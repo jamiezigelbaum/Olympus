@@ -62,6 +62,7 @@ const WORK: Record<string, Record<string, unknown>> = {
   'pairing-account': { source_id: 'telegram.messages', account_id: 'telegram:0123456789abcdef' },
   settings: {},
   'setup-status': {},
+  'settings-propose': { proposal: { models: { venice: 'strongest' } } },
 };
 
 describe('who can reach the CLI routes', () => {

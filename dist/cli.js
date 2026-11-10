@@ -2729,7 +2729,6 @@ var init_public_surface = __esm(() => {
     "source_watches",
     "source_watch_cancel",
     "olympus_doctor",
-    "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
     "olympus_open_remote"
@@ -2743,7 +2742,6 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "olympus_setup_status",
     "ask_anonymously",
     "archive_import"
   ];
@@ -2755,7 +2753,6 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
-    "olympus_setup_status",
     "ask_anonymously",
     "archive_import"
   ];
@@ -2837,7 +2834,8 @@ var init_public_surface = __esm(() => {
     "server-mode off",
     "server-mode auto",
     "settings show",
-    "setup status",
+    "settings schema",
+    "settings propose",
     "source answer",
     "source index status",
     "source index search",
@@ -2899,6 +2897,8 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/models/first-run-privacy" },
     { method: "POST", path: "/dashboard/models/judge" },
     { method: "POST", path: "/dashboard/engine/computer-use" },
+    { method: "POST", path: "/dashboard/settings/proposal/apply" },
+    { method: "POST", path: "/dashboard/settings/proposal/discard" },
     { method: "POST", path: "/dashboard/models/local/discover" },
     { method: "POST", path: "/dashboard/models/local/test" },
     { method: "POST", path: "/dashboard/models/local/save" },
@@ -17300,7 +17300,7 @@ function canonicalDataRoot(root) {
 }
 async function callWorkerCli(operation, body, options = {}) {
   const env = options.env ?? process.env;
-  const config = options.config ?? loadConfig(env);
+  const config = loadConfig(env);
   const authToken = resolveWorkerAuthToken(env, config);
   if (!authToken)
     throw new WorkerUnreachableError("this command has no worker token to present");
@@ -17356,7 +17356,7 @@ var init_cli_via_worker = __esm(() => {
   init_operation_error();
   init_worker_auth();
   init_worker_transport();
-  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement", "pairing-account", "settings", "setup-status"];
+  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement", "pairing-account", "settings", "settings-propose"];
   WorkerUnreachableError = class WorkerUnreachableError extends Error {
     constructor(detail) {
       super(`No Olympus worker answered (${detail}).`);
@@ -21899,6 +21899,18 @@ function writeIntentFromRow(row) {
 function idParams(identity2) {
   return [identity2.provider, identity2.accountScope, tierLedgerConversationKey(identity2), identity2.providerItemId];
 }
+function tierMovingDirectionClause(direction) {
+  if (!direction)
+    return "";
+  const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+  const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
+    OR ${rank("target_content_tier")} > ${rank("content_tier")}
+    OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+      AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+      AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+      AND c.superseded_by_generation = tier_items.generation + 1))`;
+  return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+}
 
 class TierLedger {
   dbPath;
@@ -22279,16 +22291,7 @@ class TierLedger {
       ${this.movingDirectionClause(direction)}`).get().n;
   }
   movingDirectionClause(direction) {
-    if (!direction)
-      return "";
-    const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
-    const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
-      OR ${rank("target_content_tier")} > ${rank("content_tier")}
-      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
-        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
-        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
-        AND c.superseded_by_generation = tier_items.generation + 1))`;
-    return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+    return tierMovingDirectionClause(direction);
   }
   listMoving(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
@@ -55506,7 +55509,7 @@ function archiveFindingList(kind) {
 function privateAnswerFailure(reason, mapping = PRIVATE_ANSWER_FAILURES) {
   return typeof reason === "string" && Object.prototype.hasOwnProperty.call(mapping, reason) ? mapping[reason] : { message: "Olympus could not answer this.", action: "Try again." };
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_SETUP_AGENT_COPY, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -55933,27 +55936,6 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
-  DASHBOARD_SETUP_AGENT_COPY = {
-    open: "Set up with my agent",
-    title: "Set up with my agent",
-    intro: "Copy this to the agent you already use (Claude, ChatGPT, Codex, OpenClaw). It will check what's done, run the steps it's allowed to, and send you a link here for anything that needs your click.",
-    brief: [
-      "Help me finish setting up Olympus on this computer.",
-      "",
-      "1. Run: olympus setup status",
-      "   It lists every setup step, what's done, and the one way forward for each.",
-      '2. Do the steps marked "you can run this" yourself.',
-      `3. For steps marked "needs the owner", give me the link it shows, wait for me, then run setup status again. Don't ask me what's on screen.`,
-      "4. To change several settings at once, use olympus settings propose. I'll apply them with one click.",
-      "",
-      "You can't change what's Private, who has access, or what Olympus spends. Those always need my click in the dashboard."
-    ].join(`
-`),
-    copy: "Copy for my agent",
-    copied: "Copied",
-    copyFailed: "Select the text and copy it.",
-    close: "Close"
-  };
   DASHBOARD_HOST_GATE_COPY = {
     title: "Dashboard controls are locked",
     open: "Open dashboard controls",
@@ -103455,6 +103437,28 @@ var init_email_policy = __esm(() => {
   ]);
 });
 
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  const one = pendingItems === 1;
+  if (audience === "local") {
+    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
+  }
+  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+function withCoverageNote(answer, note) {
+  if (!note)
+    return answer;
+  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
+    return `${answer.replace(/\s+$/, "")}
+- ${note}`;
+  return `${answer.replace(/\s+$/, "")}
+
+Coverage notes:
+- ${note}`;
+}
+
 // src/core/email.ts
 class EmailClient {
   config;
@@ -104226,6 +104230,7 @@ function parseSourceIndexSearchResult(value, context2) {
     throw new OperationError("email_error", "source index locator policy requires at least one released locator.");
   }
   const secretLocations = parseSecretLocations(value.secret_locations);
+  const privacyNote = typeof audit.pending_privacy_items === "number" ? privacyBacklogCoverageNote(audit.pending_privacy_items, "local") : undefined;
   const searchedCorpora = Array.isArray(audit.searched_corpora) ? audit.searched_corpora.filter((corpus2) => typeof corpus2 === "string") : undefined;
   return {
     kind: "source_index_search",
@@ -104233,6 +104238,7 @@ function parseSourceIndexSearchResult(value, context2) {
     retrieval_source: "local_index",
     hits: value.hits,
     ...secretLocations ? { secret_locations: secretLocations } : {},
+    ...privacyNote ? { coverage_notes: [privacyNote] } : {},
     audit: {
       ...searchedCorpora ? { searched_corpora: searchedCorpora } : {},
       request_id: requiredString5(audit.request_id, "audit.request_id"),
@@ -119624,320 +119630,6 @@ var init_selected_item_safety = __esm(() => {
   ]);
 });
 
-// src/core/setup-checklist.ts
-var exports_setup_checklist = {};
-__export(exports_setup_checklist, {
-  setupSafeName: () => setupSafeName,
-  renderSetupChecklistText: () => renderSetupChecklistText,
-  parseSetupChecklist: () => parseSetupChecklist,
-  looksLikeCredential: () => looksLikeCredential,
-  buildSetupChecklist: () => buildSetupChecklist,
-  SETUP_STEP_IDS: () => SETUP_STEP_IDS,
-  SETUP_OWNER_WHY: () => SETUP_OWNER_WHY,
-  SETUP_DASHBOARD_LINKS: () => SETUP_DASHBOARD_LINKS
-});
-function looksLikeCredential(value2) {
-  return CREDENTIAL_SHAPES.some((pattern) => pattern.test(value2));
-}
-function setupSafeName(value2, fallback) {
-  const oneLine = value2.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
-  if (!oneLine || looksLikeCredential(oneLine))
-    return fallback;
-  return oneLine;
-}
-function owner(link, reason) {
-  return { kind: "owner", link, reason, why: SETUP_OWNER_WHY[reason] };
-}
-function command(text3) {
-  return { kind: "command", command: text3 };
-}
-function listNames2(names) {
-  if (names.length <= 1)
-    return names[0] ?? "";
-  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-}
-function dollars(value2) {
-  return Number.isInteger(value2) ? `$${value2}` : `$${value2.toFixed(2)}`;
-}
-function installedStep(facts) {
-  return facts.running ? { id: "installed", title: "Olympus installed", status: "done", detail: `Version ${facts.version}`, forward: command("olympus doctor") } : {
-    id: "installed",
-    title: "Start Olympus",
-    status: "open",
-    detail: `Version ${facts.version} is installed, but Olympus is not running.`,
-    forward: command("olympus doctor")
-  };
-}
-function privateAnswersStep(facts) {
-  const fact = facts.privateAnswers;
-  const forward = owner(SETUP_DASHBOARD_LINKS.privateAnswers, "privacy");
-  if (!fact)
-    return { id: "private_answers", title: "Private answers", status: "open", detail: NOT_RUNNING, forward };
-  if (fact.chosen)
-    return { id: "private_answers", title: "Private answers", status: "done", detail: fact.label ?? "Chosen", forward };
-  return { id: "private_answers", title: "Choose how Private items are answered", status: "open", detail: "Not chosen yet.", forward };
-}
-function judgeStep(facts) {
-  const fact = facts.judge;
-  const forward = owner(SETUP_DASHBOARD_LINKS.privacyJudge, "spending");
-  if (!fact)
-    return { id: "privacy_judge", title: "Privacy judge", status: "open", detail: NOT_RUNNING, forward };
-  if (!fact.chosen) {
-    return { id: "privacy_judge", title: "Choose your privacy judge", status: "open", detail: "Not chosen yet: on this computer for free, or Venice.", forward };
-  }
-  const detail = fact.choice === "venice" ? typeof fact.limitDollars === "number" ? `Venice, up to ${dollars(fact.limitDollars)}` : "Venice, no spending limit set" : "On this computer, free";
-  return { id: "privacy_judge", title: "Privacy judge", status: "done", detail, forward };
-}
-function sourcesStep(facts) {
-  const sources = facts.sources?.map((source) => ({ ...source, name: setupSafeName(source.name, source.id) }));
-  if (!sources)
-    return { id: "sources", title: "Connect a source", status: "open", detail: NOT_RUNNING, forward: owner(SETUP_DASHBOARD_LINKS.addSource, "access") };
-  const connected2 = sources.filter((source) => source.state === "connected").map((source) => source.name);
-  const needsYou = sources.filter((source) => source.state === "needs_you").map((source) => source.name);
-  if (connected2.length > 0) {
-    return {
-      id: "sources",
-      title: `${listNames2(connected2)} connected`,
-      status: "done",
-      detail: needsYou.length > 0 ? `${listNames2(needsYou)} needs you.` : `${connected2.length} ${connected2.length === 1 ? "source" : "sources"} connected.`,
-      forward: owner(needsYou.length > 0 ? SETUP_DASHBOARD_LINKS.sources : SETUP_DASHBOARD_LINKS.addSource, "access"),
-      sources
-    };
-  }
-  return {
-    id: "sources",
-    title: "Connect a source",
-    status: "open",
-    detail: needsYou.length > 0 ? `${listNames2(needsYou)} needs you to finish connecting.` : "Nothing connected yet.",
-    forward: owner(needsYou.length > 0 ? SETUP_DASHBOARD_LINKS.sources : SETUP_DASHBOARD_LINKS.addSource, "access"),
-    sources
-  };
-}
-function messagingStep(facts) {
-  const forward = owner(SETUP_DASHBOARD_LINKS.sources, "access");
-  if (!facts.messaging)
-    return { id: "messaging_chats", title: "Choose your chats", status: "open", detail: NOT_RUNNING, forward };
-  const paired = facts.messaging.filter((fact) => fact.paired).map((fact) => ({ ...fact, name: setupSafeName(fact.name, "Chat app") }));
-  if (paired.length === 0) {
-    return { id: "messaging_chats", title: "Choose your chats", status: "skipped", detail: "No chat app is paired.", forward: owner(SETUP_DASHBOARD_LINKS.addSource, "access") };
-  }
-  const waiting = paired.filter((fact) => !fact.chatsChosen).map((fact) => fact.name);
-  if (waiting.length === 0) {
-    return { id: "messaging_chats", title: `${listNames2(paired.map((fact) => fact.name))} chats chosen`, status: "done", detail: "Olympus keeps the chats you chose.", forward };
-  }
-  return { id: "messaging_chats", title: `Choose your ${listNames2(waiting)} chats`, status: "open", detail: "Paired. Pick which chats Olympus keeps.", forward };
-}
-function aiAppStep(facts) {
-  const forward = owner(SETUP_DASHBOARD_LINKS.agents, "access");
-  if (!facts.aiApps)
-    return { id: "ai_app", title: "Connect an AI app", status: "open", detail: NOT_RUNNING, forward };
-  const names = [...new Set(facts.aiApps.map((name) => setupSafeName(name, "An agent")))];
-  if (names.length === 0)
-    return { id: "ai_app", title: "Connect an AI app", status: "open", detail: "ChatGPT, Claude, Grok or your own agent", forward };
-  return { id: "ai_app", title: "AI app connected", status: "done", detail: listNames2(names), forward };
-}
-function firstItemsStep(facts) {
-  const forward = command("olympus source index status");
-  if (facts.findableItems === undefined)
-    return { id: "first_items", title: "First items findable", status: "open", detail: NOT_RUNNING, forward };
-  if (facts.findableItems > 0) {
-    const count = Math.floor(facts.findableItems).toLocaleString("en-US");
-    return { id: "first_items", title: "First items findable", status: "done", detail: `${count} ${facts.findableItems === 1 ? "item" : "items"} findable`, forward };
-  }
-  return { id: "first_items", title: "First items findable", status: "open", detail: "Starts by itself after your first source is read.", forward };
-}
-function buildSetupChecklist(facts) {
-  const drafts = [
-    installedStep(facts),
-    privateAnswersStep(facts),
-    judgeStep(facts),
-    sourcesStep(facts),
-    messagingStep(facts),
-    aiAppStep(facts),
-    firstItemsStep(facts)
-  ];
-  let nextTaken = false;
-  const steps = drafts.map(({ status, id, title, detail, forward, sources }) => {
-    let state;
-    if (status === "done")
-      state = "done";
-    else if (status === "skipped")
-      state = "skipped";
-    else if (!nextTaken) {
-      state = "next";
-      nextTaken = true;
-    } else
-      state = "todo";
-    return { id, title, state, detail, forward, ...sources ? { sources } : {} };
-  });
-  const applicable = steps.filter((step) => step.state !== "skipped");
-  const done = applicable.filter((step) => step.state === "done").length;
-  const next = steps.find((step) => step.state === "next");
-  return {
-    kind: "olympus_setup_status",
-    done,
-    total: applicable.length,
-    complete: next === undefined,
-    ...next ? { next: { id: next.id, title: next.title } } : {},
-    steps
-  };
-}
-function parseSetupChecklist(value2) {
-  if (!value2 || typeof value2 !== "object")
-    return;
-  const record2 = value2;
-  if (record2.kind !== "olympus_setup_status" || !Array.isArray(record2.steps))
-    return;
-  const steps = [];
-  for (const raw of record2.steps) {
-    if (!raw || typeof raw !== "object")
-      return;
-    const step = raw;
-    if (!SETUP_STEP_IDS.includes(step.id))
-      return;
-    if (!["done", "next", "todo", "skipped"].includes(step.state))
-      return;
-    if (typeof step.title !== "string" || typeof step.detail !== "string")
-      return;
-    const forward = parseForward(step.forward);
-    if (!forward)
-      return;
-    const sources = Array.isArray(step.sources) ? step.sources.flatMap((entry) => {
-      if (!entry || typeof entry !== "object")
-        return [];
-      const source = entry;
-      if (typeof source.id !== "string" || typeof source.name !== "string")
-        return [];
-      if (!["connected", "needs_you", "skipped"].includes(source.state))
-        return [];
-      return [{ id: setupSafeName(source.id, "source"), name: setupSafeName(source.name, "A source"), state: source.state }];
-    }) : undefined;
-    steps.push({
-      id: step.id,
-      title: setupSafeName(step.title, "Setup step"),
-      state: step.state,
-      detail: setupSafeName(step.detail, ""),
-      forward,
-      ...sources ? { sources } : {}
-    });
-  }
-  const applicable = steps.filter((step) => step.state !== "skipped");
-  const next = steps.find((step) => step.state === "next");
-  return {
-    kind: "olympus_setup_status",
-    done: applicable.filter((step) => step.state === "done").length,
-    total: applicable.length,
-    complete: next === undefined,
-    ...next ? { next: { id: next.id, title: next.title } } : {},
-    steps
-  };
-}
-function parseForward(value2) {
-  if (!value2 || typeof value2 !== "object")
-    return;
-  const forward = value2;
-  if (forward.kind === "command" && typeof forward.command === "string" && /^olympus [a-z][a-z -]*$/.test(forward.command)) {
-    return command(forward.command);
-  }
-  if (forward.kind === "owner" && typeof forward.link === "string" && Object.values(SETUP_DASHBOARD_LINKS).includes(forward.link) && (forward.reason === "privacy" || forward.reason === "access" || forward.reason === "spending")) {
-    return owner(forward.link, forward.reason);
-  }
-  return;
-}
-function renderSetupChecklistText(checklist) {
-  const lines = [`Setup: ${checklist.done} of ${checklist.total} done`];
-  if (checklist.next)
-    lines.push(`Next: ${checklist.next.title}`);
-  lines.push("");
-  for (const step of checklist.steps) {
-    lines.push(`${STATE_MARKS[step.state]} ${step.title}${step.detail ? ` - ${step.detail}` : ""}`);
-    if (step.state === "done" || step.state === "skipped")
-      continue;
-    if (step.forward.kind === "command")
-      lines.push(`    You can run this: ${step.forward.command}`);
-    else
-      lines.push(`    Needs the owner: ${step.forward.link}`, `    ${step.forward.why}`);
-  }
-  lines.push("", "Dashboard links open in the Olympus dashboard on this computer (olympus dashboard).");
-  return lines.join(`
-`);
-}
-var SETUP_STEP_IDS, SETUP_OWNER_WHY, SETUP_DASHBOARD_LINKS, NOT_RUNNING = "Start Olympus to check this.", CREDENTIAL_SHAPES, STATE_MARKS;
-var init_setup_checklist = __esm(() => {
-  SETUP_STEP_IDS = [
-    "installed",
-    "private_answers",
-    "privacy_judge",
-    "sources",
-    "messaging_chats",
-    "ai_app",
-    "first_items"
-  ];
-  SETUP_OWNER_WHY = {
-    privacy: "Needs your click because it changes what is private.",
-    access: "Needs your click because it changes who has access.",
-    spending: "Needs your click because it changes what Olympus spends."
-  };
-  SETUP_DASHBOARD_LINKS = {
-    privateAnswers: "/dashboard?keys#private-routing",
-    privacyJudge: "/dashboard?keys#privacy-judge",
-    addSource: "/dashboard?connect#add-source",
-    sources: "/dashboard?connect#sources",
-    agents: "/dashboard?settings#agents"
-  };
-  CREDENTIAL_SHAPES = [
-    /dash_[A-Za-z0-9_-]{6,}/,
-    /olympus_conn_[A-Za-z0-9_-]*/i,
-    /\bbearer\s+\S+/i,
-    /\bsk-[A-Za-z0-9_-]{8,}/,
-    /\b[A-Za-z0-9_-]{32,}\b/
-  ];
-  STATE_MARKS = { done: "[x]", next: "[>]", todo: "[ ]", skipped: "[-]" };
-});
-
-// src/core/setup-status.ts
-var exports_setup_status = {};
-__export(exports_setup_status, {
-  readSetupStatus: () => readSetupStatus,
-  parseSetupStatusArgs: () => parseSetupStatusArgs,
-  SETUP_STATUS_USAGE: () => SETUP_STATUS_USAGE
-});
-async function readSetupStatus(options = {}) {
-  const env = options.env ?? process.env;
-  let answer;
-  try {
-    answer = await callWorkerCli("setup-status", {}, { env, ...options.config ? { config: options.config } : {}, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
-  } catch (error) {
-    if (!(error instanceof WorkerUnreachableError))
-      throw error;
-    return buildSetupChecklist({ version: options.version ?? runningOlympusVersion(), running: false });
-  }
-  const checklist = parseSetupChecklist(answer);
-  if (!checklist) {
-    throw new OperationError("source_index_error", "The running Olympus answered setup status in a form this command does not read.", "Update Olympus so the command and the running engine match, then run olympus setup status again.");
-  }
-  return checklist;
-}
-function parseSetupStatusArgs(args) {
-  let text3 = false;
-  for (const arg of args) {
-    if (arg === "--text")
-      text3 = true;
-    else if (arg === "--json")
-      text3 = false;
-    else
-      throw new OperationError("invalid_params", `Usage: ${SETUP_STATUS_USAGE}`);
-  }
-  return { text: text3 };
-}
-var SETUP_STATUS_USAGE = "olympus setup status [--text]";
-var init_setup_status = __esm(() => {
-  init_cli_via_worker();
-  init_operation_error();
-  init_setup_checklist();
-  init_update_check();
-});
-
 // src/core/remote-open.ts
 function parseServerModeSetting(value2) {
   if (typeof value2 !== "string")
@@ -120489,7 +120181,6 @@ var init_operations = __esm(() => {
   init_source_corpus_registry();
   init_venice_models();
   init_public_surface();
-  init_setup_status();
   init_remote_open_tool();
   ARGUS_PROFILE_ENUM = [
     "default_chat",
@@ -120965,19 +120656,6 @@ var init_operations = __esm(() => {
       handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
     },
     {
-      name: "olympus_setup_status",
-      description: [
-        "Read Olympus's setup checklist: each step (installed, Private answers, privacy judge, sources, chat choices, an AI app, first items findable) with its state (done, next, todo, skipped) and exactly one way forward.",
-        'A forward of kind "command" is an olympus command you may run yourself. A forward of kind "owner" is a dashboard link to give the owner: it needs their click because it changes what is private, who has access or what Olympus spends. After they click, call this again and carry on; do not ask what is on screen.',
-        "Read-only. Output contains names and states only, never item content, keys or tokens."
-      ].join(" "),
-      params: {},
-      mutating: false,
-      nativeExposure: "always",
-      cliHints: { name: "setup status" },
-      handler: async (ctx) => readSetupStatus({ config: ctx.config })
-    },
-    {
       name: "ask_anonymously",
       description: [
         "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.",
@@ -121146,11 +120824,11 @@ function isClassifierApproved(entries, key2, options = {}) {
   for (const entry of entries) {
     if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
       continue;
-    const owner2 = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
+    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
     const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
-    if (!owner2 && !builtInDefault)
+    if (!owner && !builtInDefault)
       continue;
-    if (owner2 && entry.kind === "classifier_model_revoked")
+    if (owner && entry.kind === "classifier_model_revoked")
       return false;
     if (entry.kind === "classifier_model_decision" && entry.status === "complete")
       return true;
@@ -124292,11 +123970,11 @@ __export(exports_tier_migration_cli, {
 });
 import { createHash as createHash79 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
-  const [command2, ...rest] = args;
+  const [command, ...rest] = args;
   const flags = parseFlags(rest);
   const env = context2.env ?? process.env;
   const paths = context2.paths ?? resolveTierMigrationPaths(env, resolveEmbeddingLedgerPath(env));
-  switch (command2) {
+  switch (command) {
     case "plan": {
       const withSniffer = flags.boolean("with-sniffer");
       const top = flags.number("top");
@@ -124442,7 +124120,7 @@ async function runTierMigrateCommand(args, context2 = {}) {
       };
     }
     default:
-      throw new OperationError("invalid_params", `Unknown tier migrate command: ${command2 ?? "(none)"}.`, `Usage: ${TIER_MIGRATE_USAGE}`);
+      throw new OperationError("invalid_params", `Unknown tier migrate command: ${command ?? "(none)"}.`, `Usage: ${TIER_MIGRATE_USAGE}`);
   }
 }
 async function withLanes(context2, env, mode, inputs, run) {
@@ -124582,10 +124260,10 @@ function parseFlags(args) {
         throw new OperationError("invalid_params", `--${name} takes no value.`);
       return value2 === true;
     },
-    assertDone(command2) {
+    assertDone(command) {
       const unknown = [...values.keys()].filter((name) => !used.has(name));
       if (unknown.length > 0) {
-        throw new OperationError("invalid_params", `Unknown option for tier migrate ${command2}: --${unknown[0]}.`, `Usage: ${TIER_MIGRATE_USAGE}`);
+        throw new OperationError("invalid_params", `Unknown option for tier migrate ${command}: --${unknown[0]}.`, `Usage: ${TIER_MIGRATE_USAGE}`);
       }
     }
   };
@@ -124618,12 +124296,12 @@ function tierCommandOpensStores(args) {
 function tierCommandRewritesStores(args) {
   if (args[0] !== "migrate")
     return false;
-  const command2 = args[1];
-  return command2 === "run" || command2 === "rollback" || command2 === "purge" && args.includes("--approve");
+  const command = args[1];
+  return command === "run" || command === "rollback" || command === "purge" && args.includes("--approve");
 }
 async function runTierCommand(args, context2 = {}) {
-  const [command2, ...rest] = args;
-  switch (command2) {
+  const [command, ...rest] = args;
+  switch (command) {
     case "set":
       return runTierSet(rest, context2);
     case "explain":
@@ -124639,7 +124317,7 @@ async function runTierCommand(args, context2 = {}) {
       return runTierMigrateCommand2(rest);
     }
     default:
-      throw new OperationError("invalid_params", `Unknown tier command: ${command2 ?? "(none)"}.`, "Run olympus tier --help.");
+      throw new OperationError("invalid_params", `Unknown tier command: ${command ?? "(none)"}.`, "Run olympus tier --help.");
   }
 }
 function knownStorePaths(context2) {
@@ -124983,8 +124661,8 @@ function publicIdentity(identity2) {
 }
 function runTierRules(args, context2 = {}) {
   const env = context2.env ?? process.env;
-  const [command2, ...rest] = args;
-  if (command2 === "list") {
+  const [command, ...rest] = args;
+  if (command === "list") {
     const path = resolveTierRulesPath({ env });
     const mailScopeRules = mailScopeTierRules(env);
     if (!existsSync82(path)) {
@@ -124993,7 +124671,7 @@ function runTierRules(args, context2 = {}) {
     const validation = validateTierRulesFile({ env });
     return { ...validation, rules: loadOwnerTierRules({ env }).map(describeRule), mailScopeRules };
   }
-  if (command2 === "add") {
+  if (command === "add") {
     const options = parseFlags2(rest, ["id", "match", "tier", "source", "strength"]);
     const matchText = options.get("match");
     const separator = matchText?.indexOf("=") ?? -1;
@@ -125014,7 +124692,7 @@ function runTierRules(args, context2 = {}) {
     const { path, rules } = addOwnerTierRule(rule, { env });
     return { path, added: describeRule(rule), rules: rules.length };
   }
-  if (command2 === "remove") {
+  if (command === "remove") {
     const [id, ...extra] = rest;
     if (!id || extra.length > 0)
       throw new OperationError("invalid_params", "Usage: olympus tier rules remove <id>");
@@ -125056,13 +124734,13 @@ function describeRule(rule) {
 }
 async function runTierClassifier(args, context2 = {}) {
   const env = context2.env ?? process.env;
-  const [command2, ...rest] = args;
+  const [command, ...rest] = args;
   const ledgerPath = resolveClassificationLedgerPath(env);
   const runtime = installedSnifferRuntime(env);
   const lane = runtime.source === "off" ? { refused: runtime.reason } : runtime.lane;
   const promptVersion = snifferPromptVersions(privacyOwnerContext({ env: context2.env ?? process.env })).approval;
   const laneSummary = "refused" in lane ? { lane: null, refused: lane.refused } : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
-  if (command2 === "status") {
+  if (command === "status") {
     const ledger = await readClassificationLedger(ledgerPath);
     const cloudDeclined = runtime.source === "off" && runtime.cloudLane && classifierDecision(ledger.entries, { lane: runtime.cloudLane.kind, profileId: runtime.cloudLane.profileId, modelId: runtime.cloudLane.modelId, promptVersion }) === "declined";
     const decision = "refused" in lane ? runtime.source === "off" && runtime.cloudChoiceRequired ? cloudDeclined ? "declined" : "not_asked" : lane.refused === "no_private_lane" ? "not_applicable" : "refused" : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion });
@@ -125077,7 +124755,7 @@ async function runTierClassifier(args, context2 = {}) {
       skippedLines: ledger.skipped
     };
   }
-  if (command2 === "approve") {
+  if (command === "approve") {
     const options = parseFlags2(rest, ["why"]);
     const why = options.get("why")?.trim();
     if (!why)
@@ -125090,7 +124768,7 @@ async function runTierClassifier(args, context2 = {}) {
     const entry = await approveClassifier(ledgerPath, lane, promptVersion, why, context2.now?.() ?? new Date);
     return { ledger: ledgerPath, recorded: entry };
   }
-  if (command2 === "decline") {
+  if (command === "decline") {
     const options = parseFlags2(rest, ["why"]);
     const why = options.get("why")?.trim();
     const declinedLane = "refused" in lane ? runtime.source === "off" ? runtime.cloudLane : undefined : lane;
@@ -125159,6 +124837,106 @@ var init_tier_cli = __esm(() => {
     "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
     "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
   };
+});
+
+// src/core/settings-proposal.ts
+function parseSettingsProposalInput(value2) {
+  if (!value2 || typeof value2 !== "object" || Array.isArray(value2))
+    throw new SettingsProposalError("A settings proposal is a JSON object. Run olympus settings schema for its shape.");
+  const record2 = value2;
+  const unknownKeys = Object.keys(record2).filter((key2) => !TOP_KEYS.includes(key2));
+  if (unknownKeys.length > 0)
+    throw new SettingsProposalError(`Olympus cannot set ${unknownKeys.join(", ")} from a proposal. Settable: ${TOP_KEYS.join(", ")}.`);
+  const input = {};
+  if (record2.private_answer_mode !== undefined) {
+    if (typeof record2.private_answer_mode !== "string" || !SOVEREIGNTY_PRESETS.includes(record2.private_answer_mode)) {
+      throw new SettingsProposalError(`private_answer_mode must be one of ${SOVEREIGNTY_PRESETS.join(", ")}.`);
+    }
+    input.private_answer_mode = record2.private_answer_mode;
+  }
+  if (record2.computer_use !== undefined) {
+    if (record2.computer_use !== "everyday" && record2.computer_use !== "server")
+      throw new SettingsProposalError("computer_use must be everyday or server.");
+    input.computer_use = record2.computer_use;
+  }
+  if (record2.privacy_judge !== undefined) {
+    const judge3 = record2.privacy_judge;
+    if (!judge3 || typeof judge3 !== "object" || Array.isArray(judge3))
+      throw new SettingsProposalError("privacy_judge must be an object with choice and spending_limit_dollars.");
+    if (judge3.choice !== "local" && judge3.choice !== "venice")
+      throw new SettingsProposalError("privacy_judge.choice must be local or venice.");
+    const cap = judge3.spending_limit_dollars;
+    if (typeof cap !== "number" || !Number.isFinite(cap) || cap < 0)
+      throw new SettingsProposalError("privacy_judge.spending_limit_dollars must be a number, zero or more.");
+    const extra = Object.keys(judge3).filter((key2) => key2 !== "choice" && key2 !== "spending_limit_dollars");
+    if (extra.length > 0)
+      throw new SettingsProposalError(`privacy_judge has no ${extra.join(", ")}.`);
+    input.privacy_judge = { choice: judge3.choice, spending_limit_dollars: cap };
+  }
+  if (record2.models !== undefined) {
+    const models = record2.models;
+    if (!models || typeof models !== "object" || Array.isArray(models))
+      throw new SettingsProposalError('models must be an object such as {"venice": "strongest"}.');
+    const picked = {};
+    for (const [provider, choice] of Object.entries(models)) {
+      if (!SETTINGS_PROPOSAL_MODEL_PROVIDERS.includes(provider))
+        throw new SettingsProposalError(`models.${provider} is not a model picker. Pickers: ${SETTINGS_PROPOSAL_MODEL_PROVIDERS.join(", ")}.`);
+      if (typeof choice !== "string" || choice.trim() === "")
+        throw new SettingsProposalError(`models.${provider} must name one of its options.`);
+      picked[provider] = choice.trim();
+    }
+    if (Object.keys(picked).length > 0)
+      input.models = picked;
+  }
+  if (Object.keys(input).length === 0)
+    throw new SettingsProposalError("This proposal changes nothing. Run olympus settings schema for what it can set.");
+  return input;
+}
+function parseProposalFrom(value2) {
+  if (value2 === undefined)
+    return;
+  if (typeof value2 !== "string" || !/^[\p{L}\p{N} ._'()-]{1,40}$/u.test(value2.trim())) {
+    throw new SettingsProposalError("--from takes a short name of up to 40 letters, digits and spaces.");
+  }
+  return value2.trim();
+}
+var SETTINGS_PROPOSAL_MODEL_PROVIDERS, SETTINGS_PROPOSAL_SCHEMA, SettingsProposalError, TOP_KEYS;
+var init_settings_proposal = __esm(() => {
+  init_sovereignty();
+  SETTINGS_PROPOSAL_MODEL_PROVIDERS = ["local", "venice", "zkapi"];
+  SETTINGS_PROPOSAL_SCHEMA = {
+    description: "Write a JSON object with any of these keys, then run olympus settings propose <file>. The owner applies it with one click on the dashboard Settings page. Run olympus settings show for the current values and the allowed model choices.",
+    keys: {
+      private_answer_mode: { type: "string", allowed: [...SOVEREIGNTY_PRESETS] },
+      computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only, while the choice is still open. Propose it on its own." },
+      privacy_judge: {
+        type: "object",
+        fields: {
+          choice: { type: "string", allowed: ["local", "venice"] },
+          spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
+          note: { type: "note", note: "Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately." }
+        }
+      },
+      models: {
+        type: "object",
+        fields: Object.fromEntries(SETTINGS_PROPOSAL_MODEL_PROVIDERS.map((provider) => [provider, {
+          type: "string",
+          note: `One of models.${provider}.options from olympus settings show.`
+        }]))
+      }
+    },
+    example: {
+      private_answer_mode: "local-first",
+      models: { venice: "strongest" }
+    }
+  };
+  SettingsProposalError = class SettingsProposalError extends Error {
+    constructor(message2) {
+      super(message2);
+      this.name = "SettingsProposalError";
+    }
+  };
+  TOP_KEYS = ["private_answer_mode", "computer_use", "privacy_judge", "models"];
 });
 
 // src/core/engine-brief.ts
@@ -142174,13 +141952,6 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
-// src/core/privacy-backlog-coverage.ts
-function privacyBacklogCoverageNote(pendingItems) {
-  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
-    return;
-  return `Olympus is still checking ${pendingItems} new item${pendingItems === 1 ? "" : "s"} for privacy before ${pendingItems === 1 ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
-}
-
 // src/core/remote-result.ts
 function providerSourceLabel(provider) {
   return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
@@ -143054,10 +142825,10 @@ class SourceAnswerJobRegistry {
     this.evictRetained(scope.owner);
     return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
   }
-  async result(owner2, jobId, signal) {
+  async result(owner, jobId, signal) {
     this.sweep();
     const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
-    if (!job || !sameOwner(job.owner, owner2))
+    if (!job || !sameOwner(job.owner, owner))
       throw sourceAnswerJobNotFound();
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
@@ -143089,19 +142860,19 @@ class SourceAnswerJobRegistry {
     }
     throw job.outcome.error;
   }
-  whenFinished(owner2, jobId) {
+  whenFinished(owner, jobId) {
     const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
-    if (!job || !sameOwner(job.owner, owner2))
+    if (!job || !sameOwner(job.owner, owner))
       return;
     return job.done.then(() => {
       const outcome = job.outcome;
       return outcome?.ok ? { ok: true, value: outcome.value, releaseManifests: [...job.releaseManifests?.manifests ?? []] } : { ok: false };
     });
   }
-  dropOwner(owner2) {
-    this.cancelWaiting(owner2, callerAbortError("source_answer connection revoked"));
+  dropOwner(owner) {
+    this.cancelWaiting(owner, callerAbortError("source_answer connection revoked"));
     for (const [id, job] of this.jobs) {
-      if (!sameOwner(job.owner, owner2))
+      if (!sameOwner(job.owner, owner))
         continue;
       this.jobs.delete(id);
       job.abort(callerAbortError("source_answer connection revoked"));
@@ -143112,15 +142883,15 @@ class SourceAnswerJobRegistry {
   sweep() {
     const now = this.now();
     const owners = new Map;
-    const revoked = (owner2) => {
-      let known = owners.get(owner2);
+    const revoked = (owner) => {
+      let known = owners.get(owner);
       if (known === undefined) {
         try {
-          known = this.isOwnerRevoked?.(owner2) === true;
+          known = this.isOwnerRevoked?.(owner) === true;
         } catch {
           known = false;
         }
-        owners.set(owner2, known);
+        owners.set(owner, known);
       }
       return known;
     };
@@ -143135,9 +142906,9 @@ class SourceAnswerJobRegistry {
     const priority = this.priority;
     if (priority && this.isOwnerRevoked) {
       const waiting = new Set([...priority.queues.keys(), ...priority.ownerQueue.map((waiter) => waiter.owner)]);
-      for (const owner2 of waiting)
-        if (revoked(owner2))
-          this.dropOwner(owner2);
+      for (const owner of waiting)
+        if (revoked(owner))
+          this.dropOwner(owner);
     }
   }
   stats() {
@@ -143147,27 +142918,27 @@ class SourceAnswerJobRegistry {
   queued() {
     return (this.priority?.queued ?? 0) + (this.priority?.ownerQueue.length ?? 0);
   }
-  ownerMustWait(owner2) {
+  ownerMustWait(owner) {
     const priority = this.priority;
     if (!priority)
       return false;
-    if ((this.running.get(owner2) ?? 0) + this.ownerWaiting(owner2) >= this.limits.maxRunningPerOwner)
+    if ((this.running.get(owner) ?? 0) + this.ownerWaiting(owner) >= this.limits.maxRunningPerOwner)
       return false;
     return priority.ownerQueue.length > 0 || this.runningTotal >= this.limits.maxRunningGlobal && priority.runningTotal > 0;
   }
-  ownerWaiting(owner2) {
-    return this.priority.ownerQueue.filter((waiter) => waiter.owner === owner2).length;
+  ownerWaiting(owner) {
+    return this.priority.ownerQueue.filter((waiter) => waiter.owner === owner).length;
   }
   enqueue(scope, jobSignal, kind) {
     const priority = this.priority;
-    const owner2 = scope.owner;
+    const owner = scope.owner;
     if (kind === "owner") {
       if (priority.ownerQueue.length >= priority.maxOwnerQueued)
         throw sourceAnswerBusy();
     } else {
-      const waiting = priority.queues.get(owner2)?.length ?? 0;
+      const waiting = priority.queues.get(owner)?.length ?? 0;
       if (waiting >= priority.maxQueuedPerOwner || priority.queued >= priority.maxQueuedTotal) {
-        if (waiting > 0 || !this.backgroundMayStart(owner2, this.now(), this.now()))
+        if (waiting > 0 || !this.backgroundMayStart(owner, this.now(), this.now()))
           throw sourceAnswerBusy();
       }
     }
@@ -143192,7 +142963,7 @@ class SourceAnswerJobRegistry {
       jobSignal.removeEventListener("abort", onJob);
     };
     const waiter = {
-      owner: owner2,
+      owner,
       kind,
       enqueuedAt: this.now(),
       tick: ++priority.ticks,
@@ -143202,12 +142973,12 @@ class SourceAnswerJobRegistry {
         state = "running";
         unlisten();
         if (kind === "background") {
-          priority.running.set(owner2, (priority.running.get(owner2) ?? 0) + 1);
+          priority.running.set(owner, (priority.running.get(owner) ?? 0) + 1);
           priority.runningTotal += 1;
           priority.ticks += 1;
-          priority.lastServed.set(owner2, priority.ticks);
+          priority.lastServed.set(owner, priority.ticks);
         }
-        this.running.set(owner2, (this.running.get(owner2) ?? 0) + 1);
+        this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
         this.runningTotal += 1;
         priority.lastGrant = kind;
         this.unqueue(waiter);
@@ -143227,11 +142998,11 @@ class SourceAnswerJobRegistry {
     if (kind === "owner") {
       priority.ownerQueue.push(waiter);
     } else {
-      const queue = priority.queues.get(owner2);
+      const queue = priority.queues.get(owner);
       if (queue)
         queue.push(waiter);
       else
-        priority.queues.set(owner2, [waiter]);
+        priority.queues.set(owner, [waiter]);
       priority.queued += 1;
     }
     if (scope.clientSignal?.aborted)
@@ -143252,21 +143023,21 @@ class SourceAnswerJobRegistry {
         return;
       state = "done";
       if (kind === "background") {
-        const backgroundCount = (priority.running.get(owner2) ?? 1) - 1;
+        const backgroundCount = (priority.running.get(owner) ?? 1) - 1;
         if (backgroundCount <= 0)
-          priority.running.delete(owner2);
+          priority.running.delete(owner);
         else
-          priority.running.set(owner2, backgroundCount);
+          priority.running.set(owner, backgroundCount);
         priority.runningTotal -= 1;
       }
-      const count = (this.running.get(owner2) ?? 1) - 1;
+      const count = (this.running.get(owner) ?? 1) - 1;
       if (count <= 0)
-        this.running.delete(owner2);
+        this.running.delete(owner);
       else
-        this.running.set(owner2, count);
+        this.running.set(owner, count);
       this.runningTotal -= 1;
       if (kind === "background")
-        this.forgetIdleOwner(owner2);
+        this.forgetIdleOwner(owner);
       this.dispatch();
     };
     return { ready, release, detach: () => {
@@ -143293,25 +143064,25 @@ class SourceAnswerJobRegistry {
       this.forgetIdleOwner(waiter.owner);
     }
   }
-  cancelWaiting(owner2, reason) {
+  cancelWaiting(owner, reason) {
     const priority = this.priority;
     if (!priority)
       return;
-    const waiting = [...priority.queues.get(owner2) ?? [], ...priority.ownerQueue.filter((waiter) => waiter.owner === owner2)];
+    const waiting = [...priority.queues.get(owner) ?? [], ...priority.ownerQueue.filter((waiter) => waiter.owner === owner)];
     for (const waiter of waiting)
       waiter.cancel(reason, false);
   }
-  forgetIdleOwner(owner2) {
+  forgetIdleOwner(owner) {
     const priority = this.priority;
-    if (!priority.queues.has(owner2) && !priority.running.has(owner2))
-      priority.lastServed.delete(owner2);
+    if (!priority.queues.has(owner) && !priority.running.has(owner))
+      priority.lastServed.delete(owner);
   }
-  backgroundMayStart(owner2, enqueuedAt, at) {
+  backgroundMayStart(owner, enqueuedAt, at) {
     const priority = this.priority;
     const overdue = at - enqueuedAt >= priority.maxWaitMs;
     if (priority.ownerQueue.length > 0 && !(overdue && priority.lastGrant === "owner"))
       return false;
-    if ((priority.running.get(owner2) ?? 0) >= 1)
+    if ((priority.running.get(owner) ?? 0) >= 1)
       return false;
     const backgroundCapacity = Math.max(1, this.limits.maxRunningGlobal - 1);
     if (priority.runningTotal >= backgroundCapacity || this.runningTotal >= this.limits.maxRunningGlobal)
@@ -143325,11 +143096,11 @@ class SourceAnswerJobRegistry {
       return false;
     }
   }
-  stillAuthorized(owner2) {
+  stillAuthorized(owner) {
     if (!this.isOwnerRevoked)
       return true;
     try {
-      return !this.isOwnerRevoked(owner2);
+      return !this.isOwnerRevoked(owner);
     } catch {
       return false;
     }
@@ -143368,11 +143139,11 @@ class SourceAnswerJobRegistry {
     const priority = this.priority;
     let granted;
     let grantedTurn = 0;
-    for (const [owner2, queue] of priority.queues) {
+    for (const [owner, queue] of priority.queues) {
       const head = queue[0];
-      if (!this.backgroundMayStart(owner2, head.enqueuedAt, at))
+      if (!this.backgroundMayStart(owner, head.enqueuedAt, at))
         continue;
-      const turn = Math.max(priority.lastServed.get(owner2) ?? 0, head.tick);
+      const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
       if (granted && turn >= grantedTurn)
         continue;
       granted = head;
@@ -143396,25 +143167,25 @@ class SourceAnswerJobRegistry {
     }, delay2);
     priority.timer.unref?.();
   }
-  occupy(owner2) {
-    this.running.set(owner2, (this.running.get(owner2) ?? 0) + 1);
+  occupy(owner) {
+    this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
     this.runningTotal += 1;
     let released = false;
     return () => {
       if (released)
         return;
       released = true;
-      const count = (this.running.get(owner2) ?? 1) - 1;
+      const count = (this.running.get(owner) ?? 1) - 1;
       if (count <= 0)
-        this.running.delete(owner2);
+        this.running.delete(owner);
       else
-        this.running.set(owner2, count);
+        this.running.set(owner, count);
       this.runningTotal -= 1;
       this.dispatch();
     };
   }
-  admit(owner2) {
-    if ((this.running.get(owner2) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
+  admit(owner) {
+    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
       throw sourceAnswerBusy();
     }
   }
@@ -143434,9 +143205,9 @@ class SourceAnswerJobRegistry {
       error: new OperationError("source_answer_too_large", "The finished answer was too large for Olympus to hold for collection.", "Ask a narrower question with source_answer.")
     };
   }
-  evictRetained(owner2) {
-    const finished = [...this.jobs.values()].filter((job) => job.owner === owner2 && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
-    const owned = [...this.jobs.values()].filter((job) => job.owner === owner2).length;
+  evictRetained(owner) {
+    const finished = [...this.jobs.values()].filter((job) => job.owner === owner && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
+    const owned = [...this.jobs.values()].filter((job) => job.owner === owner).length;
     let excess = owned - this.limits.maxRetainedPerOwner;
     for (const job of finished) {
       if (excess <= 0)
@@ -143683,13 +143454,13 @@ function mcpOperationCaller(clientName) {
 function makeContext(clientName, sourceAnswerJobs) {
   const config2 = loadConfig();
   const caller = mcpOperationCaller(clientName);
-  const owner2 = sourceAnswerJobOwner(caller);
+  const owner = sourceAnswerJobOwner(caller);
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
     email: new EmailClient(config2, createEmailTransport(config2)),
     caller,
-    ...sourceAnswerJobs && owner2 ? { sourceAnswerJobs: { registry: sourceAnswerJobs, owner: owner2 } } : {}
+    ...sourceAnswerJobs && owner ? { sourceAnswerJobs: { registry: sourceAnswerJobs, owner } } : {}
   };
 }
 var REMOTE_JSON_RPC_ERROR_TEXT, REMOTE_JSON_RPC_ERROR_FALLBACK = "The request could not be handled.";
@@ -144272,10 +144043,10 @@ function prepareRelayStart(config2, options) {
     OLYMPUS_RELAY_TARGET: localUrl,
     OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId
   });
-  let command2;
+  let command;
   let executablePath;
   try {
-    command2 = resolveBunRuntimePath(config2.worker.service.runtimePath, env);
+    command = resolveBunRuntimePath(config2.worker.service.runtimePath, env);
     executablePath = resolveExecutablePath(options.executablePath ?? relayFileURLToPath(new URL("./cli.js", options.moduleUrl)));
   } catch {
     return fail("the Bun runtime or the packaged Olympus CLI could not be found.", "relay");
@@ -144289,7 +144060,7 @@ function prepareRelayStart(config2, options) {
   return {
     statusDir,
     launch: {
-      command: command2,
+      command,
       args: ["--no-env-file", executablePath, "__relay-service-run", instanceId],
       env: childEnv,
       startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
@@ -146293,7 +146064,7 @@ function withFirstRunPrivacyGate(handler, options) {
     if (request.method === "GET" && ["/v1/health", "/health"].includes(path)) {
       return Response.json({ reachable: true, status: "ok", privacy_choice_pending: true, dependency_check: "not_run" });
     }
-    if (path.startsWith("/.well-known/") || path.startsWith("/connect/") || path === RELAY_SURFACES_PATH || path === "/openapi.json" || ["/dashboard/launch", "/dashboard/control/launch", "/dashboard/control/launch/redeem", "/dashboard/control/session", "/dashboard/control/session/local"].includes(path) || request.method === "GET" && path === "/v1/service/readiness") {
+    if (path.startsWith("/.well-known/") || path.startsWith("/connect/") || path === RELAY_SURFACES_PATH || path === "/openapi.json" || ["/dashboard/launch", "/dashboard/control/launch", "/dashboard/control/launch/redeem", "/dashboard/control/session", "/dashboard/control/session/local"].includes(path) || request.method === "GET" && path === "/v1/service/readiness" || request.method === "POST" && ["/v1/cli/settings", "/v1/cli/settings-propose"].includes(path)) {
       return handler(request);
     }
     if ((path === "/mcp" || path === "/openai/mcp") && request.method === "POST") {
@@ -149787,6 +149558,150 @@ var init_openai_compatible_client = __esm(() => {
   init_vlm();
 });
 
+// src/workers/settings-proposal-holder.ts
+import { randomUUID as randomUUID33 } from "node:crypto";
+function modeLabel(id) {
+  return PRIVACY_PRESET_LABELS[id] ?? id;
+}
+function judgeLabel(choice, cap) {
+  if (choice === "local")
+    return "Local (free)";
+  return cap === null ? "Venice, no spending limit" : `Venice, up to $${cap}`;
+}
+function createSettingsProposalHolder(targets, now = () => new Date) {
+  let held;
+  let lastApplied;
+  async function rowsFor(input) {
+    const rows = [];
+    if (input.computer_use && Object.keys(input).length > 1) {
+      throw new SettingsProposalError("How this computer runs goes in two proposals: propose computer_use on its own first, and once it is applied, propose the other changes.");
+    }
+    if (input.private_answer_mode) {
+      if (!targets.saveAnswerMode)
+        throw new SettingsProposalError("This Olympus cannot change the Private-answer mode from the dashboard.");
+      if (targets.computerSetup?.().computer_use_pending === true) {
+        throw new SettingsProposalError("Choose how this computer runs first: propose computer_use on its own, and once it is applied, propose private_answer_mode.");
+      }
+      rows.push({ key: "private_answer_mode", label: "Private-answer mode", current: targets.answerMode().label, proposed: modeLabel(input.private_answer_mode) });
+    }
+    if (input.computer_use) {
+      const setup = targets.computerSetup?.();
+      if (!setup?.engine_server_mode || !targets.saveComputerUse)
+        throw new SettingsProposalError("computer_use can be set only in the standalone Olympus app on a Mac.");
+      if (setup.computer_use_pending !== true) {
+        throw new SettingsProposalError("How this Mac runs was already chosen. Change it with the Engine switch on the dashboard Settings page.");
+      }
+      rows.push({ key: "computer_use", label: "How this computer runs", current: "Not chosen yet", proposed: input.computer_use === "server" ? "Always-on server" : "Everyday computer" });
+    }
+    if (input.privacy_judge && (input.models || input.private_answer_mode)) {
+      throw new SettingsProposalError("The privacy judge goes in two proposals: propose the other changes first, and once they are applied, propose privacy_judge on its own.");
+    }
+    if (input.privacy_judge) {
+      const judge3 = targets.judge?.();
+      if (!judge3 || !targets.saveJudge)
+        throw new SettingsProposalError("This Olympus has no privacy judge setting.");
+      if (input.privacy_judge.choice === "venice" && !judge3.cloudAvailable) {
+        throw new SettingsProposalError("Venice judging needs a Venice key and an allowed Venice model first. Connect Venice, then propose again.");
+      }
+      rows.push({
+        key: "privacy_judge",
+        label: "Privacy judge",
+        current: judgeLabel(judge3.choice, judge3.uncapped ? null : judge3.capDollars),
+        proposed: judgeLabel(input.privacy_judge.choice, input.privacy_judge.spending_limit_dollars)
+      });
+    }
+    if (input.models) {
+      const choices = targets.modelChoices ? await targets.modelChoices() : undefined;
+      if (!choices || !targets.saveModel)
+        throw new SettingsProposalError("This Olympus has no model pickers.");
+      for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
+        const value2 = input.models[provider];
+        if (value2 === undefined)
+          continue;
+        const list = choices[provider];
+        if (!list)
+          throw new SettingsProposalError(`There is no ${MODEL_LABELS[provider]} picker on this computer yet. Set it up first, then propose again.`);
+        const option = list.options.find((candidate) => candidate.value === value2);
+        if (!option)
+          throw new SettingsProposalError(`models.${provider} must be one of: ${list.options.map((candidate) => candidate.value).join(", ")}.`);
+        const current2 = list.options.find((candidate) => candidate.value === list.current);
+        rows.push({ key: `models.${provider}`, label: MODEL_LABELS[provider], current: current2?.label ?? list.current, proposed: option.label });
+      }
+    }
+    return rows;
+  }
+  return {
+    async propose(input, from) {
+      const proposal = {
+        id: randomUUID33(),
+        created_at: now().toISOString(),
+        ...from ? { from } : {},
+        input,
+        rows: await rowsFor(input)
+      };
+      held = proposal;
+      lastApplied = undefined;
+      return proposal;
+    },
+    current() {
+      return held;
+    },
+    lastApplied() {
+      if (!lastApplied || now().getTime() - lastApplied.at > 15 * 60000)
+        return;
+      return lastApplied.result;
+    },
+    discard(id) {
+      if (!held || held.id !== id)
+        return false;
+      held = undefined;
+      return true;
+    },
+    async apply(id) {
+      if (!held || held.id !== id)
+        return;
+      const proposal = held;
+      held = undefined;
+      const input = proposal.input;
+      const results = [];
+      const record6 = async (key2, run2) => {
+        const row = proposal.rows.find((candidate) => candidate.key === key2);
+        try {
+          const saved = await run2();
+          results.push({ ...row, applied: saved.ok, ...saved.message ? { message: saved.message } : {} });
+        } catch (error2) {
+          results.push({ ...row, applied: false, message: error2 instanceof Error ? error2.message : "This setting could not be saved." });
+        }
+      };
+      const writes = async () => {
+        for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
+          const value2 = input.models?.[provider];
+          if (value2 !== undefined)
+            await record6(`models.${provider}`, () => targets.saveModel(provider, value2));
+        }
+        if (input.privacy_judge) {
+          const judge3 = input.privacy_judge;
+          await record6("privacy_judge", () => targets.saveJudge(judge3.choice, judge3.spending_limit_dollars));
+        }
+        if (input.computer_use)
+          await record6("computer_use", () => targets.saveComputerUse(input.computer_use));
+        if (input.private_answer_mode)
+          await record6("private_answer_mode", () => targets.saveAnswerMode(input.private_answer_mode));
+      };
+      await (targets.deferReloads ? targets.deferReloads(writes) : writes());
+      const result = { ok: results.every((row) => row.applied), rows: results };
+      lastApplied = { at: now().getTime(), result };
+      return result;
+    }
+  };
+}
+var MODEL_LABELS;
+var init_settings_proposal_holder = __esm(() => {
+  init_privacy_language();
+  init_settings_proposal();
+  MODEL_LABELS = { local: "Local model", venice: "Venice model", zkapi: "zkAPI model" };
+});
+
 // src/workers/email-source/dashboard-messaging.ts
 function createDashboardMessagingPairing(options) {
   const states = new Map;
@@ -150147,8 +150062,8 @@ function readQr(path) {
     closeSync32(fd2);
   }
 }
-async function unlinkHelper(command2, env) {
-  const child2 = spawn12(command2, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
+async function unlinkHelper(command, env) {
+  const child2 = spawn12(command, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
   let errorTail = "";
   child2.stderr?.on("data", (chunk) => {
     errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
@@ -150174,8 +150089,8 @@ function listingErrorCode(stderr) {
   }
   return;
 }
-async function listHelper(command2, args, env, input) {
-  const child2 = spawn12(command2, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+async function listHelper(command, args, env, input) {
+  const child2 = spawn12(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
   const stdin = child2.stdin;
   const stdout = child2.stdout;
   const stderr = child2.stderr;
@@ -152041,10 +151956,10 @@ function resolveSourceWatchGatewayConnection(config2, options = {}) {
   };
 }
 async function loadOpenClawGatewayConfig(env = process.env) {
-  const command2 = resolveOpenClawCommand2(env);
+  const command = resolveOpenClawCommand2(env);
   let child2;
   try {
-    child2 = Bun.spawn([command2, "config", "get", "gateway", "--json"], {
+    child2 = Bun.spawn([command, "config", "get", "gateway", "--json"], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
@@ -152568,7 +152483,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-source-action],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-source-action],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind],form[data-settings-proposal]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       Array.from(form.elements).filter((control) => control.matches('button,input:not([type="hidden"])')).forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -152620,6 +152535,8 @@ function mountDashboardController(options) {
         return "Validating the key…";
       case "connect_this_computer":
         return "Connecting…";
+      case "apply_settings_proposal":
+        return "Applying…";
       default:
         return "Working…";
     }
@@ -152776,6 +152693,11 @@ function mountDashboardController(options) {
       return { action: "set_computer_use", choice: (form.hasAttribute("data-server-mode") ? body.server === "on" : body.choice === "server") ? "server" : "everyday" };
     if (form.hasAttribute("data-first-run-privacy"))
       return { action: "save_first_run_privacy", choice: body.choice ?? "" };
+    if (form.hasAttribute("data-settings-proposal")) {
+      if (!body.id)
+        return;
+      return { action: form.dataset.settingsProposal === "discard" ? "discard_settings_proposal" : "apply_settings_proposal", id: body.id };
+    }
     const connect = form.dataset.connectKind;
     if (connect === "oauth") {
       return {
@@ -153823,7 +153745,7 @@ function mountDashboardController(options) {
       submitAgentControl(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-source-action],[data-local-models-discover],[data-local-models-test]"))
+    if (!form.matches("[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-source-action],[data-local-models-discover],[data-local-models-test],[data-settings-proposal]"))
       return;
     event.preventDefault();
     const submittedValues = formRecord(form);
@@ -155300,6 +155222,8 @@ function standaloneDashboardControllerScript(input) {
         if (action === 'disconnect_source') return ['/dashboard/disconnect', withoutAction(params)];
         if (action === 'delete_source_data') return ['/dashboard/delete-source-data', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
+        if (action === 'apply_settings_proposal') return ['/dashboard/settings/proposal/apply', withoutAction(params)];
+        if (action === 'discard_settings_proposal') return ['/dashboard/settings/proposal/discard', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'connect_this_computer') return ['/dashboard/connect/this-computer', withoutAction(params)];
@@ -163202,62 +163126,7 @@ function hostProgram(input, bridge, mount) {
   function remember(name, result) {
     if (name === input.bridge.readTool)
       lastRead = result;
-    return noteSetup(name, result);
-  }
-  let setupReady = false;
-  const setupDialog = document.querySelector("[data-setup-agent-dialog]");
-  function openSetupAgent() {
-    if (!setupReady || !setupDialog || setupDialog.open)
-      return;
-    if (typeof setupDialog.showModal === "function")
-      setupDialog.showModal();
-    else
-      setupDialog.setAttribute("open", "");
-  }
-  function noteSetup(name, result) {
-    if (name !== input.bridge.readTool || !result || typeof result !== "object")
-      return result;
-    const meta2 = result._meta;
-    const computer = meta2 && typeof meta2 === "object" ? meta2[input.setupAgent.metaKey] : undefined;
-    const ready = !!(computer && computer.setup && computer.setup.kind === "olympus_setup_status");
-    if (ready && !setupReady) {
-      setupReady = true;
-      document.querySelectorAll("[data-setup-agent-open]").forEach((opener) => {
-        opener.hidden = false;
-      });
-      if (window.location.hash === input.setupAgent.fragment)
-        openSetupAgent();
-    }
     return result;
-  }
-  if (typeof window.addEventListener === "function") {
-    window.addEventListener("hashchange", () => {
-      if (window.location.hash === input.setupAgent.fragment)
-        openSetupAgent();
-    });
-  }
-  if (typeof document.addEventListener === "function")
-    document.addEventListener("click", (event) => {
-      const target = event.target;
-      if (target && target.closest && target.closest("[data-setup-agent-open]"))
-        openSetupAgent();
-      if (target && target.closest && target.closest("[data-setup-agent-close]") && setupDialog)
-        setupDialog.close();
-    });
-  const setupCopy = document.querySelector("[data-setup-agent-copy]");
-  const setupBrief = document.getElementById("setup-agent-brief");
-  const setupStatus = document.querySelector("[data-setup-agent-copy-status]");
-  if (setupCopy && setupBrief) {
-    setupCopy.addEventListener("click", () => {
-      const done = (words2) => {
-        if (setupStatus)
-          setupStatus.textContent = words2;
-      };
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        navigator.clipboard.writeText(setupBrief.textContent || "").then(() => done(input.setupAgent.copied), () => done(input.setupAgent.copyFailed));
-      } else
-        done(input.setupAgent.copyFailed);
-    });
   }
   function lockPage() {
     if (input.hasReadToken) {
@@ -163292,7 +163161,7 @@ function hostProgram(input, bridge, mount) {
     if (expired)
       return lastRead !== undefined && name === input.bridge.readTool ? Promise.resolve(lastRead) : Promise.reject(new Error("locked"));
     if (!csrfToken) {
-      return fetch(input.readUrl, { cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : failed()).then((result) => noteSetup(name, result));
+      return fetch(input.readUrl, { cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : failed());
     }
     return localUnlock(name).then(() => fetch(input.toolsCallPath, {
       method: "POST",
@@ -163684,8 +163553,7 @@ function renderComputerHostPage(input) {
     words: DASHBOARD_HOST_GATE_COPY,
     updateSupported: installer !== undefined,
     updateWords: { notice: DASHBOARD_UPDATE_COPY.notice("{version}"), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed },
-    pairing: computerPairing(bridge.openTargets),
-    setupAgent: { metaKey: COMPUTER_META_KEY, fragment: `#${DASHBOARD_SETUP_AGENT_ID}`, copied: DASHBOARD_SETUP_AGENT_COPY.copied, copyFailed: DASHBOARD_SETUP_AGENT_COPY.copyFailed }
+    pairing: computerPairing(bridge.openTargets)
   })}, ${dashboardHostBridge.toString()}, ${mountDashboardController.toString()});`.replaceAll("</script", "<\\/script");
   return [
     "<!doctype html>",
@@ -163709,7 +163577,6 @@ function renderComputerHostPage(input) {
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text3(model.name)} — ${text3(model.state)}</strong>: ${text3(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
     "</main>",
-    setupAgentDialog(),
     `<dialog class="pairing" data-pairing-dialog aria-label="${attribute2(DASHBOARD_PAIRING_DIALOG_LABEL)}"><div class="bar"><button class="btn" type="button" data-pairing-close>Close</button></div><div data-pairing-root></div></dialog>`,
     `<script>${program}</script>`,
     "</body>",
@@ -163718,11 +163585,7 @@ function renderComputerHostPage(input) {
   ].join(`
 `);
 }
-function setupAgentDialog() {
-  const C2 = DASHBOARD_SETUP_AGENT_COPY;
-  return `<dialog class="setup-agent" id="${DASHBOARD_SETUP_AGENT_ID}" data-setup-agent-dialog aria-labelledby="setup-agent-title">` + `<div class="head"><h2 id="setup-agent-title">${text3(C2.title)}</h2><button class="x" type="button" data-setup-agent-close aria-label="${attribute2(C2.close)}">✕</button></div>` + `<p class="intro">${text3(C2.intro)}</p>` + `<pre id="setup-agent-brief">${text3(C2.brief)}</pre>` + `<div class="actions"><button class="btn primary" type="button" data-setup-agent-copy>${text3(C2.copy)}</button>` + `<button class="btn" type="button" data-setup-agent-close>${text3(C2.close)}</button>` + '<span class="status" data-setup-agent-copy-status aria-live="polite"></span></div>' + "</dialog>";
-}
-var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = "/dashboard/archive-import/upload-file", DASHBOARD_LOCAL_PAGES, HOST_CSS, DASHBOARD_PAIRING_DIALOG_LABEL = "Pair a messaging account", DASHBOARD_SETUP_AGENT_ID = "setup-with-agent", COMPUTER_HOST_PAGE_CSP;
+var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = "/dashboard/archive-import/upload-file", DASHBOARD_LOCAL_PAGES, HOST_CSS, DASHBOARD_PAIRING_DIALOG_LABEL = "Pair a messaging account", COMPUTER_HOST_PAGE_CSP;
 var init_host_page = __esm(() => {
   init_computer_identity();
   init_update_check();
@@ -163782,15 +163645,6 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 .pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
 .pairing::backdrop{background:rgba(0,0,0,0.45)}
 .pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
-.setup-agent{width:min(46rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:1.25rem 1.5rem;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,0.12)}
-.setup-agent::backdrop{background:rgba(0,0,0,0.35)}
-.setup-agent .head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem}
-.setup-agent h2{margin:0;font-size:1.0625rem;font-weight:600}
-.setup-agent .x{border:0;background:transparent;color:var(--muted);font:inherit;font-size:1.25rem;line-height:1;min-width:2.25rem;min-height:2.25rem;cursor:pointer;border-radius:999px}
-.setup-agent .x:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.setup-agent .intro{margin:0.375rem 0 0.75rem;color:var(--muted);font-size:0.9375rem}
-.setup-agent pre{margin:0 0 0.75rem;padding:0.875rem 1rem;background:var(--surface);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all}
-.setup-agent .actions{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 `;
   COMPUTER_HOST_PAGE_CSP = [
     "default-src 'none'",
@@ -165838,7 +165692,7 @@ function renderDashboardConnectPage(view3, options) {
   const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off)).concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
   const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
   const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view3, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
-  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
     renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
@@ -166028,8 +165882,25 @@ function renderDashboardSettingsPage(options) {
   const update = settings?.update;
   const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
   const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
-  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
+  const proposal = renderSettingsProposal(options?.settingsProposal);
+  const body = lockedGate2(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
   return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS], options });
+}
+function renderSettingsProposal(state) {
+  const proposal = state?.current;
+  if (proposal) {
+    const who = proposal.from ? escapeHtml2(proposal.from) : "An agent on this computer";
+    const judge3 = proposal.input.privacy_judge;
+    const veniceJudge = judge3?.choice === "venice" ? `$${judge3.spending_limit_dollars}` : undefined;
+    const rows2 = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.current)}</td><td><b>${escapeHtml2(row.proposed)}</b></td></tr>`).join("");
+    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml2(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
+    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows2}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml2(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
+  }
+  const applied = state?.lastApplied;
+  if (!applied)
+    return "";
+  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml2(row.message ?? "not saved")}`}</td></tr>`).join("");
+  return `<section class="propcard" aria-label="Applied settings" id="proposed-settings"><h3 class="sect">${applied.ok ? "Settings applied" : "Some settings were not applied"}</h3>` + `<table class="proptable"><tbody>${rows}</tbody></table></section>`;
 }
 function renderDashboardHelpPage(options) {
   const report = options?.systemReport;
@@ -166170,6 +166041,13 @@ var init_local = __esm(() => {
     { id: "help", label: "Help" }
   ];
   SETTINGS_CSS = `
+.propcard { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 24px; }
+.propcard .sect { margin-top: 0; }
+.proptable { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.proptable th, .proptable td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+.proptable thead th { border-top: 0; color: var(--t2); font-weight: 500; }
+.propnote { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.propcard .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
@@ -166657,7 +166535,7 @@ function isDashboardArchiveImportLocalRoute(request) {
   return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save", "/dashboard/models/choice", "/dashboard/models/addable"].includes(new URL(request.url).pathname);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save", "/dashboard/models/choice", "/dashboard/models/addable", "/dashboard/settings/proposal/apply", "/dashboard/settings/proposal/discard"].includes(new URL(request.url).pathname);
 }
 function dashboardLocalGradeRefusal(request) {
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request))
@@ -167767,8 +167645,8 @@ class GogcliEmailConnector {
 }
 
 class SpawnCommandRunner {
-  async run(command2, args, options = {}) {
-    const child2 = Bun.spawn([command2, ...args], {
+  async run(command, args, options = {}) {
+    const child2 = Bun.spawn([command, ...args], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe"
@@ -167794,7 +167672,7 @@ class SpawnCommandRunner {
               resolve28({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
-                stderr: command2 + " timed out after " + timeoutMs + "ms."
+                stderr: command + " timed out after " + timeoutMs + "ms."
               });
             }, COMMAND_TIMEOUT_KILL_GRACE_MS);
           }, timeoutMs);
@@ -171630,6 +171508,32 @@ function dashboardSourceSyncNotSupportedError(source, reason = "no_lane") {
 function dashboardConnectSourceLabel(source) {
   return DASHBOARD_SUPPORTED_SOURCES.find((definition) => (definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" || definition.connect_action.kind === "this_computer") && definition.connect_action.source === source)?.label ?? source;
 }
+function settingsProposalHolderFor(dashboard) {
+  const judge3 = dashboard.judgeSetup;
+  const models = dashboard.modelChoices;
+  const saveComputerUse = dashboard.saveComputerUseChoice;
+  return createSettingsProposalHolder({
+    answerMode: () => {
+      const id = privateAnswerMode(dashboard.sovereigntyEngine.config);
+      return { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id] };
+    },
+    ...dashboard.savePrivateAnswerMode ? { saveAnswerMode: dashboard.savePrivateAnswerMode } : {},
+    ...dashboard.deferReloads ? { deferReloads: dashboard.deferReloads } : {},
+    ...dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {},
+    ...saveComputerUse ? { saveComputerUse: (choice) => ({ ok: true, message: saveComputerUse(choice).status_message }) } : {},
+    ...judge3 ? {
+      judge: judge3.status,
+      saveJudge: async (choice, cap) => ({ ok: true, message: (await judge3.save(choice, cap)).status_message })
+    } : {},
+    ...models ? {
+      modelChoices: () => models.status(),
+      saveModel: async (provider, value2) => {
+        const saved = await models.save(provider, value2);
+        return saved.ok ? { ok: true, message: saved.status_message } : { ok: false, message: saved.message };
+      }
+    } : {}
+  });
+}
 function createEmailSourceWorker(options = {}) {
   const connector = options.connector ?? new GogcliEmailConnectorStub;
   const agentConnections = options.agentConnections;
@@ -171676,6 +171580,7 @@ function createEmailSourceWorker(options = {}) {
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
   const serviceInstanceId = options.serviceInstanceId?.trim() || undefined;
@@ -171828,7 +171733,9 @@ function createEmailSourceWorker(options = {}) {
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
               }
-              const response = json({ ...result, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
+              const localNote = caller?.surface !== "remote" ? privacyBacklogCoverageNote(readPendingPrivacyItems(options), "local") : undefined;
+              const answered = localNote && typeof result.answer === "string" ? { ...result, answer: withCoverageNote(result.answer, localNote) } : result;
+              const response = json({ ...answered, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,
@@ -171872,10 +171779,22 @@ function createEmailSourceWorker(options = {}) {
                 return json(pairingPlacementForCli(body));
               case "pairing-account":
                 return json(pairingAccountForCli(body));
-              case "setup-status": {
-                if (!sourceDashboard?.setupStatus)
-                  throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "This Olympus has no setup checklist to show.");
-                return json(await sourceDashboard.setupStatus());
+              case "settings-propose": {
+                if (!settingsProposal)
+                  throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "This Olympus has no dashboard settings to change.");
+                try {
+                  const proposal = await settingsProposal.propose(parseSettingsProposalInput(body.proposal), parseProposalFrom(body.from));
+                  return json({
+                    kind: "olympus_settings_proposal",
+                    id: proposal.id,
+                    changes: proposal.rows,
+                    next: "Nothing has changed yet. Ask the owner to open the dashboard on this computer, go to Settings, check the proposed changes and click Apply all."
+                  });
+                } catch (error2) {
+                  if (error2 instanceof SettingsProposalError)
+                    throw new EmailSourceWorkerError(400, "invalid_params", error2.message, "Run olympus settings schema and olympus settings show for what can be set.");
+                  throw error2;
+                }
               }
               case "settings": {
                 if (!sourceDashboard)
@@ -171953,27 +171872,27 @@ function createEmailSourceWorker(options = {}) {
         if (request.method === "POST" && url2.pathname === `${basePath}/source/watch/create`) {
           if (!sourceWatch)
             throw sourceWatchNotSupported();
-          const owner2 = authenticatedWatchOwner(request);
+          const owner = authenticatedWatchOwner(request);
           const create = await parseSourceWatchCreateRequest(request);
-          const watch2 = createSourceWatchPublicView({ store: sourceWatch.store, create, owner: owner2 });
+          const watch2 = createSourceWatchPublicView({ store: sourceWatch.store, create, owner });
           return json({ kind: "source_watch", watch: watch2, policy: SOURCE_WATCH_POLICY });
         }
         if (request.method === "POST" && url2.pathname === `${basePath}/source/watches`) {
           if (!sourceWatch)
             throw sourceWatchNotSupported();
-          const owner2 = authenticatedWatchOwner(request);
+          const owner = authenticatedWatchOwner(request);
           const page2 = await parseSourceWatchesRequest(request);
-          return json(listSourceWatchPublicViews({ store: sourceWatch.store, owner: owner2, ...page2 }));
+          return json(listSourceWatchPublicViews({ store: sourceWatch.store, owner, ...page2 }));
         }
         if (request.method === "POST" && url2.pathname === `${basePath}/source/watch/cancel`) {
           if (!sourceWatch)
             throw sourceWatchNotSupported();
-          const owner2 = authenticatedWatchOwner(request);
+          const owner = authenticatedWatchOwner(request);
           const cancel = await parseSourceWatchCancelRequest(request);
-          const watch2 = sourceWatch.store.cancelWatch(owner2, cancel);
+          const watch2 = sourceWatch.store.cancelWatch(owner, cancel);
           return json({
             kind: "source_watch",
-            watch: sourceWatchPublicView(watch2, sourceWatch.store.deliverySummary(owner2, watch2.watchId)),
+            watch: sourceWatchPublicView(watch2, sourceWatch.store.deliverySummary(owner, watch2.watchId)),
             policy: SOURCE_WATCH_POLICY
           });
         }
@@ -172148,6 +172067,7 @@ function createEmailSourceWorker(options = {}) {
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 ...agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {},
                 ...options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {},
+                ...settingsProposal ? { settingsProposal: { current: settingsProposal.current(), lastApplied: settingsProposal.lastApplied() } } : {},
                 settings: {
                   ...options.localModelReadiness ? { models: options.localModelReadiness() } : {},
                   ...update && installer ? { update: { version: update.version, command: installer.command } } : {}
@@ -172588,6 +172508,28 @@ function createEmailSourceWorker(options = {}) {
           }
           const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
           return json(result.ok ? result : { ok: false, error: { code: "model_choice_failed", message: result.message } }, result.ok ? 200 : 409);
+        }
+        if (request.method === "POST" && (url2.pathname === DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH || url2.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            return json({ ok: false, error: { code: "local_dashboard_only", message: "Apply proposed settings in an unlocked dashboard on this computer." } }, 403);
+          }
+          if (!settingsProposal)
+            throw new EmailSourceWorkerError(501, "not_available", "Proposed settings are unavailable.");
+          const input = await parseObjectBody(request);
+          if (typeof input.id !== "string" || input.id === "")
+            throw new EmailSourceWorkerError(400, "invalid_request", "Refresh the page to see the current proposal.");
+          if (url2.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH) {
+            return settingsProposal.discard(input.id) ? json({ ok: true, status_message: "Discarded. Nothing was changed." }) : json({ ok: false, error: { code: "proposal_changed", message: "This proposal was replaced or already handled. Refresh the page." } }, 409);
+          }
+          const applied = await settingsProposal.apply(input.id);
+          if (!applied)
+            return json({ ok: false, error: { code: "proposal_changed", message: "This proposal was replaced or already handled. Refresh the page." } }, 409);
+          const failed = applied.rows.filter((row) => !row.applied);
+          return json({
+            ok: true,
+            rows: applied.rows,
+            status_message: failed.length === 0 ? `Applied ${applied.rows.length} ${applied.rows.length === 1 ? "change" : "changes"}.` : `Applied ${applied.rows.length - failed.length} of ${applied.rows.length}. Not applied: ${failed.map((row) => `${row.label} (${row.message ?? "not saved"})`).join("; ")}.`
+          }, failed.length === 0 ? 200 : 409);
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/models/judge") {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
@@ -173690,6 +173632,7 @@ function createEmailSourceWorker(options = {}) {
             const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
             const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run2) => run2.scope)) ?? [] : [];
             const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+            const pendingPrivacy = readPendingPrivacyItems(options);
             const safeResult = {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
@@ -173716,7 +173659,8 @@ function createEmailSourceWorker(options = {}) {
                 raw_source_exposed: false,
                 source_text_returned: false,
                 ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
-                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}
+                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {},
+                ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
               },
               policy: {
                 raw_source_exposed: false,
@@ -176294,6 +176238,13 @@ function isSourceIndexStatusResult(value2) {
 function uniqueStrings2(values) {
   return [...new Set(values.map((value2) => value2.trim()).filter(Boolean))];
 }
+function readPendingPrivacyItems(options) {
+  try {
+    return options.pendingPrivacyItems?.();
+  } catch {
+    return;
+  }
+}
 function json(value2, status = 200) {
   return new Response(JSON.stringify(value2), {
     status,
@@ -176319,12 +176270,14 @@ function mostPrivateTrustDomain(domains) {
     return "internal";
   return "public_safe";
 }
-var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
+var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = "/dashboard/settings/proposal/apply", DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = "/dashboard/settings/proposal/discard", DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
   init_source_failure();
   init_google_own_app();
   init_sovereignty();
   init_first_run_privacy();
+  init_settings_proposal();
+  init_settings_proposal_holder();
   init_privacy_language();
   init_dashboard_messaging_service();
   init_source_scope_approval();
@@ -177168,7 +177121,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash93, randomUUID as randomUUID33 } from "node:crypto";
+import { createHash as createHash93, randomUUID as randomUUID34 } from "node:crypto";
 import { realpathSync as realpathSync22, rmSync as rmSync39, readdirSync as readdirSync28 } from "node:fs";
 import { join as join132, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -177557,7 +177510,7 @@ function createLocalFilesSourceConnector(options) {
           const deletedSeen = new Set;
           const priorGen = cursor?.startsWith(LOCAL_FILES_CURSOR_PREFIX) ? cursor.slice(LOCAL_FILES_CURSOR_PREFIX.length) : undefined;
           const replay = priorGen !== undefined && priorGen !== "poll";
-          const nextGen = randomUUID33();
+          const nextGen = randomUUID34();
           let wroteSnapshot = false;
           if (options.watch) {
             try {
@@ -192709,8 +192662,8 @@ function helperAppPathForHome(home2 = homedir47()) {
   return join135(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
-  const run2 = deps.run ?? ((command2, args) => {
-    spawn13(command2, args, { stdio: "ignore", detached: true }).unref();
+  const run2 = deps.run ?? ((command, args) => {
+    spawn13(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
   if ((deps.exists ?? existsSync101)(helper))
@@ -194205,12 +194158,13 @@ function childLane(scope) {
   const stores = scope.stores;
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
-function createTierVisibilityGate(scopes) {
+function createTierVisibilityGate(scopes, onHeldMatches) {
   return (hits) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
     const hidden = new Set;
+    const held = new Set;
     for (const scope of current2) {
       const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
       if (governed.length === 0)
@@ -194233,6 +194187,8 @@ function createTierVisibilityGate(scopes) {
         }
         const key2 = tierLedgerIdentityKey(hit.sourceItem);
         const itemCopies = copies.get(key2);
+        if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
+          held.add(hit);
         if (!itemCopies || itemCopies.length === 0) {
           if (routedWithoutCopies.has(key2))
             hidden.add(hit);
@@ -194252,8 +194208,31 @@ function createTierVisibilityGate(scopes) {
         }
       }
     }
+    if (onHeldMatches && held.size > 0) {
+      try {
+        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
+      } catch {}
+    }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
   };
+}
+function interleaveByCorpus(hits) {
+  const byCorpus = new Map;
+  for (const hit of hits) {
+    const lane = byCorpus.get(hit.corpusId);
+    if (lane)
+      lane.push(hit);
+    else
+      byCorpus.set(hit.corpusId, [hit]);
+  }
+  const lanes = [...byCorpus.values()];
+  const ordered = [];
+  for (let rank = 0;ordered.length < hits.length; rank += 1) {
+    for (const lane of lanes)
+      if (rank < lane.length)
+        ordered.push(lane[rank]);
+  }
+  return ordered;
 }
 function createReleaseTierCheck(scopes, secureDerivativeDefault) {
   return {
@@ -194325,6 +194304,71 @@ var init_tier_visibility = __esm(() => {
   init_child_visibility();
 });
 
+// src/workers/classification/judge-boost.ts
+class JudgeBoosts {
+  entries = new Map;
+  now;
+  constructor(options = {}) {
+    this.now = options.now ?? (() => Date.now());
+  }
+  raise(identities) {
+    const expiresAt = this.now() + JUDGE_BOOST_TTL_MS;
+    const seen = new Set;
+    for (const identity2 of identities) {
+      if (seen.size >= JUDGE_BOOST_PER_QUESTION)
+        break;
+      const key2 = tierLedgerIdentityKey(identity2);
+      if (seen.has(key2))
+        continue;
+      seen.add(key2);
+      this.entries.delete(key2);
+      this.entries.set(key2, {
+        identity: {
+          provider: identity2.provider,
+          accountScope: identity2.accountScope,
+          providerItemId: identity2.providerItemId,
+          ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}
+        },
+        expiresAt
+      });
+    }
+    while (this.entries.size > JUDGE_BOOST_MAX_ITEMS)
+      this.entries.delete(this.entries.keys().next().value);
+  }
+  has(identity2) {
+    const entry = this.entries.get(tierLedgerIdentityKey(identity2));
+    if (!entry)
+      return false;
+    if (entry.expiresAt > this.now())
+      return true;
+    this.entries.delete(tierLedgerIdentityKey(identity2));
+    return false;
+  }
+  live() {
+    const now = this.now();
+    const live = [];
+    for (const [key2, entry] of this.entries) {
+      if (entry.expiresAt > now)
+        live.push(entry.identity);
+      else
+        this.entries.delete(key2);
+    }
+    return live;
+  }
+  drop(identity2) {
+    this.entries.delete(tierLedgerIdentityKey(identity2));
+  }
+  get size() {
+    return this.entries.size;
+  }
+}
+var JUDGE_BOOST_PER_QUESTION = 20, JUDGE_BOOST_MAX_ITEMS = 200, JUDGE_BOOST_TTL_MS, judgeBoosts;
+var init_judge_boost = __esm(() => {
+  init_tier_ledger();
+  JUDGE_BOOST_TTL_MS = 15 * 60000;
+  judgeBoosts = new JudgeBoosts;
+});
+
 // src/core/source-account-migration.ts
 import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync62, readdirSync as readdirSync31, realpathSync as realpathSync29, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync43, unlinkSync as unlinkSync4 } from "node:fs";
 import { basename as basename20, dirname as dirname100, isAbsolute as isAbsolute38, join as join137, relative as relative17, resolve as resolve29, sep as sep21 } from "node:path";
@@ -194358,10 +194402,10 @@ function candidates(sourceId, slot, env) {
     const folderDir = dirname100(accountSessionPath(account, env));
     const own3 = basename20(legacyTelegramSessionBase(env));
     const staged = new Set;
-    for (const name of listNames3(legacyDir))
+    for (const name of listNames2(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
         staged.add(name);
-    for (const name of listNames3(folderDir)) {
+    for (const name of listNames2(folderDir)) {
       const legacyName = name.startsWith("telegram.pairing-") ? `${own3}${name.slice("telegram".length)}` : undefined;
       if (legacyName && folderNameOfStagedTelegramLogin(legacyName, env))
         staged.add(legacyName);
@@ -194372,7 +194416,7 @@ function candidates(sourceId, slot, env) {
   }
   return found;
 }
-function listNames3(dir) {
+function listNames2(dir) {
   try {
     return readdirSync31(dir);
   } catch {
@@ -195655,13 +195699,13 @@ function createMediaLocator(archive) {
 function keyOf(message2, state, matching) {
   const ms = wallTimeToUtcMs(message2.wall, state.z) ?? Date.parse(`${message2.wall}Z`);
   const chatJid = chatOf(state, matching, message2.chat);
-  const owner2 = state.m !== undefined && hash2(nameKey(message2.sender)) === state.m;
-  const sender = owner2 ? OWNER_SENDER : nameKey(message2.sender);
+  const owner = state.m !== undefined && hash2(nameKey(message2.sender)) === state.m;
+  const sender = owner ? OWNER_SENDER : nameKey(message2.sender);
   const { caption, files, omitted } = splitMedia(message2.text);
   return {
     ms,
     chatJid,
-    owner: owner2,
+    owner,
     caption,
     files,
     omitted,
@@ -195707,10 +195751,10 @@ async function countSlotAhead(archive, cursor, slot, state, matching) {
   return { whole: false, count, keys };
 }
 function recordOf2(message2, keyed, certain, state, matching, media, report) {
-  const { ms, chatJid, owner: owner2, caption, files, omitted, key: key2 } = keyed;
+  const { ms, chatJid, owner, caption, files, omitted, key: key2 } = keyed;
   const wordless = textKey(caption) === "" && (files.length > 0 || omitted);
   const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message2.precision, key2);
-  const id = matched ? matched.id : exportMessageId(chatJid, ms, message2.precision, owner2 ? OWNER_SENDER : nameKey(message2.sender), message2.text, message2.occurrence);
+  const id = matched ? matched.id : exportMessageId(chatJid, ms, message2.precision, owner ? OWNER_SENDER : nameKey(message2.sender), message2.text, message2.occurrence);
   if (!matched && matching.index?.liveBetween(chatJid, ms - 60000, ms + 60000)) {
     report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: "skipped" });
   }
@@ -195734,9 +195778,9 @@ function recordOf2(message2, keyed, certain, state, matching, media, report) {
     chatJid: matched?.chatJid ?? chatJid,
     chatName: message2.chat,
     senderJid: "",
-    senderName: owner2 ? "" : message2.sender,
-    ...owner2 ? {} : { senderContactName: message2.sender },
-    fromMe: matched?.fromMe ?? owner2,
+    senderName: owner ? "" : message2.sender,
+    ...owner ? {} : { senderContactName: message2.sender },
+    fromMe: matched?.fromMe ?? owner,
     timestamp: matched?.timestamp ?? new Date(ms).toISOString(),
     text: caption,
     ...mediaType !== undefined ? { mediaType } : {},
@@ -197250,8 +197294,11 @@ async function runSnifferPass(options) {
     return false;
   };
   const work = { metadata: [], content: [] };
+  const boosts = options.boosts ?? judgeBoosts;
+  const raised = boosts.live();
+  const raisedFound = new Set;
   for (const target of options.targets) {
-    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
+    const admit = (question) => {
       report.pendingSeen += 1;
       if (target.embeddingPrefilter?.retained(question))
         return false;
@@ -197262,7 +197309,21 @@ async function runSnifferPass(options) {
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
-    } });
+    };
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: admit });
+    if (raised.length > 0) {
+      const listed = new Set(questions.map((question) => `${question.pass}\x00${tierLedgerIdentityKey(question)}`));
+      for (const identity2 of raised) {
+        for (const pass of ["metadata", "content"]) {
+          const question = target.sniffer.questionFor(identity2, pass);
+          if (!question)
+            continue;
+          raisedFound.add(tierLedgerIdentityKey(identity2));
+          if (!listed.has(`${pass}\x00${tierLedgerIdentityKey(question)}`) && admit(question))
+            questions.push(question);
+        }
+      }
+    }
     for (const question of questions) {
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -197283,6 +197344,9 @@ async function runSnifferPass(options) {
         report.awaitingResync += 1;
     }
   }
+  for (const identity2 of raised)
+    if (!raisedFound.has(tierLedgerIdentityKey(identity2)))
+      boosts.drop(identity2);
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
     const stopped = await prepareSnifferModel(options);
@@ -197340,8 +197404,9 @@ async function runSnifferPass(options) {
       const turnStarted = monotonicNow();
       let turnCallMs = 0;
       try {
-        const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-        let next = options.lane.kind === "venice" ? pending[0] : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+        const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+        const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
+        let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
         if (next.question.pass === "content")
           next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
         pending.splice(pending.indexOf(next), 1);
@@ -197514,6 +197579,7 @@ var init_sniffer_resolver = __esm(() => {
   init_answer_activity();
   init_atomic_file();
   init_sniffer();
+  init_judge_boost();
   init_sniffer_lane();
   init_sniffer_store();
   init_tier_classifier();
@@ -197567,6 +197633,7 @@ class TierSnifferService {
   waitingReason;
   lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   backlogCache;
+  lowerMovesCache;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -197697,7 +197764,49 @@ class TierSnifferService {
   backlog() {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
-    return { ...backlog, summary: [backlog.summary, ...messages].join(" ") };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(" ") };
+  }
+  lowerMovesQueued(pendingItems) {
+    const now = this.clockMs();
+    const cached3 = this.lowerMovesCache;
+    if (cached3 && now - cached3.atMs < BACKLOG_REFRESH_MS && (cached3.count > 0 || pendingItems >= cached3.pendingItems))
+      return cached3.count;
+    const count = this.countLowerMovesQueued();
+    this.lowerMovesCache = { count, atMs: now, pendingItems };
+    return count;
+  }
+  forgetLowerMoves() {
+    this.lowerMovesCache = undefined;
+  }
+  countLowerMovesQueued() {
+    const autoMoves = this.options.autoMoves;
+    try {
+      if (!autoMoves || !autoMoves.localEmbeddingsOnly())
+        return 0;
+    } catch {
+      return 0;
+    }
+    let queued = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const set2 = tierSetForLedger(ledgerPath);
+        if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
+          continue;
+      } catch {
+        continue;
+      }
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
+          SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
+        ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return queued;
   }
   backlogCounts() {
     if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS))
@@ -198414,6 +198523,8 @@ class TierSnifferService {
       signal
     });
     phase("pass");
+    if (report.verdictsApplied > 0)
+      this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
@@ -198626,6 +198737,8 @@ class TierSnifferService {
       } catch {}
       try {
         const judged = applyMediaJudgments({ set: set2, autoMoves: this.autoMovesFor(set2) });
+        if (judged.movesQueued > 0)
+          this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
         }
@@ -198686,6 +198799,8 @@ class TierSnifferService {
           this.rejudgeCursors.delete(ledgerPath);
         for (const key2 of Object.keys(total))
           total[key2] += report[key2];
+        if (report.movesQueued > 0)
+          this.forgetLowerMoves();
       } catch {}
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
@@ -198958,7 +199073,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_embedding_prefilter();
   init_tier_move();
@@ -215449,16 +215564,16 @@ function createInProcessOperationContext(input) {
     });
     return input.workerFetch(markInProcessRemoteRequest(request));
   }, undefined, config2.email.requestTimeoutSeconds * 1000);
-  const owner2 = sourceAnswerJobOwner(input.caller);
+  const owner = sourceAnswerJobOwner(input.caller);
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
     email: new EmailClient(config2, transport),
     caller: input.caller,
-    ...input.sourceAnswerJobs && owner2 ? {
+    ...input.sourceAnswerJobs && owner ? {
       sourceAnswerJobs: {
         registry: input.sourceAnswerJobs,
-        owner: owner2,
+        owner,
         ...input.signal ? { clientSignal: input.signal } : {},
         detachFromClient: client.detach
       }
@@ -220316,13 +220431,6 @@ function computerUnpairEntries(view3) {
     return [{ sourceId: action.source_id, label: action.label, confirmation: action.confirmation }];
   });
 }
-function setupMeta(options, view3) {
-  try {
-    return options.setupChecklist?.(view3);
-  } catch {
-    return;
-  }
-}
 function waitingCount(options) {
   try {
     const count2 = options.waitingPrivateQuestions?.() ?? 0;
@@ -220385,8 +220493,7 @@ function createDashboardPanelTools(options) {
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
-      const setup = setupMeta(options, view3);
-      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta2 = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -220396,7 +220503,6 @@ function createDashboardPanelTools(options) {
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...indexedItems > 0 ? { indexedItems } : {},
-        ...setup ? { setup } : {},
         ...archives ? { archives } : {},
         ...sourceImports ? { sourceImports } : {},
         ...archiveSources ? { archiveSources } : {},
@@ -220416,94 +220522,6 @@ var init_dashboard_panel_tools = __esm(() => {
   init_mac_permissions();
   init_http();
   UNPAIR_SOURCE_IDS = new Set(["telegram.messages", "whatsapp.personal.messages"]);
-});
-
-// src/workers/setup-status.ts
-var exports_setup_status2 = {};
-__export(exports_setup_status2, {
-  setupFactsFromView: () => setupFactsFromView,
-  setupChecklistFromView: () => setupChecklistFromView,
-  readSetupWorkerFacts: () => readSetupWorkerFacts
-});
-import { readFileSync as readFileSync94 } from "node:fs";
-function sourceState(card) {
-  if (card.connection.state === "reauth_required")
-    return "needs_you";
-  if (!CONNECTED.has(card.connection.state))
-    return "skipped";
-  if (card.scope_selection?.status === "scope_pending")
-    return "needs_you";
-  return "connected";
-}
-function setupFactsFromView(view3, worker) {
-  const cards = (view3?.sources ?? []).filter((card) => !NOT_A_SOURCE.has(card.source_id) && (card.connection.action.kind !== "archive_import" || CONNECTED.has(card.connection.state)));
-  const sources = cards.map((card) => ({ id: card.source_id, name: card.label, state: sourceState(card) }));
-  const messaging = cards.filter((card) => MESSAGING.has(card.source_id)).map((card) => ({
-    name: card.label,
-    paired: CONNECTED.has(card.connection.state) || card.connection.state === "reauth_required",
-    chatsChosen: card.capture?.scope !== undefined || card.freshness?.capture?.age_seconds !== undefined
-  }));
-  const findableItems = view3 ? view3.sources.reduce((sum2, card) => sum2 + (Number.isFinite(card.coverage?.indexed_items) ? Math.max(0, card.coverage.indexed_items) : 0), 0) : undefined;
-  return {
-    version: worker.version,
-    running: true,
-    privateAnswers: worker.privateAnswers,
-    ...worker.judge ? { judge: worker.judge } : {},
-    ...view3 ? { sources, messaging } : {},
-    ...worker.aiApps ? { aiApps: worker.aiApps } : {},
-    ...findableItems !== undefined ? { findableItems } : {}
-  };
-}
-function setupChecklistFromView(view3, worker) {
-  return buildSetupChecklist(setupFactsFromView(view3, worker));
-}
-function currentPolicy(policy) {
-  if (!policy.path)
-    return policy.config;
-  try {
-    return validateSovereigntyConfig(JSON.parse(readFileSync94(policy.path, "utf8")));
-  } catch {
-    return policy.config;
-  }
-}
-function readSetupWorkerFacts(input) {
-  const pending = privacyChoicePending(input.policy);
-  const mode = privateAnswerMode(currentPolicy(input.policy));
-  let judge3;
-  if (input.judge) {
-    try {
-      const status = input.judge.status();
-      judge3 = { chosen: input.judge.hasRecord(), choice: status.choice, limitDollars: status.uncapped ? null : status.capDollars };
-    } catch {
-      judge3 = undefined;
-    }
-  }
-  let aiApps;
-  try {
-    const store = input.connections?.();
-    aiApps = [
-      ...input.hostAgent ? [input.hostAgent] : [],
-      ...(store?.list() ?? []).filter((connection) => !connection.revokedAt).map((connection) => connection.displayName)
-    ];
-  } catch {
-    aiApps = input.hostAgent ? [input.hostAgent] : undefined;
-  }
-  return {
-    version: input.version,
-    privateAnswers: pending ? { chosen: false } : { chosen: true, label: mode === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[mode] },
-    ...judge3 ? { judge: judge3 } : {},
-    ...aiApps ? { aiApps } : {}
-  };
-}
-var CONNECTED, MESSAGING, NOT_A_SOURCE;
-var init_setup_status2 = __esm(() => {
-  init_setup_checklist();
-  init_first_run_privacy();
-  init_privacy_language();
-  init_sovereignty();
-  CONNECTED = new Set(["connected", "waiting_for_first_sync", "syncing", "synced"]);
-  MESSAGING = new Set(["telegram.messages", "whatsapp.personal.messages"]);
-  NOT_A_SOURCE = new Set(["venice.api", "archive.imports"]);
 });
 
 // src/workers/private-agent-listeners.ts
@@ -220724,7 +220742,7 @@ __export(exports_server2, {
 });
 import { release as release2, totalmem as totalmem4 } from "node:os";
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync106 } from "node:fs";
+import { existsSync as existsSync106, readFileSync as readFileSync94 } from "node:fs";
 import { dirname as dirname105, isAbsolute as isAbsolute40, join as join139 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
@@ -222092,6 +222110,20 @@ async function main() {
     return "ready";
   };
   let requestModelReload = () => false;
+  let deferredReloads;
+  const withDeferredReloads = async (writes) => {
+    if (deferredReloads)
+      return writes();
+    deferredReloads = [];
+    try {
+      return await writes();
+    } finally {
+      const held = deferredReloads;
+      deferredReloads = undefined;
+      for (const request of held)
+        requestModelReload(request);
+    }
+  };
   let modelReloadInstalled = false;
   let modelReloadUnavailable = false;
   const modelSetup = new ModelSetupService({
@@ -222311,7 +222343,7 @@ async function main() {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes
@@ -224515,7 +224547,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return;
   };
   let dashboardPanelTools;
-  let setupStatusNow;
   let localPrivateAnswers;
   let desktopBridge;
   closeDesktopBridge = () => {
@@ -224549,6 +224580,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     archiveImportAgent: archiveImportDashboard.agent,
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
@@ -224630,11 +224662,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           requestReload: () => requestModelReload()
         }),
         modelSetup: getModelSetup,
-        setupStatus: async () => {
-          if (!setupStatusNow)
-            throw new Error("the setup checklist is not ready");
-          return await setupStatusNow();
-        },
         computerSetup: macComputerSetupView,
         saveComputerUseChoice: saveMacComputerUseChoice,
         checkModelSetup: () => {
@@ -224662,6 +224689,28 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return false;
           requestModelReload();
           return true;
+        },
+        deferReloads: withDeferredReloads,
+        savePrivateAnswerMode: (choice) => {
+          if (sovereigntyEngine.source !== "file" || !sovereigntyEngine.path)
+            return { ok: false, message: "This Olympus has no policy file to change." };
+          let current2;
+          try {
+            current2 = validateSovereigntyConfig(JSON.parse(readFileSync94(sovereigntyEngine.path, "utf8")));
+          } catch {
+            return { ok: false, message: "The privacy policy file cannot be read." };
+          }
+          let result;
+          try {
+            result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current2);
+          } catch (error2) {
+            return { ok: false, message: error2 instanceof Error ? error2.message : "The Private-answer mode could not be saved." };
+          }
+          if (!result.ok)
+            return { ok: false, message: "The privacy policy changed while saving. Refresh and try again." };
+          if (!result.changed)
+            return { ok: true, message: "Already in use." };
+          return { ok: true, message: requestModelReload() ? "Saved. Olympus is applying it." : "Saved. Restart Olympus to apply it." };
         },
         connectModelKey,
         panelTools: {
@@ -224859,15 +224908,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { SourceAnswerJobRegistry: SourceAnswerJobRegistry2, sourceAnswerJobLimitsFromEnv: sourceAnswerJobLimitsFromEnv2 } = await Promise.resolve().then(() => (init_source_answer_jobs(), exports_source_answer_jobs));
   const sourceAnswerJobs = new SourceAnswerJobRegistry2({
     limits: sourceAnswerJobLimitsFromEnv2(process.env, "remote"),
-    isOwnerRevoked: (owner2) => {
-      if (!owner2.startsWith("remote:"))
+    isOwnerRevoked: (owner) => {
+      if (!owner.startsWith("remote:"))
         return false;
-      const id = owner2.slice("remote:".length);
+      const id = owner.slice("remote:".length);
       const record8 = remoteConnections()?.list().find((connection) => connection.id === id);
       return record8 === undefined || record8.revokedAt !== null;
     },
     priority: {
-      isBackground: (owner2) => owner2.startsWith("remote:") && isBackgroundConnection(owner2.slice("remote:".length)),
+      isBackground: (owner) => owner.startsWith("remote:") && isBackgroundConnection(owner.slice("remote:".length)),
       interactive: {
         busy: () => answerActivity.interactiveInFlight > 0,
         onIdle: (listener) => answerActivity.onInteractiveIdle(listener)
@@ -225181,7 +225230,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         sourceAnswerJobs
       }),
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       ...caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}
     })
   };
@@ -225413,21 +225465,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { withEngineBriefRoute: withEngineBriefRoute2 } = await Promise.resolve().then(() => (init_engine_brief_route(), exports_engine_brief_route));
   const { dashboardViewModel: engineBriefView } = await Promise.resolve().then(() => (init_mcp_surface(), exports_mcp_surface));
   const { createDashboardPanelTools: createDashboardPanelTools2 } = await Promise.resolve().then(() => (init_dashboard_panel_tools(), exports_dashboard_panel_tools));
-  const { readSetupWorkerFacts: readSetupWorkerFacts2, setupChecklistFromView: setupChecklistFromView2 } = await Promise.resolve().then(() => (init_setup_status2(), exports_setup_status2));
-  const setupWorkerFacts = () => readSetupWorkerFacts2({
-    version: runningOlympusVersion(),
-    policy: { config: sovereigntyEngine.config, ...sovereigntyEngine.source === "file" && sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {} },
-    ...sourceIndexReadEnabled ? { judge: judgeSpending } : {},
-    connections: () => dashboardAgentStore?.(),
-    ...process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === "openclaw" ? { hostAgent: "OpenClaw" } : {}
-  });
-  setupStatusNow = async () => {
-    const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json"));
-    const view3 = response.ok ? await response.json() : undefined;
-    return setupChecklistFromView2(view3, setupWorkerFacts());
-  };
   dashboardPanelTools = createDashboardPanelTools2({
-    setupChecklist: (view3) => setupChecklistFromView2(view3, setupWorkerFacts()),
     surface: () => chatgptSurface,
     setup: chatgptSetup,
     workerFetch: worker.fetch,
@@ -225678,7 +225716,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     server.stop();
   };
   shutdownSignals.setShutdown(shutdown);
-  requestModelReload = shutdownSignals.modelReload({
+  const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => {
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
@@ -225686,6 +225724,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     exit: (code) => process.exit(code)
   });
+  requestModelReload = (request) => {
+    if (deferredReloads) {
+      deferredReloads.push(request ?? {});
+      return workerRestartsItself(workerLaunch, process.env);
+    }
+    return reloadNow(request);
+  };
   modelReloadInstalled = true;
   modelChoices.refreshStrongest().catch(() => false);
   setInterval(() => {
@@ -226220,8 +226265,8 @@ function mountConnectorStoreDeclarations(declarations, options) {
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
         throw new Error(`dbPath ${JSON.stringify(declaration.dbPath)} is already mounted as corpus ${JSON.stringify(pathOwnerCorpusId)}.`);
       }
-      const owner2 = options.storeOwner?.(declaration.dbPath);
-      const account = owner2 ? { sourceId: owner2 } : storageAccountForCorpus(declaration, options.registeredCorpora);
+      const owner = options.storeOwner?.(declaration.dbPath);
+      const account = owner ? { sourceId: owner } : storageAccountForCorpus(declaration, options.registeredCorpora);
       const store = collidingStore ?? openConnectorStore(account, {
         dbPath: declaration.dbPath,
         corpusId: declaration.corpusId,
@@ -226438,6 +226483,7 @@ var init_server5 = __esm(async () => {
   init_unreadable_locators();
   init_child_visibility();
   init_tier_visibility();
+  init_judge_boost();
   init_secret_locations();
   init_source_storage();
   init_provider_account_history();
@@ -227678,7 +227724,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
     throw new OperationError("config_error", "Could not establish process-instance identity for exclusive Olympus lifecycle custody.", "Retry from a normal macOS or Linux user session where process identity can be inspected.");
   }
   for (let attempt = 0;attempt < 2; attempt += 1) {
-    const owner2 = {
+    const owner = {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
@@ -227686,15 +227732,15 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       action,
       started_at: now().toISOString()
     };
-    const candidate = join109(dir, `mutation-owner-${owner2.nonce}.tmp`);
-    writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner2, null, 2)}
+    const candidate = join109(dir, `mutation-owner-${owner.nonce}.tmp`);
+    writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner, null, 2)}
 `);
     try {
       linkSync4(candidate, lockPath);
       syncDirectorySync(dir);
       removeFileDurablySync(candidate);
       return {
-        release: () => releaseLifecycleMutationLock(lockPath, owner2.nonce)
+        release: () => releaseLifecycleMutationLock(lockPath, owner.nonce)
       };
     } catch (error) {
       if (existsSync77(candidate))
@@ -227726,8 +227772,8 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   throw new OperationError("config_error", "Could not acquire exclusive Olympus lifecycle mutation custody.");
 }
 function releaseLifecycleMutationLock(lockPath, nonce) {
-  const owner2 = readLifecycleMutationOwner(lockPath);
-  if (owner2.nonce !== nonce || owner2.pid !== process.pid) {
+  const owner = readLifecycleMutationOwner(lockPath);
+  if (owner.nonce !== nonce || owner.pid !== process.pid) {
     throw new OperationError("config_error", "Olympus lifecycle mutation custody changed before release; refusing to remove another owner lock.");
   }
   removeFileDurablySync(lockPath);
@@ -228592,6 +228638,7 @@ init_sovereignty();
 init_tier_cli();
 init_data_owner_lock();
 init_cli_via_worker();
+init_settings_proposal();
 init_olympus_layout();
 
 // src/core/setup.ts
@@ -228842,8 +228889,8 @@ function normalizeSetupPlatform(platform2) {
     return platform2;
   return "other";
 }
-function defaultCommandExists2(command2) {
-  const result = spawnSync18("sh", ["-lc", `command -v ${shellQuote4(command2)} >/dev/null 2>&1`], {
+function defaultCommandExists2(command) {
+  const result = spawnSync18("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
     stdio: "ignore"
   });
   return result.status === 0;
@@ -228852,8 +228899,8 @@ function defaultPythonModuleExists2(pythonCommand, moduleName) {
   const result = spawnSync18(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return result.status === 0;
 }
-function defaultCommandVersion(command2) {
-  const result = spawnSync18(command2, ["--version"], {
+function defaultCommandVersion(command) {
+  const result = spawnSync18(command, ["--version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -228923,10 +228970,10 @@ import { homedir as homedir37 } from "node:os";
 import { join as join114, resolve as resolve22 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
 var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
-function run(exec, command2, args, env) {
+function run(exec, command, args, env) {
   if (exec)
-    return exec(command2, args);
-  const result = spawnSync19(command2, args, { encoding: "utf8", ...env ? { env } : {} });
+    return exec(command, args);
+  const result = spawnSync19(command, args, { encoding: "utf8", ...env ? { env } : {} });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 function parseCodesignDetails(text3) {
@@ -229058,8 +229105,8 @@ var ENGINE_CLI_USAGE = {
 };
 var DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstallOpenHandler };
 async function runEngineCommand(args, deps = {}) {
-  const [command2, ...rest] = args;
-  if ((deps.platform ?? process.platform) === "linux" && !deps.lifecycleLocked && ["install", "uninstall", "rollback"].includes(command2 ?? "")) {
+  const [command, ...rest] = args;
+  if ((deps.platform ?? process.platform) === "linux" && !deps.lifecycleLocked && ["install", "uninstall", "rollback"].includes(command ?? "")) {
     const layout = linuxLayoutFor(deps);
     return withLinuxEngineLifecycleLockAsync(layout, () => runEngineCommand(args, { ...deps, lifecycleLocked: true }));
   }
@@ -229071,7 +229118,7 @@ async function runEngineCommand(args, deps = {}) {
     ...deps.uid !== undefined ? { uid: deps.uid } : {},
     ...deps.platform ? { platform: deps.platform } : {}
   };
-  if (command2 === "install") {
+  if (command === "install") {
     const options = parseInstallArgs(rest);
     const result = await installEngineVerified({ ...service, ...options, ...deps.health ? { health: deps.health } : {} });
     const { plist, ...summary } = result;
@@ -229104,7 +229151,7 @@ async function runEngineCommand(args, deps = {}) {
       next: result.action === "dry_run" ? "Rerun without --dry-run to write and load the agent." : result.ok ? "Run olympus engine status; the engine links itself to the relay once the worker is ready." : "Run olympus engine logs to see why the engine did not become healthy."
     };
   }
-  if (command2 === "install-helper") {
+  if (command === "install-helper") {
     const options = parseInstallHelperArgs(rest);
     const helper = (deps.installHelper ?? installEngineHelper)({
       ...deps.homeDir ? { homeDir: deps.homeDir } : {},
@@ -229134,10 +229181,10 @@ async function runEngineCommand(args, deps = {}) {
     const { plist: _plist, ...summary } = engine;
     return { ...helper, ok, engine: { ...summary, ok, health }, restarted_engine: true, note: ok ? "The engine was restarted through the helper app." : "The engine did not prove it started through the helper app.", next: ok ? "Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine." : "Run olympus engine logs to see why the engine did not become healthy." };
   }
-  if (command2 === "verify") {
+  if (command === "verify") {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...deps.health ? { health: deps.health } : {} });
   }
-  if (command2 === "uninstall") {
+  if (command === "uninstall") {
     expectNoArgs("uninstall", rest);
     const result = uninstallEngine(service);
     const handler = openHandlerFor(deps)?.uninstall(openHandlerOptions(deps, service));
@@ -229145,7 +229192,7 @@ async function runEngineCommand(args, deps = {}) {
       syncLinuxOpenHandlerReceipt(service, false);
     return handler ? { ...result, open_handler: handler } : result;
   }
-  if (command2 === "restart") {
+  if (command === "restart") {
     const since = Date.now();
     const result = restartEngine({ ...service, ...parseNowArg("restart", rest) });
     if ((deps.platform ?? process.platform) !== "linux")
@@ -229153,10 +229200,10 @@ async function runEngineCommand(args, deps = {}) {
     const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), since }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
-  if (command2 === "stop") {
+  if (command === "stop") {
     return stopEngine({ ...service, ...parseNowArg("stop", rest) });
   }
-  if (command2 === "start") {
+  if (command === "start") {
     expectNoArgs("start", rest);
     const since = Date.now();
     const result = startEngine(service);
@@ -229165,7 +229212,7 @@ async function runEngineCommand(args, deps = {}) {
     const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), ...result.action === "already_running" ? {} : { since } }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
-  if (command2 === "rollback") {
+  if (command === "rollback") {
     expectNoArgs("rollback", rest);
     const result = await rollbackEngine({ ...service, ...deps.health ? { health: deps.health } : {} });
     if ((deps.platform ?? process.platform) !== "linux" || !result.ok)
@@ -229188,13 +229235,13 @@ async function runEngineCommand(args, deps = {}) {
       syncLinuxOpenHandlerReceipt(service, false);
     return handler ? { ...result, open_handler: handler } : result;
   }
-  if (command2 === "status") {
+  if (command === "status") {
     if (rest.length === 1 && rest[0] === "--brief")
       return engineBriefReport(deps);
     expectNoArgs("status", rest);
     return engineStatusReport(deps);
   }
-  if (command2 === "logs") {
+  if (command === "logs") {
     const options = parseLogsArgs(rest);
     if (options.follow) {
       await followEngineLogs(deps, options.lines);
@@ -229202,7 +229249,7 @@ async function runEngineCommand(args, deps = {}) {
     }
     return readEngineLogs({ ...service, lines: options.lines });
   }
-  throw new OperationError("invalid_params", `Unknown engine command: ${command2 ?? ""}`.trim(), "Run olympus engine --help.");
+  throw new OperationError("invalid_params", `Unknown engine command: ${command ?? ""}`.trim(), "Run olympus engine --help.");
 }
 function openHandlerFor(deps) {
   return deps.openHandler ?? (deps.exec ? undefined : DEFAULT_OPEN_HANDLER);
@@ -229329,12 +229376,12 @@ async function followEngineLogs(deps, lines) {
   reader.on("line", (line2) => console.log(redactLogLine(line2)));
   await new Promise((resolve23) => child2.once("exit", () => resolve23()));
 }
-function parseNowArg(command2, args) {
+function parseNowArg(command, args) {
   if (args.length === 0)
     return {};
   if (args.length === 1 && args[0] === "--now")
     return { now: true };
-  throw new OperationError("invalid_params", `Unknown engine ${command2} option: ${args.find((arg) => arg !== "--now") ?? args[0]}`);
+  throw new OperationError("invalid_params", `Unknown engine ${command} option: ${args.find((arg) => arg !== "--now") ?? args[0]}`);
 }
 function parseInstallArgs(args) {
   const options = {};
@@ -229427,9 +229474,9 @@ function parseLogsArgs(args) {
   }
   return { lines, follow };
 }
-function expectNoArgs(command2, args) {
+function expectNoArgs(command, args) {
   if (args.length > 0)
-    throw new OperationError("invalid_params", `Unknown engine ${command2} option: ${args[0]}`);
+    throw new OperationError("invalid_params", `Unknown engine ${command} option: ${args[0]}`);
 }
 
 // src/cli.ts
@@ -229637,28 +229684,6 @@ async function main2() {
     try {
       const result = runSovereigntyInit(args.slice(2));
       console.log(JSON.stringify(result, null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        if (error2.suggestion)
-          console.error(`Fix: ${error2.suggestion}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (args[0] === "setup" && args[1] === "status") {
-    try {
-      const { parseSetupStatusArgs: parseSetupStatusArgs2, readSetupStatus: readSetupStatus2 } = await Promise.resolve().then(() => (init_setup_status(), exports_setup_status));
-      const { text: text6 } = parseSetupStatusArgs2(args.slice(2));
-      const checklist = await readSetupStatus2();
-      if (text6) {
-        const { renderSetupChecklistText: renderSetupChecklistText2 } = await Promise.resolve().then(() => (init_setup_checklist(), exports_setup_checklist));
-        console.log(renderSetupChecklistText2(checklist));
-      } else {
-        console.log(JSON.stringify(checklist, null, 2));
-      }
     } catch (error2) {
       if (error2 instanceof OperationError) {
         console.error(`Error [${error2.code}]: ${error2.message}`);
@@ -230233,13 +230258,13 @@ function v04PublicCliCommandName(args) {
   const { operation } = resolveCliOperation([...commandArgs]);
   if (operation)
     return operation.cliHints.name;
-  const [group, command2] = commandArgs;
+  const [group, command] = commandArgs;
   if (group === "setup" || group === "dashboard" || group === "serve" || group === "open")
     return group;
-  if (group === "source" && command2 === "extract-pdfs")
+  if (group === "source" && command === "extract-pdfs")
     return "source extract-pdfs";
   if (group === "sovereignty" || group === "worker" || group === "engine" || group === "connect" || group === "connections" || group === "data" || group === "tier" || group === "zkapi" || group === "open-handler" || group === "server-mode" || group === "settings") {
-    return command2 ? `${group} ${command2}` : undefined;
+    return command ? `${group} ${command}` : undefined;
   }
   return;
 }
@@ -230614,7 +230639,6 @@ function printHelp() {
   console.log("  olympus source index search <query> --corpus-id <corpus>");
   console.log("  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]");
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join("|")} --yes [--cloud-lane subscription|api-key]`);
-  console.log("  olympus setup status [--text]");
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join("|")} [--path ~/.olympus/sovereignty.json]`);
   console.log("  olympus worker install [--platform darwin|linux] [--dry-run]");
   console.log("  olympus worker start|stop|restart|status|foreground|upgrade|uninstall");
@@ -230626,7 +230650,8 @@ function printHelp() {
   console.log("  olympus open olympus://open/<target>");
   console.log("  olympus open-handler install|uninstall|status");
   console.log("  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]");
-  console.log("  olympus settings show");
+  console.log("  olympus settings show|schema");
+  console.log("  olympus settings propose <file.json|-> [--from <name>]");
   console.log("  olympus doctor");
   console.log("  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
@@ -230689,6 +230714,8 @@ var PUBLIC_LEAF_USAGE = {
   "open-handler uninstall": "olympus open-handler uninstall",
   "open-handler status": "olympus open-handler status",
   "settings show": "olympus settings show",
+  "settings schema": "olympus settings schema",
+  "settings propose": "olympus settings propose <file.json|-> [--from <name>]",
   "server-mode status": "olympus server-mode status",
   "server-mode on": "olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]",
   "server-mode off": "olympus server-mode off",
@@ -230808,7 +230835,10 @@ var COMMAND_GROUP_HELP = {
   settings: [
     "Usage: olympus settings <command>",
     "Commands:",
-    "  olympus settings show   Every dashboard setting, as JSON, read from the running Olympus (changes nothing)"
+    "  olympus settings show      Every dashboard setting, as JSON, read from the running Olympus (changes nothing)",
+    "  olympus settings schema    What a settings proposal can set",
+    "  olympus settings propose <file.json|-> [--from <name>]",
+    "                             Propose settings; the owner applies them with one click on the dashboard Settings page"
   ],
   "server-mode": [
     "Usage: olympus server-mode <command>",
@@ -231050,46 +231080,46 @@ function runGoogleRequestBudgetFutureRecovery(options) {
   });
 }
 async function runWorkerCommand(args) {
-  const command2 = args[0];
-  if (!command2 || command2 === "--help" || command2 === "-h") {
+  const command = args[0];
+  if (!command || command === "--help" || command === "-h") {
     console.log("Usage: olympus worker install|start|stop|restart|status|foreground|upgrade|uninstall");
     return;
   }
-  if (command2 === "run" || command2 === "foreground") {
+  if (command === "run" || command === "foreground") {
     await runWorkerForeground();
     return;
   }
-  if (command2 === "install" || command2 === "upgrade") {
-    const parsed = parseWorkerInstallArgs(command2, args.slice(1));
+  if (command === "install" || command === "upgrade") {
+    const parsed = parseWorkerInstallArgs(command, args.slice(1));
     if (!parsed.dryRun)
       refuseWorkerServiceBesideEngine(parsed);
-    const options = command2 === "install" ? withWorkerInstallAuth(parsed) : parsed;
-    const result = runWorkerLifecycle(command2, options);
-    const handler = command2 === "install" && !options.dryRun ? linuxDesktopOpenHandler("install", options) : undefined;
+    const options = command === "install" ? withWorkerInstallAuth(parsed) : parsed;
+    const result = runWorkerLifecycle(command, options);
+    const handler = command === "install" && !options.dryRun ? linuxDesktopOpenHandler("install", options) : undefined;
     console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
-  if (["status", "start", "stop", "restart", "uninstall"].includes(command2)) {
+  if (["status", "start", "stop", "restart", "uninstall"].includes(command)) {
     const actionOptions = parseWorkerActionArgs(args.slice(1));
-    if (command2 === "start" || command2 === "restart")
+    if (command === "start" || command === "restart")
       refuseWorkerServiceBesideEngine(actionOptions);
-    const workerHttp = command2 === "status" ? await readWorkerHttpState() : undefined;
-    const result = runWorkerLifecycle(command2, {
+    const workerHttp = command === "status" ? await readWorkerHttpState() : undefined;
+    const result = runWorkerLifecycle(command, {
       ...actionOptions,
       ...workerHttp ? { recoverySignals: lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) } : {}
     });
-    if (command2 === "status") {
+    if (command === "status") {
       console.log(JSON.stringify({
         ...result,
         worker_http: workerHttp
       }, null, 2));
       return;
     }
-    const handler = command2 === "uninstall" && !engineRunsWorkerHere(actionOptions) ? linuxDesktopOpenHandler("uninstall", actionOptions) : undefined;
+    const handler = command === "uninstall" && !engineRunsWorkerHere(actionOptions) ? linuxDesktopOpenHandler("uninstall", actionOptions) : undefined;
     console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
-  throw new OperationError("invalid_params", `Unknown worker command: ${command2}`);
+  throw new OperationError("invalid_params", `Unknown worker command: ${command}`);
 }
 function refuseWorkerServiceBesideEngine(options) {
   if (!engineRunsWorkerHere(options))
@@ -231807,8 +231837,8 @@ function observedWorkerServiceState() {
   };
 }
 async function runDataCommand(args) {
-  const command2 = args[0];
-  if (command2 === "export") {
+  const command = args[0];
+  if (command === "export") {
     const options = parseDataOptions(args.slice(1));
     if (!options.output.trim())
       throw new OperationError("invalid_params", "--output must be provided.");
@@ -231821,11 +231851,11 @@ async function runDataCommand(args) {
       ...options.sourceId ? { source_id: options.sourceId } : {}
     }));
   }
-  if (command2 === "verify") {
+  if (command === "verify") {
     const options = parseDataOptions(args.slice(1));
     return verifyOlympusDataExport({ destination: options.input });
   }
-  if (command2 === "delete") {
+  if (command === "delete") {
     const options = parseDataOptions(args.slice(1));
     if (options.all && !options.yesIAMSure && options.dryRun !== true) {
       await confirmDeleteAll();
@@ -231872,13 +231902,13 @@ async function runDataCommand(args) {
       throw new DataOwnerBusyError(olympusDataRoot(process.env));
     });
   }
-  if (command2 === "--help" || command2 === "-h") {
+  if (command === "--help" || command === "-h") {
     console.log(`Usage: olympus data export --output <dir> [--source <id>]
        olympus data verify --input <dir>
        olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]`);
     process.exit(0);
   }
-  throw new OperationError("invalid_params", `Unknown data command: ${command2 ?? ""}`.trim());
+  throw new OperationError("invalid_params", `Unknown data command: ${command ?? ""}`.trim());
 }
 function parseDataOptions(args) {
   let outputPath = "";
@@ -231939,15 +231969,15 @@ function requireOptionValue(args, index, optionName) {
   return value2;
 }
 function runConnectionsCommand(args, env = process.env) {
-  const [command2, ...rest] = args;
-  if (command2 === "status") {
+  const [command, ...rest] = args;
+  if (command === "status") {
     if (rest.length !== 0)
       throw new OperationError("invalid_params", "Usage: olympus connections status");
     return runConnectionsStatus(env);
   }
   const store = openRemoteConnectionStore(resolveRemoteConnectionsDbPathForCli(env));
   try {
-    if (command2 === "add") {
+    if (command === "add") {
       if (rest.length !== 1 || rest[0].startsWith("-")) {
         throw new OperationError("invalid_params", "Usage: olympus connections add <name>");
       }
@@ -231962,7 +231992,7 @@ function runConnectionsCommand(args, env = process.env) {
         notice: "The token is shown once and is not stored. Paste it into the agent now; revoke with olympus connections revoke <id>."
       };
     }
-    if (command2 === "pair") {
+    if (command === "pair") {
       if (rest.length !== 0)
         throw new OperationError("invalid_params", "Usage: olympus connections pair");
       const urls = remoteAccessUrlsForCli(env);
@@ -231980,7 +232010,7 @@ function runConnectionsCommand(args, env = process.env) {
         notice: oauthEnabled ? "Type this code on the Olympus approval page that opens when you add the URL as a connector. It works once and expires in 10 minutes." : `OAuth approval is off until this install has a public https address: turn on remote access (plugin config remote.*), or set ${REMOTE_PUBLIC_BASE_URL_ENV}. Bearer connections (olympus connections add) still work.`
       };
     }
-    if (command2 === "list") {
+    if (command === "list") {
       if (rest.length !== 0)
         throw new OperationError("invalid_params", "Usage: olympus connections list");
       return {
@@ -231990,12 +232020,12 @@ function runConnectionsCommand(args, env = process.env) {
         connections: store.list().map(remoteConnectionView)
       };
     }
-    if (command2 === "revoke") {
+    if (command === "revoke") {
       if (rest.length !== 1)
         throw new OperationError("invalid_params", "Usage: olympus connections revoke <id>");
       return { kind: "remote_connection_revoked", connection: remoteConnectionView(store.revoke(rest[0])) };
     }
-    throw new OperationError("invalid_params", `Unknown connections command: ${command2 ?? ""}`.trim(), "Run olympus connections --help.");
+    throw new OperationError("invalid_params", `Unknown connections command: ${command ?? ""}`.trim(), "Run olympus connections --help.");
   } finally {
     store.close();
   }
@@ -232030,17 +232060,66 @@ function remoteUrlFields(urls) {
   };
 }
 async function runSettingsCommand(args, env = process.env, options = {}) {
+  if (args[0] === "schema" && args.length === 1)
+    return { kind: "olympus_settings_schema", ...SETTINGS_PROPOSAL_SCHEMA };
+  if (args[0] === "propose")
+    return runSettingsPropose(args.slice(1), env, options);
   if (args.length !== 1 || args[0] !== "show")
-    throw new OperationError("invalid_params", "Usage: olympus settings show");
+    throw new OperationError("invalid_params", SETTINGS_USAGE);
   let settings;
   try {
     settings = await callWorkerCli("settings", {}, { env, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
   } catch (error2) {
     if (!(error2 instanceof WorkerUnreachableError))
       throw error2;
-    throw new OperationError("config_error", "Olympus is not running, so its settings cannot be read.", "Start Olympus (olympus engine start), then run olympus settings show again.");
+    throw new OperationError("config_error", "Olympus is not running, so its settings cannot be read.", "Start Olympus (olympus engine start), then run olympus settings show again as the account Olympus runs under.");
   }
   return { ...settings, remote_access: runConnectionsStatus(env) };
+}
+var SETTINGS_USAGE = "Usage: olympus settings show | schema | propose <file.json|-> [--from <name>]";
+async function runSettingsPropose(args, env, options) {
+  let file;
+  let from;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--from") {
+      from = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (file !== undefined || arg.startsWith("-") && arg !== "-")
+      throw new OperationError("invalid_params", SETTINGS_USAGE);
+    file = arg;
+  }
+  if (!file)
+    throw new OperationError("invalid_params", SETTINGS_USAGE);
+  let text6;
+  try {
+    text6 = file === "-" ? (options.readStdin ?? (() => readFileSync95(0, "utf8")))() : readFileSync95(file, "utf8");
+  } catch (error2) {
+    throw new OperationError("invalid_params", `Could not read ${file === "-" ? "the proposal from standard input" : file}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text6);
+  } catch {
+    throw new OperationError("invalid_params", "The proposal is not valid JSON.", "Run olympus settings schema for its shape.");
+  }
+  try {
+    parseSettingsProposalInput(parsed);
+    parseProposalFrom(from);
+  } catch (error2) {
+    if (error2 instanceof SettingsProposalError)
+      throw new OperationError("invalid_params", error2.message, "Run olympus settings schema for what can be set.");
+    throw error2;
+  }
+  try {
+    return await callWorkerCli("settings-propose", { proposal: parsed, ...from ? { from } : {} }, { env, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
+  } catch (error2) {
+    if (!(error2 instanceof WorkerUnreachableError))
+      throw error2;
+    throw new OperationError("config_error", "Olympus is not running, so it cannot take a settings proposal.", "Start Olympus (olympus engine start). Run this as the account Olympus runs under.");
+  }
 }
 function runConnectionsStatus(env) {
   const dir = remoteAccessDirForCli(env);

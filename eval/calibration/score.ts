@@ -39,7 +39,7 @@ import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { loadOwnerTierRules } from '../../src/workers/classification/tier-rules.ts';
 import { BUILT_IN_REASONING_MODELS } from '../../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { createLlamaServerHandle, type LlamaServerHandle } from '../../src/workers/source-index/built-in-reasoning/server.ts';
-import { CALIBRATION_DIR_DEFAULT, readLabels, readSample } from './files.ts';
+import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, scoredTier, readLabels, readSample } from './files.ts';
 
 const argv = process.argv.slice(2);
 const flag = (name: string) => {
@@ -86,11 +86,12 @@ async function main(): Promise<void> {
   const labels = readLabels(dir).labels;
   const split = flag('--split');
   if (split !== undefined && split !== 'dev' && split !== 'test') throw new Error('--split is dev or test.');
-  const inSplit = (id: string) => split === undefined
-    || ((createHash('sha256').update(id).digest()[0]! % 2 === 0) === (split === 'dev'));
+  // A whole-item sample fixes each item's half by its related group; older samples split by a hash of the id.
+  const inSplit = (item: { id: string; split?: 'dev' | 'test' }) => split === undefined
+    || (item.split ?? (createHash('sha256').update(item.id).digest()[0]! % 2 === 0 ? 'dev' : 'test')) === split;
   const labeled = sample.items
-    .filter((item) => inSplit(item.id))
-    .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
+    .filter((item) => inSplit(item))
+    .filter((item) => scoredTier(labels[item.id]?.label) !== undefined)
     .slice(0, Number(flag('--limit') ?? Number.MAX_SAFE_INTEGER));
   const unsure = sample.items.filter((item) => labels[item.id]?.label === 'unsure').length;
   if (labeled.length === 0) throw new Error('No Personal or Private labels yet. Run: bun eval/calibration/label.ts');
@@ -168,7 +169,7 @@ async function main(): Promise<void> {
       return {
         id: item.id,
         file: item.rel,
-        owner: labels[item.id]!.label as 'personal' | 'private',
+        owner: scoredTier(labels[item.id]!.label)!,
         olympus: held ? 'held' : madePrivate ? 'private' : 'personal',
         madePrivate,
         why: record.reasons.filter((reason) => reason !== 'metadata:default:personal'),
@@ -196,7 +197,7 @@ async function main(): Promise<void> {
     ];
     process.stdout.write(`\n${summary.join('\n')}\n${misses.length ? `\nMisses:\n${misses.join('\n')}\n` : '\nNo misses.\n'}`);
     const resultPath = join(dir, `score-${split ?? 'all'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), split: split ?? 'all', model: spec.modelId, ownerWords: wordsFile ? 'trial' : 'saved', precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
+    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), sampleSha256: createHash('sha256').update(readFileSync(join(dir, SAMPLE_FILE))).digest('hex'), split: split ?? 'all', model: spec.modelId, ownerWords: wordsFile ? 'trial' : 'saved', precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
     process.stdout.write(`\nFull result: ${resultPath}\n`);
   } finally {
     store.close();

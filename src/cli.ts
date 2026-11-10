@@ -181,6 +181,7 @@ import {
 import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
 import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
+import { parseProposalFrom, parseSettingsProposalInput, SETTINGS_PROPOSAL_SCHEMA, SettingsProposalError } from './core/settings-proposal.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
 import {
   runSetupWizard,
@@ -1525,7 +1526,8 @@ function printHelp(): void {
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
   console.log('  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
-  console.log('  olympus settings show');
+  console.log('  olympus settings show|schema');
+  console.log('  olympus settings propose <file.json|-> [--from <name>]');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1588,6 +1590,8 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'open-handler uninstall': 'olympus open-handler uninstall',
   'open-handler status': 'olympus open-handler status',
   'settings show': 'olympus settings show',
+  'settings schema': 'olympus settings schema',
+  'settings propose': 'olympus settings propose <file.json|-> [--from <name>]',
   'server-mode status': 'olympus server-mode status',
   'server-mode on': 'olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]',
   'server-mode off': 'olympus server-mode off',
@@ -1710,7 +1714,10 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   settings: [
     'Usage: olympus settings <command>',
     'Commands:',
-    '  olympus settings show   Every dashboard setting, as JSON, read from the running Olympus (changes nothing)',
+    '  olympus settings show      Every dashboard setting, as JSON, read from the running Olympus (changes nothing)',
+    '  olympus settings schema    What a settings proposal can set',
+    '  olympus settings propose <file.json|-> [--from <name>]',
+    '                             Propose settings; the owner applies them with one click on the dashboard Settings page',
   ],
   'server-mode': [
     'Usage: olympus server-mode <command>',
@@ -3221,17 +3228,63 @@ function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
 export async function runSettingsCommand(
   args: readonly string[],
   env: Record<string, string | undefined> = process.env,
-  options: { fetchImpl?: typeof fetch } = {},
+  options: { fetchImpl?: typeof fetch; readStdin?: () => string } = {},
 ): Promise<Record<string, unknown>> {
-  if (args.length !== 1 || args[0] !== 'show') throw new OperationError('invalid_params', 'Usage: olympus settings show');
+  if (args[0] === 'schema' && args.length === 1) return { kind: 'olympus_settings_schema', ...SETTINGS_PROPOSAL_SCHEMA };
+  if (args[0] === 'propose') return runSettingsPropose(args.slice(1), env, options);
+  if (args.length !== 1 || args[0] !== 'show') throw new OperationError('invalid_params', SETTINGS_USAGE);
   let settings: Record<string, unknown>;
   try {
     settings = await callWorkerCli<Record<string, unknown>>('settings', {}, { env, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
   } catch (error) {
     if (!(error instanceof WorkerUnreachableError)) throw error;
-    throw new OperationError('config_error', 'Olympus is not running, so its settings cannot be read.', 'Start Olympus (olympus engine start), then run olympus settings show again.');
+    throw new OperationError('config_error', 'Olympus is not running, so its settings cannot be read.', 'Start Olympus (olympus engine start), then run olympus settings show again as the account Olympus runs under.');
   }
   return { ...settings, remote_access: runConnectionsStatus(env) };
+}
+
+const SETTINGS_USAGE = 'Usage: olympus settings show | schema | propose <file.json|-> [--from <name>]';
+
+/**
+ * `olympus settings propose <file>`: hand the running Olympus a set of
+ * settings for the owner to review. Nothing changes until the owner clicks
+ * Apply all on the dashboard's Settings page (#1050).
+ */
+async function runSettingsPropose(
+  args: readonly string[],
+  env: Record<string, string | undefined>,
+  options: { fetchImpl?: typeof fetch; readStdin?: () => string },
+): Promise<Record<string, unknown>> {
+  let file: string | undefined;
+  let from: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--from') { from = args[index + 1]; index += 1; continue; }
+    if (file !== undefined || (arg.startsWith('-') && arg !== '-')) throw new OperationError('invalid_params', SETTINGS_USAGE);
+    file = arg;
+  }
+  if (!file) throw new OperationError('invalid_params', SETTINGS_USAGE);
+  let text: string;
+  try {
+    text = file === '-' ? (options.readStdin ?? (() => readFileSync(0, 'utf8')))() : readFileSync(file, 'utf8');
+  } catch (error) {
+    throw new OperationError('invalid_params', `Could not read ${file === '-' ? 'the proposal from standard input' : file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { throw new OperationError('invalid_params', 'The proposal is not valid JSON.', 'Run olympus settings schema for its shape.'); }
+  try {
+    parseSettingsProposalInput(parsed);
+    parseProposalFrom(from);
+  } catch (error) {
+    if (error instanceof SettingsProposalError) throw new OperationError('invalid_params', error.message, 'Run olympus settings schema for what can be set.');
+    throw error;
+  }
+  try {
+    return await callWorkerCli<Record<string, unknown>>('settings-propose', { proposal: parsed, ...(from ? { from } : {}) }, { env, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
+  } catch (error) {
+    if (!(error instanceof WorkerUnreachableError)) throw error;
+    throw new OperationError('config_error', 'Olympus is not running, so it cannot take a settings proposal.', 'Start Olympus (olympus engine start). Run this as the account Olympus runs under.');
+  }
 }
 
 function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
