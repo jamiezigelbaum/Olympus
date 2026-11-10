@@ -657,7 +657,7 @@ async function smoke(questionsFile: string): Promise<never> {
     engine,
     origin: desktopSandboxOrigin(),
     stateFile: join(WORKDIR, 'smoke-client.json'),
-    ownerCookie,
+    ...(ownerCookie ? { ownerCookie } : {}),
   }, {
     onTools: (names) => { tools = [...names]; },
     onQuestion: (obs) => {
