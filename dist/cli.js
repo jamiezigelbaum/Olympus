@@ -31982,7 +31982,7 @@ function createConnectorStoreCorpusAdapter(options) {
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
-  if (embeddingProvider && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))) {
+  if (embeddingProvider && embeddingProvider.backend === "local" && (options.retrievalMode ?? "hybrid") === "hybrid") {
     expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
   }
   return expanded;

@@ -181,6 +181,24 @@ describe('a cold embedding model on the first question (#1172)', () => {
     expect(provider.queryCalls()).toBeLessThan(40);
   });
 
+  test('a cloud embedding provider is never waited for before the lanes run', async () => {
+    // A cloud provider never reports a starting model; a stalled remote call
+    // must not hold every corpus lane for the preparation budget.
+    const store = await fixtureStore();
+    const cloud: SourceEmbeddingProvider = {
+      provider: 'fixture-cloud', modelId: 'fixture-cold-model', dimension: 3, configHash: 'one',
+      epochId: 'epoch:one', backend: 'cloud',
+      async embed(inputs) { return inputs.map((input) => vectorFor(input.text)); },
+    };
+    const local = coldProvider(createTestClock(), 5_000);
+    const adapterFor = (embeddingProvider: SourceEmbeddingProvider) => createConnectorStoreCorpusAdapter({
+      store, embeddingProvider, retrievalMode: 'hybrid',
+    });
+
+    expect(adapterFor(cloud).prepareSemantic).toBeUndefined();
+    expect(adapterFor(local).prepareSemantic).toBeDefined();
+  });
+
   test('a provider that is down, not starting, is not waited for', async () => {
     const clock = createTestClock();
     const store = await fixtureStore();

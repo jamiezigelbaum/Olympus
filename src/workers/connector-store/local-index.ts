@@ -13586,11 +13586,13 @@ export function createConnectorStoreCorpusAdapter(
   // A local model that is still starting gets the router's preparation budget
   // to finish before the vector lane runs (#1172). Only when this adapter will
   // run the vector lane for the request, and without reading the store: the
-  // router asks only after hybridAvailability said the lane is servable.
+  // router asks only after hybridAvailability said the lane is servable. Only
+  // a local provider can report a starting model; a cloud one is never waited
+  // for, so a stalled remote call cannot hold every lane for the budget.
   if (
     embeddingProvider
+    && embeddingProvider.backend === 'local'
     && (options.retrievalMode ?? 'hybrid') === 'hybrid'
-    && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
   ) {
     expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
   }
