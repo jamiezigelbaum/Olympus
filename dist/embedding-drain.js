@@ -10913,6 +10913,12 @@ function snifferReasonCode(verdict) {
 function cachedSnifferVerdictHolds(verdict) {
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
 }
+function schemaReference(text2, verb, field) {
+  if (SCHEMA_ONLY_FIELD.test(field[0]))
+    return true;
+  const tail = text2.slice(field.index + field[0].length);
+  return SCHEMA_VALUE.test(tail) || ASSIGN_VERBS.has(verb) && /^\s+to\b/.test(tail);
+}
 function hasClassifierInstruction(text2) {
   const words = [...text2.matchAll(/[a-z][a-z0-9_]*/g)];
   for (let i = 0;i < words.length; i++) {
@@ -10924,24 +10930,27 @@ function hasClassifierInstruction(text2) {
         continue;
       const left = Math.min(verb.index, words[j].index);
       const right = Math.max(verb.index, words[j].index);
-      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)))
+      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)) && schemaReference(text2, verb[0], words[j]))
         return true;
     }
+    let outputShaped = !SETTING_VERBS.has(verb[0]);
     for (let j = i + 1;j < Math.min(words.length, i + 13); j++) {
       const object = words[j];
       if (object.index - verb.index > 100 || /[.!?;]/.test(text2.slice(verb.index, object.index)))
         break;
       if (TIER_WORD.test(object[0])) {
         const tail = text2.slice(object.index + object[0].length);
-        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
+        if (outputShaped && /^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
           return true;
         break;
       }
       if (!OBJECT_GLUE.has(object[0]))
         break;
+      if (object[0] === "with" || object[0] === "as")
+        outputShaped = true;
     }
   }
-  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text2);
+  return /\byour verdict\b(?:\s+(?:for|on)\s+[^.!?;:]{0,40})?\s*(?:[:=]|\bis\b|\bshould be\b|\bmust be\b)\s*["'`]?(?:personal|private|public)\b/.test(text2);
 }
 function normalizeSnifferMaterial(material) {
   return normalizeSnifferSurface(canonicalizeScreeningText(material));
@@ -11152,7 +11161,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -11181,16 +11190,23 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+  TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+  TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
   INJECTION_RULES = [
-    ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
-    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
-    ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-    ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
+    ["role_boundary", ROLE_TAG],
+    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+    ["forged_verdict", new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+    ["cross_item_steering", new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)]
   ];
   INSTRUCTION_VERBS = new Set(["reply", "answer", "respond", "output", "return", "mark", "set", "label", "classify", "treat", "tag", "rate", "assign", "choose", "use", "emit", "produce", "make"]);
   VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
   TIER_WORD = /^(?:personal|public|private)$/;
   OBJECT_GLUE = new Set(["only", "with", "as", "to", "be", "is", "the", "a", "an", "this", "that", "it", "these", "them", "every", "each", "all", "item", "items", "file", "files", "document", "documents", "message", "messages", "entry", "entries", "list", "batch", "not"]);
+  SCHEMA_ONLY_FIELD = /^(?:ownrecord|privatekind)$/;
+  SCHEMA_VALUE = /^["'`]?\s*(?:[:=]|\b(?:of|as|at|is|be|to)\b)?\s*["'`({[]*\s*(?:(?:0?[.,]\d+|1(?:[.,]0+)?|0)(?![\d.,]*\d)|(?:personal|private|public|ordinary|true|false|none|null)\b)/;
+  ASSIGN_VERBS = new Set(["set", "assign"]);
+  SETTING_VERBS = new Set(["set", "make", "use", "choose"]);
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy classifier. Judge the ONE item independently.",
     "PERSONAL means the owner permits their trusted cloud assistant to read it.",
@@ -11471,6 +11487,16 @@ var init_linux_engine_service = __esm(() => {
   heldLifecycleLocks = new Set;
 });
 
+// src/core/package-root.ts
+var init_package_root = () => {};
+
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES;
+var init_update_check = __esm(() => {
+  init_package_root();
+  UPDATE_MAX_BYTES = 512 * 1024;
+});
+
 // src/core/log-redaction.ts
 function redactLogLine(line) {
   return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
@@ -11481,9 +11507,6 @@ function boundedLogErrorMessage(error) {
   return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
 }
 var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
-
-// src/core/package-root.ts
-var init_package_root = () => {};
 
 // src/core/first-run-privacy.ts
 var init_first_run_privacy = __esm(() => {
@@ -11866,6 +11889,7 @@ var init_engine_service = __esm(() => {
   init_file_lease();
   init_linux_engine_layout();
   init_worker_transport();
+  init_update_check();
   init_atomic_file();
   init_engine_children();
   init_operation_error();
@@ -69583,12 +69607,7 @@ init_source_placement();
 init_vocabulary();
 init_local_private_answers();
 init_linux_owner_bridge_host();
-
-// src/core/update-check.ts
-init_package_root();
-var UPDATE_MAX_BYTES = 512 * 1024;
-
-// src/workers/email-source/server.ts
+init_update_check();
 init_open_targets();
 init_linux_owner_bridge();
 init_linux_desktop_opener();
@@ -70251,6 +70270,7 @@ init_messaging_capture_grant_file();
 init_messaging_runtime();
 init_package_root();
 init_pairing_session_paths();
+init_update_check();
 
 // src/workers/email-source/dashboard-messaging-runner.ts
 var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
@@ -70258,6 +70278,7 @@ var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 // src/workers/email-source/index.ts
 init_source_scope_approval();
 init_release_manifest();
+init_update_check();
 init_google_handle_compatibility();
 init_source_account_binding();
 init_source_registry();
@@ -70828,6 +70849,7 @@ var TOOL_BLOCKERS = new Map([
 var OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
 
 // src/workers/dashboard/host-page.ts
+init_update_check();
 init_dashboard_contract();
 init_page();
 init_vocabulary();
