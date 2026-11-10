@@ -91,7 +91,7 @@ describe('connector-store locator-index operator', () => {
     expect(first).toMatchObject({
       execute: true,
       schemaVersionBefore: 10,
-      schemaVersionAfter: 16,
+      schemaVersionAfter: 15,
       before: { state: 'backfill_required', cursorItemPk: 0, indexedItems: 0 },
       after: { state: 'backfill_required', indexedItems: 1 },
       batch: { scannedItems: 1 },
@@ -100,8 +100,8 @@ describe('connector-store locator-index operator', () => {
     const second = runConnectorStoreLocatorIndex([...args, '--execute']);
     expect(second).toMatchObject({
       execute: true,
-      schemaVersionBefore: 16,
-      schemaVersionAfter: 16,
+      schemaVersionBefore: 15,
+      schemaVersionAfter: 15,
       before: { state: 'backfill_required', indexedItems: 1 },
       after: { state: 'ready', indexedItems: 2 },
       batch: { scannedItems: 1 },
@@ -119,7 +119,7 @@ describe('connector-store locator-index operator', () => {
     const proof = new Database(dbPath, { readonly: true });
     try {
       expect(proof.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get())
-        .toEqual({ version: 16 });
+        .toEqual({ version: 15 });
       expect((proof.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((row) => row.name))
         .toEqual(expect.arrayContaining([
           'source_scope_generation', 'source_scope_revision', 'source_scope_folder_keys_json',

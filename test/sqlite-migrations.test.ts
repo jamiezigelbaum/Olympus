@@ -84,7 +84,7 @@ describe('SQLite schema migration runner', () => {
       }).close();
 
       let db = openDatabase(path);
-      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(16);
+      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(15);
       expect(tableColumns(db, 'items')).toEqual(expect.arrayContaining([
         'search_text',
         'sender_id',
@@ -119,7 +119,7 @@ describe('SQLite schema migration runner', () => {
       }).close();
 
       db = openDatabase(path);
-      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(16);
+      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(15);
       expect(schemaVersionRows(db, 'connector-store')).toBe(1);
       db.close();
     } finally {

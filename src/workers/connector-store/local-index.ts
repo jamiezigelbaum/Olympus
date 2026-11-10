@@ -301,7 +301,7 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -468,23 +468,13 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: 15,
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
       name: 'connector_store_child_items',
       up(db: Database) {
         // Additive and inert: nullable columns and a partial index. An
         // existing row has no parent and no deferred bytes, and is not
         // rewritten (docs/design/child-items.md, "Storage").
         addConnectorStoreChildItemColumns(db);
-      },
-    },
-    {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
-      name: 'connector_store_visibility_feed',
-      up(db: Database) {
-        // Additive: the item change feed and an empty saved visibility set.
-        // Nothing existing is rewritten; the writer fills the set on its
-        // next visibility build (docs/design/engine-split.md, part 1).
-        createConnectorStoreVisibilityTables(db);
       },
     },
   ];
@@ -502,7 +492,7 @@ const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
  * connection, not just the writer's, can bring its hidden-copy set up to date
  * without a full rebuild:
  *
- * - `item_visibility_changes`: a bounded feed of item identities whose rows
+ * - `item_visibility_feed`: a bounded feed of item identities whose rows
  *   were inserted, deleted or changed in what decides visibility, written by
  *   real triggers in the item write's own transaction (like the ledger's
  *   `tier_visibility_changes`).
@@ -512,10 +502,17 @@ const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
  * - `tier_visibility_state`: which ledger, corpus and feed cursors that set
  *   covers. A reader applies only the feed entries past them, and fails closed
  *   when either feed no longer holds them.
+ *
+ * Created idempotently on every writable open, without a schema version: the
+ * tables and triggers are additive, so the previous build (which checks
+ * version 15) still opens the store after a binary rollback, and its item
+ * writes still land in the feed through these real triggers. The feed is not
+ * named `item_visibility_changes`, the TEMP journal that build creates on its
+ * own connection.
  */
 function createConnectorStoreVisibilityTables(db: Database): void {
   db.exec(`
-    CREATE TABLE IF NOT EXISTS item_visibility_changes (
+    CREATE TABLE IF NOT EXISTS item_visibility_feed (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
       provider TEXT NOT NULL,
       account_scope TEXT NOT NULL,
@@ -540,10 +537,10 @@ function createConnectorStoreVisibilityTables(db: Database): void {
     );
   `);
   const note = (row: 'NEW' | 'OLD') => `
-    INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+    INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id)
       VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
-    DELETE FROM item_visibility_changes
-      WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_changes);`;
+    DELETE FROM item_visibility_feed
+      WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed);`;
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_insert AFTER INSERT ON items BEGIN ${note('NEW')} END;
     CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_delete AFTER DELETE ON items BEGIN ${note('OLD')} END;
@@ -3022,13 +3019,14 @@ export class LocalConnectorStore {
         createConnectorStoreChunkMediaReleases(this.db);
         createConnectorStoreMediaJudgments(this.db);
         createConnectorStoreItemTextVersions(this.db);
+        createConnectorStoreVisibilityTables(this.db);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
-      // A read-only open of a store from before v16 has no feed: it keeps the
-      // older rule (any external commit rebuilds the set).
+      // A read-only open of a store no writer of this build has opened has no
+      // feed: it keeps the older rule (any external commit rebuilds the set).
       this.visibilityFeedPresent = (this.db.query(`SELECT COUNT(*) AS present FROM sqlite_master
-        WHERE (type = 'table' AND name IN ('item_visibility_changes', 'tier_visibility_members', 'tier_visibility_state'))
+        WHERE (type = 'table' AND name IN ('item_visibility_feed', 'tier_visibility_members', 'tier_visibility_state'))
           OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`)
         .get(JSON.stringify(CONNECTOR_STORE_VISIBILITY_TRIGGERS)) as { present: number }).present
         === 3 + CONNECTOR_STORE_VISIBILITY_TRIGGERS.length;
@@ -3488,15 +3486,15 @@ export class LocalConnectorStore {
   private itemVisibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
     if (!this.visibilityFeedPresent) return { cursor: 0, identities: [] }; // older read-only schema: external writes use data_version
     return this.db.transaction(() => {
-      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_changes) AS first,
-        (SELECT MAX(seq) FROM main.item_visibility_changes) AS last,
-        (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_changes') AS issued`)
+      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_feed) AS first,
+        (SELECT MAX(seq) FROM main.item_visibility_feed) AS last,
+        (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued`)
         .get() as { first: number | null; last: number | null; issued: number | null };
       // AUTOINCREMENT never reuses a number, so an emptied feed still knows its last one.
       const cursor = bounds.last ?? bounds.issued ?? 0;
       if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
       const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-        FROM main.item_visibility_changes WHERE seq > ?`).all(after) as Array<{
+        FROM main.item_visibility_feed WHERE seq > ?`).all(after) as Array<{
           provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
         }>;
       return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
@@ -17261,15 +17259,14 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 14) {
     validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
-  if (version === 15 || version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
     validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) validateConnectorStoreVisibilitySchema(db, 'v16');
 }
 
 function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: string): void {
-  assertExactTableColumns(db, 'item_visibility_changes',
+  assertExactTableColumns(db, 'item_visibility_feed',
     ['seq', 'provider', 'account_scope', 'conversation_key', 'provider_item_id'], false, versionLabel);
   assertExactTableColumns(db, 'tier_visibility_members',
     ['provider', 'account_scope', 'conversation_key', 'provider_item_id', 'flags', 'item_pks_json'], false, versionLabel);
@@ -17295,7 +17292,7 @@ function validateConnectorStoreSchema(db: Database): void {
   assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
   assertExactTableColumns(db, 'item_text_versions', ['item_pk', 'source_version', 'recorded_at'], false, 'v14');
   assertTriggerExists(db, 'connector_store_item_text_version_capture', 'v14');
-  validateConnectorStoreVisibilitySchema(db, 'v16');
+  validateConnectorStoreVisibilitySchema(db, 'v15');
 }
 
 const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [

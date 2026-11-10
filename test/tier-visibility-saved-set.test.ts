@@ -17,6 +17,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LocalConnectorStore, TierVisibilityNotCurrentError } from '../src/workers/connector-store/index.ts';
+import { assertSqliteSchemaCanOpen } from '../src/core/sqlite-migrations.ts';
 import type { TierLedger, TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
 import {
   CORPORA,
@@ -89,6 +90,7 @@ async function fixtureWithEveryState(): Promise<{
   storeDb: Database;
   pk: (id: string) => number;
   embed: (id: string) => void;
+  addChild: (parent: string, child: string) => void;
   openReader: () => LocalConnectorStore;
 }> {
   const { dir, cleanup } = tempDir();
@@ -118,16 +120,19 @@ async function fixtureWithEveryState(): Promise<{
   // The child of the hidden item: a copy of its parent's row and chunk.
   const columns = (table: string, skip: string) => (storeDb.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
     .map((row) => row.name).filter((name) => name !== skip);
-  const itemColumns = columns('items', 'item_pk');
-  const childValues: Record<string, string> = {
-    provider_item_id: "'hid#child:photo'", local_item_id: `'${localId('hid#child:photo')}'`, parent_local_item_id: `'${localId('hid')}'`,
+  const addChild = (parent: string, child: string) => {
+    const itemColumns = columns('items', 'item_pk');
+    const childValues: Record<string, string> = {
+      provider_item_id: `'${child}'`, local_item_id: `'${localId(child)}'`, parent_local_item_id: `'${localId(parent)}'`,
+    };
+    storeDb.exec(`INSERT INTO items (${itemColumns.join(', ')})
+      SELECT ${itemColumns.map((column) => childValues[column] ?? column).join(', ')} FROM items WHERE local_item_id = '${localId(parent)}'`);
+    const chunkColumns = columns('chunks', 'chunk_pk');
+    storeDb.exec(`INSERT INTO chunks (${chunkColumns.join(', ')})
+      SELECT ${chunkColumns.map((column) => column === 'item_pk' ? String(pk(child)) : column).join(', ')}
+      FROM chunks WHERE item_pk = ${pk(parent)}`);
   };
-  storeDb.exec(`INSERT INTO items (${itemColumns.join(', ')})
-    SELECT ${itemColumns.map((column) => childValues[column] ?? column).join(', ')} FROM items WHERE local_item_id = '${localId('hid')}'`);
-  const chunkColumns = columns('chunks', 'chunk_pk');
-  storeDb.exec(`INSERT INTO chunks (${chunkColumns.join(', ')})
-    SELECT ${chunkColumns.map((column) => column === 'item_pk' ? String(pk('hid#child:photo')) : column).join(', ')}
-    FROM chunks WHERE item_pk = ${pk('hid')}`);
+  addChild('hid', 'hid#child:photo');
   storeDb.exec('UPDATE chunks SET embedding_input_hash = content_hash WHERE embedding_input_hash IS NULL');
   const embed = (id: string) => storeDb.query(`INSERT OR REPLACE INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
     SELECT chunk_pk, ?, item_pk, embedding_input_hash, x'00000000', '2026-11-10T00:00:00Z' FROM chunks WHERE item_pk = ?`).run(MODEL, pk(id));
@@ -137,7 +142,7 @@ async function fixtureWithEveryState(): Promise<{
     cleanups.push(() => reader.close());
     return reader;
   };
-  return { f, writer, ledgerDb, storeDb, pk, embed, openReader };
+  return { f, writer, ledgerDb, storeDb, pk, embed, addChild, openReader };
 }
 
 test('a second connection serves the saved set, applies the writer\'s later commits without a full rebuild, and excludes every kept state', async () => {
@@ -248,23 +253,52 @@ test('a read-only open of a store from before the saved set keeps the older full
   const { f, writer, openReader } = await fixtureWithEveryState();
   const expected = sorted(probe(writer).tierHiddenItemPks());
   const counts = writer.status().counts;
-  // Turn a copy of the store back into the v15 shape: no feed, no saved set.
-  const oldPath = join(f.dir, 'internal-v15.sqlite');
+  // Turn a copy of the store back into the shape the previous build left: no feed, no saved set.
+  const oldPath = join(f.dir, 'internal-before-feed.sqlite');
   probe(writer).db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   copyFileSync(f.paths.internal, oldPath);
   const old = new Database(oldPath);
   old.exec(`DROP TRIGGER connector_store_item_visibility_insert; DROP TRIGGER connector_store_item_visibility_delete;
-    DROP TRIGGER connector_store_item_visibility_update; DROP TABLE item_visibility_changes;
-    DROP TABLE tier_visibility_members; DROP TABLE tier_visibility_state;
-    UPDATE schema_version SET version = 15 WHERE store_id = 'connector-store';`);
+    DROP TRIGGER connector_store_item_visibility_update; DROP TABLE item_visibility_feed;
+    DROP TABLE tier_visibility_members; DROP TABLE tier_visibility_state;`);
   old.close();
   const reader = new LocalConnectorStore({ dbPath: oldPath, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', readOnly: true });
   cleanups.push(() => reader.close());
   expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(expected);
   expect(reader.status().counts).toEqual(counts);
   expect(reader.hasEmbeddings(MODEL)).toBe(false);
-  // The v16 store itself still opens read-only alongside.
+  // The store with the feed still opens read-only alongside.
   expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(expected);
+});
+
+test('the previous build still opens a store this build wrote, and its item writes reach the feed', async () => {
+  const { f, writer, storeDb, pk, addChild, openReader } = await fixtureWithEveryState();
+  probe(writer).tierHiddenItemPks();
+  const reader = openReader();
+  const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
+  cleanups.push(() => rebuilds.restore());
+  probe(reader).tierHiddenItemPks();
+  // The feed and the saved set are additive: the schema version the previous
+  // build (1.4.x) checks is unchanged, so rolling the binary back still opens it.
+  expect(storeDb.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 15 });
+  expect(() => assertSqliteSchemaCanOpen(storeDb, 'connector-store', 15)).not.toThrow();
+  // The previous build's writer opens with its own TEMP change journal, whose
+  // table and triggers shadow names in main for that connection.
+  storeDb.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
+    CREATE TEMP TABLE item_visibility_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
+      conversation_key TEXT, provider_item_id TEXT);
+    CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN
+      INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+        VALUES (NEW.provider, NEW.account_scope, NEW.normalized_conversation, NEW.provider_item_id);
+      DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);
+    END;`);
+  // That build writes an item that changes the set: another child of the hidden parent.
+  addChild('hid', 'hid#child:scan');
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('hid#child:scan'));
+  const again = new LocalConnectorStore({ dbPath: f.paths.internal, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', tierLedger: f.ledger });
+  cleanups.push(() => again.close());
+  expect(sorted(probe(again).tierHiddenItemPks())).toEqual(sorted(probe(reader).tierHiddenItemPks()));
+  expect(rebuilds.count).toBe(0);
 });
 
 test('a read-only store reads its ledger without writing it', async () => {

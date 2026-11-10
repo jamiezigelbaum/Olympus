@@ -1149,7 +1149,7 @@ describe('a store migrates to the judgments schema with its photos intact', () =
         expect(columns(dbPath)).toEqual(expectedColumns);
         const check = new Database(dbPath, { readonly: true });
         try {
-          expect(readSqliteSchemaVersion(check, 'connector-store')).toBe(16);
+          expect(readSqliteSchemaVersion(check, 'connector-store')).toBe(15);
         } finally {
           check.close();
         }
