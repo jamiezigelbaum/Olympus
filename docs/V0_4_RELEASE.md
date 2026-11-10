@@ -414,7 +414,8 @@ stay after 1.0.
   hostnames, DNS-01, the Let's Encrypt agreement and `olympus connections
   terms`) is deleted.
 - **Engine OAuth.** Consent only on the Mac's loopback page (one click, no
-  pairing code, no account); ChatGPT's client is pinned; codes and tokens
+  pairing code, no account), from the browser holding the owner's dashboard
+  session or over the Linux owner socket (#1186); ChatGPT's client is pinned; codes and tokens
   carry a routable install prefix.
 - **ChatGPT tools.** `olympus_search` is the primary answer tool (Olympus
   retrieves, ChatGPT reasons under the one generic Analyst instruction);
