@@ -7,6 +7,7 @@
 // --saved-owner scores with the owner tier saved in each row (reproduces the run's own numbers);
 // by default the owner tier comes from DIR/labels.json now (Secret counts as Private; Not sure, Skip and unlabelled are left out).
 import { existsSync, readFileSync } from 'node:fs';
+import { confusion, type Tier } from './judge-metrics.ts';
 
 const [dir, file] = process.argv.slice(2);
 if (!dir || !file) throw new Error('usage: rescore-saved.ts DIR RESULT.json [--saved-owner] [--exclude-file FILE]');
@@ -23,24 +24,21 @@ const tagOf = (id: string) => importance[id]?.label ?? labels[id]?.importance ??
 const result = JSON.parse(readFileSync(file, 'utf8'));
 const tierOf = (label?: string) => label === 'personal' ? 'personal' : label === 'private' || label === 'secret' ? 'private' : undefined;
 
-const rows = (result.rows as Array<{ id: string; owner: string; judge: string; split: string }>)
+const rows = (result.rows as Array<{ id: string; owner: string; judge: string; split: 'dev' | 'test' }>)
   .filter((row) => !excluded.has(row.id))
   .map((row) => ({ ...row, owner: savedOwner ? row.owner : tierOf(labels[row.id]?.label) }))
-  .filter((row) => row.owner === 'personal' || row.owner === 'private');
+  .filter((row): row is typeof row & { owner: Tier } => row.owner === 'personal' || row.owner === 'private')
+  // Anything but a Personal answer counts as held Private, as before.
+  .map((row) => ({ ...row, source: '', judge: (row.judge === 'personal' ? 'personal' : 'private') as Tier }));
 
 const score = (subset: typeof rows) => {
-  const c = { items: subset.length, privateKeptPrivate: 0, privateToPersonal: 0, personalKeptPersonal: 0, personalToPrivate: 0 };
-  for (const row of subset) {
-    if (row.owner === 'private') row.judge === 'private' ? c.privateKeptPrivate++ : c.privateToPersonal++;
-    else row.judge === 'personal' ? c.personalKeptPersonal++ : c.personalToPrivate++;
-  }
-  const pr = c.privateKeptPrivate / Math.max(1, c.privateKeptPrivate + c.privateToPersonal);
-  const pe = c.personalKeptPersonal / Math.max(1, c.personalKeptPersonal + c.personalToPrivate);
+  // The shared metrics: a class absent from the subset has no recall (null), not zero.
+  const c = confusion(subset);
   const own = subset.filter((row) => row.owner === 'private');
   const missed = (tag: string) => own.filter((row) => tagOf(row.id) === tag && row.judge === 'personal').length;
   const of = (tag: string) => own.filter((row) => tagOf(row.id) === tag).length;
-  return { ...c, agreement: +((c.privateKeptPrivate + c.personalKeptPersonal) / Math.max(1, c.items) * 100).toFixed(1),
-    balancedAccuracy: +((pr + pe) / 2).toFixed(4),
+  return { ...c, agreement: c.items ? +((c.privateKeptPrivate + c.personalKeptPersonal) / c.items * 100).toFixed(1) : null,
+    balancedAccuracy: c.balancedAccuracy === null ? null : +c.balancedAccuracy.toFixed(4),
     importantMissed: `${missed('important')}/${of('important')}`, minorMissed: `${missed('minor')}/${of('minor')}`,
     untaggedMissed: `${own.filter((r) => !['important', 'minor'].includes(tagOf(r.id)) && r.judge === 'personal').length}/${own.filter((r) => !['important', 'minor'].includes(tagOf(r.id))).length}` };
 };
