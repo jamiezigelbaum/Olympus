@@ -26336,7 +26336,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -32206,82 +32206,106 @@ var init_local_index = __esm(() => {
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const rows = this.db.query(`
-      SELECT
-        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
-        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
-        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
-        i.trust_tier, i.sync_run_id,
-        -- Bare column beside a single MIN(): SQLite takes it from the very row
-        -- that produced the minimum, so this is the BEST-RANKING chunk for the
-        -- item rather than an arbitrary one. That is exactly the chunk the
-        -- citation should point at.
-        connector_store_fts.chunk_pk AS chunk_pk,
-        MIN(connector_store_fts.rank) AS rank
-      FROM connector_store_fts
-      JOIN items i ON i.item_pk = connector_store_fts.item_pk
-      WHERE connector_store_fts MATCH ?
-        AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-        AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
-        ${ftsOptions.contentOnly ? "AND connector_store_fts.chunk_pk IS NOT NULL" : ""}
-        ${selectedAccount ? "AND i.account_scope = ?" : ""}
-        ${selectedFilters.sql}
-        ${selectedFtsScope.sql}
-      GROUP BY i.item_pk
-      ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
-      LIMIT ?
-    `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
+      const fetchPage = (pageSize2, offset) => {
+        return this.db.query(`
+        SELECT
+          i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+          i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+          i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+          i.mime_type, i.authored_at, i.updated_at,
+          i.trust_tier, i.sync_run_id,
+          -- Bare column beside a single MIN(): SQLite takes it from the very row
+          -- that produced the minimum, so this is the BEST-RANKING chunk for the
+          -- item rather than an arbitrary one. That is exactly the chunk the
+          -- citation should point at.
+          connector_store_fts.chunk_pk AS chunk_pk,
+          MIN(connector_store_fts.rank) AS rank
+        FROM connector_store_fts
+        JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          AND i.tombstoned = 0
+          AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
+          ${ftsOptions.contentOnly ? "AND connector_store_fts.chunk_pk IS NOT NULL" : ""}
+          ${selectedAccount ? "AND i.account_scope = ?" : ""}
+          ${selectedFilters.sql}
+          ${selectedFtsScope.sql}
+        GROUP BY i.item_pk
+        ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
+        LIMIT ? OFFSET ?
+      `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, pageSize2, offset);
+      };
       const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
-      let selected = rows;
       const matchedGroups = new Map;
       const matchedGroupIndexes = new Map;
-      if (minimumSignal && rows.length > 0) {
-        const pks = rows.map((row) => row.item_pk);
-        const placeholders = pks.map(() => "?").join(", ");
-        for (const [groupIndex, group] of groups.entries()) {
-          const hits = this.db.query(`
-          SELECT DISTINCT connector_store_fts.item_pk
-          FROM connector_store_fts
-          JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ?
-            AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params);
-          for (const hit of hits) {
-            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-            matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
+      let conceptWeights;
+      const minimumSignalRows = (rows) => {
+        if (minimumSignal && rows.length > 0) {
+          const pks = rows.map((row) => row.item_pk);
+          const placeholders = pks.map(() => "?").join(", ");
+          for (const [groupIndex, group] of groups.entries()) {
+            const hits = this.db.query(`
+            SELECT DISTINCT connector_store_fts.item_pk
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params);
+            for (const hit of hits) {
+              matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+              matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
+            }
           }
+          const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+          const weights = rows.every(enough) ? undefined : conceptWeights ??= this.conceptWeights(groups, exact);
+          const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
+          const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
+          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : this.db.query(`
+          SELECT DISTINCT connector_store_fts.item_pk
+          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params).map((row) => row.item_pk));
+          return rows.filter((row) => {
+            if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
+              return true;
+            if (!weights)
+              return false;
+            const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+            if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
+              return true;
+            const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
+            return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+          });
         }
-        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-        const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
-        const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
-        const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
-        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : this.db.query(`
-        SELECT DISTINCT connector_store_fts.item_pk
-        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-          ${selectedFtsScope.sql}
-      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params).map((row) => row.item_pk));
-        selected = rows.filter((row) => {
-          if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
-            return true;
-          if (!weights)
-            return false;
-          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-          if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
-            return true;
-          const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
-          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
-        });
-      }
-      selected = this.tierVisibleRows(selected, (row) => ({
+        return rows;
+      };
+      const visibleRows = (candidates) => this.tierVisibleRows(candidates, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+      const selected = [];
+      const seen = new Set;
+      let scanned = 0;
+      let pageSize = fetchLimit;
+      let exhausted = false;
+      while (true) {
+        const page = fetchPage(pageSize, scanned);
+        scanned += page.length;
+        exhausted = page.length < pageSize;
+        const fresh = page.filter((row) => !seen.has(row.item_pk));
+        for (const row of fresh)
+          seen.add(row.item_pk);
+        const signalled = minimumSignalRows(fresh);
+        const visible = visibleRows(signalled);
+        selected.push(...visible);
+        if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
+          break;
+        pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
+      }
       const spanTerms = queryTermsForSpan(query);
       const kept = selected.slice(0, limit);
       return {
@@ -32293,7 +32317,7 @@ var init_local_index = __esm(() => {
           const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
           return chunk ? { ...base, chunk } : base;
         }),
-        saturated: rows.length >= fetchLimit || selected.length > limit,
+        saturated: !exhausted || selected.length > limit,
         concepts: {
           total: groups.length,
           matched: new Map(kept.map((row) => [

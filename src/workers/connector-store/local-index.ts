@@ -201,6 +201,10 @@ import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 export const DEFAULT_MAX_CHUNK_CHARS = 4_000;
 const MAX_MAX_CHUNK_CHARS = 32_000;
 const MAX_SEARCH_RESULTS = 50;
+// The most raw keyword matches one query reads while looking for rows the tier
+// filter serves (#1174). Bounds the work in a store that is mostly superseded
+// copies: at most a handful of page queries per search.
+const KEYWORD_CANDIDATE_SCAN_CAP = 1_000;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
 // text also matches, without changing the query or candidate budget.
@@ -11953,39 +11957,42 @@ export class LocalConnectorStore {
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const rows = this.db.query(`
-      SELECT
-        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
-        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
-        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
-        i.trust_tier, i.sync_run_id,
-        -- Bare column beside a single MIN(): SQLite takes it from the very row
-        -- that produced the minimum, so this is the BEST-RANKING chunk for the
-        -- item rather than an arbitrary one. That is exactly the chunk the
-        -- citation should point at.
-        connector_store_fts.chunk_pk AS chunk_pk,
-        MIN(connector_store_fts.rank) AS rank
-      FROM connector_store_fts
-      JOIN items i ON i.item_pk = connector_store_fts.item_pk
-      WHERE connector_store_fts MATCH ?
-        AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-        AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
-        ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
-        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
-        ${selectedFilters.sql}
-        ${selectedFtsScope.sql}
-      GROUP BY i.item_pk
-      ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
-      LIMIT ?
-    `).all(
-      terms,
-      ...(selectedAccount ? [selectedAccount] : []),
-      ...selectedFilters.params,
-      ...selectedFtsScope.params,
-      fetchLimit,
-    ) as ItemRow[];
+    const fetchPage = (pageSize: number, offset: number): ItemRow[] => {
+      return this.db.query(`
+        SELECT
+          i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+          i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+          i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+          i.mime_type, i.authored_at, i.updated_at,
+          i.trust_tier, i.sync_run_id,
+          -- Bare column beside a single MIN(): SQLite takes it from the very row
+          -- that produced the minimum, so this is the BEST-RANKING chunk for the
+          -- item rather than an arbitrary one. That is exactly the chunk the
+          -- citation should point at.
+          connector_store_fts.chunk_pk AS chunk_pk,
+          MIN(connector_store_fts.rank) AS rank
+        FROM connector_store_fts
+        JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          AND i.tombstoned = 0
+          AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
+          ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
+          ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+          ${selectedFilters.sql}
+          ${selectedFtsScope.sql}
+        GROUP BY i.item_pk
+        ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
+        LIMIT ? OFFSET ?
+      `).all(
+        terms,
+        ...(selectedAccount ? [selectedAccount] : []),
+        ...selectedFilters.params,
+        ...selectedFtsScope.params,
+        pageSize,
+        offset,
+      ) as ItemRow[];
+    };
     // Minimum signal: for a multi-concept query, a candidate matching a
     // single common concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
@@ -12000,61 +12007,65 @@ export class LocalConnectorStore {
     // "June 2026 blood work" matched a diet guide on "blood" and "work", and
     // "omega-3 level" matched every guide that says "3" and "level".
     const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
-    let selected = rows;
     const matchedGroups = new Map<number, number>();
     const matchedGroupIndexes = new Map<number, number[]>();
-    if (minimumSignal && rows.length > 0) {
-      const pks = rows.map((row) => row.item_pk);
-      const placeholders = pks.map(() => '?').join(', ');
-      for (const [groupIndex, group] of groups.entries()) {
-        const hits = this.db.query(`
-          SELECT DISTINCT connector_store_fts.item_pk
-          FROM connector_store_fts
-          JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ?
-            AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
-        for (const hit of hits) {
-          matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-          matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+    // Store-wide concept rarity, counted at most once per query.
+    let conceptWeights: ReturnType<LocalConnectorStore['conceptWeights']> | undefined;
+    const minimumSignalRows = (rows: ItemRow[]): ItemRow[] => {
+      if (minimumSignal && rows.length > 0) {
+        const pks = rows.map((row) => row.item_pk);
+        const placeholders = pks.map(() => '?').join(', ');
+        for (const [groupIndex, group] of groups.entries()) {
+          const hits = this.db.query(`
+            SELECT DISTINCT connector_store_fts.item_pk
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
+          for (const hit of hits) {
+            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+            matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+          }
         }
+        const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+        const weights = rows.every(enough) ? undefined : (conceptWeights ??= this.conceptWeights(groups, exact));
+        // One unique literal topic word can identify a record when a question
+        // combines neighbouring records (#710). The shared stopwords exclude
+        // scaffolding such as "my"; synonyms alone cannot earn this exception.
+        // Keep the population floor and all SQL scope/tier checks. A common
+        // term or a word shared by several items still needs the ordinary floor.
+        const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
+        const uniqueTerms = weights && weights.population >= 10
+          ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
+          : [];
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (this.db.query(`
+          SELECT DISTINCT connector_store_fts.item_pk
+          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>)
+          .map(row => row.item_pk));
+        return rows.filter((row) => {
+          if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
+          if (!weights) return false;
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          // Two rare topic concepts can identify an item even when the question
+          // adds words it never used. Rarity is evidence in every source family.
+          // Keep the strict floor for common words and small corpora. This uses
+          // the same scoped FTS candidates and tier filter.
+          if (groups.length >= 3 && weights.population >= 10
+            && indexes.length >= 2 && indexes.length * 2 >= groups.length
+            && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
+          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+        });
       }
-      const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
-      // One unique literal topic word can identify a record when a question
-      // combines neighbouring records (#710). The shared stopwords exclude
-      // scaffolding such as "my"; synonyms alone cannot earn this exception.
-      // Keep the population floor and all SQL scope/tier checks. A common
-      // term or a word shared by several items still needs the ordinary floor.
-      const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
-      const uniqueTerms = weights && weights.population >= 10
-        ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
-        : [];
-      const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (this.db.query(`
-        SELECT DISTINCT connector_store_fts.item_pk
-        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-          ${selectedFtsScope.sql}
-      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>)
-        .map(row => row.item_pk));
-      selected = rows.filter((row) => {
-        if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
-        if (!weights) return false;
-        const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-        // Two rare topic concepts can identify an item even when the question
-        // adds words it never used. Rarity is evidence in every source family.
-        // Keep the strict floor for common words and small corpora. This uses
-        // the same scoped FTS candidates and tier filter.
-        if (groups.length >= 3 && weights.population >= 10
-          && indexes.length >= 2 && indexes.length * 2 >= groups.length
-          && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
-        const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
-        return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
-      });
-    }
-    selected = this.tierVisibleRows(
-      selected,
+      return rows;
+    };
+    const visibleRows = (candidates: ItemRow[]): ItemRow[] => this.tierVisibleRows(
+      candidates,
       (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -12065,6 +12076,39 @@ export class LocalConnectorStore {
       // layer (they are seasoned with the names, as they always were).
       (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
     );
+    // Candidates are read in pages until `limit` visible rows survive (#1174).
+    // In a store where most matches are superseded or staged copies, one
+    // page of the best-ranked matches can hold almost none the tier filter
+    // serves, and a visible match ranked below them was never considered.
+    // The first page is the same single fetch as before, so a store whose
+    // top matches are visible pays nothing extra. Later pages grow fourfold,
+    // and the whole scan stops at KEYWORD_CANDIDATE_SCAN_CAP raw rows, so the
+    // work per query stays bounded however much of the store is hidden. The
+    // filters themselves are unchanged: this decides how many candidates are
+    // looked at, never which of them may be served.
+    const selected: ItemRow[] = [];
+    const seen = new Set<number>();
+    let scanned = 0;
+    let pageSize = fetchLimit;
+    let exhausted = false;
+    while (true) {
+      const page = fetchPage(pageSize, scanned);
+      scanned += page.length;
+      exhausted = page.length < pageSize;
+      // OFFSET pages over one ordering; a row seen on an earlier page (if the
+      // store changed between pages) is not counted twice.
+      const fresh = page.filter((row) => !seen.has(row.item_pk));
+      for (const row of fresh) seen.add(row.item_pk);
+      const signalled = minimumSignalRows(fresh);
+      const visible = visibleRows(signalled);
+      selected.push(...visible);
+      // Only rows the tier filter hid earn another page. A page it hid nothing
+      // from was cut by the minimum-signal filter alone, which has always
+      // stopped at one page, and the cost of that common case stays as it was.
+      if (exhausted || selected.length >= limit || visible.length === signalled.length
+        || scanned >= KEYWORD_CANDIDATE_SCAN_CAP) break;
+      pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
+    }
     const spanTerms = queryTermsForSpan(query);
     const kept = selected.slice(0, limit);
     return {
@@ -12078,7 +12122,7 @@ export class LocalConnectorStore {
           : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
         return chunk ? { ...base, chunk } : base;
       }),
-      saturated: rows.length >= fetchLimit || selected.length > limit,
+      saturated: !exhausted || selected.length > limit,
       // How many of the query's concepts each row matched (in its name or its
       // text). A single-concept query has nothing to count: every row matched it.
       concepts: {
