@@ -7103,7 +7103,7 @@ var init_sqlite_migrations = __esm(() => {
 // src/core/people-index.ts
 import { Database } from "bun:sqlite";
 import { createHash as createHash3 } from "node:crypto";
-import { chmodSync as chmodSync3, mkdirSync as mkdirSync8 } from "node:fs";
+import { chmodSync as chmodSync3, existsSync as existsSync9, mkdirSync as mkdirSync8 } from "node:fs";
 import { dirname as dirname13 } from "node:path";
 function peopleIndexMigrations() {
   return [{
@@ -7122,6 +7122,7 @@ function peopleIndexMigrations() {
           is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
           item_count INTEGER NOT NULL,
           person_id TEXT NOT NULL,
+          corpus_ids_json TEXT NOT NULL DEFAULT '[]',
           link_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_people_identities_person ON people_identities(person_id);
@@ -7250,6 +7251,7 @@ function linkPeople(input) {
         isOwner: false,
         itemCount: 0,
         personId: "",
+        corpusIds: [],
         nameKeys: new Set,
         publicNames: new Map,
         conversations: new Set
@@ -7261,6 +7263,8 @@ function linkPeople(input) {
       identity.senderLabel = label;
     identity.isOwner ||= observation.isOwner;
     identity.itemCount += observation.itemCount;
+    if (observation.corpusId && !identity.corpusIds.includes(observation.corpusId))
+      identity.corpusIds.push(observation.corpusId);
     for (const strong of [...strongKeysFromText(observation.senderId), ...strongKeysFromText(label)]) {
       if (!identity.keys.includes(strong))
         identity.keys.push(strong);
@@ -7438,6 +7442,7 @@ function linkPeople(input) {
         isOwner: member.isOwner,
         itemCount: member.itemCount,
         personId,
+        corpusIds: [...member.corpusIds].sort(),
         ...why ? { linkReason: why } : {}
       };
     });
@@ -7459,7 +7464,8 @@ function bestName(members) {
     for (const [name, count] of member.publicNames)
       counts.set(name, (counts.get(name) ?? 0) + count);
   }
-  const named = [...counts].sort(([a, ca], [b, cb]) => cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
+  const handle = (name) => Number(name.startsWith("@"));
+  const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named)
     return named;
   const key = members.flatMap((member) => member.keys).sort()[0];
@@ -7507,8 +7513,8 @@ class LocalPeopleIndex {
   rebuild(observations) {
     const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
     const insertIdentity = this.db.query(`
-      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, link_reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertPerson = this.db.query(`
       INSERT INTO people_persons (person_id, display_name, is_owner, name_shareable, item_count, linked_by_json) VALUES (?, ?, ?, ?, ?, ?)
@@ -7518,7 +7524,7 @@ class LocalPeopleIndex {
       for (const person of people) {
         insertPerson.run(person.personId, person.displayName, Number(person.isOwner), Number(person.nameShareable), person.itemCount, JSON.stringify(person.linkedBy));
         for (const identity of person.identities) {
-          insertIdentity.run(identity.identityKey, identity.provider, identity.senderId ?? null, identity.senderLabel ?? null, JSON.stringify(identity.keys), JSON.stringify(identity.names), Number(identity.isOwner), identity.itemCount, person.personId, identity.linkReason ?? null);
+          insertIdentity.run(identity.identityKey, identity.provider, identity.senderId ?? null, identity.senderLabel ?? null, JSON.stringify(identity.keys), JSON.stringify(identity.names), Number(identity.isOwner), identity.itemCount, person.personId, JSON.stringify(identity.corpusIds), identity.linkReason ?? null);
         }
       }
       this.db.query(`INSERT OR REPLACE INTO people_meta (key, value) VALUES ('rebuilt_at', ?)`).run(this.now().toISOString());
@@ -7612,6 +7618,7 @@ class LocalPeopleIndex {
         }
         insert.run(correction.kind, correction.identityA, correction.identityB, null, at);
       } else if (correction.kind === "split") {
+        this.db.query(`DELETE FROM people_corrections WHERE kind = 'merge' AND (identity_a = ? OR identity_b = ?)`).run(correction.identity, correction.identity);
         insert.run("split", correction.identity, null, null, at);
       } else {
         const name = correction.name.trim().slice(0, 160);
@@ -7644,7 +7651,7 @@ class LocalPeopleIndex {
   loadPeople() {
     const persons = this.db.query(`SELECT person_id, display_name, is_owner, name_shareable, item_count, linked_by_json FROM people_persons`).all();
     const identities = this.db.query(`
-      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, link_reason
+      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason
       FROM people_identities ORDER BY identity_key
     `).all();
     const byPerson = new Map;
@@ -7659,6 +7666,7 @@ class LocalPeopleIndex {
         isOwner: row.is_owner === 1,
         itemCount: row.item_count,
         personId: row.person_id,
+        corpusIds: JSON.parse(row.corpus_ids_json),
         ...row.link_reason ? { linkReason: row.link_reason } : {}
       }]);
     }
@@ -11062,7 +11070,7 @@ var init_tier_classifier = __esm(() => {
 // src/workers/classification/sniffer-store.ts
 import { Database as Database2 } from "bun:sqlite";
 import { createHash as createHash7 } from "node:crypto";
-import { chmodSync as chmodSync4, existsSync as existsSync9, mkdirSync as mkdirSync9 } from "node:fs";
+import { chmodSync as chmodSync4, existsSync as existsSync10, mkdirSync as mkdirSync9 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 function snifferMaterialHash(pass, material) {
   return createHash7("sha256").update(`${pass}
@@ -11412,7 +11420,7 @@ function subjectParams(subject) {
 }
 function restrictFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync9(path))
+    if (existsSync10(path))
       chmodSync4(path, 384);
   }
 }
@@ -14637,7 +14645,7 @@ var init_credential_broker = __esm(() => {
 
 // src/workers/credential-broker/connected-handles.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync16 } from "node:fs";
+import { existsSync as existsSync11, mkdirSync as mkdirSync10, readFileSync as readFileSync16 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname17, join as join17 } from "node:path";
 function defaultHandleRegistryPath() {
@@ -14645,7 +14653,7 @@ function defaultHandleRegistryPath() {
 }
 function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
   const path = connectedHandleGrantEpochPath(registryPath);
-  if (!existsSync10(path))
+  if (!existsSync11(path))
     return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
   let parsed;
   try {
@@ -14686,7 +14694,7 @@ function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
 }
 function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync10(path)) {
+  if (!existsSync11(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
   const parsed = JSON.parse(readFileSync16(path, "utf8"));
@@ -14727,7 +14735,7 @@ function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, prese
   }, null, 2));
 }
 function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync10(path))
+  if (!existsSync11(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -14757,7 +14765,7 @@ function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistr
   });
 }
 function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync10(path))
+  if (!existsSync11(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -15100,7 +15108,7 @@ var init_file_scope_sources = __esm(() => {
 
 // src/core/source-scope-approval.ts
 import { createHash as createHash10, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync11, readFileSync as readFileSync17 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync17 } from "node:fs";
 import { dirname as dirname18, join as join18 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
   return join18(dirname18(handleRegistryPath), "file-source-scopes.json");
@@ -15268,7 +15276,7 @@ function normalizeAncestorKeys(input) {
   return [...new Set(keys)];
 }
 function readState(path) {
-  if (!existsSync11(path))
+  if (!existsSync12(path))
     return { kind: "missing" };
   let raw;
   try {
@@ -15333,7 +15341,7 @@ var init_source_scope_approval = __esm(() => {
 
 // src/core/mail-source-scope.ts
 import { createHash as createHash11, randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync12, readFileSync as readFileSync18 } from "node:fs";
+import { existsSync as existsSync13, readFileSync as readFileSync18 } from "node:fs";
 import { dirname as dirname19, join as join19 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
   return join19(dirname19(handleRegistryPath), "mail-source-scopes.json");
@@ -15525,7 +15533,7 @@ function pendingSnapshot2(revision, accountGeneration, reason) {
   };
 }
 function readState2(path) {
-  if (!existsSync12(path))
+  if (!existsSync13(path))
     return { kind: "missing" };
   let raw;
   try {
@@ -18372,7 +18380,7 @@ var init_fts = __esm(() => {
 // src/workers/classification/secret-locations.ts
 import { Database as Database3 } from "bun:sqlite";
 import { createHash as createHash16 } from "node:crypto";
-import { chmodSync as chmodSync5, closeSync as closeSync7, existsSync as existsSync13, mkdirSync as mkdirSync11, openSync as openSync7 } from "node:fs";
+import { chmodSync as chmodSync5, closeSync as closeSync7, existsSync as existsSync14, mkdirSync as mkdirSync11, openSync as openSync7 } from "node:fs";
 import { dirname as dirname20 } from "node:path";
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
@@ -18393,7 +18401,7 @@ class SecretLocationsIndex {
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
       mkdirSync11(dirname20(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync13(this.dbPath))
+      if (!existsSync14(this.dbPath))
         closeSync7(openSync7(this.dbPath, "a", 384));
       chmodSync5(this.dbPath, 384);
     }
@@ -18669,7 +18677,7 @@ var init_secret_locations = __esm(() => {
 // src/workers/classification/tier-ledger.ts
 import { Database as Database4 } from "bun:sqlite";
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { chmodSync as chmodSync6, closeSync as closeSync8, existsSync as existsSync14, mkdirSync as mkdirSync12, openSync as openSync8, statSync as statSync8 } from "node:fs";
+import { chmodSync as chmodSync6, closeSync as closeSync8, existsSync as existsSync15, mkdirSync as mkdirSync12, openSync as openSync8, statSync as statSync8 } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
@@ -18711,7 +18719,7 @@ class TierLedger {
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk && !this.readOnly) {
       mkdirSync12(dirname21(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync14(this.dbPath))
+      if (!existsSync15(this.dbPath))
         closeSync8(openSync8(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
@@ -19783,7 +19791,7 @@ class TierLedger {
     return row.value;
   }
   static readLedgerId(dbPath, options = {}) {
-    if (dbPath === ":memory:" || !existsSync14(dbPath))
+    if (dbPath === ":memory:" || !existsSync15(dbPath))
       return;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 1e4));
     for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }]) {
@@ -21091,7 +21099,7 @@ function hasUnmergedWrites(dbPath) {
     if (statSync8(`${dbPath}-wal`).size > 0)
       return true;
   } catch {}
-  return existsSync14(`${dbPath}-journal`);
+  return existsSync15(`${dbPath}-journal`);
 }
 function proposalFromRow(row) {
   return {
@@ -21433,7 +21441,7 @@ function decisionFlags(decision) {
 }
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync14(path))
+    if (existsSync15(path))
       chmodSync6(path, 384);
   }
 }
@@ -21892,7 +21900,7 @@ var init_tier_ledger = __esm(() => {
   };
 });
 // src/workers/file-extraction/job-names.ts
-import { existsSync as existsSync15 } from "node:fs";
+import { existsSync as existsSync16 } from "node:fs";
 import { Database as Database5 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   return sharedDataPath("file-extraction-jobs", env);
@@ -21901,7 +21909,7 @@ function extractionJobsDbPaths(env = process.env) {
   return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
 }
 function clearExtractionJobNames(dbPath, item, options = {}) {
-  if (dbPath === ":memory:" || !existsSync15(dbPath))
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
     return { cleared: 0, durable: true };
   const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
@@ -21949,7 +21957,7 @@ function clearExtractionJobNames(dbPath, item, options = {}) {
   }
 }
 function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
-  if (dbPath === ":memory:" || !existsSync15(dbPath))
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
     return { retired: 0, stillSecret: false };
   const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
@@ -21995,7 +22003,7 @@ function artifactsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
 }
 function oweExtractionRereadAfterTierMove(dbPath, item) {
-  if (dbPath === ":memory:" || !existsSync15(dbPath))
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
     return 0;
   const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
@@ -22014,7 +22022,7 @@ function oweExtractionRereadAfterTierMove(dbPath, item) {
   }
 }
 function oweExtractionRereadAfterRevive(dbPath, item) {
-  if (dbPath === ":memory:" || !existsSync15(dbPath))
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
     return 0;
   const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
@@ -22319,7 +22327,7 @@ self.onmessage = (event) => {
 `, thread, unavailable = false, nextId = 1;
 
 // src/core/store-identity.ts
-import { existsSync as existsSync16, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
+import { existsSync as existsSync17, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
 import { basename as basename3, dirname as dirname22, isAbsolute as isAbsolute9, join as join20, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -22397,7 +22405,7 @@ function storePlacementView(env = process.env) {
       return loaded = { kind: "unreadable" };
     try {
       const read = readSourceRegistry(env);
-      loaded = existsSync16(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+      loaded = existsSync17(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
     } catch {
       loaded = { kind: "unreadable" };
     }
@@ -22549,7 +22557,7 @@ import { createHash as createHash17, randomUUID as randomUUID8 } from "node:cryp
 import {
   chmodSync as chmodSync7,
   closeSync as closeSync9,
-  existsSync as existsSync17,
+  existsSync as existsSync18,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync13,
   lstatSync as lstatSync9,
@@ -22624,10 +22632,10 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
       rmSync5(join21(refs, name), { force: true });
-    const remaining = existsSync17(refs) ? readdirSync2(refs) : [];
+    const remaining = existsSync18(refs) ? readdirSync2(refs) : [];
     if (remaining.length > 0)
       return false;
-    if (existsSync17(refs))
+    if (existsSync18(refs))
       rmdirSync(refs);
     rmSync5(path, { force: true });
     return true;
@@ -22664,7 +22672,7 @@ function sweepMediaCache(dir, options = {}) {
       if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
         continue;
       const refs = refsDir(path);
-      if (existsSync17(refs)) {
+      if (existsSync18(refs)) {
         for (const marker of readdirSync2(refs)) {
           const markerPath = join21(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
@@ -22728,12 +22736,12 @@ function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
   if (!name || !isAbsolute10(name) || holderDigest(name) !== markerName)
     return false;
-  if (existsSync17(name))
+  if (existsSync18(name))
     return false;
   const verdict = placement.pathMarker(name);
   if (verdict !== "unplaced")
     return verdict === "gone";
-  return existsSync17(dirname23(name));
+  return existsSync18(dirname23(name));
 }
 function storeHolderGone(marker, placement) {
   const recorded = parseStoreMarker(readMarker(marker));
@@ -22815,7 +22823,7 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync18 } from "node:fs";
+import { existsSync as existsSync19 } from "node:fs";
 import { basename as basename5, dirname as dirname24, join as join22 } from "node:path";
 function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const candidates = [recordedLedgerPath];
@@ -22829,7 +22837,7 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync18(candidate))
+    if (candidate === ":memory:" || !existsSync19(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
@@ -22969,7 +22977,7 @@ var init_tier_placement = __esm(() => {
 });
 
 // src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync19 } from "node:fs";
+import { existsSync as existsSync20 } from "node:fs";
 function secretsDisposition() {
   return SECRETS_DISPOSITION;
 }
@@ -23024,7 +23032,7 @@ function forgetSecretInSideStores(options) {
     result.failed += 1;
   }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath !== ":memory:" && existsSync19(snifferPath)) {
+  if (snifferPath !== ":memory:" && existsSync20(snifferPath)) {
     try {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
       try {
@@ -23070,7 +23078,7 @@ function forgetSecretInSideStores(options) {
     }
   }
   try {
-    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync19(path)));
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync20(path)));
   } catch {}
   try {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
@@ -23118,7 +23126,7 @@ function snifferRetriesSettlement(ledger, identity) {
     return false;
   }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath === ":memory:" || !existsSync19(snifferPath))
+  if (snifferPath === ":memory:" || !existsSync20(snifferPath))
     return false;
   try {
     const sniffer = new TierSnifferStore({ dbPath: snifferPath });
@@ -24696,7 +24704,7 @@ var init_media_judge = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash19, randomUUID as randomUUID9 } from "node:crypto";
-import { existsSync as existsSync20, lstatSync as lstatSync10, mkdirSync as mkdirSync14, statSync as statSync11 } from "node:fs";
+import { existsSync as existsSync21, lstatSync as lstatSync10, mkdirSync as mkdirSync14, statSync as statSync11 } from "node:fs";
 import { dirname as dirname25 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 function connectorStoreMigrations() {
@@ -27249,7 +27257,7 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync20(path))
+      if (path === ":memory:" || !existsSync21(path))
         return;
       return this.tierLedger();
     }
@@ -28369,7 +28377,7 @@ var init_local_index = __esm(() => {
         seen.add(sha);
         if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
-        if (!isMediaCachePath(row.media_path, sha) || !existsSync20(row.media_path))
+        if (!isMediaCachePath(row.media_path, sha) || !existsSync21(row.media_path))
           continue;
         images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
       }
@@ -28848,6 +28856,7 @@ var init_local_index = __esm(() => {
             ...row.sender_label?.trim() ? { senderLabel: row.sender_label.trim() } : {},
             isOwner: false,
             itemCount: 0,
+            corpusId: this.corpusId,
             conversations: new Set,
             anyPublic: false
           };
@@ -29914,7 +29923,7 @@ var init_local_index = __esm(() => {
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
         for (const row of rows) {
-          if (existsSync20(row.media_path))
+          if (existsSync21(row.media_path))
             retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
         }
         reassertedMediaHolders.add(holderKey);
@@ -32187,7 +32196,7 @@ var init_local_index = __esm(() => {
               continue;
             if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
-            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync20(row.media_path)) {
+            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync21(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
               skip.add(row);
             }
@@ -35098,7 +35107,7 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { closeSync as closeSync10, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, statSync as statSync12 } from "node:fs";
+import { closeSync as closeSync10, constants as constants4, existsSync as existsSync22, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, statSync as statSync12 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname27, isAbsolute as isAbsolute11, join as join24 } from "node:path";
 import { createInterface } from "node:readline";
@@ -35337,7 +35346,7 @@ function helperPath() {
   const here = dirname27(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join24(here, name);
-    if (existsSync21(candidate))
+    if (existsSync22(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -36285,14 +36294,14 @@ var init_tier_row_rehome = __esm(() => {
 });
 
 // src/workers/classification/secret-scan-off-thread.ts
-import { existsSync as existsSync22 } from "node:fs";
+import { existsSync as existsSync23 } from "node:fs";
 import { dirname as dirname29, join as join27 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function workerPath() {
   const here = dirname29(fileURLToPath2(import.meta.url));
   for (const name of ["secret-scan-worker.js", "secret-scan-worker.ts"]) {
     const candidate = join27(here, name);
-    if (existsSync22(candidate))
+    if (existsSync23(candidate))
       return candidate;
   }
   return;
@@ -40716,7 +40725,7 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync23 } from "node:fs";
+import { existsSync as existsSync24 } from "node:fs";
 import { dirname as dirname31, join as join30 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
@@ -40818,7 +40827,7 @@ function modelWorkerPath() {
   const here = dirname31(fileURLToPath3(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join30(here, name);
-    if (existsSync23(path))
+    if (existsSync24(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -44567,7 +44576,7 @@ var init_dashboard_opening = __esm(() => {
 });
 
 // src/core/messaging-runtime.ts
-import { existsSync as existsSync24, rmSync as rmSync6 } from "node:fs";
+import { existsSync as existsSync25, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname34, join as join33 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
@@ -44576,7 +44585,7 @@ function telegramPythonVenvDir(options = {}) {
   const home = options.homeDir ?? env.HOME ?? homedir12();
   return join33(env.XDG_CACHE_HOME ?? join33(home, ".cache"), "olympus", "telegram-python");
 }
-function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync24) {
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync25) {
   let directory = dirname34(fileURLToPath4(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
     if (exists(join33(directory, TELEGRAM_REQUIREMENTS_FILE)))
@@ -44611,7 +44620,7 @@ async function readyTelegramPython(options = {}) {
   const venvDir = telegramPythonVenvDir(options);
   const isolated = join33(venvDir, "bin", "python");
   const hasTelethon = options.pythonHasTelethon ?? pythonImportsTelethon;
-  if (!installing.has(venvDir) && existsSync24(isolated) && await hasTelethon(isolated))
+  if (!installing.has(venvDir) && existsSync25(isolated) && await hasTelethon(isolated))
     return isolated;
   const system = Bun.which("python3") ?? undefined;
   if (!installing.has(venvDir) && system && await hasTelethon(system))
@@ -44624,7 +44633,7 @@ async function readyTelegramPython(options = {}) {
     install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: system, venvDir }).finally(() => installing.delete(venvDir));
     installing.set(venvDir, install);
   }
-  if (!await install || !existsSync24(isolated))
+  if (!await install || !existsSync25(isolated))
     throw new Error(`Olympus could not install Telethon for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
   return isolated;
 }
@@ -51888,7 +51897,7 @@ var init_forget = __esm(() => {
 
 // src/core/this-computer.ts
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync27, readFileSync as readFileSync24 } from "node:fs";
+import { existsSync as existsSync28, readFileSync as readFileSync24 } from "node:fs";
 import { createHash as createHash27, randomUUID as randomUUID11 } from "node:crypto";
 import { dirname as dirname37, join as join36 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
@@ -51908,7 +51917,7 @@ function defaultThisComputerStatePath(handleRegistryPath) {
   return join36(dirname37(handleRegistryPath), "this-computer.json");
 }
 function readState5(path) {
-  if (!existsSync27(path))
+  if (!existsSync28(path))
     return;
   try {
     const parsed = JSON.parse(readFileSync24(path, "utf8"));
@@ -51967,7 +51976,7 @@ var MACHINE_ID_PATTERN, cachedSystemHostIdentity, systemHostIdentity = () => {
       value = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(result.stdout ?? "")?.[1];
     } else if (process.platform === "linux") {
       for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
-        const id = existsSync27(path) ? readFileSync24(path, "utf8").trim() : "";
+        const id = existsSync28(path) ? readFileSync24(path, "utf8").trim() : "";
         if (/^[0-9a-f]{32}$/.test(id)) {
           value = id;
           break;
@@ -52005,6 +52014,7 @@ var init_source_forget_registry = __esm(() => {
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
+  init_people_index();
   init_source_watch();
   init_ingestion_health_state();
   init_source_scope_approval();
@@ -53523,7 +53533,7 @@ var init_file_mime = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync29, mkdirSync as mkdirSync17, opendirSync, readFileSync as readFileSync26 } from "node:fs";
+import { existsSync as existsSync30, mkdirSync as mkdirSync17, opendirSync, readFileSync as readFileSync26 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname39, join as join38 } from "node:path";
 function folderAccessMemoryPath() {
@@ -53750,7 +53760,7 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync29(this.memoryPath)) {
+    if (this.memoryPath && existsSync30(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync26(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -70343,7 +70353,7 @@ init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
 import { createHash as createHash33 } from "node:crypto";
-import { existsSync as existsSync34, lstatSync as lstatSync16, mkdirSync as mkdirSync20, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync35, lstatSync as lstatSync16, mkdirSync as mkdirSync20, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname41, isAbsolute as isAbsolute14 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -70415,7 +70425,7 @@ init_source_storage();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
-import { existsSync as existsSync25, mkdirSync as mkdirSync15, rmSync as rmSync7 } from "node:fs";
+import { existsSync as existsSync26, mkdirSync as mkdirSync15, rmSync as rmSync7 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname35, join as join34 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
@@ -70618,10 +70628,10 @@ function whatsappStateDirOf(grant, account, env) {
 }
 function sessionExists(grant, account, env) {
   if (account.layout === "folder") {
-    return grant.source === "telegram" ? existsSync25(`${accountSessionPath(account, env)}.session`) : existsSync25(join34(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
+    return grant.source === "telegram" ? existsSync26(`${accountSessionPath(account, env)}.session`) : existsSync26(join34(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
   }
   const sessionPath = grant.sessionPath ?? "";
-  return grant.source === "telegram" ? existsSync25(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync25(join34(sessionPath, WHATSAPP_SESSION_FILE));
+  return grant.source === "telegram" ? existsSync26(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync26(join34(sessionPath, WHATSAPP_SESSION_FILE));
 }
 function spawnCapture(input) {
   const child = Bun.spawn([input.executable, ...input.args], {
@@ -70703,7 +70713,7 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync26,
+  existsSync as existsSync27,
   mkdirSync as mkdirSync16,
   readFileSync as readFileSync23,
   renameSync as renameSync5,
@@ -70893,7 +70903,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync26(path))
+  if (!existsSync27(path))
     return;
   let payload2;
   try {
@@ -72122,7 +72132,7 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync28, readFileSync as readFileSync25 } from "node:fs";
+import { existsSync as existsSync29, readFileSync as readFileSync25 } from "node:fs";
 import { dirname as dirname38, join as join37 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
@@ -72182,7 +72192,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync28(snapshotPath))
+    if (!existsSync29(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -72312,7 +72322,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join37(dir, "node_modules");
-    if (!existsSync28(join37(candidate, "@parcel", "watcher")))
+    if (!existsSync29(join37(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire8(join37(dirname38(candidate), "package.json"));
@@ -74660,7 +74670,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash30 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync30, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
+import { existsSync as existsSync31, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -74893,7 +74903,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync30(dir))
+    if (!existsSync31(dir))
       return result;
     for (const name of readdirSync4(dir)) {
       try {
@@ -75179,7 +75189,7 @@ init_scope();
 // src/workers/local-files/mac-settings.ts
 init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync31 } from "node:fs";
+import { existsSync as existsSync32 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { join as join39 } from "node:path";
 function helperAppPathForHome(home = homedir16()) {
@@ -75190,7 +75200,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn3(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync31)(helper))
+  if ((deps.exists ?? existsSync32)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -75862,7 +75872,7 @@ init_control_path_headroom();
 init_sniffer();
 init_tier_ledger();
 init_tier_classifier();
-import { chmodSync as chmodSync8, existsSync as existsSync32, lstatSync as lstatSync15, mkdirSync as mkdirSync18, readFileSync as readFileSync28 } from "node:fs";
+import { chmodSync as chmodSync8, existsSync as existsSync33, lstatSync as lstatSync15, mkdirSync as mkdirSync18, readFileSync as readFileSync28 } from "node:fs";
 import { join as join41 } from "node:path";
 import { createHash as createHash31, randomUUID as randomUUID12 } from "node:crypto";
 
@@ -76260,7 +76270,7 @@ class EmbeddingPrefilter {
       this.control.deleteMeta(TRAINING);
     }
     try {
-      if (existsSync32(this.path) && !lstatSync15(this.path).isSymbolicLink() && lstatSync15(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync15(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
+      if (existsSync33(this.path) && !lstatSync15(this.path).isSymbolicLink() && lstatSync15(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync15(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
         chmodSync8(embeddingPrefilterDirectory(this.control.dbPath), 448);
         chmodSync8(this.path, 384);
         this.saved = JSON.parse(readFileSync28(this.path, "utf8"));
@@ -76410,8 +76420,8 @@ class EmbeddingPrefilter {
     let stage = "scan_failed";
     try {
       const revisions = this.revisions();
-      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync32(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
-        if (existsSync32(this.path))
+      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync33(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
+        if (existsSync33(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
         if (attempt?.outcome === "trained")
@@ -76581,7 +76591,7 @@ class EmbeddingPrefilter {
                 if (this.control.dbPath === ":memory:")
                   throw new Error;
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
-                if (existsSync32(directory) && (!lstatSync15(directory).isDirectory() || lstatSync15(directory).isSymbolicLink()))
+                if (existsSync33(directory) && (!lstatSync15(directory).isDirectory() || lstatSync15(directory).isSymbolicLink()))
                   throw new Error;
                 mkdirSync18(directory, { recursive: true, mode: 448 });
                 chmodSync8(directory, 448);
@@ -76596,7 +76606,7 @@ class EmbeddingPrefilter {
         }
       }
       if (attempt.revisions !== this.revisions()) {
-        if (existsSync32(this.path))
+        if (existsSync33(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
@@ -76665,7 +76675,7 @@ class EmbeddingPrefilter {
       return skip("model_missing");
     if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt))
       return skip("model_invalid");
-    if (!existsSync32(this.path))
+    if (!existsSync33(this.path))
       return skip("weights_missing");
     if (this.saved.revisions !== this.revisions())
       return skip("revisions_changed");
@@ -77357,7 +77367,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync33 } from "node:fs";
+import { existsSync as existsSync34 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
@@ -77581,7 +77591,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync33(path);
+      const hasQueue = existsSync34(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -77934,14 +77944,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync33(bound)) {
+        if (bound && bound !== ":memory:" && existsSync34(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync33(own3))
+      if (existsSync34(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -79228,7 +79238,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config2) => {
-    if (!config2.dbPath || !existsSync34(config2.dbPath))
+    if (!config2.dbPath || !existsSync35(config2.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config2), { ...config2, dbPath: config2.dbPath, readOnly: true }, env);
     try {

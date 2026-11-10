@@ -16111,7 +16111,7 @@ function metadataStringArray(metadata, key) {
 // src/core/people-index.ts
 import { Database } from "bun:sqlite";
 import { createHash as createHash9 } from "node:crypto";
-import { chmodSync as chmodSync9, mkdirSync as mkdirSync16 } from "node:fs";
+import { chmodSync as chmodSync9, existsSync as existsSync17, mkdirSync as mkdirSync16 } from "node:fs";
 import { dirname as dirname30 } from "node:path";
 function peopleIndexMigrations() {
   return [{
@@ -16130,6 +16130,7 @@ function peopleIndexMigrations() {
           is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
           item_count INTEGER NOT NULL,
           person_id TEXT NOT NULL,
+          corpus_ids_json TEXT NOT NULL DEFAULT '[]',
           link_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_people_identities_person ON people_identities(person_id);
@@ -16258,6 +16259,7 @@ function linkPeople(input) {
         isOwner: false,
         itemCount: 0,
         personId: "",
+        corpusIds: [],
         nameKeys: new Set,
         publicNames: new Map,
         conversations: new Set
@@ -16269,6 +16271,8 @@ function linkPeople(input) {
       identity.senderLabel = label;
     identity.isOwner ||= observation.isOwner;
     identity.itemCount += observation.itemCount;
+    if (observation.corpusId && !identity.corpusIds.includes(observation.corpusId))
+      identity.corpusIds.push(observation.corpusId);
     for (const strong of [...strongKeysFromText(observation.senderId), ...strongKeysFromText(label)]) {
       if (!identity.keys.includes(strong))
         identity.keys.push(strong);
@@ -16446,6 +16450,7 @@ function linkPeople(input) {
         isOwner: member.isOwner,
         itemCount: member.itemCount,
         personId,
+        corpusIds: [...member.corpusIds].sort(),
         ...why ? { linkReason: why } : {}
       };
     });
@@ -16467,7 +16472,8 @@ function bestName(members) {
     for (const [name, count] of member.publicNames)
       counts.set(name, (counts.get(name) ?? 0) + count);
   }
-  const named = [...counts].sort(([a, ca], [b, cb]) => cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
+  const handle = (name) => Number(name.startsWith("@"));
+  const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named)
     return named;
   const key = members.flatMap((member) => member.keys).sort()[0];
@@ -16515,8 +16521,8 @@ class LocalPeopleIndex {
   rebuild(observations) {
     const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
     const insertIdentity = this.db.query(`
-      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, link_reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertPerson = this.db.query(`
       INSERT INTO people_persons (person_id, display_name, is_owner, name_shareable, item_count, linked_by_json) VALUES (?, ?, ?, ?, ?, ?)
@@ -16526,7 +16532,7 @@ class LocalPeopleIndex {
       for (const person of people) {
         insertPerson.run(person.personId, person.displayName, Number(person.isOwner), Number(person.nameShareable), person.itemCount, JSON.stringify(person.linkedBy));
         for (const identity of person.identities) {
-          insertIdentity.run(identity.identityKey, identity.provider, identity.senderId ?? null, identity.senderLabel ?? null, JSON.stringify(identity.keys), JSON.stringify(identity.names), Number(identity.isOwner), identity.itemCount, person.personId, identity.linkReason ?? null);
+          insertIdentity.run(identity.identityKey, identity.provider, identity.senderId ?? null, identity.senderLabel ?? null, JSON.stringify(identity.keys), JSON.stringify(identity.names), Number(identity.isOwner), identity.itemCount, person.personId, JSON.stringify(identity.corpusIds), identity.linkReason ?? null);
         }
       }
       this.db.query(`INSERT OR REPLACE INTO people_meta (key, value) VALUES ('rebuilt_at', ?)`).run(this.now().toISOString());
@@ -16620,6 +16626,7 @@ class LocalPeopleIndex {
         }
         insert.run(correction.kind, correction.identityA, correction.identityB, null, at);
       } else if (correction.kind === "split") {
+        this.db.query(`DELETE FROM people_corrections WHERE kind = 'merge' AND (identity_a = ? OR identity_b = ?)`).run(correction.identity, correction.identity);
         insert.run("split", correction.identity, null, null, at);
       } else {
         const name = correction.name.trim().slice(0, 160);
@@ -16652,7 +16659,7 @@ class LocalPeopleIndex {
   loadPeople() {
     const persons = this.db.query(`SELECT person_id, display_name, is_owner, name_shareable, item_count, linked_by_json FROM people_persons`).all();
     const identities = this.db.query(`
-      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, link_reason
+      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason
       FROM people_identities ORDER BY identity_key
     `).all();
     const byPerson = new Map;
@@ -16667,6 +16674,7 @@ class LocalPeopleIndex {
         isOwner: row.is_owner === 1,
         itemCount: row.item_count,
         personId: row.person_id,
+        corpusIds: JSON.parse(row.corpus_ids_json),
         ...row.link_reason ? { linkReason: row.link_reason } : {}
       }]);
     }
@@ -19854,7 +19862,7 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { closeSync as closeSync8, constants as constants7, existsSync as existsSync17, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync18, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { delimiter as delimiter6, dirname as dirname31, isAbsolute as isAbsolute21, join as join37 } from "node:path";
 import { createInterface } from "node:readline";
@@ -20033,7 +20041,7 @@ function helperPath() {
   const here = dirname31(fileURLToPath7(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join37(here, name);
-    if (existsSync17(candidate))
+    if (existsSync18(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -23161,10 +23169,10 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync18 } from "node:fs";
+import { existsSync as existsSync19 } from "node:fs";
 import { dirname as dirname32, join as join40 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync19) {
   let directory = dirname32(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
@@ -23499,7 +23507,7 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync19 } from "node:fs";
+import { existsSync as existsSync20 } from "node:fs";
 import { dirname as dirname33, join as join42 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 
@@ -23601,7 +23609,7 @@ function modelWorkerPath() {
   const here = dirname33(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join42(here, name);
-    if (existsSync19(path))
+    if (existsSync20(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -24466,14 +24474,14 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync20, mkdirSync as mkdirSync17, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync21, mkdirSync as mkdirSync17, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync20(path))
+    if (!existsSync21(path))
       return;
     const parsed = JSON.parse(readFileSync32(path, "utf8"));
     const record2 = asRecord16(parsed);
@@ -24608,6 +24616,7 @@ var init_source_forget_registry = __esm(() => {
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
+  init_people_index();
   init_source_watch();
   init_ingestion_health_state();
   init_source_scope_approval();
@@ -31359,7 +31368,7 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync22, readFileSync as readFileSync34 } from "node:fs";
+import { existsSync as existsSync23, readFileSync as readFileSync34 } from "node:fs";
 import { join as join45 } from "node:path";
 import { homedir as homedir18 } from "node:os";
 init_openclaw_executable();
@@ -31824,7 +31833,7 @@ init_consult_transport_zkapi();
 // src/core/consult-gate.ts
 init_owner_config_read();
 import { createHash as createHash15 } from "node:crypto";
-import { existsSync as existsSync21, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { basename as basename7, dirname as dirname35, join as join43 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
@@ -32069,7 +32078,7 @@ function consultUserVocabularyDir(env = process.env) {
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync21(path))
+    if (!existsSync22(path))
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
@@ -32082,7 +32091,7 @@ function verifiedPackFile(path, sha256) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname35(fileURLToPath10(moduleUrl));
   const root = basename7(here) === "core" && basename7(dirname35(here)) === "src" ? dirname35(dirname35(here)) : basename7(here) === "dist" ? dirname35(here) : undefined;
-  return root !== undefined && existsSync21(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync22(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -32107,7 +32116,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join43(userDir, "manifest.json");
-    if (!existsSync21(path) || statSync19(path).size > 1024 * 1024)
+    if (!existsSync22(path) || statSync19(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync33(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -33543,7 +33552,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync22(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync23(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -33660,7 +33669,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync22(configPath))
+  if (configPath === undefined || !existsSync23(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -34942,7 +34951,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join45(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync23(join45(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -34961,7 +34970,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync23, readFileSync as readFileSync35 } from "node:fs";
+import { existsSync as existsSync24, readFileSync as readFileSync35 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -35017,7 +35026,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync23(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync24(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
