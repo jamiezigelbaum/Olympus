@@ -23,7 +23,8 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?keys | ?connect | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
-//   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth.
+//   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth (a source's
+//                sheet inside Add a source opens that dialog at the source first).
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
 //                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
@@ -1929,7 +1930,7 @@ export function setupPreviewScript(name: string | null, step: string | null): st
   const selected = name ? sheets[name] : undefined;
   if (!selected) return '';
   const index = Math.max(0, Math.min(selected.count - 1, Number(step ?? 1) - 1 || 0));
-  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selected.selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;var walk=steps.closest('[data-setup-walkthrough]');if(walk&&${JSON.stringify(step)}!=='choice'){var begin=sheet.querySelector('[data-setup-begin]');if(begin)begin.click();else walk.hidden=false;}for(var i=0;i<${index}&&!steps.querySelector('[data-setup-error]');i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
+  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selected.selector)});if(!sheet)return;var setup=sheet.closest('[data-source-setup]');if(setup){var dialog=setup.closest('dialog');if(dialog&&!dialog.open)dialog.showModal();var tile=dialog&&dialog.querySelector('[data-source-pick="'+setup.getAttribute('data-source-setup')+'"]');if(tile)tile.click();else setup.hidden=false;}sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;var walk=steps.closest('[data-setup-walkthrough]');if(walk&&${JSON.stringify(step)}!=='choice'){var begin=sheet.querySelector('[data-setup-begin]');if(begin)begin.click();else walk.hidden=false;}for(var i=0;i<${index}&&!steps.querySelector('[data-setup-error]');i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
 }
 
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
