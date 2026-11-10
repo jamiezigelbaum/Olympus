@@ -6100,6 +6100,9 @@ export async function main(): Promise<void> {
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
     ),
+    // Local callers read Private, so only items still waiting for their
+    // judgment (found by words, not yet by meaning) are counted for them.
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
     // Bound late: the consult block below sets askAnonymouslyNow.
@@ -6847,7 +6850,13 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      // An agent outside this computer reads no Private store: an item
+      // waiting for its judgment, and one judged lower whose move out of
+      // Private is still queued, are both out of its reach until then.
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
       ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
