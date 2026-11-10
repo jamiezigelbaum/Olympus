@@ -29092,6 +29092,16 @@ var init_remote_oauth_store = __esm(() => {
 
 // src/core/app-release-capture.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+function privateQuestionKey(ref) {
+  if (!ref || typeof ref !== "object")
+    return;
+  const { id, generation } = ref;
+  if (typeof id !== "string" || !id || id.length > 128)
+    return;
+  if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1)
+    return;
+  return `${id}#${generation}`;
+}
 function createReleaseCapture() {
   return { heldBack: 0 };
 }
@@ -29151,20 +29161,21 @@ function appConnectionOf(caller) {
 function setPrivateAnswerCompletionHook(next) {
   completionHook = next;
 }
-function notePrivateAnswerCompleted(privateQuestionId) {
+function notePrivateAnswerCompleted(ref) {
   try {
-    if (typeof privateQuestionId !== "string" || !privateQuestionId)
+    const key2 = privateQuestionKey(ref);
+    if (!key2)
       return;
-    completedPrivateAnswers.add(privateQuestionId);
+    completedPrivateAnswers.add(key2);
     while (completedPrivateAnswers.size > COMPLETED_MAX)
       completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
-    completionHook?.(privateQuestionId);
+    completionHook?.(key2);
   } catch {}
 }
-function notePrivateQuestion(privateQuestionId) {
+function notePrivateQuestion(ref) {
   const capture = storage.getStore();
-  if (capture && typeof privateQuestionId === "string" && privateQuestionId)
-    capture.privateQuestionId = privateQuestionId;
+  if (capture && ref && privateQuestionKey(ref))
+    capture.privateQuestion = { id: ref.id, generation: ref.generation };
 }
 function setAppReleaseRecorder(next) {
   recorder = next;
@@ -29179,16 +29190,16 @@ function recordAppRequest(input) {
     if (!connection || !question || input.capture.items === undefined)
       return;
     const withheld = input.withheldAfter === true || input.capture.withheld === true;
-    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
+    const privateQuestionKeyOf = privateQuestionKey(input.privateQuestion ?? input.capture.privateQuestion);
     write({
       at: (input.now ?? Date.now)(),
       connection,
       question,
       items: withheld ? [] : input.capture.items,
       heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
-      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
+      answeredPrivately: privateQuestionKeyOf !== undefined && completedPrivateAnswers.has(privateQuestionKeyOf),
       withheld,
-      ...privateQuestionId ? { privateQuestionId } : {}
+      ...privateQuestionKeyOf ? { privateQuestionKey: privateQuestionKeyOf } : {}
     });
   } catch {}
 }
@@ -29235,8 +29246,8 @@ function recordRemoteOperation(input) {
   recordAppRequest({
     caller: input.caller,
     question,
-    capture: input.privateQuestionId ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
-    privateQuestionId: input.privateQuestionId
+    capture: input.privateQuestion ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
+    privateQuestion: input.privateQuestion
   });
 }
 var storage, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
@@ -29536,7 +29547,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         return changed;
       }).immediate();
       if (saved && result.status === "answered")
-        notePrivateAnswerCompleted(ref.id);
+        notePrivateAnswerCompleted(ref);
       return saved;
     },
     retry(ref, reason = "answer_failed") {
@@ -30171,7 +30182,7 @@ function openAppReleaseLog(dbPath, options = {}) {
       const id = `apr_${randomBytes10(12).toString("base64url")}`;
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionId ?? null);
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
         const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         const secret2 = db.query(`SELECT 1 FROM app_release_secret_items
@@ -30234,8 +30245,8 @@ function openAppReleaseLog(dbPath, options = {}) {
     markMadePrivate(requestId, position) {
       db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
     },
-    markAnsweredPrivately(privateQuestionId) {
-      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionId).changes;
+    markAnsweredPrivately(privateQuestionKey2) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey2).changes;
     },
     forgetCorpora(corpusIds, dryRun) {
       if (corpusIds.length === 0)
@@ -143868,7 +143879,7 @@ async function handleRemoteCallTool(request, makeOperationContext) {
     const approved = release();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     const output = privatePart ? release() : approved;
-    recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestionId: privateMayAnswer ? privatePart?.answerId : undefined });
+    recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
     return { content: text3(remoteErrorOutput(error2, { declaredParams })), isError: true };
@@ -205667,7 +205678,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
         if (done && isAnswered(raw))
-          notePrivateQuestion(pending?.match?.waiting?.id);
+          notePrivateQuestion(pending?.match?.waiting);
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {} });
       }
@@ -205765,7 +205776,7 @@ function recordWaiting(ticket, question, detail, options) {
     return;
   try {
     const ref = options.waitingQuestions?.()?.record(ticket, { question, surface: "chatgpt", state: "waiting", detail });
-    notePrivateQuestion(ref?.id);
+    notePrivateQuestion(ref);
     return ref;
   } catch {
     console.warn("[chatgpt] waiting private question not recorded reason=store_unavailable");
@@ -215682,7 +215693,7 @@ async function runSearch(args, options, authorized, context3, signal) {
       caller: context3.caller,
       question,
       capture: note === undefined ? capture : { ...capture, heldBack: Math.max(1, capture.heldBack) },
-      privateQuestionId: note !== undefined ? privateCall?.answerId : undefined,
+      privateQuestion: note !== undefined ? privateCall?.answerRef : undefined,
       withheldAfter
     });
   }
@@ -216984,9 +216995,9 @@ function createAppsReceived(options) {
       console.error(`[olympus:apps-received] record_failed ${error2 instanceof Error ? error2.name : "error"}`);
     }
   });
-  setPrivateAnswerCompletionHook((privateQuestionId) => {
+  setPrivateAnswerCompletionHook((privateQuestionKey2) => {
     try {
-      open7().markAnsweredPrivately(privateQuestionId);
+      open7().markAnsweredPrivately(privateQuestionKey2);
     } catch (error2) {
       console.error(`[olympus:apps-received] mark_failed ${error2 instanceof Error ? error2.name : "error"}`);
     }
@@ -217949,7 +217960,7 @@ class PrivateAnswerJobs {
       this.finish(analysis, "done");
       for (const job of analysis.jobs)
         if (job.waiting)
-          notePrivateAnswerCompleted(job.waiting.id);
+          notePrivateAnswerCompleted(job.waiting);
     } catch (error2) {
       if (!timedOut)
         this.finish(analysis, "failed", error2 instanceof AnalysisStop ? error2.reason : "error");
@@ -218911,7 +218922,7 @@ function createRemotePrivateParts(options) {
       });
       recorded = ref !== undefined;
       if (ref)
-        recordedId?.(ref.id, verdict === "secret_match");
+        recordedId?.({ id: ref.id, generation: ref.generation }, verdict === "secret_match");
     } catch {
       console.warn("[olympus:remote] waiting private question not recorded reason=store_unavailable");
     }
@@ -218921,7 +218932,7 @@ function createRemotePrivateParts(options) {
     const ticket = ticketFor(connectionId);
     const question = typeof args.question === "string" ? args.question.trim() : "";
     const selectors = normalizeWaitingSelectors({});
-    let answerId;
+    let answerRef;
     let secretMatch = false;
     const verdict = (async () => {
       if (closed || signal?.aborted || !ticket || !question || !selectors)
@@ -218934,7 +218945,10 @@ function createRemotePrivateParts(options) {
     });
     return {
       get answerId() {
-        return answerId;
+        return answerRef?.id;
+      },
+      get answerRef() {
+        return answerRef;
       },
       get secretMatch() {
         return secretMatch;
@@ -218948,8 +218962,8 @@ function createRemotePrivateParts(options) {
             return false;
           if (!activeNow(ticket.connectionId))
             return false;
-          return recordVerdict(ticket, question, selectors, found, (id, secret2) => {
-            answerId = id;
+          return recordVerdict(ticket, question, selectors, found, (ref, secret2) => {
+            answerRef = ref;
             secretMatch = secret2;
           });
         } catch {
@@ -219061,11 +219075,14 @@ function createRemotePrivateParts(options) {
             return startSearch(connectionId, args, context3?.signal);
           if (operation === "source_answer") {
             const ticket = ticketFor(connectionId);
-            let answerId;
+            let answerRef;
             let secretMatch = false;
             return {
               get answerId() {
-                return answerId;
+                return answerRef?.id;
+              },
+              get answerRef() {
+                return answerRef;
               },
               get secretMatch() {
                 return secretMatch;
@@ -219073,12 +219090,12 @@ function createRemotePrivateParts(options) {
               async settle(raw, released) {
                 const pending = asRecord21(raw);
                 if (pending?.status === "working" && typeof pending.job_id === "string") {
-                  const settled = settleWhenFinished(context3?.jobs, pending.job_id, args, ticket, context3?.releaseCheck, (id, secret2) => {
-                    answerId = id;
+                  const settled = settleWhenFinished(context3?.jobs, pending.job_id, args, ticket, context3?.releaseCheck, (ref, secret2) => {
+                    answerRef = ref;
                     secretMatch = secret2;
                     const handoff = handoffs.get(`${connectionId}\x00${pending.job_id}`);
                     if (handoff) {
-                      handoff.answerId = id;
+                      handoff.answerRef = ref;
                       handoff.secretMatch = secret2;
                     }
                   });
@@ -219089,8 +219106,8 @@ function createRemotePrivateParts(options) {
                   }
                   return false;
                 }
-                return settleAnswer(raw, released, args, ticket, (id, secret2) => {
-                  answerId = id;
+                return settleAnswer(raw, released, args, ticket, (ref, secret2) => {
+                  answerRef = ref;
                   secretMatch = secret2;
                 });
               }
@@ -219102,7 +219119,10 @@ function createRemotePrivateParts(options) {
               return;
             return {
               get answerId() {
-                return handoffs.get(`${connectionId}\x00${jobId}`)?.answerId;
+                return handoffs.get(`${connectionId}\x00${jobId}`)?.answerRef?.id;
+              },
+              get answerRef() {
+                return handoffs.get(`${connectionId}\x00${jobId}`)?.answerRef;
               },
               get secretMatch() {
                 return handoffs.get(`${connectionId}\x00${jobId}`)?.secretMatch;
@@ -219254,7 +219274,7 @@ async function callTool(request, name, options) {
     const approved = release2();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     const output = privatePart ? release2() : approved;
-    recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestionId: privateMayAnswer ? privatePart?.answerId : undefined });
+    recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {
     return operationErrorResponse(error2, declaredParams);

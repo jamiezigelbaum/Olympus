@@ -1056,7 +1056,7 @@ describe('the list of what AI apps received keeps no name of an item that become
     expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
 
     // A receipt built before the change but written after it keeps no name either.
-    clock.advance(1_000);
+    await clock.advance(1_000);
     log.record(request(clock.now() - 2_000, [KEYS, GARDEN]));
     expect(log.list().flatMap((entry) => entry.items.map((item) => item.title)).filter(Boolean)).toEqual([GARDEN.name, GARDEN.name]);
     expect(rawNames(logPath)).not.toContain(FAKE_AWS_KEY);
@@ -1065,7 +1065,7 @@ describe('the list of what AI apps received keeps no name of an item that become
     fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
     await fx.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }, GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(fx.ledger.itemIsSecret(identityOf('keys'))).toBe(false);
-    clock.advance(1_000);
+    await clock.advance(1_000);
     log.record(request(clock.now(), [KEYS]));
     expect(log.list()[0]!.items.map((item) => item.title)).toEqual([KEYS.name]);
   });

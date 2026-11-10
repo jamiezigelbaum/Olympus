@@ -552,7 +552,7 @@ export function openWaitingPrivateQuestionStore(
         return changed;
       }).immediate();
       // What each AI app received: the request that left this question is now answered privately.
-      if (saved && result.status === 'answered') notePrivateAnswerCompleted(ref.id);
+      if (saved && result.status === 'answered') notePrivateAnswerCompleted(ref);
       return saved;
     },
 

@@ -49,9 +49,29 @@ export interface ReleaseCapture {
   /**
    * The waiting private question this request left on the computer
    * (core/waiting-private-questions.ts), when Private items matched. Only its
-   * completion (notePrivateAnswerCompleted) says the question was answered privately.
+   * completion (notePrivateAnswerCompleted) says the question was answered
+   * privately: the completion of this generation, never an earlier one.
    */
-  privateQuestionId?: string;
+  privateQuestion?: PrivateQuestionRef;
+}
+
+/**
+ * A waiting private question at one generation. Asked again, a question keeps
+ * its id and moves to a new generation, so an answer completes only the
+ * generation it was made for.
+ */
+export interface PrivateQuestionRef {
+  readonly id: string;
+  readonly generation: number;
+}
+
+/** The stored key of a waiting question at one generation; undefined for anything else. */
+export function privateQuestionKey(ref: unknown): string | undefined {
+  if (!ref || typeof ref !== 'object') return undefined;
+  const { id, generation } = ref as { id?: unknown; generation?: unknown };
+  if (typeof id !== 'string' || !id || id.length > 128) return undefined;
+  if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) return undefined;
+  return `${id}#${generation}`;
 }
 
 export interface AppConnection {
@@ -73,8 +93,8 @@ export interface AppRequestRecord {
    */
   answeredPrivately: boolean;
   withheld: boolean;
-  /** The waiting private question whose completion marks the request answered privately. */
-  privateQuestionId?: string;
+  /** The waiting private question, at its generation (privateQuestionKey), whose completion marks the request answered privately. */
+  privateQuestionKey?: string;
 }
 
 const storage = new AsyncLocalStorage<ReleaseCapture>();
@@ -158,7 +178,7 @@ export function appConnectionOf(caller: OperationCaller | undefined): AppConnect
 
 type Recorder = (record: AppRequestRecord) => void;
 let recorder: Recorder | undefined;
-let completionHook: ((privateQuestionId: string) => void) | undefined;
+let completionHook: ((privateQuestionKey: string) => void) | undefined;
 
 // Private answers completed recently, in memory only: a fast answer can finish
 // before its request's result leaves, so the record reads it here.
@@ -166,29 +186,31 @@ const COMPLETED_MAX = 512;
 const completedPrivateAnswers = new Set<string>();
 
 /** The worker installs the store's hook that marks a recorded request answered privately. */
-export function setPrivateAnswerCompletionHook(next: ((privateQuestionId: string) => void) | undefined): void {
+export function setPrivateAnswerCompletionHook(next: ((privateQuestionKey: string) => void) | undefined): void {
   completionHook = next;
 }
 
 /**
  * A waiting private question was answered on this computer (the panel's
- * analysis finished, or the local inbox saved an answer). Never throws.
+ * analysis finished, or the local inbox saved an answer), at the generation
+ * the answer was made for. Never throws.
  */
-export function notePrivateAnswerCompleted(privateQuestionId: unknown): void {
+export function notePrivateAnswerCompleted(ref: PrivateQuestionRef | undefined): void {
   try {
-    if (typeof privateQuestionId !== 'string' || !privateQuestionId) return;
-    completedPrivateAnswers.add(privateQuestionId);
+    const key = privateQuestionKey(ref);
+    if (!key) return;
+    completedPrivateAnswers.add(key);
     while (completedPrivateAnswers.size > COMPLETED_MAX) completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value!);
-    completionHook?.(privateQuestionId);
+    completionHook?.(key);
   } catch {
     // Never changes an answer.
   }
 }
 
-/** Notes, in the current capture, the waiting private question a request left on the computer. */
-export function notePrivateQuestion(privateQuestionId: unknown): void {
+/** Notes, in the current capture, the waiting private question (at its generation) a request left on the computer. */
+export function notePrivateQuestion(ref: PrivateQuestionRef | undefined): void {
   const capture = storage.getStore();
-  if (capture && typeof privateQuestionId === 'string' && privateQuestionId) capture.privateQuestionId = privateQuestionId;
+  if (capture && ref && privateQuestionKey(ref)) capture.privateQuestion = { id: ref.id, generation: ref.generation };
 }
 
 /** The worker installs the store's recorder; undefined removes it (tests, shutdown). */
@@ -204,8 +226,8 @@ export function recordAppRequest(input: {
   caller: OperationCaller | undefined;
   question: string | undefined;
   capture: ReleaseCapture;
-  /** The waiting private question the request left on the computer, if any (else the capture's). */
-  privateQuestionId?: string | undefined;
+  /** The waiting private question (at its generation) the request left on the computer, if any (else the capture's). */
+  privateQuestion?: PrivateQuestionRef | undefined;
   /** The exit replaced the noted result with a withheld one after the builders ran. */
   withheldAfter?: boolean;
   now?: () => number;
@@ -219,7 +241,7 @@ export function recordAppRequest(input: {
     const question = boundedString(input.question, 2_000);
     if (!connection || !question || input.capture.items === undefined) return;
     const withheld = input.withheldAfter === true || input.capture.withheld === true;
-    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
+    const privateQuestionKeyOf = privateQuestionKey(input.privateQuestion ?? input.capture.privateQuestion);
     write({
       at: (input.now ?? Date.now)(),
       connection,
@@ -227,9 +249,10 @@ export function recordAppRequest(input: {
       items: withheld ? [] : input.capture.items,
       heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
       // A Private answer that finished before the result left is already known; a later one marks the row.
-      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
+      // Only this generation's answer: the same question asked again is a new attempt.
+      answeredPrivately: privateQuestionKeyOf !== undefined && completedPrivateAnswers.has(privateQuestionKeyOf),
       withheld,
-      ...(privateQuestionId ? { privateQuestionId } : {}),
+      ...(privateQuestionKeyOf ? { privateQuestionKey: privateQuestionKeyOf } : {}),
     });
   } catch {
     // A log that cannot be written never changes what an app gets.
@@ -289,8 +312,8 @@ export function recordRemoteOperation(input: {
   caller: OperationCaller | undefined;
   output: Record<string, unknown>;
   capture: ReleaseCapture;
-  /** The waiting private question the call left on the computer (core/remote-private-part.ts answerId), if any. */
-  privateQuestionId: string | undefined;
+  /** The waiting private question, at its generation, the call left on the computer (core/remote-private-part.ts answerRef), if any. */
+  privateQuestion: PrivateQuestionRef | undefined;
 }): void {
   const { operation, args, output } = input;
   if (operation !== 'source_answer' && operation !== 'source_answer_result') return;
@@ -299,7 +322,7 @@ export function recordRemoteOperation(input: {
   recordAppRequest({
     caller: input.caller,
     question,
-    capture: input.privateQuestionId ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
-    privateQuestionId: input.privateQuestionId,
+    capture: input.privateQuestion ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
+    privateQuestion: input.privateQuestion,
   });
 }

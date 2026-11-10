@@ -22776,7 +22776,7 @@ function openAppReleaseLog(dbPath, options = {}) {
       const id = `apr_${randomBytes2(12).toString("base64url")}`;
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionId ?? null);
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
         const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         const secret = db.query(`SELECT 1 FROM app_release_secret_items
@@ -22839,8 +22839,8 @@ function openAppReleaseLog(dbPath, options = {}) {
     markMadePrivate(requestId, position) {
       db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
     },
-    markAnsweredPrivately(privateQuestionId) {
-      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionId).changes;
+    markAnsweredPrivately(privateQuestionKey) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey).changes;
     },
     forgetCorpora(corpusIds, dryRun) {
       if (corpusIds.length === 0)

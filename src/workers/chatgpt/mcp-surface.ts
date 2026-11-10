@@ -606,7 +606,7 @@ async function runChatGptTool(
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
         // The waiting question made at the match follows the collected answer's row (what each AI
         // app received), so the row is marked once that private answer completes.
-        if (done && isAnswered(raw)) notePrivateQuestion(pending?.match?.waiting?.id);
+        if (done && isAnswered(raw)) notePrivateQuestion(pending?.match?.waiting);
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {}) });
       }
@@ -741,7 +741,7 @@ function recordWaiting(
   try {
     const ref = options.waitingQuestions?.()?.record(ticket, { question, surface: 'chatgpt', state: 'waiting', detail });
     // The request's row (what each AI app received) follows this question to its answer.
-    notePrivateQuestion(ref?.id);
+    notePrivateQuestion(ref);
     return ref;
   } catch {
     console.warn('[chatgpt] waiting private question not recorded reason=store_unavailable');

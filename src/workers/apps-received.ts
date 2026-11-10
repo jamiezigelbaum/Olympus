@@ -61,9 +61,9 @@ export function createAppsReceived(options: {
       console.error(`[olympus:apps-received] record_failed ${error instanceof Error ? error.name : 'error'}`);
     }
   });
-  setPrivateAnswerCompletionHook((privateQuestionId) => {
+  setPrivateAnswerCompletionHook((privateQuestionKey) => {
     try {
-      open().markAnsweredPrivately(privateQuestionId);
+      open().markAnsweredPrivately(privateQuestionKey);
     } catch (error) {
       console.error(`[olympus:apps-received] mark_failed ${error instanceof Error ? error.name : 'error'}`);
     }

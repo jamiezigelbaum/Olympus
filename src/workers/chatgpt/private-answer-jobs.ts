@@ -1074,7 +1074,7 @@ export class PrivateAnswerJobs {
       };
       this.finish(analysis, 'done');
       // What each AI app received: each request whose question this answers was answered privately.
-      for (const job of analysis.jobs) if (job.waiting) notePrivateAnswerCompleted(job.waiting.id);
+      for (const job of analysis.jobs) if (job.waiting) notePrivateAnswerCompleted(job.waiting);
     } catch (error) {
       if (!timedOut) this.finish(analysis, 'failed', error instanceof AnalysisStop ? error.reason : 'error');
     } finally {

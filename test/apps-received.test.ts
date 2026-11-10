@@ -436,7 +436,7 @@ describe('a Private match is not a Private answer', () => {
       privateMatchProbe: async () => ({ count: 1, evidence: [] }),
       waitingQuestions: () => ({
         ticket: (connectionId: string) => waiting.ticket(connectionId),
-        record: (...args: Parameters<typeof waiting.record>) => { const ref = waiting.record(...args); if (ref) refs.push(ref.id); return ref; },
+        record: (...args: Parameters<typeof waiting.record>) => { const ref = waiting.record(...args); if (ref) refs.push(`${ref.id}#${ref.generation}`); return ref; },
       }),
     } as unknown as ChatGptSurfaceOptions;
     const handedOff = await callChatGptTool('source_answer', { question: 'When is Leo\'s dentist appointment?' }, ctx, options);
@@ -447,7 +447,7 @@ describe('a Private match is not a Private answer', () => {
     await callChatGptTool('source_answer_result', { job_id: jobId }, ctx, options);
     expect(records).toHaveLength(1);
     expect(refs).toHaveLength(1);
-    expect(records[0]!.privateQuestionId).toBe(refs[0]);
+    expect(records[0]!.privateQuestionKey).toBe(refs[0]);
   });
 
   test('the row says answered privately only once its waiting question\'s answer completes', async () => {
@@ -455,17 +455,51 @@ describe('a Private match is not a Private answer', () => {
     const apps = createAppsReceived({ dbPath: join(tempDir(), 'data', 'app-release-log.sqlite'), setItemPrivate: async () => undefined, now: () => clock.now() });
     cleanups.push(() => apps.close());
     const caller = { surface: 'remote' as const, provider: 'openai' as const };
-    const noted = { items: [], heldBack: 1, privateQuestionId: 'wq_leo' };
+    const leo = { id: 'wq_leo', generation: 1 };
+    const noted = { items: [], heldBack: 1, privateQuestion: leo };
     recordAppRequest({ caller, question: 'When is Leo\'s dentist appointment?', capture: noted, now: () => clock.now() });
     const read = async () => ((await apps.handle({ action: 'list' })).body.requests as Array<{ question: string; answeredPrivately: boolean }>);
     expect((await read())[0]).toMatchObject({ answeredPrivately: false });
-    notePrivateAnswerCompleted('wq_other');
+    notePrivateAnswerCompleted({ id: 'wq_other', generation: 1 });
     expect((await read())[0]).toMatchObject({ answeredPrivately: false });
-    notePrivateAnswerCompleted('wq_leo');
+    notePrivateAnswerCompleted(leo);
     expect((await read())[0]).toMatchObject({ answeredPrivately: true });
     // An answer that completed before its request's result left is known when the row is written.
-    recordAppRequest({ caller, question: 'Again?', capture: { items: [], heldBack: 1, privateQuestionId: 'wq_leo' }, now: () => clock.now() });
+    recordAppRequest({ caller, question: 'Again?', capture: { items: [], heldBack: 1, privateQuestion: leo }, now: () => clock.now() });
     expect((await read()).find((row) => row.question === 'Again?')).toMatchObject({ answeredPrivately: true });
+  });
+
+  test('an earlier answer of a waiting question never completes a later ask of the same question', async () => {
+    const clock = createTestClock(Date.parse('2026-11-10T10:00:00Z'));
+    const apps = createAppsReceived({ dbPath: join(tempDir(), 'data', 'app-release-log.sqlite'), setItemPrivate: async () => undefined, now: () => clock.now() });
+    cleanups.push(() => apps.close());
+    const { openWaitingPrivateQuestionStore, WAITING_QUESTION_LIMITS } = await import('../src/core/waiting-private-questions.ts');
+    const waiting = openWaitingPrivateQuestionStore(join(tempDir(), 'data', 'waiting.sqlite'), { now: () => clock.now() });
+    cleanups.push(() => waiting.close());
+    const caller = { surface: 'remote' as const, connectionId: 'conn-a', provider: 'openai' as const };
+    const read = async () => ((await apps.handle({ action: 'list' })).body.requests as Array<{ question: string; answeredPrivately: boolean }>);
+    const row = async (question: string) => (await read()).find((entry) => entry.question === question);
+    const answered = { status: 'answered' as const, answer: 'In the drawer.', citations: [], unanswered: [], leftOut: [], read: [] };
+
+    const first = waiting.record(waiting.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
+    recordAppRequest({ caller, question: 'Where is the lease?', capture: { items: [], heldBack: 1, privateQuestion: first }, now: () => clock.now() });
+    expect(waiting.saveAnswer(first, answered)).toBe(true);
+    expect(await row('Where is the lease?')).toMatchObject({ answeredPrivately: true });
+
+    // Asked again once the answer is too old to hand back: the same waiting
+    // question, a new generation, its answer not yet made.
+    await clock.advance(WAITING_QUESTION_LIMITS.reanswerAfterMs + 60_000);
+    const second = waiting.record(waiting.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
+    expect(second.id).toBe(first.id);
+    expect(second.generation).toBe(first.generation + 1);
+    recordAppRequest({ caller, question: 'Where is the lease now?', capture: { items: [], heldBack: 1, privateQuestion: second }, now: () => clock.now() });
+    expect(await row('Where is the lease now?')).toMatchObject({ answeredPrivately: false });
+    // A late note of the first answer marks nothing new.
+    notePrivateAnswerCompleted(first);
+    expect(await row('Where is the lease now?')).toMatchObject({ answeredPrivately: false });
+    // Its own answer does.
+    expect(waiting.saveAnswer(second, answered)).toBe(true);
+    expect(await row('Where is the lease now?')).toMatchObject({ answeredPrivately: true });
   });
 
   test('a saved local answer completes its waiting question', async () => {
@@ -481,7 +515,7 @@ describe('a Private match is not a Private answer', () => {
     expect(completed).toEqual([]);
     const second = store.record(store.ticket('conn-a'), { question: 'Who signed it?', surface: 'remote', state: 'waiting' })!;
     store.saveAnswer(second, { status: 'answered', answer: 'Alice.', citations: [], unanswered: [], leftOut: [], read: [] });
-    expect(completed).toEqual([second.id]);
+    expect(completed).toEqual([`${second.id}#${second.generation}`]);
   });
 });
 
