@@ -69,10 +69,10 @@ describe('first-run docs', () => {
     const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
     const docs = `${readme}\n${quickstart}`;
 
-    expect(docs).toContain('All seven declared');
-    expect(docs).toContain('sources sync through the canonical connector-store runtime');
-    expect(docs).toContain('v0.4 supports one');
-    expect(docs).toContain('connected account per provider');
+    expect(docs).toContain('Every public source uses the canonical connector-store runtime.');
+    expect(docs).toContain('Every source syncs\nthrough the same connector-store runtime.');
+    expect(docs).toContain('Olympus supports one connected account per provider.');
+    expect(docs).not.toContain('All seven declared');
     expect(docs).not.toContain('Gmail and Google Drive connection is recorded');
     expect(docs).not.toContain('default to `legacy_index`');
     expect(docs).toContain('Sync now');
