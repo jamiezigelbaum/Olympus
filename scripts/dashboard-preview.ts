@@ -1747,10 +1747,11 @@ export function previewMessagingFixture(state: string): Record<string, unknown> 
   if (state === 'telegram-capturing' || state === 'whatsapp-capturing') return { ok: true, state: 'paired' };
   if (['telegram-chats', 'whatsapp-chats', 'telegram-post-pair', 'whatsapp-post-pair'].includes(state)) return {
     ok: true, chats: [
-      { chatScope: 'preview:1', title: 'Alex Example', kind: 'person' },
-      { chatScope: 'preview:2', title: 'Weekend plans', kind: 'group' },
-      { chatScope: 'preview:3', title: 'Book club', kind: 'group' },
-    ], wholeAccount: false, chatScopes: state.endsWith('-post-pair') ? [] : ['preview:1'],
+      { chatScope: 'preview:1', title: 'Alex Example', kind: 'dm', lastMessageAt: '2026-07-07T18:00:00.000Z' },
+      { chatScope: 'preview:2', title: 'Weekend plans', kind: 'group', lastMessageAt: '2026-07-05T09:00:00.000Z' },
+      { chatScope: 'preview:3', title: 'Book club', kind: 'group', lastMessageAt: '2026-06-20T12:00:00.000Z' },
+    ], wholeAccount: false, chatKinds: [], chatScopes: state.endsWith('-post-pair') ? [] : ['preview:1'],
+    ...(state.startsWith('whatsapp-') ? { coverage: 'contacts_and_joined_groups' } : {}),
     ...(state.endsWith('-post-pair') ? { state: 'scope_selection_required' } : {}),
   };
   return undefined;

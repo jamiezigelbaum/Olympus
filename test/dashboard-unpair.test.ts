@@ -288,6 +288,58 @@ describe('bounded dashboard Unpair', () => {
     expect(await secrets.get('whatsapp.personal_local.session_path')).toBeUndefined();
   });
 
+  test.each(['removed', 'offline'] as const)('WhatsApp Unpair logs the linked device out at WhatsApp before deleting the session (#761, %s)', async (outcome) => {
+    const home = fixtureHome();
+    const stateDir = join(home, '.local/share/olympus/whatsapp-live');
+    const sessionDb = touch(join(stateDir, 'session.db'));
+    const registryPath = join(home, 'handles.json');
+    writeConnectedHandleRegistry(registryOf(whatsappHandle()), registryPath);
+    const secrets = memorySecretStore({ 'whatsapp.personal_local.session_path': sessionDb });
+    const unlinkedFrom: string[] = [];
+    const worker = trackWorker(createEmailSourceWorker({
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        registryPath,
+        secretStore: secrets,
+        pairingSessionPathContext: { homeDir: home },
+        unlinkWhatsAppDevice: async (dir) => {
+          // The session must still exist: --unlink signs out with it.
+          expect(existsSync(sessionDb)).toBe(true);
+          unlinkedFrom.push(dir);
+          return outcome;
+        },
+      },
+    }));
+
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', { source_id: 'whatsapp.personal.messages', acknowledge: true }));
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as Record<string, any>;
+    expect(unlinkedFrom).toEqual([stateDir]);
+    expect(body.phone_unlinked).toBe(outcome);
+    expect(body.policy.provider_device_still_linked).toBe(outcome !== 'removed');
+    expect(body.status_message).toContain(outcome === 'removed' ? 'removed from your phone' : 'Settings → Linked devices');
+    expect(existsSync(sessionDb)).toBe(false);
+  });
+
+  test('Telegram Unpair never runs the WhatsApp unlink', async () => {
+    const home = fixtureHome();
+    const sessionPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session'));
+    const registryPath = join(home, 'handles.json');
+    writeConnectedHandleRegistry(registryOf(telegramHandle()), registryPath);
+    let called = false;
+    const worker = trackWorker(createEmailSourceWorker({ sourceDashboard: {
+      sovereigntyEngine: fixtureSovereigntyEngine(), registryPath,
+      secretStore: memorySecretStore({ 'telegram.personal.session_path': sessionPath }),
+      pairingSessionPathContext: { homeDir: home },
+      unlinkWhatsAppDevice: async () => { called = true; return 'removed'; },
+    } }));
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', { source_id: 'telegram.messages', acknowledge: true }));
+    expect(response.status).toBe(200);
+    expect(called).toBe(false);
+    expect((await response.json() as Record<string, any>).policy.provider_device_still_linked).toBe(true);
+  });
+
   test.each([false, true])('removes a folder Telegram account\'s session wherever the data folder is (relocated: %s), and leaves its spool', async (relocated) => {
     const home = fixtureHome();
     const env = { HOME: home, XDG_DATA_HOME: relocated ? fixtureHome() : join(home, '.local/share') };

@@ -3403,8 +3403,18 @@ export async function runDashboardCommand(
     if (result.state !== 'headless') throw new OperationError('email_unreachable', 'Worker did not provide an owner-proven desktop route.');
     desktopUnavailable = true;
   }
-  const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
-  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  // A socket that fails its checks still lets the mint run first, so the
+  // error names the worker that refused, as before; the socket error follows.
+  let socketPath: string | undefined;
+  let socketError: unknown;
+  try { socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {}); } catch (error) { socketError = error; }
+  // Behind the owner socket the link is opened through an SSH forward that
+  // listens on 127.0.0.1 only, so it names that literal origin: a configured
+  // name such as localhost may resolve to another listener on the owner's
+  // computer (#1211). The socket carries the request whatever host it names.
+  const mintBase = socketPath ? new URL(`http://127.0.0.1:${new URL(base).port || '80'}`).origin : base;
+  const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint() });
+  if (socketError !== undefined) throw socketError;
   const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {

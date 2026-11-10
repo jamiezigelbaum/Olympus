@@ -6,6 +6,7 @@ import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { withFileLease } from '../../core/file-lease.ts';
 import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from '../../core/messaging-capture.ts';
 import { readCaptureGrantFile } from '../../core/messaging-capture-grant-file.ts';
+import { formatAllowedChatList, parseAllowedChatList, SOURCE_CHAT_KINDS, type MessagingChatKind } from '../../core/messaging-chat-kinds.ts';
 import { pairMessagingSource, TELEGRAM_API_HASH_SECRET_KEY, TELEGRAM_API_ID_SECRET_KEY, whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { telegramPythonExecutable } from '../../core/messaging-runtime.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -35,9 +36,23 @@ function parseChats(source: MessagingSource, listing: unknown): PairingChat[] {
     if (!raw || typeof raw !== 'object') continue;
     const row = raw as Record<string, unknown>;
     if (typeof row.chat_scope !== 'string' || typeof row.title !== 'string' || typeof row.kind !== 'string') continue;
-    if (validScope(source, row.chat_scope)) chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind });
+    const lastMessageAt = typeof row.last_message_at === 'string' && !Number.isNaN(Date.parse(row.last_message_at)) ? new Date(row.last_message_at).toISOString() : undefined;
+    if (validScope(source, row.chat_scope)) chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind, ...(lastMessageAt ? { lastMessageAt } : {}) });
   }
   return chats;
+}
+
+/** The grant's allowed list as whole account, kinds and exact chat scopes (WhatsApp JIDs spelled as scopes). Throws for a malformed list. */
+function grantChoice(source: MessagingSource, raw: string): { wholeAccount: boolean; chatKinds: MessagingChatKind[]; chatScopes: string[] } {
+  const choice = parseAllowedChatList(source, raw, (value) => validScope(source, source === 'whatsapp' ? `whatsapp.personal:chat:${value}` : value));
+  return { wholeAccount: choice.wholeAccount, chatKinds: choice.chatKinds, chatScopes: choice.chats.map((value) => source === 'whatsapp' ? `whatsapp.personal:chat:${value}` : value) };
+}
+
+/** Kinds the owner chose: strings, known for this source, no repeats. Throws otherwise. */
+function chosenKinds(source: MessagingSource, value: unknown): MessagingChatKind[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((kind) => typeof kind === 'string' && (SOURCE_CHAT_KINDS[source] as readonly string[]).includes(kind))) throw new Error('Invalid chat kinds.');
+  return [...new Set(value as MessagingChatKind[])];
 }
 
 /** Re-pairing may renew credentials, but does not change what capture was approved to read. */
@@ -46,10 +61,7 @@ export function retainApprovedCaptureScope(source: MessagingSource, env: Record<
   const alternate = source === 'telegram' ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
   const raw = env[key]?.trim() || alternate?.trim();
   if (!raw || (alternate && alternate.trim() !== raw)) throw new Error('Invalid capture grant scope.');
-  if (raw !== '*') {
-    const values = raw.split(',').map((value) => value.trim());
-    if (!values.length || values.some((value) => !validScope(source, source === 'whatsapp' ? `whatsapp.personal:chat:${value}` : value))) throw new Error('Invalid capture grant scope.');
-  }
+  grantChoice(source, raw);
   return source === 'telegram'
     ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw }
     : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
@@ -177,12 +189,11 @@ export function createDashboardMessagingService(options: {
             // WhatsApp proves a linked device, not which account it belongs to.
             const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
             if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
-            let selection: { wholeAccount: boolean; chatScopes: readonly string[] };
+            let selection: { wholeAccount: boolean; chatScopes: readonly string[]; chatKinds?: readonly MessagingChatKind[] };
             if (source === 'telegram' && /^telegram:[a-f0-9]{16}$/.test(accountProof)
               && prior.kind === 'valid' && prior.grant.accountProof === accountProof) {
               const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-              const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES!;
-              selection = { wholeAccount: raw === '*', chatScopes: raw === '*' ? [] : raw.split(',') };
+              selection = grantChoice(source, env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES!);
             } else {
               let choices: readonly PairingChat[] = chats;
               if (source === 'whatsapp') {
@@ -195,9 +206,10 @@ export function createDashboardMessagingService(options: {
             }
             // Consent waits outside the grant lock; reject a disconnect or other grant writer.
             if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
+            const chatKinds = [...(selection.chatKinds ?? [])];
             return source === 'telegram'
-              ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes }
-              : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map(scope => scope.slice('whatsapp.personal:chat:'.length)) };
+              ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes, ...(chatKinds.length ? { chatKinds } : {}) }
+              : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map(scope => scope.slice('whatsapp.personal:chat:'.length)), ...(chatKinds.length ? { chatKinds } : {}) };
           },
           runCommand: (request) => runDashboardPairingCommand(request, hooks),
           onWhatsAppQr: (path) => hooks.qr(readQr(path)),
@@ -251,12 +263,10 @@ export function createDashboardMessagingService(options: {
     });
     const chats = parseChats(source, listing);
     const key = source === 'telegram' ? 'OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES' : 'OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS';
-    const rawScope = current.grant.producer.env[key] ?? '';
-    const selected = rawScope === '*' ? [] : rawScope.split(',').filter(Boolean).map((v) => source === 'whatsapp' ? `whatsapp.personal:chat:${v}` : v);
-    if (!rawScope || selected.some((scope) => !validScope(source, scope))) throw new Error('Invalid capture grant scope.');
-    for (const scope of selected) if (!chats.some((chat) => chat.chatScope === scope)) chats.push({ chatScope: scope, title: scope, kind: 'chat' });
+    const choice = grantChoice(source, current.grant.producer.env[key] ?? '');
+    for (const scope of choice.chatScopes) if (!chats.some((chat) => chat.chatScope === scope)) chats.push({ chatScope: scope, title: scope, kind: 'chat' });
     available.set(source, { fingerprint: current.fingerprint, chats });
-    return { ok: true, state: 'paired', chats, wholeAccount: rawScope === '*', chatScopes: selected, ...(source === 'whatsapp' ? { coverage: 'contacts_and_joined_groups' } : {}) };
+    return { ok: true, state: 'paired', chats, ...choice, ...(source === 'whatsapp' ? { coverage: 'contacts_and_joined_groups' } : {}) };
   };
   /**
    * A re-pair that ended without saving leaves the earlier grant suspended
@@ -311,7 +321,7 @@ export function createDashboardMessagingService(options: {
       }
       if (operation === 'scope' && manager.status(source).state === 'scope_selection_required') {
         if (typeof record.wholeAccount !== 'boolean' || !Array.isArray(record.chatScopes) || !record.chatScopes.every(value => typeof value === 'string')) throw new Error('Invalid scope.');
-        return manager.select(source, { wholeAccount: record.wholeAccount, chatScopes: [...new Set(record.chatScopes as string[])] });
+        return manager.select(source, { wholeAccount: record.wholeAccount, chatScopes: [...new Set(record.chatScopes as string[])], chatKinds: chosenKinds(source, record.chatKinds) });
       }
       if (manager.busy(source)) throw new Error('Finish or cancel pairing first.');
       if (operation !== 'chats' && operation !== 'scope') throw new Error('Unknown operation.');
@@ -326,12 +336,13 @@ export function createDashboardMessagingService(options: {
       const whole = record.wholeAccount === true;
       if (!Array.isArray(record.chatScopes) || !record.chatScopes.every((value) => typeof value === 'string')) throw new Error('Invalid scope.');
       const selected = [...new Set(record.chatScopes as string[])];
-      if (whole ? selected.length > 0 : selected.length === 0) throw new Error('Choose all chats or at least one chat.');
+      const kinds = chosenKinds(source, record.chatKinds);
+      if (whole ? selected.length + kinds.length > 0 : selected.length + kinds.length === 0) throw new Error('Choose all chats, a kind, or at least one chat.');
       return await options.withGrantMutation(() => options.withMessagingCapturePaused(source, async () => {
         const current = grantFor(source);
         const snapshot = available.get(source);
         if (!snapshot || snapshot.fingerprint !== current.fingerprint || selected.some((scope) => !snapshot.chats.some((chat) => chat.chatScope === scope))) throw new Error('Chat list changed.');
-        const value = whole ? '*' : selected.map((scope) => source === 'whatsapp' ? scope.slice('whatsapp.personal:chat:'.length) : scope).join(',');
+        const value = formatAllowedChatList(source, { wholeAccount: whole, chatKinds: kinds, chats: selected.map((scope) => source === 'whatsapp' ? scope.slice('whatsapp.personal:chat:'.length) : scope) });
         const env = { ...current.grant.producer.env };
         if (source === 'telegram') {
           env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = value;
