@@ -126026,12 +126026,16 @@ async function writeBackupFile(options) {
       key_check: backupKeyCheck(options.key.key)
     } : {}
   });
+  const entries = exportEntries(options.exportDir);
+  const tooLarge = entries.find((entry) => entry.size > USTAR_MAX_SIZE);
+  if (tooLarge)
+    throw new OperationError("source_index_error", `A file in the export is too large to back up (64 GiB or more): ${tooLarge.rel}`);
   const handle = await openAsync(staging, "wx", 384);
   try {
     await handle.write(header);
     const body = new BodyWriter(handle, header, options.key?.key, nonce);
     const buffer = Buffer.alloc(CHUNK);
-    for (const entry of exportEntries(options.exportDir)) {
+    for (const entry of entries) {
       await body.write(tarHeader(entry.rel, entry.size, entry.type === "dir" ? "5" : "0", entry.mtime));
       if (entry.type === "dir")
         continue;
@@ -126403,7 +126407,7 @@ function restoreOlympusBackup(options) {
     rmSync34(staging, { recursive: true, force: true });
   }
 }
-var BACKUP_FILE_EXTENSION = ".olympusbackup", BACKUP_FORMAT_VERSION = 1, BACKUP_KEEP = 7, MAGIC, KEY_CHECK_LABEL = "olympus-backup-key-check-v1", CHUNK, TAG_BYTES = 16, DIGEST_BYTES = 32, MAX_HEADER_BYTES, BACKUP_NAME, DEFAULT_SCRYPT, MIN_SCRYPT_N = 16384, MAX_SCRYPT_N = 1048576, BACKUP_WRONG_PASSPHRASE = "That passphrase does not open this backup.", BACKUP_CHANGED = "This backup has been changed or damaged since it was made, so nothing was restored.";
+var BACKUP_FILE_EXTENSION = ".olympusbackup", BACKUP_FORMAT_VERSION = 1, BACKUP_KEEP = 7, MAGIC, KEY_CHECK_LABEL = "olympus-backup-key-check-v1", CHUNK, TAG_BYTES = 16, DIGEST_BYTES = 32, MAX_HEADER_BYTES, BACKUP_NAME, DEFAULT_SCRYPT, MIN_SCRYPT_N = 16384, MAX_SCRYPT_N = 1048576, USTAR_MAX_SIZE = 8589934591, BACKUP_WRONG_PASSPHRASE = "That passphrase does not open this backup.", BACKUP_CHANGED = "This backup has been changed or damaged since it was made, so nothing was restored.";
 var init_data_backup = __esm(() => {
   init_operation_error();
   init_atomic_file();
