@@ -314,9 +314,10 @@ describe('data-lifecycle.ts knows no source', () => {
       .filter(ts.isImportDeclaration)
       .map((statement) => (statement.moduleSpecifier as ts.StringLiteral).text)
       .filter((path) => path.startsWith('./workers/'));
-    // Generic modules only: the tier sidecars, the owner's rules and exclusions
-    // files (their paths, for export), the credential broker's records.
+    // Generic modules only: the tier sidecars, the owner's rules, privacy profile
+    // and exclusions files (their paths, for export), the credential broker's records.
     expect(imports.sort()).toEqual([
+      './workers/classification/privacy-profile.ts',
       './workers/classification/tier-ledger-path.ts',
       './workers/classification/tier-rules.ts',
       './workers/credential-broker/connected-handles.ts',
