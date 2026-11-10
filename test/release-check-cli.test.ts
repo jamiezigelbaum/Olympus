@@ -45,4 +45,14 @@ describe('release-check run command arguments', () => {
       expect(usage).toContain('--skip-archive');
     });
   });
+
+  test('the Mac server-mode leg is on unless --skip-server-mode leaves it out, and the usage names the flag', () => {
+    withConfig((base) => {
+      expect(parseCli(base).skipServerMode).toBe(false);
+      expect(parseCli([...base, '--skip-server-mode']).skipServerMode).toBe(true);
+      let usage = '';
+      try { parseCli([]); } catch (error) { usage = (error as Error).message; }
+      expect(usage).toContain('--skip-server-mode');
+    });
+  });
 });
