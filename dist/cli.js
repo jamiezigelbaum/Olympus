@@ -43629,13 +43629,13 @@ class LocalPeopleIndex {
         runSqliteMigrations(this.db, PEOPLE_INDEX_STORE_ID, peopleIndexMigrations());
       }).immediate();
     } catch (error) {
-      this.db.close();
+      closeSqliteStore(this.db);
       throw error;
     }
     this.loadPeople();
   }
   close() {
-    this.db.close();
+    closeSqliteStore(this.db);
   }
   rebuild(observations) {
     const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
@@ -43880,7 +43880,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
     })();
     return keys.length + corrections + cards;
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 1, PEOPLE_INDEX_STORE_ID = "people-index", ADDRESS, PEOPLE_AUTHORED_FAMILIES;

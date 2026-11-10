@@ -7100,6 +7100,16 @@ var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
 
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
+
 // src/core/people-index.ts
 function normalizePhone(value) {
   const trimmed = value.trim();
@@ -9565,16 +9575,6 @@ var init_delphi_scorer = __esm(() => {
   ].join(`
 `);
 });
-
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
-}
 
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {

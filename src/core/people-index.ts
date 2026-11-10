@@ -34,6 +34,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
+import { closeSqliteStore } from './sqlite-store.ts';
 
 /** What one store knows about one sender: the input the index is built from. */
 export interface PeopleSenderObservation {
@@ -658,14 +659,14 @@ export class LocalPeopleIndex {
         runSqliteMigrations(this.db, PEOPLE_INDEX_STORE_ID, peopleIndexMigrations());
       }).immediate();
     } catch (error) {
-      this.db.close();
+      closeSqliteStore(this.db);
       throw error;
     }
     this.loadPeople();
   }
 
   close(): void {
-    this.db.close();
+    closeSqliteStore(this.db);
   }
 
   /** Rebuild the derived people from fresh observations; corrections and cards stay. */
@@ -1013,6 +1014,6 @@ export function forgetPeopleIndexRows(
     })();
     return keys.length + corrections + cards;
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
