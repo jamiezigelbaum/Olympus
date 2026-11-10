@@ -167,18 +167,15 @@ The user-facing page is docs/openclaw-node-setup.md.
   reaches it, and no web page can use it: a browser always sends the page's
   own `Origin`, which the dashboard refuses, and a rebinding host name is not
   a loopback origin. But the design note's "they would still need a ticket or
-  the token" does not hold for local programs: the dashboard's local-only
-  mint (`POST /dashboard/control/session/local`, for Outside help) gives a
-  control session, local grade, to any request that arrives from a loopback
-  peer with a loopback `Origin`, with no secret. Through a tunnel the
-  engine's peer is sshd on loopback, so while a tunnel is up, any program or
-  other account on the computer that can open 127.0.0.1:PORT can unlock the
-  dashboard, as any program on the server already can. This is true of the
-  by-hand `ssh -L` tunnel people already use, not new with this feature; the
-  agent's tunnel narrows the window by closing itself (30 minutes after it
-  starts, once the browser's connections close). Removing it would mean the
-  local mint refusing in remote mode or requiring a secret; that is a
-  separate decision (it changes Outside help on servers).
+  the token" held for the tunnel but not for local programs until #1153: the
+  dashboard's local-only mint (`POST /dashboard/control/session/local`, for
+  Outside help) gave a local-grade control session to any request from a
+  loopback peer with a loopback `Origin`, with no secret. Without the Linux
+  owner socket (so on a Mac, and through a tunnel, whose peer is sshd on
+  loopback) the mint now also needs a live control session in the same
+  browser, which only the owner's launch ticket or the worker token opens.
+  Another program or account that can open 127.0.0.1:PORT, but has neither,
+  gets no session.
 
 - **Who can trigger it.** Only the owner in a direct session (OpenClaw's
   `senderIsOwner` and a direct session key); the tunnel still needs the
