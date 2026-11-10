@@ -719,9 +719,10 @@ MCP clients cap how long one tool call may run, and an answer can take several
 minutes. So over MCP (local `olympus serve` and remote `/mcp` alike) and the
 OpenAPI tool paths, a `source_answer` that is not done by a hand-off threshold
 returns `{"status": "working", "job_id": …}` and keeps running. The threshold
-is 200 seconds for remote agents (`OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`) and 45
-seconds for local `olympus serve` (`OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`,
-under Codex's 60-second default tool timeout); both are capped at 230000.
+is 45 seconds for remote agents (`OLYMPUS_SOURCE_ANSWER_HANDOFF_MS`, under the
+MCP SDK's 60-second default request timeout) and for local `olympus serve`
+(`OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`, under Codex's 60-second default
+tool timeout); both are capped at 230000.
 `source_answer_result` with that `job_id` returns the answer, the same error
 the call would have raised, or `working` again after waiting up to a minute
 (never longer than the threshold). A slow `ask_anonymously` (a Tor route can
