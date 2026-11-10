@@ -6165,6 +6165,8 @@ export async function main(): Promise<void> {
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  // What AI apps received (apps-received.ts); built below, beside the waiting questions.
+  let appsReceived: import('../apps-received.ts').AppsReceived | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
   closeDesktopBridge = () => { desktopBridge?.close(); privateAgentListeners?.close(); };
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
@@ -6337,6 +6339,11 @@ export async function main(): Promise<void> {
                   },
                 }
               : {}),
+            appsReceived: {
+              handle: (body) => (appsReceived
+                ? appsReceived.handle(body)
+                : Promise.resolve({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Olympus is still starting. Try again in a moment.' } } })),
+            },
             // Outside help (consults): the Mac dashboard card's backend, the
             // one caller of the settings writer; bound late like the panel's tools.
             consult: {
@@ -6469,6 +6476,18 @@ export async function main(): Promise<void> {
   // revoking process could not clean up, are dropped on open and on every
   // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  {
+    // Every request an AI app or agent makes, recorded where its result leaves (core/app-release-capture.ts).
+    const { createAppsReceived } = await import('../apps-received.ts');
+    const { appReleaseLogDbPath } = await import('../../core/app-release-log.ts');
+    const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
+    appsReceived = createAppsReceived({
+      dbPath: appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env)),
+      // The per-item override (`olympus tier set <item> private`) on exactly the recorded item:
+      // its locator must still name the same provider, item and conversation, or nothing is written.
+      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem(locator, 'private', expected),
+    });
+  }
   const connectionActive = (connectionId: string): boolean => {
     if (connectionId.startsWith('@local:')) return true;
     const connections = remoteConnections();
