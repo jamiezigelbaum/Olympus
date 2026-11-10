@@ -417,6 +417,7 @@ func runPairOnlyMode(stateDir string, container *sqlstore.Container) error {
 		return errors.New("session_store_failed")
 	}
 	unsupported := make(chan string, 1)
+	useCurrentWAVersion(ctx)
 	client := newWhatsmeowClient(device, &pairingDiagnosticLogger{stateDir: stateDir, unsupported: unsupported})
 	keepHistoryForCapture(client, stateDir)
 	return runPairOnly(ctx, client, container, stateDir, unsupported)
