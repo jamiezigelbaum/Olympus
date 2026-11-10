@@ -144558,12 +144558,16 @@ function secondRoundJudge(local, venice, counts = { asked: 0, released: 0, kept:
     counts.asked += 1;
     try {
       const second = await venice.complete({ ...request });
-      if (completionTier({ text: second.text, modelId: second.modelId }) === "personal") {
+      const tier = completionTier({ text: second.text, modelId: second.modelId });
+      if (tier === "personal") {
         counts.released += 1;
         return { text: second.text, modelId: second.modelId };
       }
-      counts.kept += 1;
-      confirmed?.add(digest4);
+      if (tier === "held") {
+        counts.kept += 1;
+        confirmed?.add(digest4);
+      } else
+        counts.failed += 1;
     } catch (error2) {
       if (error2 instanceof JudgeCloudStopped)
         counts.stopped += 1;

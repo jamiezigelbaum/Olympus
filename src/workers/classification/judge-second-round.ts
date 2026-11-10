@@ -148,12 +148,13 @@ export function secondRoundJudge<T extends SnifferModel>(local: T, venice: Analy
     try {
       // The same one-item question; a cloud model reads the text, never local decoder state.
       const second = await venice.complete({ ...request }) as SnifferModelCompletion;
-      if (completionTier({ text: second.text, modelId: second.modelId }) === 'personal') {
+      const tier = completionTier({ text: second.text, modelId: second.modelId });
+      if (tier === 'personal') {
         counts.released += 1;
         return { text: second.text, modelId: second.modelId };
       }
-      counts.kept += 1;
-      confirmed?.add(digest);
+      // Only Venice's own valid Private verdict is remembered; no verdict leaves it to be asked again.
+      if (tier === 'held') { counts.kept += 1; confirmed?.add(digest); } else counts.failed += 1;
     } catch (error) {
       // A stop keeps the local Private; the sweep re-opens it once the limit is raised or credit added.
       if (error instanceof JudgeCloudStopped) counts.stopped += 1; else counts.failed += 1;

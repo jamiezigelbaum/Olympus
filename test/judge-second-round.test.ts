@@ -163,6 +163,21 @@ test('a cap stop leaves held items for a raised limit to double-check, without p
   expect(f.tier('confirmed')).toBe('secure');
 });
 
+test('only a valid Venice Private verdict is remembered as confirmed (#1136 review)', async () => {
+  const added: string[] = [];
+  const confirmed = { has: (digest: string) => added.includes(digest), add: (digest: string) => { added.push(digest); } };
+  const request = { system: 's', prompt: 'Heldmarker', localOnly: true };
+  for (const text of ['', 'not json at all', '{"verdicts":[]}']) {
+    const counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
+    const reply = await secondRoundJudge(localJudge(/Heldmarker/), { complete: async () => ({ text, modelId: 'synthetic-venice' }) }, counts, confirmed).complete(request);
+    expect(reply.text).toBe(verdict('private'));
+    expect(counts).toMatchObject({ kept: 0, failed: 1 });
+  }
+  expect(added).toEqual([]);
+  await secondRoundJudge(localJudge(/Heldmarker/), veniceJudge([], 'private'), undefined, confirmed).complete(request);
+  expect(added).toHaveLength(1);
+});
+
 test('the sweep waits while the judge already has enough open questions', async () => {
   const f = lane();
   await f.set.sync(fixtureConnector(() => [{ id: 'earlier', name: 'Orchid notes', text: 'Laterheld: patient follow-up.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
