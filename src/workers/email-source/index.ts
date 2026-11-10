@@ -25,7 +25,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
-import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
+import { isRetiredGooglePilotClientId, packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
 import { dropboxPublisherAppKey, googleDesktopClient, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
   createOAuthRelayNonce,
@@ -183,6 +183,7 @@ import {
   DASHBOARD_TOOLS_CALL_PATH,
   dashboardHtmlRoutePage,
   dashboardLegacyRedirect,
+  dashboardConnectorRedirect,
   dashboardOutsideHelpRedirect,
   dashboardReadToken,
   renderComputerHostPage,
@@ -1502,7 +1503,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // A locked reader: names, never an open token (no opener).
             return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url, request)));
           }
-          if (page === 'connector') return html(renderDashboardLocalPage('connector', { url, options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) } }));
+          if (page === 'connector') {
+            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url), 'Cache-Control': 'no-store' } });
+          }
           if (page === 'agents') {
             return html(renderDashboardLocalPage('agents', {
               url,
@@ -7205,6 +7208,11 @@ async function dashboardStoredClientIdIsPublisherOwned(
   clientIdKey: string,
   secretStore: SecretStore,
 ): Promise<boolean> {
+  // The beta.11 Desktop pilot client is Olympus's, never the owner's, however
+  // the id was stored. Its Google project is deleted (#765), so treating it as
+  // the owner's app would offer a reconnect through a client that no longer
+  // exists; as a publisher id, the card reconnects through the current one.
+  if (dashboardGoogleOAuthSource(source) && isRetiredGooglePilotClientId(clientId)) return true;
   const provenance = await secretStore.get(dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey));
   if (provenance === 'publisher') return true;
   if (provenance === 'byo') return false;
