@@ -92,7 +92,19 @@ export function acceptableForms(needle: string): string[] {
   const base = needle.toLowerCase();
   const dates = dateForms(base);
   if (dates.length > 0) return [base, ...dates];
+  // A value the dataset writes with its unit ('3.5 V', '5kg') is the same
+  // value whether the unit is spaced or set solid, as documents and answers
+  // write it both ways. A bare number never takes a unit it was not given.
+  const withUnit = /^(\d[\d.,]*)\s?([a-zµ°%][a-zµ°%/]*)$/.exec(base);
+  if (withUnit) {
+    const [, number, unit] = withUnit as unknown as [string, string, string];
+    return [...new Set(numberForms(number).flatMap((form) => [`${form} ${unit}`, `${form}${unit}`]))];
+  }
   if (!/^[\d.,]+$/.test(base)) return [base];
+  return numberForms(base);
+}
+
+function numberForms(base: string): string[] {
   const swapped = base.replace(/[.,]/g, (mark) => (mark === ',' ? '.' : ','));
   return swapped !== base && numericLocaleSwapIsSafe(base, swapped) ? [base, swapped] : [base];
 }
