@@ -1,4 +1,5 @@
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
+import { dashboardModelsOnComputer } from '../dashboard/models-on-computer.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
@@ -443,7 +444,7 @@ export interface EmailSourceWorkerOptions {
   updateAvailable?: () => UpdateAvailable | undefined;
   platform?: string;
   /** Local Linux notices, outside the frozen ChatGPT panel bundle. */
-  localModelReadiness?: () => readonly { name: string; state: string; detail: string; downloadBytes: number }[];
+  localModelReadiness?: () => readonly import('../../core/linux-model-readiness.ts').LocalModelReadiness[];
   connector?: EmailSourceConnector;
   sourceAnswer?: SourceIndexAnswerHandler;
   sourceAnswerReleaseCheck?: ReleaseCheck;
@@ -1549,7 +1550,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               panelHtml: dashboardResourceHtml(),
               updateAvailable: options.updateAvailable?.(),
               platform: options.platform ?? process.platform,
-              ...(options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {}),
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
               ...(controlSessionCsrfToken && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local' ? { localSession: true } : {}),
@@ -1602,7 +1602,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
                 ...(settingsProposal ? { settingsProposal: { current: settingsProposal.current(), lastApplied: settingsProposal.lastApplied() } } : {}),
                 settings: {
-                  ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
+                  models: dashboardModelsOnComputer({
+                    config: sourceDashboard?.sovereigntyEngine.config,
+                    // The built-in model answers for the route's local member exactly when the local picker lists built-in sizes.
+                    builtInAnswers: (await sourceDashboard?.modelChoices?.status().catch(() => undefined))?.local?.current.startsWith('builtin:') === true,
+                    ...(options.localModelReadiness ? { readiness: options.localModelReadiness() } : {}),
+                  }),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
                 },
               },

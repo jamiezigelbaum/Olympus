@@ -152,12 +152,14 @@ import {
 } from '../../core/source-index/corpus.ts';
 import { FileLeaseBusyError, withFileLease } from '../../core/file-lease.ts';
 import {
+  awaitStartingQueryEmbedding,
   cosineSimilarity,
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  type QueryEmbeddingWaitTimers,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -13588,6 +13590,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   filters?: ConnectorStoreSearchFilters;
   /** Optional declared projection applied only to final eligible hits. */
   resultProjector?: ConnectorStoreResultProjector;
+  /** Time seams for waiting on a starting embedding model; tests pass a test clock. */
+  timers?: QueryEmbeddingWaitTimers;
 }
 
 // Membrane-safe routed search: hits carry identity + provenance with a
@@ -13851,6 +13855,19 @@ export function createConnectorStoreCorpusAdapter(
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
+  // A local model that is still starting gets the router's preparation budget
+  // to finish before the vector lane runs (#1172). Only when this adapter will
+  // run the vector lane for the request, and without reading the store: the
+  // router asks only after hybridAvailability said the lane is servable. Only
+  // a local provider can report a starting model; a cloud one is never waited
+  // for, so a stalled remote call cannot hold every lane for the budget.
+  if (
+    embeddingProvider
+    && embeddingProvider.backend === 'local'
+    && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+  ) {
+    expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
+  }
   return expanded;
 }
 

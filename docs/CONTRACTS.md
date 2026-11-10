@@ -1016,3 +1016,15 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   answer's unanswered notes AND read into the Analyst prompt, so a corpus-wide
   count placed there would hedge every answer whose corpus holds one unread
   document. No frozen interface changed shape.
+- 2026-11-10 (no version change, #1172): a semantic lane that should have run
+  for a question and did not (`semantic_lane_skipped`: the query embedding
+  failed, timed out or came back unusable, or the vectors could not be read)
+  now adds one `coverage.extractionGaps` entry per corpus, naming the corpus
+  and the lane's reason token. It belongs there, unlike corpus readability:
+  it is a per-question loss of meaning-based matches, and an answer built
+  without it looks complete when it is not. A corpus with no vectors yet
+  (`semantic_lane_unservable`) or one answered by keyword by design
+  (`semantic_lane_not_run`) adds nothing. Before that, the router gives a
+  local embedding model that is still starting a bounded wait (15 s, within
+  the 45 s source-answer hand-off) so the first question after idle keeps its
+  vector lane. No frozen interface changed shape.

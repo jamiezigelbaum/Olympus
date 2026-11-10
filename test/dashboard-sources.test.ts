@@ -31,7 +31,8 @@ describe('Sources page', () => {
     expect(gmail.querySelector('svg path')).not.toBeNull();
     expect(gmail.textContent).toContain('12,408 items · updated 2 min ago');
     const menu = [...gmail.querySelectorAll('.menuitem')].map((item) => item.textContent?.trim());
-    expect(menu).toEqual(['Sync now', 'Disconnect Gmail']);
+    // Details opens the row on Home (#1085): its See why, Import an archive and Details for support.
+    expect(menu).toEqual(['Details', 'Sync now', 'Disconnect Gmail']);
     expect(gmail.querySelector('form[data-source-action="sync_now"] input[name="source"]')!.getAttribute('value')).toBe('gmail');
     // Olympus deletes data only once a source is disconnected, so a connected row never offers it.
     expect(doc.querySelector('dialog#delete-gmail-email')).toBeNull();
@@ -103,7 +104,8 @@ describe('Sources page', () => {
   test('locked, the actions are disabled', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), {} as Parameters<typeof renderDashboardConnectPage>[1]);
-    expect([...doc.querySelectorAll('.menuitem')].every((item) => item.hasAttribute('disabled'))).toBe(true);
+    // Details is a link to Home, which works locked; every action is disabled.
+    expect([...doc.querySelectorAll('button.menuitem')].every((item) => item.hasAttribute('disabled'))).toBe(true);
   });
 
   test('logos fall back to a glyph or a letter, never an empty tile', () => {
