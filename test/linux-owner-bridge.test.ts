@@ -370,16 +370,21 @@ test('Linux dashboard cookie and CSRF survive worker auth-wrapper reload behind 
   f.options.fetchSocket = async r => handler(r, { requestIP: () => null });
   const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => {
     const r = await handler(new Request(f.bridge.entryOrigin + '/dashboard/control/session', { method: 'POST', headers: { Host: new URL(f.bridge.entryOrigin).host, Origin: f.bridge.entryOrigin, Authorization: 'Bearer fixture-bearer' } }), { requestIP: () => null });
-    expect(r.status).toBe(200); return r.headers.getSetCookie();
+    expect(r.status).toBe(200);
+    return { cookies: r.headers.getSetCookie(), unlockKey: (await r.json() as { unlock_key: string }).unlock_key };
   } });
   cleanup.push(() => bridge.close());
   const request = (path: string, init: RequestInit = {}) => new Request(bridge.origin + path, { ...init, headers: { Host: new URL(bridge.origin).host, ...Object.fromEntries(new Headers(init.headers)) } });
   await bridge.openTicket('/dashboard');
   const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
   const proved = await bridge.handle(request('/owner-proof', { method: 'POST', headers: { Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) }));
-  const proof = (await proved.json() as { proof: string }).proof;
+  const { proof, unlock } = await proved.json() as { proof: string; unlock: string };
   const cookies = proved.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
-  const headers = { Cookie: cookies, 'X-Olympus-Owner-Proof': proof };
+  // The engine's cookie alone renders the content-free shell (#1187); the
+  // unlock key the bridge handed this origin's storage renders the page.
+  expect(unlock).toBeTruthy();
+  expect(await (await bridge.handle(request('/dashboard', { headers: { Cookie: cookies, 'X-Olympus-Owner-Proof': proof } }))).json()).toEqual({ csrf: null });
+  const headers = { Cookie: cookies, 'X-Olympus-Owner-Proof': proof, 'X-Olympus-Dashboard-Unlock': unlock };
   const before = await bridge.handle(request('/dashboard', { headers }));
   const csrf = (await before.json() as { csrf: string }).csrf; expect(csrf).toBeTruthy();
   handler = worker();

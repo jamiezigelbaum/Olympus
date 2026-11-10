@@ -18,9 +18,11 @@ import {
   type EmailSourceHealth,
 } from '../src/workers/email-source/index.ts';
 import { resolveEmailSourceBindHostFromEnv } from '../src/workers/email-source/server.ts';
+import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
@@ -375,13 +377,22 @@ describe('worker HTTP bind and auth', () => {
       headers: { Authorization: 'Bearer worker-secret', Origin: origin },
     }));
     const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
-    const csrfToken = (await mint.json() as { csrf_token: string }).csrf_token;
+    const minted = await mint.json() as { csrf_token: string; unlock_key: string };
+    const csrfToken = minted.csrf_token;
 
+    // The cookie alone gets the content-free shell, never the page (#1187).
     const navigated = await fetch(new Request(`${origin}/dashboard`, { headers: { Cookie: cookie } }));
     expect(navigated.status).toBe(200);
-    expect(navigated.headers.get('Content-Type')).toContain('text/html');
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(csrfToken);
+    expect(seen[0]?.headers.get(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)).toBe('1');
+    expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBeNull();
+    // With this browser's stored key, the page itself.
+    const unlocked = await fetch(new Request(`${origin}/dashboard`, { headers: { Cookie: cookie, [DASHBOARD_UNLOCK_HEADER]: minted.unlock_key } }));
+    expect(unlocked.status).toBe(200);
+    expect(unlocked.headers.get('Content-Type')).toContain('text/html');
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(csrfToken);
+    expect(seen[1]?.headers.get(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)).toBeNull();
 
     // No cookie is still no dashboard.
     expect((await fetch(new Request(`${origin}/dashboard`))).status).toBe(401);
@@ -411,7 +422,55 @@ describe('worker HTTP bind and auth', () => {
       headers: { Cookie: cookie, 'X-Olympus-CSRF': csrfToken },
     }))).status).toBe(403);
 
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(2);
+  });
+
+  // #1187: browsers send the cookie to every port on the host, so a server on
+  // another loopback port can be handed it. The cookie alone, or with a key
+  // for another origin, never reaches the page; nor can a request forge the
+  // internal shell or CSRF context.
+  test('the dashboard page needs the unlock key kept for its own origin, not just the cookie', async () => {
+    const origin = 'http://127.0.0.1:17777';
+    const other = 'http://127.0.0.1:18888';
+    const seen: Request[] = [];
+    const fetch = withWorkerBearerAuth(async (request) => {
+      seen.push(request);
+      return new Response('<!doctype html>', { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }, { authToken: 'worker-secret' });
+    const mintAt = async (at: string) => {
+      const response = await fetch(new Request(`${at}/dashboard/control/session`, { method: 'POST', headers: { Authorization: 'Bearer worker-secret', Origin: at } }));
+      return { cookie: response.headers.get('Set-Cookie')!.split(';')[0]!, ...(await response.json() as { csrf_token: string; unlock_key: string }) };
+    };
+    const here = await mintAt(origin);
+    const there = await mintAt(other);
+    expect(here.unlock_key).not.toBe(there.unlock_key);
+    expect(here.unlock_key).not.toBe(here.csrf_token);
+    const navigate = (headers: Record<string, string>) => fetch(new Request(`${origin}/dashboard?settings`, { headers: { Cookie: here.cookie, ...headers } }));
+    const shell = (request: Request | undefined) => request?.headers.get(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER) === '1' && !request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+    for (const headers of [
+      {},
+      { [DASHBOARD_UNLOCK_HEADER]: there.unlock_key },
+      { [DASHBOARD_UNLOCK_HEADER]: here.csrf_token },
+      { 'X-Olympus-CSRF': here.csrf_token },
+      { [DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER]: here.csrf_token },
+    ]) {
+      seen.splice(0);
+      expect((await navigate(headers)).status).toBe(200);
+      expect(seen).toHaveLength(1);
+      expect(shell(seen[0])).toBe(true);
+    }
+    // A forged shell context on the right key is stripped: the page renders.
+    seen.splice(0);
+    await navigate({ [DASHBOARD_UNLOCK_HEADER]: here.unlock_key, [DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER]: '1' });
+    expect(seen[0]?.headers.get(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)).toBeNull();
+    expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(here.csrf_token);
+    // Another session at the same origin (the opening link's) carries the same key, so nothing new is stored.
+    const ticket = await fetch(new Request(`${origin}/dashboard/control/launch`, { method: 'POST', headers: { Authorization: 'Bearer worker-secret', Origin: origin } }));
+    const redeemed = await fetch(new Request(`${origin}/dashboard/control/launch/redeem`, {
+      method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: (await ticket.json() as { ticket: string }).ticket }),
+    }));
+    expect((await redeemed.json() as { unlock_key: string }).unlock_key).toBe(here.unlock_key);
   });
 
   test('control-session mint refuses missing bearer and cross-origin requests', async () => {

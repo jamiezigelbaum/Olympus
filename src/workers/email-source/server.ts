@@ -7678,8 +7678,9 @@ export async function main(): Promise<void> {
           if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
           return null;
         }
-        await response.body?.cancel();
-        return response.headers.getSetCookie();
+        // The cookies, and the unlock key the browser's storage keeps (#1187).
+        const body = (await response.json().catch(() => undefined) ?? {}) as { unlock_key?: unknown };
+        return { cookies: response.headers.getSetCookie(), ...(typeof body.unlock_key === 'string' ? { unlockKey: body.unlock_key } : {}) };
       },
     });
     desktopPoll = setInterval(() => { void probeDesktop(); }, 2_000); desktopPoll.unref();

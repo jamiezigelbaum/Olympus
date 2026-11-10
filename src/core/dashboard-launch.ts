@@ -55,6 +55,30 @@ export const DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120;
 /** `POST /dashboard/control/launch?purpose=remote` mints a remote ticket. */
 export const DASHBOARD_LAUNCH_REMOTE_PURPOSE = 'remote';
 
+/**
+ * Where the owner's browser keeps this engine's dashboard unlock key, so a
+ * later plain navigation to `/dashboard` can prove it (#1187, owner decision
+ * 2026-11-10: per-port browser storage).
+ *
+ * Browsers share cookies across every port of a host (RFC 6265 §8.5), so a
+ * server on another loopback port can be handed the dashboard cookie. Browser
+ * storage is kept per origin, port included, so only a page this engine served
+ * can read this value. The cookie alone renders the content-free shell below;
+ * the shell reads this value and fetches the real page with it.
+ *
+ * The key is one per engine origin (workers/http.ts, dashboardUnlockKey), so
+ * it stays the same when this browser's session is renewed or upgraded to a
+ * local one. It is handed out only with a control session (the opening link,
+ * a worker token, the desktop bridge) and proves nothing without that
+ * session's cookie. Only this one value is kept, never the worker bearer,
+ * a CSRF token or a read token.
+ */
+export const DASHBOARD_UNLOCK_STORAGE_KEY = 'olympus-dashboard-unlock-v1';
+/** The header a fetch of a dashboard page carries the stored key in. */
+export const DASHBOARD_UNLOCK_HEADER = 'X-Olympus-Dashboard-Unlock';
+/** Marks the shell's response, so its own fetch never writes a shell into a shell. */
+export const DASHBOARD_UNLOCK_SHELL_HEADER = 'X-Olympus-Dashboard-Shell';
+
 export interface DashboardLaunchTicketStoreOptions {
   now?: () => number;
   maxTickets?: number;
@@ -246,6 +270,15 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
+          if (!response.ok) return response;
+          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
+          return response.json().then(function (body) {
+            try {
+              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
+            } catch (e) {}
+            return response;
+          }, function () { return response; });
+        }).then(function (response) {
           // A link already used or expired (a reload, a second open) still
           // lands on the dashboard: the session it opened is in its cookie,
           // and without one the dashboard itself offers the way back in.
@@ -291,5 +324,97 @@ export function dashboardLaunchPageHeaders(): Record<string, string> {
     'Referrer-Policy': 'no-referrer',
     'X-Frame-Options': 'DENY',
     'Content-Security-Policy': `default-src 'none'; script-src 'sha256-${scriptHash}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+  };
+}
+
+
+/**
+ * The page a navigation to `/dashboard` gets with the cookie alone: no install
+ * fact, no token, no data. Its script reads this origin's stored unlock key,
+ * fetches the same address with it, and writes the answer into this window, so
+ * the address, the fragment and the back button stay as they were. Without a
+ * stored token (another port, another browser, a cleared one) it says how to
+ * open Olympus again.
+ */
+export const DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      code { color: #e8e6e3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail"></p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
+        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
+        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
+        var status = document.getElementById('status');
+        var detail = document.getElementById('detail');
+        function locked() {
+          try { window.localStorage.removeItem(KEY); } catch (e) {}
+          status.textContent = 'Dashboard controls are locked';
+          detail.textContent = 'Run ';
+          var command = document.createElement('code');
+          command.textContent = 'olympus dashboard';
+          detail.appendChild(command);
+          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
+        }
+        function failed() {
+          status.textContent = 'Opening failed.';
+          detail.textContent = 'Reload this page to try again.';
+        }
+        var key = '';
+        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
+        if (!key) { locked(); return; }
+        var headers = {};
+        headers[HEADER] = key;
+        fetch(window.location.href, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: headers
+        }).then(function (response) {
+          // A page that moved: go there, and its own navigation proves itself the same way.
+          if (response.redirected) { window.location.replace(response.url); return; }
+          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
+          var type = response.headers.get('Content-Type') || '';
+          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
+          return response.text().then(function (html) {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        }).catch(failed);
+      }());
+    </script>
+  </body>
+</html>
+`;
+
+/**
+ * The shell's response headers. Its policy is the policy of the page it will
+ * write into this window (the document keeps the shell's policy), so the
+ * caller passes that page's own.
+ */
+export function dashboardUnlockShellHeaders(contentSecurityPolicy: string): Record<string, string> {
+  return {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': contentSecurityPolicy,
+    [DASHBOARD_UNLOCK_SHELL_HEADER]: '1',
   };
 }

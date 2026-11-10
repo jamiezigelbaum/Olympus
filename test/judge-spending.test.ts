@@ -1,5 +1,6 @@
+import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import { runTierClassifier } from '../src/workers/classification/tier-cli.ts';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { approveClassifier, readClassificationLedger, isClassifierApproved, revokeClassifier } from '../src/workers/classification-ledger.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
@@ -482,7 +483,7 @@ test('the Keys page renders through the real setup object and shows the upgrade 
   const origin = 'http://127.0.0.1:17777';
   const cookie = (await ownerLocalMint(fetcher, origin, 'synthetic-bearer')).headers.get('Set-Cookie')!.split(';')[0]!;
   const keys = async () => {
-    const page = new Request(origin + '/dashboard?keys', { headers: { Cookie: cookie } });
+    const page = new Request(origin + '/dashboard?keys', { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, origin, 'synthetic-bearer'), Cookie: cookie } });
     recordRequestPeer(page, '127.0.0.1');
     const reply = await fetcher(page);
     expect(reply.status).toBe(200);

@@ -75,7 +75,7 @@ independent Critical review. That review found three older gaps of the same
 kind, which join the Owner controls lane as Critical work: connection approval
 that trusts loopback alone (#1186), a forwarded Linux owner socket (#1188,
 fixed in #1196) and a dashboard cookie not confined to the engine's origin
-(#1187).
+(#1187, fixed with a per-port unlock key: owner decision 2026-11-10).
 
 Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
 
