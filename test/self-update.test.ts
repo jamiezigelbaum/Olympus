@@ -24,6 +24,7 @@ import {
 } from '../src/workers/http.ts';
 import { checkSite, loadSigningKey, publicKeyPem, signInstaller } from '../scripts/sign-release-manifest.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 
 const dirs: string[] = [];
 afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true }); });
@@ -299,9 +300,8 @@ describe('Update now is this computer\'s own: never the bearer, a launch link or
 
   test('this computer\'s unlocked dashboard starts it and reads its progress', async () => {
     const f = fixture();
-    const mint = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(mint, '127.0.0.1');
-    const minted = await f.fetch(mint);
+    // Minted as the owner's browser does it: from the control session its launch opened (#1153).
+    const minted = await ownerLocalMint(f.fetch, ORIGIN, TOKEN);
     expect(minted.status).toBe(200);
     const session = { Cookie: cookieOf(minted), 'X-Olympus-CSRF': ((await minted.json()) as { csrf_token: string }).csrf_token };
     const started = await f.fetch(post(DASHBOARD_SELF_UPDATE_PATHS.start, session));
