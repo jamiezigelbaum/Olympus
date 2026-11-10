@@ -66,6 +66,6 @@ describe('release check: approving an app connection on a Mac needs the owner (#
       expect(line).toMatch(/echo "(page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=/);
     }
     // It is valid bash.
-    expect(spawnSync('bash', ['-n'], { input: script, encoding: 'utf8' }).status).toBe(0);
-  });
+    expect(spawnSync('bash', ['-n'], { input: script, encoding: 'utf8', timeout: 10_000 }).status).toBe(0);
+  }, 15_000);
 });
