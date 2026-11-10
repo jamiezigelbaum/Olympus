@@ -13,13 +13,14 @@ import { BACKUP_KEY_INVALID, applyPendingRestoreAtBoot, backupDue, createBackupS
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
-import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { renderDashboardSettingsPage } from '../src/workers/dashboard/pages/local.ts';
 import { DASHBOARD_BACKUP_PATHS } from '../src/workers/dashboard/backup-paths.ts';
 import { handleDashboardBackupRoute } from '../src/workers/dashboard/backup-routes.ts';
 import { scopePathOfRealPath } from '../src/workers/local-files/locations.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { createTestClock } from './helpers/test-clock.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const run of cleanup.splice(0)) run(); });
@@ -196,9 +197,10 @@ describe('backup routes', () => {
     return { fetch: withWorkerBearerAuth(instance.fetch, { authToken: 'test-worker-token' }), calls };
   }
   async function mint(fetch: ReturnType<typeof worker>['fetch'], local: boolean) {
-    const request = new Request(origin + (local ? DASHBOARD_LOCAL_CONTROL_SESSION_PATH : '/dashboard/control/session'), { method: 'POST', headers: { Origin: origin, ...(local ? {} : { Authorization: 'Bearer test-worker-token' }) } });
+    // The local session is minted as the owner's browser does it: from the control session its launch opened (#1153).
+    const request = new Request(origin + '/dashboard/control/session', { method: 'POST', headers: { Origin: origin, Authorization: 'Bearer test-worker-token' } });
     recordRequestPeer(request, '127.0.0.1');
-    const response = await fetch(request);
+    const response = local ? await ownerLocalMint(fetch, origin, 'test-worker-token') : await fetch(request);
     expect(response.status).toBe(200);
     return { Cookie: response.headers.get('Set-Cookie')!.split(';')[0]!, Origin: origin, 'X-Olympus-CSRF': (await response.json() as { csrf_token: string }).csrf_token };
   }
