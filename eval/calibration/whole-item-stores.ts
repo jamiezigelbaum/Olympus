@@ -298,6 +298,20 @@ export function groupsOf(area: string, row: Row): string[] {
   if (conversation) groups.push(`conversation:${area}:${conversation}`);
   const locator = text(row['locator_uri']);
   if (locator?.startsWith('/')) groups.push(`folder:${area}:${dirname(locator)}`);
+  // Sources such as Drive keep folder ancestry here instead of in a path. Items with the
+  // same ancestry list sit in the same folder, so the whole list is the folder's identity.
+  const keysJson = text(row['source_scope_folder_keys_json']);
+  if (keysJson) {
+    try {
+      const keys = JSON.parse(keysJson) as unknown;
+      if (Array.isArray(keys)) {
+        const ancestry = keys.filter((key): key is string => typeof key === 'string' && key.length > 0);
+        if (ancestry.length > 0) groups.push(`folderkeys:${area}:${JSON.stringify(ancestry)}`);
+      }
+    } catch {
+      // An unreadable key list adds no group.
+    }
+  }
   const sender = text(row['sender_id']) ?? text(row['sender_label']);
   if (sender && String(row['mime_type'] ?? '') === 'message/rfc822') groups.push(`sender:${area}:${sender.toLowerCase()}`);
   return groups;

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scoredTier, type CalibrationLabels, type CalibrationSample } from '../eval/calibration/files.ts';
 import { readJudgeFile, scoreWhole } from '../eval/calibration/score-whole.ts';
-import { areaOf, buildPopulation, buildWholeItems, installEnv, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
+import { areaOf, buildPopulation, buildWholeItems, groupsOf, installEnv, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
 import {
   allocate,
   cellKey,
@@ -384,4 +384,15 @@ describe('whole items from store copies', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+test('Drive-style items with the same stored folder ancestry share a group, other folders do not', () => {
+  const keys = (list: string[]) => ({ locator_uri: 'https://drive.google.com/file/d/x', source_scope_folder_keys_json: JSON.stringify(list) });
+  const a = groupsOf('google.drive', keys(['root', 'f1']));
+  const b = groupsOf('google.drive', keys(['root', 'f1']));
+  const c = groupsOf('google.drive', keys(['root', 'f2']));
+  expect(a.length).toBe(1);
+  expect(a).toEqual(b);
+  expect(a).not.toEqual(c);
+  expect(groupsOf('google.drive', { source_scope_folder_keys_json: 'not json' })).toEqual([]);
 });
