@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { sourceSupportDetails, systemSupportReport } from '../src/workers/dashboard/source-failure.ts';
 import { renderDashboardHelpPage } from '../src/workers/dashboard/pages/local.ts';
 
@@ -34,7 +35,7 @@ test('the Help route is reachable, and only locally opened controls get a system
   const { join } = await import('node:path');
   const { createSovereigntyEngine, loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
   const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
-  const { withWorkerBearerAuth, DASHBOARD_LOCAL_CONTROL_SESSION_PATH } = await import('../src/workers/http.ts');
+  const { withWorkerBearerAuth } = await import('../src/workers/http.ts');
   const { recordRequestPeer } = await import('../src/core/request-peer.ts');
   const dir = mkdtempSync(join(tmpdir(), 'support-report-'));
   let reads = 0;
@@ -52,9 +53,7 @@ test('the Help route is reachable, and only locally opened controls get a system
     expect(locked.status).toBe(200);
     expect(await locked.text()).not.toContain('id="system-report"');
     expect(reads).toBe(0);
-    const mint = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
-    recordRequestPeer(mint, '127.0.0.1');
-    const session = await fetch(mint);
+    const session = await ownerLocalMint(fetch, origin, 'worker-secret');
     const request = new Request(origin + '/dashboard?help', { headers: { Cookie: session.headers.get('set-cookie')!.split(';')[0]! } });
     recordRequestPeer(request, '127.0.0.1');
     const response = await fetch(request);

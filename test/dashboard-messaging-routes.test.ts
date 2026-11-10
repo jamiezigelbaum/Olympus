@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from 'bun:test';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const origin = 'http://127.0.0.1:28190';
 const closers: Array<() => void> = [];
@@ -25,9 +26,9 @@ function fixture() {
 }
 
 async function mint(fetch: ReturnType<typeof fixture>, local: boolean) {
-  const request = new Request(origin + (local ? DASHBOARD_LOCAL_CONTROL_SESSION_PATH : '/dashboard/control/session'), { method: 'POST', headers: { Origin: origin, ...(local ? {} : { Authorization: 'Bearer test-worker-token' }) } });
+  const request = new Request(origin + '/dashboard/control/session', { method: 'POST', headers: { Origin: origin, Authorization: 'Bearer test-worker-token' } });
   recordRequestPeer(request, '127.0.0.1');
-  const response = await fetch(request);
+  const response = local ? await ownerLocalMint(fetch, origin, 'test-worker-token') : await fetch(request);
   expect(response.status).toBe(200);
   return { Cookie: response.headers.get('Set-Cookie')!.split(';')[0]!, Origin: origin, 'X-Olympus-CSRF': (await response.json() as { csrf_token: string }).csrf_token };
 }

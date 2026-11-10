@@ -160,11 +160,11 @@ class FakeMachine implements ArchiveHost {
         return super.probe(frame, call);
       }
       override async go(path?: string): Promise<void> {
-        if (world.goFails && path === '/dashboard') { world.goFails -= 1; throw new Error('navigation timed out'); }
+        if (world.goFails && path?.startsWith('/dashboard')) { world.goFails -= 1; throw new Error('navigation timed out'); }
         return super.go(path);
       }
     }
-    const driver = new Driver(async () => (await mountPanel(this.serve())).win);
+    const driver = new Driver(async (path) => (await mountPanel(this.serve(), path)).win);
     await driver.go();
     return await work({ driver, pid: undefined, requests: [] });
   }
