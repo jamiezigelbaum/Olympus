@@ -260,8 +260,13 @@ function emptyBacklogCounts(): BacklogCounts {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
 
-/** Queued lowering moves counted per ledger on a backlog read, at most. */
-const MOVES_COUNT_BOUND = 10_000;
+/**
+ * Queued moves examined per ledger when lowerings are counted, at most: the
+ * oldest page of the moving queue (by the state index), never a scan of a
+ * whole migration's queue. A page of raises can hide lowerings behind it, so
+ * the count is a floor, which is all the note needs.
+ */
+const MOVES_SCAN_BOUND = 2_000;
 /** Ledger and queue rows at or below which the backlog is counted on every read. */
 const BACKLOG_EXACT_ROWS = 20_000;
 /** How old a large backlog's served count may be before a new count starts. */
@@ -279,8 +284,9 @@ export interface TierClassificationBacklog {
    * Items already judged lower (Personal, say) whose automatic move out of
    * Private is still queued: an agent outside this computer cannot find them
    * until it runs. Counted only where automatic moves run (a move waiting for
-   * the owner is not "still checking"), and at most MOVES_COUNT_BOUND per
-   * ledger, so a large migration queue never costs a search a full scan.
+   * the owner is not "still checking"), among at most MOVES_SCAN_BOUND queued
+   * moves per ledger, and at most once a minute (`lowerMovesQueued`), so a
+   * large migration queue never costs a search a scan.
    */
   lowerMovesQueued: number;
   pendingWithoutQuestion: number;
@@ -356,6 +362,7 @@ export class TierSnifferService {
   private waitingReason: string | undefined;
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
+  private lowerMovesCache: { count: number; atMs: number } | undefined;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -498,8 +505,20 @@ export class TierSnifferService {
     return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(), summary: [backlog.summary, ...messages].join(' ') };
   }
 
-  /** Queued lowering moves that automatic moves will carry out, bounded per ledger (see `lowerMovesQueued`). */
+  /**
+   * Queued lowering moves that automatic moves will carry out (see
+   * `lowerMovesQueued`). Counted at most once per BACKLOG_REFRESH_MS: every
+   * search, remote result and status read asks, and none may pay for a count.
+   */
   private lowerMovesQueued(): number {
+    const now = this.clockMs();
+    if (this.lowerMovesCache && now - this.lowerMovesCache.atMs < BACKLOG_REFRESH_MS) return this.lowerMovesCache.count;
+    const count = this.countLowerMovesQueued();
+    this.lowerMovesCache = { count, atMs: now };
+    return count;
+  }
+
+  private countLowerMovesQueued(): number {
     const autoMoves = this.options.autoMoves;
     try {
       if (!autoMoves || !autoMoves.localEmbeddingsOnly()) return 0;
@@ -517,9 +536,12 @@ export class TierSnifferService {
       const opened = this.openBacklogLedger(ledgerPath);
       if (!opened) continue;
       try {
+        // The inner page bounds the rows examined (the direction test has a
+        // correlated subquery the state index cannot answer); it is named
+        // tier_items so the shared direction clause reads its columns.
         queued += (opened.db.query(`SELECT COUNT(*) AS n FROM (
-          SELECT 1 FROM tier_items WHERE state = 'moving' ${tierMovingDirectionClause('lower')} LIMIT ?
-        )`).get(MOVES_COUNT_BOUND) as { n: number }).n;
+          SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
+        ) AS tier_items WHERE 1 ${tierMovingDirectionClause('lower')}`).get(MOVES_SCAN_BOUND) as { n: number }).n;
       } catch {
         // An unreadable ledger counts nothing, as in the backlog count itself.
       } finally { opened.db.close(); }

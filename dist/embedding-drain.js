@@ -76453,7 +76453,7 @@ var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
-var MOVES_COUNT_BOUND = 1e4;
+var MOVES_SCAN_BOUND = 2000;
 var BACKLOG_EXACT_ROWS = 20000;
 var BACKLOG_REFRESH_MS = 60000;
 var BACKLOG_SLICE_ROWS = 5000;
@@ -76485,6 +76485,7 @@ class TierSnifferService {
   waitingReason;
   lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   backlogCache;
+  lowerMovesCache;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -76609,6 +76610,14 @@ class TierSnifferService {
     return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(), summary: [backlog.summary, ...messages].join(" ") };
   }
   lowerMovesQueued() {
+    const now = this.clockMs();
+    if (this.lowerMovesCache && now - this.lowerMovesCache.atMs < BACKLOG_REFRESH_MS)
+      return this.lowerMovesCache.count;
+    const count = this.countLowerMovesQueued();
+    this.lowerMovesCache = { count, atMs: now };
+    return count;
+  }
+  countLowerMovesQueued() {
     const autoMoves = this.options.autoMoves;
     try {
       if (!autoMoves || !autoMoves.localEmbeddingsOnly())
@@ -76630,8 +76639,8 @@ class TierSnifferService {
         continue;
       try {
         queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
-          SELECT 1 FROM tier_items WHERE state = 'moving' ${tierMovingDirectionClause("lower")} LIMIT ?
-        )`).get(MOVES_COUNT_BOUND).n;
+          SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
+        ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
       } catch {} finally {
         opened.db.close();
       }

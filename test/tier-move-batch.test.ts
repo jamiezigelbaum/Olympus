@@ -622,5 +622,19 @@ test('the backlog counts queued lowerings that automatic moves will run, never r
   expect(service.backlog().lowerMovesQueued).toBe(0);
   for (const spec of f.specs) f.f.ledger.recordRoutedPlacement(identityOf(spec.id), high, f.f.set.placementFor(high));
   expect(f.f.ledger.listMoving({ direction: 'raise' })).toHaveLength(3);
+  expect(serviceFor(f.f).service.backlog().lowerMovesQueued).toBe(0);
+});
+
+test('reads within a minute reuse the lowering count instead of counting again', async () => {
+  const f = await fixture(3, true);
+  let clock = Date.parse('2026-11-10T12:00:00Z');
+  const { service } = serviceFor(f.f, {}, [], { now: () => new Date(clock) });
+  expect(service.backlog().lowerMovesQueued).toBe(3);
+  // The moves land, but every read inside the minute is served the counted value: no query per search.
+  for (const move of f.moves()) await moveTieredItem(move);
+  for (let read = 0; read < 5; read++) expect(service.backlog().lowerMovesQueued).toBe(3);
+  clock += 59_000;
+  expect(service.backlog().lowerMovesQueued).toBe(3);
+  clock += 2_000;
   expect(service.backlog().lowerMovesQueued).toBe(0);
 });
