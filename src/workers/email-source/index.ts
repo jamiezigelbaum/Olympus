@@ -292,6 +292,8 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type Da
 import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
+import { DASHBOARD_BACKUP_PATHS, handleDashboardBackupRoute } from '../dashboard/backup-routes.ts';
+import type { BackupService } from '../backup-service.ts';
 import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingAccountForCli, pairingPlacementForCli, settingsForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
@@ -607,6 +609,8 @@ export interface EmailSourceWorkerOptions {
      * answers 501.
      */
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
+    /** Settings › Back up and restore (backup-service.ts); its routes take the local grade only. */
+    backup?: BackupService;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
@@ -1521,6 +1525,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
                 ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
+                // The folder and the backups in it only for the unlocked session minted on this computer.
+                ...(sourceDashboard?.backup && controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local'
+                  ? { backup: sourceDashboard.backup.status() } : {}),
                 settings: {
                   ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
@@ -2206,6 +2213,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
           return json(result.ok ? result : { ok: false, error: { code: 'model_choice_failed', message: result.message } }, result.ok ? 200 : 409);
+        }
+
+        // Settings › Back up and restore (#1065): the unlocked dashboard on this computer only.
+        if (request.method === 'POST' && (DASHBOARD_BACKUP_PATHS as readonly string[]).includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Back up and restore only in an unlocked dashboard on this computer.' } }, 403);
+          }
+          if (!sourceDashboard?.backup) return json({ ok: false, error: { code: 'not_available', message: 'Backups are not available on this install.' } }, 501);
+          const outcome = await handleDashboardBackupRoute(url.pathname, await parseObjectBody(request), { backup: sourceDashboard.backup });
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/judge') {

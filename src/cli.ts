@@ -181,7 +181,7 @@ import {
 import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
 import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
-import { restoreOlympusData } from './data-restore.ts';
+import { backupOlympusData, restoreOlympusBackup, deriveBackupKey } from './data-backup.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
 import {
   runSetupWizard,
@@ -1518,7 +1518,8 @@ function printHelp(): void {
   console.log('  olympus connections status');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
-  console.log('  olympus data restore --input <dir> [--dry-run]');
+  console.log('  olympus data backup --output <folder> [--passphrase-stdin]');
+  console.log('  olympus data restore --input <file or dir> [--passphrase-stdin] [--dry-run]');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
@@ -1573,7 +1574,8 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
-  'data restore': 'olympus data restore --input <dir> [--dry-run]',
+  'data backup': 'olympus data backup --output <folder> [--passphrase-stdin]',
+  'data restore': 'olympus data restore --input <file or dir> [--passphrase-stdin] [--dry-run]',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
   'zkapi install-tools': 'olympus zkapi install-tools',
@@ -1664,7 +1666,8 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     '  olympus data export --output <dir> [--source <id>]',
     '  olympus data verify --input <dir>',
-    '  olympus data restore --input <dir> [--dry-run]',
+    '  olympus data backup --output <folder> [--passphrase-stdin]',
+    '  olympus data restore --input <file or dir> [--passphrase-stdin] [--dry-run]',
     '  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]',
   ],
   tier: [
@@ -2922,13 +2925,32 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     const options = parseDataOptions(args.slice(1));
     return verifyOlympusDataExport({ destination: options.input });
   }
+  if (command === 'backup') {
+    const options = parseDataOptions(args.slice(1));
+    if (!options.output.trim()) throw new OperationError('invalid_params', '--output must be provided.');
+    const folder = resolve(options.output.trim());
+    // The passphrase is read here and used here: it never travels to the
+    // worker and is never stored. The export runs where exports run (the
+    // worker when it owns the data); packing and encryption run in this process.
+    const passphrase = options.passphraseStdin ? await readBackupPassphrase() : undefined;
+    const key = passphrase !== undefined ? deriveBackupKey(passphrase) : undefined;
+    return backupOlympusData({
+      folder,
+      ...(key ? { key } : {}),
+      exportInto: (destination) => runLocallyOrThroughWorker(
+        () => exportOlympusData({ destination }),
+        () => callWorkerCli('data-export', { output: destination }),
+      ),
+    });
+  }
   if (command === 'restore') {
     const options = parseDataOptions(args.slice(1));
     if (!options.input.trim()) throw new OperationError('invalid_params', '--input must be provided.');
+    const passphrase = options.passphraseStdin ? await readBackupPassphrase() : undefined;
     // Only with Olympus stopped: it writes the stores the worker would hold
     // open. A held owner lock is refused as busy, never restored around (#1065).
     return runLocallyOrThroughWorker(
-      () => restoreOlympusData({ input: resolve(options.input.trim()), dryRun: options.dryRun }),
+      () => restoreOlympusBackup({ input: resolve(options.input.trim()), dryRun: options.dryRun, ...(passphrase !== undefined ? { passphrase } : {}) }),
       undefined,
     );
   }
@@ -2995,7 +3017,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     });
   }
   if (command === '--help' || command === '-h') {
-    console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data restore --input <dir> [--dry-run]\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
+    console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data backup --output <folder> [--passphrase-stdin]\n       olympus data restore --input <file or dir> [--passphrase-stdin] [--dry-run]\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
     process.exit(0);
   }
   throw new OperationError('invalid_params', `Unknown data command: ${command ?? ''}`.trim());
@@ -3008,7 +3030,9 @@ function parseDataOptions(args: string[]): {
   all: boolean;
   dryRun: boolean;
   yesIAMSure: boolean;
+  passphraseStdin: boolean;
 } {
+  let passphraseStdin = false;
   let outputPath = '';
   let inputPath = '';
   let sourceId: string | undefined;
@@ -3035,14 +3059,29 @@ function parseDataOptions(args: string[]): {
       dryRun = true;
     } else if (arg === '--yes-i-am-sure') {
       yesIAMSure = true;
+    } else if (arg === '--passphrase-stdin') {
+      passphraseStdin = true;
     } else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data restore --input <dir> [--dry-run]\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
+      console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data backup --output <folder> [--passphrase-stdin]\n       olympus data restore --input <file or dir> [--passphrase-stdin] [--dry-run]\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
       process.exit(0);
     } else {
       throw new OperationError('invalid_params', `Unknown data option: ${arg}`);
     }
   }
-  return { output: outputPath, input: inputPath, sourceId, all, dryRun, yesIAMSure };
+  return { output: outputPath, input: inputPath, sourceId, all, dryRun, yesIAMSure, passphraseStdin };
+}
+
+/**
+ * A backup passphrase: typed (hidden) at a terminal, else piped in. Only the
+ * line ending a pipe adds is dropped; spaces are part of a passphrase.
+ */
+async function readBackupPassphrase(): Promise<string> {
+  if (process.stdin.isTTY) return readSecretFromTerminal('Backup passphrase (input hidden): ');
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const passphrase = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
+  if (passphrase.trim() === '') throw new OperationError('invalid_params', 'No passphrase was given on standard input.');
+  return passphrase;
 }
 
 async function confirmDeleteAll(): Promise<void> {
