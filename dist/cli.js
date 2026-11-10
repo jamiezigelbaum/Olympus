@@ -28684,6 +28684,12 @@ function snifferReasonCode(verdict) {
 function cachedSnifferVerdictHolds(verdict) {
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
 }
+function schemaReference(text2, verb, field) {
+  if (SCHEMA_ONLY_FIELD.test(field[0]))
+    return true;
+  const tail = text2.slice(field.index + field[0].length);
+  return SCHEMA_VALUE.test(tail) || ASSIGN_VERBS.has(verb) && /^\s+to\b/.test(tail);
+}
 function hasClassifierInstruction(text2) {
   const words2 = [...text2.matchAll(/[a-z][a-z0-9_]*/g)];
   for (let i = 0;i < words2.length; i++) {
@@ -28695,24 +28701,27 @@ function hasClassifierInstruction(text2) {
         continue;
       const left = Math.min(verb.index, words2[j].index);
       const right = Math.max(verb.index, words2[j].index);
-      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)))
+      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)) && schemaReference(text2, verb[0], words2[j]))
         return true;
     }
+    let outputShaped = !SETTING_VERBS.has(verb[0]);
     for (let j = i + 1;j < Math.min(words2.length, i + 13); j++) {
       const object = words2[j];
       if (object.index - verb.index > 100 || /[.!?;]/.test(text2.slice(verb.index, object.index)))
         break;
       if (TIER_WORD.test(object[0])) {
         const tail = text2.slice(object.index + object[0].length);
-        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
+        if (outputShaped && /^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
           return true;
         break;
       }
       if (!OBJECT_GLUE.has(object[0]))
         break;
+      if (object[0] === "with" || object[0] === "as")
+        outputShaped = true;
     }
   }
-  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text2);
+  return /\byour verdict\b(?:\s+(?:for|on)\s+[^.!?;:]{0,40})?\s*(?:[:=]|\bis\b|\bshould be\b|\bmust be\b)\s*["'`]?(?:personal|private|public)\b/.test(text2);
 }
 function normalizeSnifferMaterial(material) {
   return normalizeSnifferSurface(canonicalizeScreeningText(material));
@@ -28923,7 +28932,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -28952,16 +28961,23 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+  TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+  TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
   INJECTION_RULES = [
-    ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
-    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
-    ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-    ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
+    ["role_boundary", ROLE_TAG],
+    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+    ["forged_verdict", new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+    ["cross_item_steering", new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)]
   ];
   INSTRUCTION_VERBS = new Set(["reply", "answer", "respond", "output", "return", "mark", "set", "label", "classify", "treat", "tag", "rate", "assign", "choose", "use", "emit", "produce", "make"]);
   VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
   TIER_WORD = /^(?:personal|public|private)$/;
   OBJECT_GLUE = new Set(["only", "with", "as", "to", "be", "is", "the", "a", "an", "this", "that", "it", "these", "them", "every", "each", "all", "item", "items", "file", "files", "document", "documents", "message", "messages", "entry", "entries", "list", "batch", "not"]);
+  SCHEMA_ONLY_FIELD = /^(?:ownrecord|privatekind)$/;
+  SCHEMA_VALUE = /^["'`]?\s*(?:[:=]|\b(?:of|as|at|is|be|to)\b)?\s*["'`({[]*\s*(?:(?:0?[.,]\d+|1(?:[.,]0+)?|0)(?![\d.,]*\d)|(?:personal|private|public|ordinary|true|false|none|null)\b)/;
+  ASSIGN_VERBS = new Set(["set", "assign"]);
+  SETTING_VERBS = new Set(["set", "make", "use", "choose"]);
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy classifier. Judge the ONE item independently.",
     "PERSONAL means the owner permits their trusted cloud assistant to read it.",
@@ -104655,7 +104671,7 @@ function createNativeProcessService(options) {
         return;
       }
       const cleanup = stopChild(lifetime, child2);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null ? `Olympus ${options.label} is restarting, as it asked to.` : signal === "SIGTERM" || signal === null && code === 0 ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ""}; starting it again.` : `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then((result) => {
         if (result === "unconfirmed") {
           reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
@@ -149436,6 +149452,7 @@ function createDashboardMessagingService(options) {
   const packageRoot = olympusPackageRoot();
   const available = new Map;
   const selecting = new Set;
+  const held = new Map;
   const initialGrants = new Map;
   const grantSnapshot = (source) => {
     const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
@@ -149566,17 +149583,31 @@ function createDashboardMessagingService(options) {
     available.set(source, { fingerprint: current2.fingerprint, chats });
     return { ok: true, state: "paired", chats, wholeAccount: rawScope === "*", chatScopes: selected, ...source === "whatsapp" ? { coverage: "contacts_and_joined_groups" } : {} };
   };
+  const withCaptureFact = (source, status) => {
+    if (status.state !== "failed" && status.state !== "cancelled")
+      return status;
+    try {
+      const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      return read.kind === "valid" && read.grant.source === source && read.grant.pairingPending ? { ...status, capturePaused: true } : status;
+    } catch {
+      return status;
+    }
+  };
   return {
     async handle(operation, record6) {
       const source = sourceOf(record6.source);
       if (operation === "start") {
         if (selecting.has(source))
           throw new Error("Finish choosing chats first.");
+        if (held.get(source))
+          throw new Error("Disconnect is running. Pair again after it finishes.");
         if (manager.busy(source))
           return manager.status(source);
         return options.withGrantMutation(async () => {
           if (manager.busy(source))
             throw new Error("Pairing is already running.");
+          if (held.get(source))
+            throw new Error("Disconnect is running. Pair again after it finishes.");
           grantSnapshot(source);
           const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
           const prior = readCaptureGrantFile(path);
@@ -149591,12 +149622,12 @@ function createDashboardMessagingService(options) {
       if (operation === "status") {
         const status = manager.status(source);
         if (status.state !== "idle")
-          return status;
+          return withCaptureFact(source, status);
         const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
         return read.kind === "valid" && read.grant.source === source && !read.grant.pairingPending ? { ok: true, state: "paired" } : status;
       }
       if (operation === "cancel")
-        return manager.cancel(source);
+        return withCaptureFact(source, manager.cancel(source));
       if (operation === "respond") {
         if (typeof record6.field !== "string" || typeof record6.value !== "string")
           throw new Error("Invalid response.");
@@ -149650,6 +149681,19 @@ function createDashboardMessagingService(options) {
       }
     },
     cancelAndWait: (source) => manager.cancelAndWait(source),
+    async withPairingHeld(source, operation) {
+      held.set(source, (held.get(source) ?? 0) + 1);
+      try {
+        await manager.cancelAndWait(source);
+        return await operation();
+      } finally {
+        const left = (held.get(source) ?? 1) - 1;
+        if (left > 0)
+          held.set(source, left);
+        else
+          held.delete(source);
+      }
+    },
     close: () => manager.close()
   };
 }
@@ -151573,7 +151617,48 @@ function mountDashboardController(options) {
     if (keys)
       keys.hidden = working || !firstRunCheckRequested;
   }
-  async function readFirstRunReadiness() {
+  function refreshAroundWalkthrough(template) {
+    const walkthrough = query("[data-first-run-sheet]");
+    if (!walkthrough)
+      return;
+    const active = activeElement();
+    const dirty = (region) => Array.from(region.querySelectorAll('input:not([type="hidden"]):not([data-source-search]),textarea,select')).some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
+    for (const region of queryAll("[id]")) {
+      if (!region.isConnected || !root.contains(region))
+        continue;
+      if (region.contains(walkthrough) || walkthrough.contains(region))
+        continue;
+      if (region.matches("[data-messaging-source]") || region.querySelector("[data-messaging-source]"))
+        continue;
+      if (active && region.contains(active) || region.querySelector("dialog[open]") || dirty(region))
+        continue;
+      const next = Array.from(template.content.querySelectorAll("[id]")).find((candidate) => candidate.id === region.id);
+      if (!next || next.querySelector("[data-first-run-sheet]"))
+        continue;
+      const openSheets = new Set(Array.from(region.querySelectorAll(".sheet.on")).map((sheet) => sheet.id).concat(region.matches(".sheet.on") ? [region.id] : []));
+      const open7 = new Set(Array.from(region.querySelectorAll("details[open]")).map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
+      const fresh2 = document.importNode(next, true);
+      region.replaceWith(fresh2);
+      fresh2.querySelectorAll("details").forEach((node) => {
+        if (open7.has(node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""))
+          node.open = true;
+      });
+      [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].filter((sheet) => sheet.classList.contains("sheet") && openSheets.has(sheet.id)).forEach((sheet) => setSheetOpen(sheet, true));
+      const wait = authorizationWait;
+      const waitingSheet = wait && [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].find((candidate) => candidate.id === wait.sheetId);
+      if (wait && waitingSheet)
+        say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
+      fresh2.querySelectorAll("script[data-dashboard-rerun]").forEach((inert) => {
+        const script2 = root.ownerDocument.createElement("script");
+        for (const attribute2 of Array.from(inert.attributes))
+          script2.setAttribute(attribute2.name, attribute2.value);
+        script2.text = inert.text;
+        inert.replaceWith(script2);
+      });
+    }
+    applyWriteCapability();
+  }
+  async function readFirstRunReadiness(refreshAround = false) {
     try {
       const page2 = await options.refresh();
       if (disposed || options.signal.aborted || !firstRunChoice)
@@ -151584,6 +151669,8 @@ function mountDashboardController(options) {
       applyWriteCapability();
       const template = document.createElement("template");
       template.innerHTML = page2.body;
+      if (refreshAround)
+        refreshAroundWalkthrough(template);
       const previousProgress = query("[data-private-model-progress]");
       const nextProgress = template.content.querySelector("[data-private-model-progress]");
       if (previousProgress) {
@@ -152459,9 +152546,11 @@ function mountDashboardController(options) {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
       return;
     if (firstRunChoice) {
+      const around = force || requested || redrawOwed;
+      redrawOwed = false;
       inFlight = true;
       try {
-        await readFirstRunReadiness();
+        await readFirstRunReadiness(around);
       } finally {
         inFlight = false;
       }
@@ -152735,8 +152824,9 @@ function mountDashboardController(options) {
       const cardCancel = card.querySelector('.actionrow [data-messaging-kind="cancel"]');
       if (cardCancel)
         cardCancel.hidden = ["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
+      const cancelledLead = body.capturePaused === true ? "Setup cancelled. Your chat choices were not changed, but capture of this account stays paused until pairing again succeeds" : "Setup cancelled. Capture permission was not changed";
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? "Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? "Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : body.capturePaused === true ? "Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? cancelledLead + ", and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? cancelledLead + ". Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : cancelledLead + ". If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : cancelledLead + ". If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -171000,6 +171090,10 @@ function createEmailSourceWorker(options = {}) {
     withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
     withGrantMutation: withDashboardGrantMutation
   }) : undefined;
+  const withMessagingPairingHeld = (record8, operation) => {
+    const source = record8.acknowledge !== true ? undefined : record8.source_id === "telegram.messages" ? "telegram" : record8.source_id === "whatsapp.personal.messages" ? "whatsapp" : undefined;
+    return source && dashboardMessaging ? dashboardMessaging.withPairingHeld(source, operation) : operation();
+  };
   const basePath = normalizeBasePath2(options.basePath ?? "/v1");
   return {
     close() {
@@ -172162,13 +172256,7 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/disconnect") {
           const disconnectRecord = await parseObjectBody(request);
-          if (disconnectRecord.acknowledge === true) {
-            if (disconnectRecord.source_id === "telegram.messages")
-              await dashboardMessaging?.cancelAndWait("telegram");
-            if (disconnectRecord.source_id === "whatsapp.personal.messages")
-              await dashboardMessaging?.cancelAndWait("whatsapp");
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(disconnectRecord, () => withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -172290,17 +172378,11 @@ function createEmailSourceWorker(options = {}) {
                 }
               });
             });
-          });
+          }));
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/delete-source-data") {
           const mutationRecord = await parseObjectBody(request);
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === "telegram.messages")
-              await dashboardMessaging?.cancelAndWait("telegram");
-            if (mutationRecord.source_id === "whatsapp.personal.messages")
-              await dashboardMessaging?.cancelAndWait("whatsapp");
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -172325,17 +172407,11 @@ function createEmailSourceWorker(options = {}) {
                 raw_runtime_secrets_exposed: false
               }
             });
-          });
+          }));
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/unpair") {
           const mutationRecord = await parseObjectBody(request);
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === "telegram.messages")
-              await dashboardMessaging?.cancelAndWait("telegram");
-            if (mutationRecord.source_id === "whatsapp.personal.messages")
-              await dashboardMessaging?.cancelAndWait("whatsapp");
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -172495,7 +172571,7 @@ function createEmailSourceWorker(options = {}) {
                 }
               });
             });
-          });
+          }));
         }
         if (request.method === "POST" && url2.pathname.startsWith("/dashboard/archive-import/")) {
           const archiveImports = sourceDashboard?.archiveImports;
@@ -198265,6 +198341,12 @@ function createStandaloneRemoteAccessConfigWriter(options) {
     return { ok: true };
   };
 }
+function createStandaloneRemoteAccessControl(options) {
+  const reason = options.unsupportedReason;
+  if (reason)
+    return { manual: () => reason };
+  return createDashboardRemoteAccessControl({ setEnabled: createStandaloneRemoteAccessConfigWriter(options) });
+}
 function createDashboardEngineRestart(options) {
   let pending = false;
   return () => {
@@ -219962,11 +220044,14 @@ function createWorkerMessagingCaptureOwnership(options) {
         } finally {
           paused[source] -= 1;
           if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
+            let resumed;
             try {
-              await capture.reconcile();
+              resumed = await capture.reconcile();
             } catch {
               options.onResumeFailure?.(source);
             }
+            if (resumed)
+              options.onResumeSuccess?.(source, resumed);
           }
         }
       });
@@ -221153,17 +221238,21 @@ async function main() {
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
   const captureFailures = {};
+  const captureStatuses = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
     onResumeFailure: (source) => {
       captureFailures[source] = true;
+    },
+    onResumeSuccess: (source, status) => {
+      delete captureFailures[source];
+      captureStatuses[source] = status;
     },
     registryPath: connectedHandleRegistryPath,
     packageRoot
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  const captureStatuses = {};
   const captureEntries = () => Object.entries(captures);
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning)
@@ -223991,24 +224080,22 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         console.warn("[olympus] remote_access_restart_failed");
       }
     });
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: remoteAccessHostKind === "standalone" ? createStandaloneRemoteAccessConfigWriter({
-        write: (enabled) => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
-        ...process.platform !== "darwin" ? { unsupportedReason: "Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support." } : {},
-        canRestart: () => {
-          try {
-            waitForQuietEngine({ quietWaitMs: 0 });
-            return inspectEngine().state === "running";
-          } catch {
-            return false;
-          }
-        },
-        requestRestart: () => {
-          remoteAccessRestartFailed = false;
-          return requestEngineRestart();
+    dashboardRemoteAccessControl = remoteAccessHostKind === "standalone" ? createStandaloneRemoteAccessControl({
+      write: (enabled) => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
+      ...process.platform !== "darwin" ? { unsupportedReason: "Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support." } : {},
+      canRestart: () => {
+        try {
+          waitForQuietEngine({ quietWaitMs: 0 });
+          return inspectEngine().state === "running";
+        } catch {
+          return false;
         }
-      }) : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
-    });
+      },
+      requestRestart: () => {
+        remoteAccessRestartFailed = false;
+        return requestEngineRestart();
+      }
+    }) : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   function isBackgroundConnection(connectionId) {
     if (!connectionId)

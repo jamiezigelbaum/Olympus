@@ -47,7 +47,11 @@ test('a stale ChatGPT choice never overwrites a dashboard choice', async () => {
   const { backend, path } = setup();
   const opened = await callSetupTool('olympus_privacy_get', {}, backend);
   saveFirstRunPrivacyChoice(path, 'local-only');
-  await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: 'private-cloud-only' }, backend);
+  const stale = await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: 'private-cloud-only' }, backend);
+  // Honest about it (#702): the other path's choice stands and the panel reads it back.
+  expect((stale as any).structuredContent.status).toBe('conflict');
+  expect(meta(stale).privateAnswerChoice).toBeUndefined();
+  expect(meta(stale).privateAnswerMode.id).toBe('local-only');
   expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(loadSovereigntyPreset('local-only'));
 });
 
