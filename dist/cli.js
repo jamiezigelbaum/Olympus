@@ -21160,6 +21160,17 @@ class SecretLocationsIndex {
     `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
     return true;
   }
+  rebindScopeGenerations(input) {
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const generation of input.fromGenerations) {
+        if (generation === input.accountGeneration)
+          continue;
+        changed += this.db.query("UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?").run(input.accountGeneration, input.revision, input.provider, generation).changes;
+      }
+      return changed;
+    }).immediate();
+  }
   remove(identity2) {
     return this.db.query(`
       DELETE FROM secret_locations
@@ -34571,20 +34582,9 @@ var init_local_index = __esm(() => {
       return findTierSetLedger(this.dbPath, binding);
     }
     rebindRestoredSourceScope(input) {
-      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
-      if (!row?.cursor)
+      const generations = this.restoredScopeGenerations(input.provider, input.providerAccountId);
+      if (generations === undefined)
         return 0;
-      let record;
-      try {
-        record = JSON.parse(row.cursor);
-      } catch {
-        return 0;
-      }
-      if (record.provider !== input.provider || typeof record.providerAccountId !== "string")
-        return 0;
-      if (compareProviderAccounts(record.providerAccountId, input.providerAccountId) !== "same")
-        return 0;
-      const generations = Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
       return this.db.transaction(() => {
         let changed = 0;
         for (const generation of generations) {
@@ -34598,6 +34598,22 @@ var init_local_index = __esm(() => {
         this.db.query("DELETE FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
         return changed;
       }).immediate();
+    }
+    restoredScopeGenerations(provider, providerAccountId) {
+      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+      if (!row?.cursor)
+        return;
+      let record;
+      try {
+        record = JSON.parse(row.cursor);
+      } catch {
+        return;
+      }
+      if (record.provider !== provider || typeof record.providerAccountId !== "string")
+        return;
+      if (compareProviderAccounts(record.providerAccountId, providerAccountId) !== "same")
+        return;
+      return Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
     }
     tierSetBinding() {
       const row = this.db.query(`
@@ -195550,14 +195566,21 @@ function rebindRestoredFileScope(input) {
   const definition = getFileScopeSource(approval.sourceId);
   if (!definition || definition.account !== "provider_account")
     return 0;
+  const target = { provider: definition.provider, accountGeneration: approval.accountGeneration, revision: approval.revision };
   let carried = 0;
-  for (const store of new Set(input.stores)) {
-    carried += store.rebindRestoredSourceScope({
-      provider: definition.provider,
-      accountGeneration: approval.accountGeneration,
-      revision: approval.revision,
-      providerAccountId
-    });
+  const seenStores = new Set;
+  const seenSecrets = new Set;
+  for (const set2 of input.sets) {
+    const stores = set2.stores.filter((store) => !seenStores.has(store));
+    for (const store of stores)
+      seenStores.add(store);
+    const fromGenerations = [...new Set(stores.flatMap((store) => store.restoredScopeGenerations(definition.provider, providerAccountId) ?? []))];
+    if (set2.secretLocations && !seenSecrets.has(set2.secretLocations) && fromGenerations.length > 0) {
+      seenSecrets.add(set2.secretLocations);
+      carried += set2.secretLocations.rebindScopeGenerations({ ...target, fromGenerations });
+    }
+    for (const store of stores)
+      carried += store.rebindRestoredSourceScope({ ...target, providerAccountId });
   }
   return carried;
 }
@@ -223971,9 +223994,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           rebindRestoredFileScope({
             approval,
             providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
-            stores: definition.corpusIdsToInvalidate.flatMap((corpusId) => {
-              const set2 = sets.get(corpusId);
-              return set2 ? TIER_DOMAIN_ORDER.flatMap((domain) => set2.store(domain) ?? []) : [];
+            sets: [...new Set(definition.corpusIdsToInvalidate.flatMap((corpusId) => sets.get(corpusId) ?? []))].map((set2) => {
+              const secretLocations2 = set2.secrets();
+              return {
+                stores: TIER_DOMAIN_ORDER.flatMap((domain) => set2.store(domain) ?? []),
+                ...secretLocations2 ? { secretLocations: secretLocations2 } : {}
+              };
             })
           });
         } catch {}
@@ -228245,7 +228271,8 @@ function restoreOlympusData(options) {
       const prepare = entry.kind === "store" ? (staged) => {
         repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to);
         held = repointMediaPaths(staged, (sha2568) => pictures.get(sha2568));
-        recordRestoredScope(staged, entry.sourceId, identities.find((identity2) => identity2.sourceId === entry.sourceId)?.boundAccount);
+        const secrets = plan.find((other) => other.kind === "judgments" && other.to === secretLocationsPathForStore(entry.to));
+        recordRestoredScope(staged, entry.sourceId, identities.find((identity2) => identity2.sourceId === entry.sourceId)?.boundAccount, secrets ? join114(input, secrets.from) : undefined);
       } : undefined;
       copyPrivate(join114(input, entry.from), entry.to, prepare);
       for (const sha2568 of held)
@@ -228418,10 +228445,11 @@ function repointMediaPaths(storePath, pictureFor) {
     closeSqliteStore(db);
   }
 }
-function recordRestoredScope(storePath, sourceId, providerAccountId) {
+function recordRestoredScope(storePath, sourceId, providerAccountId, secretLocationsPath) {
   const definition = getFileScopeSource(sourceId);
   if (!definition || definition.account !== "provider_account" || !providerAccountId)
     return;
+  const secretGenerations = secretLocationsPath ? secretLocationGenerations(secretLocationsPath, definition.provider) : [];
   const db = new Database24(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
@@ -228431,7 +228459,10 @@ function recordRestoredScope(storePath, sourceId, providerAccountId) {
     const columns = db.query("PRAGMA table_info(items)").all().map((column) => column.name);
     if (!columns.includes("source_scope_generation"))
       return;
-    const generations = db.query("SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL").all(definition.provider).map((row) => row.generation);
+    const generations = [...new Set([
+      ...db.query("SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL").all(definition.provider).map((row) => row.generation),
+      ...secretGenerations
+    ])];
     if (generations.length === 0)
       return;
     const corpus = db.query("SELECT corpus_id FROM sync_runs LIMIT 1").get();
@@ -228441,6 +228472,18 @@ function recordRestoredScope(storePath, sourceId, providerAccountId) {
         items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
     `).run(RESTORED_SCOPE_RUN_ID, corpus?.corpus_id ?? "", RESTORED_SCOPE_CONNECTOR_ID, JSON.stringify({ provider: definition.provider, generations, providerAccountId }));
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function secretLocationGenerations(path, provider) {
+  const db = new Database24(path, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000;");
+    const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secret_locations'").get();
+    if (!table)
+      return [];
+    return db.query("SELECT DISTINCT scope_generation AS generation FROM secret_locations WHERE provider = ? AND scope_generation IS NOT NULL").all(provider).map((row) => row.generation);
   } finally {
     closeSqliteStore(db);
   }

@@ -311,7 +311,8 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         ? (staged: string) => {
             repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to);
             held = repointMediaPaths(staged, (sha256) => pictures.get(sha256));
-            recordRestoredScope(staged, entry.sourceId, identities.find((identity) => identity.sourceId === entry.sourceId)?.boundAccount);
+            const secrets = plan.find((other) => other.kind === 'judgments' && other.to === secretLocationsPathForStore(entry.to));
+            recordRestoredScope(staged, entry.sourceId, identities.find((identity) => identity.sourceId === entry.sourceId)?.boundAccount, secrets ? join(input, secrets.from) : undefined);
           }
         : undefined;
       copyPrivate(join(input, entry.from), entry.to, prepare);
@@ -539,9 +540,12 @@ function repointMediaPaths(storePath: string, pictureFor: (sha256: string) => st
  * (LocalConnectorStore.rebindRestoredSourceScope), under its folders. Without
  * an account the backup recorded, nothing is recorded and nothing is carried.
  */
-function recordRestoredScope(storePath: string, sourceId: string, providerAccountId: string | undefined): void {
+function recordRestoredScope(storePath: string, sourceId: string, providerAccountId: string | undefined, secretLocationsPath?: string): void {
   const definition = getFileScopeSource(sourceId);
   if (!definition || definition.account !== 'provider_account' || !providerAccountId) return;
+  // A Secret's location is kept beside the store, not in it, under the stamp
+  // its item had: those generations are carried over too.
+  const secretGenerations = secretLocationsPath ? secretLocationGenerations(secretLocationsPath, definition.provider) : [];
   const db = new Database(storePath, { readwrite: true, create: false });
   try {
     db.exec('PRAGMA busy_timeout = 10000;');
@@ -549,8 +553,11 @@ function recordRestoredScope(storePath: string, sourceId: string, providerAccoun
     if (!tables.has('items') || !tables.has('sync_runs')) return;
     const columns = (db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name);
     if (!columns.includes('source_scope_generation')) return;
-    const generations = (db.query('SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL')
-      .all(definition.provider) as Array<{ generation: string }>).map((row) => row.generation);
+    const generations = [...new Set([
+      ...(db.query('SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL')
+        .all(definition.provider) as Array<{ generation: string }>).map((row) => row.generation),
+      ...secretGenerations,
+    ])];
     if (generations.length === 0) return;
     const corpus = db.query('SELECT corpus_id FROM sync_runs LIMIT 1').get() as { corpus_id: string } | null;
     // Like the set binding: completed at the epoch, so it is never the store's last run.
@@ -565,6 +572,20 @@ function recordRestoredScope(storePath: string, sourceId: string, providerAccoun
       RESTORED_SCOPE_CONNECTOR_ID,
       JSON.stringify({ provider: definition.provider, generations, providerAccountId }),
     );
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/** The scope generations a backup's secret-locations file stamps `provider`'s locations with. */
+function secretLocationGenerations(path: string, provider: string): string[] {
+  const db = new Database(path, { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secret_locations'").get();
+    if (!table) return [];
+    return (db.query('SELECT DISTINCT scope_generation AS generation FROM secret_locations WHERE provider = ? AND scope_generation IS NOT NULL')
+      .all(provider) as Array<{ generation: string }>).map((row) => row.generation);
   } finally {
     closeSqliteStore(db);
   }
