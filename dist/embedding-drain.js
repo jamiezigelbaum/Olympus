@@ -75820,14 +75820,14 @@ class JudgeBoosts {
   }
   live() {
     const now = this.now();
-    const live = [];
+    const live2 = [];
     for (const [key2, entry] of this.entries) {
       if (entry.expiresAt > now)
-        live.push(entry.identity);
+        live2.push(entry.identity);
       else
         this.entries.delete(key2);
     }
-    return live;
+    return live2;
   }
   drop(identity) {
     this.entries.delete(tierLedgerIdentityKey(identity));
