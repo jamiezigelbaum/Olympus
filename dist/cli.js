@@ -2841,6 +2841,7 @@ var init_public_surface = __esm(() => {
     "data export",
     "data verify",
     "data delete",
+    "data restore",
     "tier set",
     "tier explain",
     "tier rules",
