@@ -25,7 +25,16 @@
 // what this pass read (`TierOwnerOverrideGuard`). Only tier overrides act here: `not-secret` needs the item's
 // signals and text, which its next listing supplies.
 
-import { classifyItemTiers, contentDigestReason, heldUntilJudged, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import {
+  classifyItemTiers,
+  contentDigestReason,
+  heldUntilJudged,
+  maxTier,
+  ownerRuleMatches,
+  tierRank,
+  type TierDecision,
+  type TierKey,
+} from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   trustDomainRank,
@@ -35,6 +44,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
+import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -104,39 +114,90 @@ export function applyOwnerOverrides(options: {
 
 /**
  * Put an item whose override was cleared back to the decision recorded before
- * the owner changed it (`TierLedger.settledDecisionBeforeOverride`). A raise hides
- * first and a lowering stays where it is until its move lands, as for any
- * decision a listing records. The write re-checks, in its own transaction,
- * that no override was set again and the generation is still the one read.
- * An item the owner set before anything else decided it stays as it is: its
- * next listing decides it.
+ * the owner changed it (`TierLedger.settledDecisionBeforeOverride`), raised to
+ * what the owner's current rules ask for. A rule added while the override
+ * stood skipped the item (tier-rules-sweep.ts leaves overridden items alone
+ * and still counts itself done), so it is applied here, in the same write;
+ * rules only raise. A label rule cannot be checked from what a store keeps:
+ * wherever a raising label rule could apply to the item, it keeps the
+ * protection it has now, up to that rule's tier. A raise hides first and a
+ * lowering stays where it is until its move lands, as for any decision a
+ * listing records. The write re-checks, in its own transaction, that no
+ * override was set again and the generation is still the one read. An item
+ * the owner set before anything else decided it stays as it is: its next
+ * listing decides it.
  */
 function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const ledger = set.ledger;
   const identity = identityOf(record);
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;
+  // Rules that cannot be trusted now: wait, rather than restore without them.
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason) return false;
+  const rules = classification.rules ?? [];
+  const raising = rules.filter((rule) => tierRank(rule.tier) > tierRank('private'));
+  const copies = ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  // Names that cannot be read back from an item that has copies: the next pass tries again.
+  if (!exported && copies.length > 0 && raising.length > 0) return false;
+  const stored = exported ? storedSignals(exported) : {};
+  const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
+  // Label rules for this item's source: whether the item carries the label is not known here.
+  const labelRules = raising.filter((rule) => rule.match.kind === 'label'
+    && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
+  const heldNow = maxTier(record.metadataTier, record.contentTier);
+  let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
+  for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
+  const metadataTier = maxTier(before.metadataTier, ruleTier);
+  const contentTier = maxTier(before.contentTier, metadataTier);
+  const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
+  let ruleReasons: string[] = [];
+  if (byRule) {
+    // The rules' reason codes exactly as a listing states them.
+    const classified = classifyItemTiers(
+      {
+        signals: { ...stored, ...(labelRules.length > 0 ? { labels: labelRules.map((rule) => rule.match.value) } : {}) },
+        provider: record.provider,
+        subject: identity,
+      },
+      { rules: [...rules], ...(classification.retirePublic ? { retirePublic: true } : {}) },
+    );
+    ruleReasons = classified.reasons.filter((reason) => reason.startsWith('metadata:owner_rule:'));
+  }
   const decision: TierDecision = {
-    metadataTier: before.metadataTier,
-    contentTier: before.contentTier,
+    metadataTier,
+    contentTier,
     // A stored decider outside the classifier's own list (a landed move) is kept as recorded.
-    decidedBy: before.decidedBy as TierDecision['decidedBy'],
-    reasons: [...before.reasons],
+    decidedBy: byRule ? 'owner_rule' : before.decidedBy as TierDecision['decidedBy'],
+    reasons: byRule
+      ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith('content:'))]
+      : [...before.reasons],
     state: 'current',
     contentRead: before.reasons.some((reason) => reason.startsWith('content:')),
     metadataPending: false,
     contentPending: false,
-    metadataForced: before.reasons.some((reason) => reason.startsWith('metadata:') && reason.endsWith(':force')),
+    metadataForced: before.reasons.some((reason) => reason.startsWith('metadata:') && reason.endsWith(':force'))
+      || (byRule && matched.some((rule) => rule.strength === 'force')),
     metadataFlagged: before.reasons.some((reason) => reason.startsWith('metadata:possibly_private:')),
     engineVersion: record.engineVersion,
     mapRevision: record.mapRevision,
     snifferId: '',
   };
+  const guard = { generation: record.generation, override: undefined };
+  if (metadataTier === 'secrets') {
+    return exported !== undefined
+      && settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard });
+  }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
-    guard: { generation: record.generation, override: undefined },
+    guard,
     staleCopiesGone: set.routedWithoutAnyCopy(identity),
   });
   return recorded.outcome !== 'unchanged';
+}
+
+function minTier(a: TierKey, b: TierKey): TierKey {
+  return tierRank(a) <= tierRank(b) ? a : b;
 }
 
 function applyOne(

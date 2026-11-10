@@ -64054,26 +64054,61 @@ function restoreClearedOverride(set, record) {
   const before = ledger.settledDecisionBeforeOverride(identity2);
   if (!before || before.metadataTier === "secrets" || before.contentTier === "secrets")
     return false;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return false;
+  const rules = classification.rules ?? [];
+  const raising = rules.filter((rule) => tierRank(rule.tier) > tierRank("private"));
+  const copies = ledger.copies(identity2);
+  const exported = storedCopyOf(set, identity2, copies);
+  if (!exported && copies.length > 0 && raising.length > 0)
+    return false;
+  const stored = exported ? storedSignals(exported) : {};
+  const matched = raising.filter((rule) => rule.match.kind !== "label" && ownerRuleMatches(rule, stored, record.provider));
+  const labelRules = raising.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
+  const heldNow = maxTier(record.metadataTier, record.contentTier);
+  let ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  for (const rule of labelRules)
+    ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
+  const metadataTier = maxTier(before.metadataTier, ruleTier);
+  const contentTier = maxTier(before.contentTier, metadataTier);
+  const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
+  let ruleReasons = [];
+  if (byRule) {
+    const classified = classifyItemTiers({
+      signals: { ...stored, ...labelRules.length > 0 ? { labels: labelRules.map((rule) => rule.match.value) } : {} },
+      provider: record.provider,
+      subject: identity2
+    }, { rules: [...rules], ...classification.retirePublic ? { retirePublic: true } : {} });
+    ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  }
   const decision = {
-    metadataTier: before.metadataTier,
-    contentTier: before.contentTier,
-    decidedBy: before.decidedBy,
-    reasons: [...before.reasons],
+    metadataTier,
+    contentTier,
+    decidedBy: byRule ? "owner_rule" : before.decidedBy,
+    reasons: byRule ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith("content:"))] : [...before.reasons],
     state: "current",
     contentRead: before.reasons.some((reason) => reason.startsWith("content:")),
     metadataPending: false,
     contentPending: false,
-    metadataForced: before.reasons.some((reason) => reason.startsWith("metadata:") && reason.endsWith(":force")),
+    metadataForced: before.reasons.some((reason) => reason.startsWith("metadata:") && reason.endsWith(":force")) || byRule && matched.some((rule) => rule.strength === "force"),
     metadataFlagged: before.reasons.some((reason) => reason.startsWith("metadata:possibly_private:")),
     engineVersion: record.engineVersion,
     mapRevision: record.mapRevision,
     snifferId: ""
   };
+  const guard = { generation: record.generation, override: undefined };
+  if (metadataTier === "secrets") {
+    return exported !== undefined && settleRoutedSecrets(set, identity2, decision, exported, { findingKinds: ["owner_marked_secret"] }, { guard });
+  }
   const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
-    guard: { generation: record.generation, override: undefined },
+    guard,
     staleCopiesGone: set.routedWithoutAnyCopy(identity2)
   });
   return recorded.outcome !== "unchanged";
+}
+function minTier(a, b) {
+  return tierRank(a) <= tierRank(b) ? a : b;
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
@@ -64171,6 +64206,7 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_stored_names();
   init_tier_rejudge();
 });
 

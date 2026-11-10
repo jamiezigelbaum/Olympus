@@ -306,6 +306,40 @@ describe('one item, Private -> Personal -> Private', () => {
     expect(ownerItems().set({ itemId, choice: 'judge', allowLower: true })).toMatchObject({ ok: false, code: 'not_owner_set' });
   });
 
+  test('undo under an always-Private rule added while the owner\'s word stood: the rule holds, across a restart', async () => {
+    let install = await judged();
+    const gardenId = ownerItems().find({ query: 'orchard-plan' }).items[0]!.item_id;
+    expect(await search(install, 'pruning plan')).toContain('Orchard pruning plan');
+
+    // Judged Personal; the owner makes it Private by hand.
+    expect(ownerItems().set({ itemId: gardenId, choice: 'private', allowLower: true })).toMatchObject({ ok: true, changed: 'set' });
+    await install.service.runOnce();
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+
+    // An always-Private folder rule arrives while the override stands: the sweep leaves the item alone and counts itself done.
+    writePrivacyProfile({ rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/Notes' }] }, { env });
+    expect(sweepOwnerRuleRaises({ set: install.lane.set })).toMatchObject({ complete: true });
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ decidedBy: 'override' });
+
+    // A restart, then the owner puts it back to the judge.
+    closeAll();
+    clearInstalledTierClassification();
+    install = await start({ extract: false });
+    await install.service.runOnce();
+    expect(ownerItems().set({ itemId: gardenId, choice: 'judge', allowLower: true })).toMatchObject({ ok: true, changed: 'cleared' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 1 });
+
+    // The rule, not the judge's Personal, decides it now: still Private, never served in between.
+    const restored = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(restored).toMatchObject({ contentTier: 'secure', metadataTier: 'secure', decidedBy: 'owner_rule' });
+    expect(restored.reasons.some((reason) => reason.startsWith('metadata:owner_rule:pathPrefix:'))).toBe(true);
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    for (let pass = 0; pass < 2; pass += 1) await install.service.runOnce();
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'owner_rule' });
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
+  });
+
   test('a Secret item is neither listed nor changed', async () => {
     await judged();
     const itemId = bankItem().item_id;
