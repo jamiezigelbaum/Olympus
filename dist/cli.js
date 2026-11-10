@@ -84800,7 +84800,7 @@ function whatsAppAddressLabel(jid) {
   const match = /^(\d{5,20})(?::\d+)?@(s\.whatsapp\.net|lid)$/.exec(jid?.trim() ?? "");
   if (!match)
     return;
-  return match[2] === "lid" ? "Unsaved WhatsApp contact" : `+${match[1]}`;
+  return match[2] === "lid" ? `Unsaved WhatsApp contact ·${match[1].slice(-4)}` : `+${match[1]}`;
 }
 function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
   const identity2 = recordIdentity(message2, account);

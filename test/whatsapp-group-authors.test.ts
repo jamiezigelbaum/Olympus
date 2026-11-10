@@ -71,14 +71,17 @@ describe('WhatsApp group authors (#1073)', () => {
     expect(byId('saved')).toBe('Grace Hopper');
     expect(byId('profile')).toBe('Ada');
     expect(byId('phone')).toBe('+351910000004');
-    expect(byId('hidden')).toBe('Unsaved WhatsApp contact');
+    expect(byId('hidden')).toBe('Unsaved WhatsApp contact ·1234');
     for (const author of authors.values()) expect(author).not.toMatch(/@(s\.whatsapp\.net|lid)$/);
   });
 
   test('a person address is shown as a number or an unsaved contact, never a raw id', () => {
     expect(whatsAppAddressLabel('351910000004@s.whatsapp.net')).toBe('+351910000004');
     expect(whatsAppAddressLabel('351910000004:12@s.whatsapp.net')).toBe('+351910000004');
-    expect(whatsAppAddressLabel('98765432101234@lid')).toBe('Unsaved WhatsApp contact');
+    expect(whatsAppAddressLabel('98765432101234@lid')).toBe('Unsaved WhatsApp contact ·1234');
+    // Two unsaved members of one group never share a label, so the people
+    // index can't link them by name (Codex review on #1152).
+    expect(whatsAppAddressLabel('11111111115678@lid')).not.toBe(whatsAppAddressLabel('22222222229999@lid'));
     expect(whatsAppAddressLabel(GROUP)).toBeUndefined();
     expect(whatsAppAddressLabel('status@broadcast')).toBeUndefined();
     expect(whatsAppAddressLabel(undefined)).toBeUndefined();

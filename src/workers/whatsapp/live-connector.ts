@@ -1320,7 +1320,10 @@ function whatsAppConversationSignals(jid: string): Readonly<Record<string, unkno
 export function whatsAppAddressLabel(jid: string | undefined): string | undefined {
   const match = /^(\d{5,20})(?::\d+)?@(s\.whatsapp\.net|lid)$/.exec(jid?.trim() ?? '');
   if (!match) return undefined;
-  return match[2] === 'lid' ? 'Unsaved WhatsApp contact' : `+${match[1]}`;
+  // A hidden (lid) id has no number to show. Its last four digits keep two
+  // unsaved members of one group apart, in citations and for the people
+  // index, which links same-named senders who share a conversation.
+  return match[2] === 'lid' ? `Unsaved WhatsApp contact ·${match[1]!.slice(-4)}` : `+${match[1]}`;
 }
 
 function rawItemFromSpoolMessage(
