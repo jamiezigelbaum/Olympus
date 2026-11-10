@@ -18128,10 +18128,13 @@ var init_sniffer_store = __esm(() => {
 });
 
 // src/workers/classification/tier-ledger.ts
+var REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
   init_tier_ledger_path();
+  REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
+  REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
 });
 
 // src/workers/file-extraction/job-names.ts
@@ -19130,7 +19133,7 @@ import { closeSync as closeSync8, constants as constants7, existsSync as existsS
 import { homedir as homedir16 } from "node:os";
 import { delimiter as delimiter6, dirname as dirname30, isAbsolute as isAbsolute21, join as join37 } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath as fileURLToPath6 } from "node:url";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
 function helperEnvironment() {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -19302,7 +19305,7 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname30(fileURLToPath6(import.meta.url));
+  const here = dirname30(fileURLToPath7(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join37(here, name);
     if (existsSync17(candidate))
@@ -22423,9 +22426,9 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync18 } from "node:fs";
 import { dirname as dirname31, join as join40 } from "node:path";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
-  let directory = dirname31(fileURLToPath7(moduleUrl));
+  let directory = dirname31(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
@@ -22761,7 +22764,7 @@ var init_remote_vlm = __esm(() => {
 import { Worker as Worker2 } from "node:worker_threads";
 import { existsSync as existsSync19 } from "node:fs";
 import { dirname as dirname32, join as join42 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
+import { fileURLToPath as fileURLToPath9 } from "node:url";
 
 class ModelThread {
   worker;
@@ -22858,7 +22861,7 @@ function cancelled() {
   return Object.assign(new Error("The request was cancelled."), { name: "AbortError" });
 }
 function modelWorkerPath() {
-  const here = dirname32(fileURLToPath8(import.meta.url));
+  const here = dirname32(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join42(here, name);
     if (existsSync19(path))
@@ -30054,6 +30057,7 @@ import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync9, rmSync as rmSync4 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname19, join as join26 } from "node:path";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir10();
@@ -30076,8 +30080,37 @@ function defaultTelegramPython(platform2) {
     return;
   return python;
 }
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
-var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+var TELEGRAM_TELETHON_VERSION = "1.45.0";
+var TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
+var TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt";
+var TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt";
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync9) {
+  let directory = dirname19(fileURLToPath6(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    if (exists(join26(directory, TELEGRAM_REQUIREMENTS_FILE)))
+      return directory;
+    const parent = dirname19(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function telegramInstallCommands(input) {
+  const python = join26(input.venvDir, "bin", "python");
+  const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
+  return [
+    [...pip, "-r", join26(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join26(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+  ];
+}
+function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
+  const venv = "~/.cache/olympus/telegram-python";
+  const root = packageRoot ?? "<Olympus package>";
+  const [build, telethon] = telegramInstallCommands({ venvDir: venv, packageRoot: root }).map((argv) => argv.filter((arg) => arg !== "--quiet").map((arg) => arg.includes(" ") ? `"${arg}"` : arg).join(" "));
+  return `Use a private virtual environment: python3 -m venv ${venv}, then ${build}, then ${telethon}. Re-run olympus connect telegram --pair.`;
+}
+var TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
 var installing = new Map;
 
 // src/core/linux-engine-service.ts
@@ -31050,7 +31083,7 @@ import { createHash as createHash14 } from "node:crypto";
 import { existsSync as existsSync21, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { basename as basename7, dirname as dirname34, join as join43 } from "node:path";
-import { fileURLToPath as fileURLToPath9 } from "node:url";
+import { fileURLToPath as fileURLToPath10 } from "node:url";
 init_opsec();
 init_types();
 var CONSULT_GATE_MAX_QUESTION_BYTES = 600;
@@ -31303,7 +31336,7 @@ function verifiedPackFile(path, sha256) {
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname34(fileURLToPath9(moduleUrl));
+  const here = dirname34(fileURLToPath10(moduleUrl));
   const root = basename7(here) === "core" && basename7(dirname34(here)) === "src" ? dirname34(dirname34(here)) : basename7(here) === "dist" ? dirname34(here) : undefined;
   return root !== undefined && existsSync21(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
 }

@@ -4,7 +4,7 @@
 
 **Your machine, your memory. Keep your private things private.**
 
-*A private second brain on your own computer, for ChatGPT, Claude, Grok and any AI app that speaks MCP. On a Mac, and on [Omarchy](https://omarchy.org) and Ubuntu 24.04 LTS Linux. Free and open source.*
+Olympus keeps your email, files and messages on your own computer and decides, item by item, what each AI may see. ChatGPT, Claude, Grok and any app that speaks MCP can use it, while your private things stay private. On a Mac, and on [Omarchy](https://omarchy.org) and Ubuntu 24.04 LTS Linux. Free and open source.
 
 [![version](https://img.shields.io/badge/version-1.4.2-534AB7)](https://github.com/jamiezigelbaum/Olympus/blob/main/CHANGELOG.md) [![license](https://img.shields.io/badge/license-MIT-0F6E56)](https://github.com/jamiezigelbaum/Olympus/blob/main/LICENSE) [![tests](https://img.shields.io/badge/tests-3400%2B%20passing-1D9E75)](https://github.com/jamiezigelbaum/Olympus/blob/main/CONTRIBUTING.md) [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai) [![runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20TypeScript-B45309)](https://bun.sh)
 
@@ -495,29 +495,32 @@ requirements for each route.
 
 | Source | Connect flow | Notes |
 |---|---|---|
-| Gmail | browser OAuth | one account |
+| Gmail | browser OAuth | Spam and Trash left out |
 | Google Drive | browser OAuth | docs + files |
 | Dropbox | browser OAuth | full file spine: metadata, extraction, OCR, audio transcribed on your machine |
+| Files on this computer | choose folders | no account; nothing is chosen by default |
+| Archives | choose an export file | mbox mail, WhatsApp chat export, Telegram Desktop JSON, Reflect, Roam, Evernote .enex; read where it is |
+| Evernote | sign in with Evernote | read permission only; you choose the notebooks |
 | Telegram | guided phone login | forward sync of active chats |
 | WhatsApp | QR pairing | live bridge |
 | X bookmarks | browser OAuth with a user-owned developer app | folder provenance and provider cost ceilings |
 | Readwise | API key | optional |
 
-Model-lane credentials such as Venice are security-preset prerequisites, not
-source connectors. Domain-agent imports and other source families are outside
-the 1.0 public roster.
+Olympus supports one connected account per provider.
+
+The full capability list (scopes, dependencies, provider limits, formats) is
+generated from the public roster in
+[docs/SOURCE_CAPABILITIES.md](docs/SOURCE_CAPABILITIES.md). Model-lane
+credentials such as Venice are privacy-mode prerequisites, not sources.
 
 Tokens live in an encrypted local secret store by default, or in an explicitly
 configured OS secret store when supported, never in plain text.
 Ingestion, classification, and indexing all run in one supervised local
-worker — `olympus worker install` makes it start on login. All seven declared
-sources sync through the canonical connector-store runtime; Olympus supports one
-connected account per provider. After base activation, dashboard onboarding
-guides the source you choose from credentials and scope through initial sync
-and cited-answer readiness, with the next supported action on blocked or
-degraded sources. The seven-source roster is not an installation checklist.
-Clean-install and real-provider qualification remain Slice 4 work, not alternate ingestion
-paths.
+worker — `olympus worker install` makes it start on login. Every source syncs
+through the same connector-store runtime. After setup, the dashboard guides the
+source you choose from sign-in and scope through the first sync to cited
+answers, and shows the next step for a source that is blocked or degraded. You
+connect only the sources you want.
 
 On an existing live OpenClaw install, treat plugin install/enable, gateway
 restart, worker service changes, and plugin refresh as live-system changes:

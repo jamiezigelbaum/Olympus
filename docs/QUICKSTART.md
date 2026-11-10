@@ -515,7 +515,7 @@ Old `dash_` links remain read-only. Use a fresh opening link when you need the
 controls. `olympus dashboard token` is an advanced compatibility command, not a
 required setup step; do not copy its secret into chat.
 
-Choose the source you want now; the source roster is not an all-seven checklist. Follow its credential or pairing → scope → initial sync → source
+Choose the source you want now; the source roster is not a checklist. Follow its credential or pairing → scope → initial sync → source
 health → cited-answer readiness journey. Other sources can be added later.
 Every blocked or degraded source names the next supported action.
 Each connected source shows its canonical sync and coverage state, and eligible
@@ -533,7 +533,7 @@ Connect only the source you chose, using its dashboard card and the
 Olympus's packaged publisher Google client requests Gmail or Drive scopes only when
 you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
-consent. v0.4 supports one connected account per provider.
+consent. Olympus supports one connected account per provider.
 
 For Drive and Dropbox, **Connect** only connects the account, and the card
 reads Waiting, *waiting for folder selection*, until you save a scope. Open
@@ -581,7 +581,7 @@ Operators can still narrow Gmail with the hidden
 override on top of the approved scope, never a replacement: the lane ANDs it
 with the picker's query, so it can only read less.
 
-All seven declared sources use the canonical connector-store runtime. Each
+Every public source uses the canonical connector-store runtime. Each
 chosen lane becomes ready when its credential or paired session, scope, and
 source-specific prerequisites are satisfied; no legacy read-authority flag or
 migration utility is needed. Omit `--session-ready` for Telegram or WhatsApp
