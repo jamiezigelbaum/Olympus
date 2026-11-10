@@ -11,6 +11,8 @@ import { engineHostServices } from '../src/core/engine-host.ts';
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_ROLE_ENV, engineRoleFromEnv } from '../src/core/engine-split.ts';
 import { FrontStoreWriteError, forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { createReleaseTierCheck, registerGovernedStore } from '../src/workers/connector-store/tier-visibility.ts';
 import { SecretLocationsIndex as SecretLocations } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
@@ -591,6 +593,38 @@ describe('the private-answer queue has one consumer', () => {
     const retries = server.match(/^.*retryUnchecked\(\).*$/gm) ?? [];
     expect(retries.length).toBe(1);
     expect(server).toMatch(/const uncheckedRetry = frontOwnsPrivateAnswerQueue \? setInterval\(/);
+  });
+});
+
+describe('configured mounts are governed by their ledgers', () => {
+  test('a ledger-backed configured store (Reflect, Roam) is registered, in the front as in the single worker', () => {
+    const root = tempRoot();
+    const path = join(root, 'reflect.sqlite');
+    const identity = { provider: 'reflect', accountScope: 'reflect:me', providerItemId: 'note-1' };
+    const writer = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.reflect.notes', family: 'note', trustDomain: 'internal' });
+    writer.tierLedger()!.recordDecision(identity, classifyItemTiers({ signals: { title: 'note-1' }, text: 'A plain note.', subject: identity }));
+    writer.close();
+    const bare = new LocalConnectorStore({ dbPath: join(root, 'roam.sqlite'), corpusId: 'internal.roam.pages', family: 'note', trustDomain: 'internal' });
+    const newLane = (ledger: TierLedger) => ({ ledger, corpusIds: new Set<string>() });
+    const input = { corpusId: 'internal.reflect.notes', ...identity, privateAtAnswer: false };
+    for (const front of [false, true]) {
+      if (front) forbidWritableStoreOpens();
+      const store = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.reflect.notes', family: 'note', trustDomain: 'internal', ...(front ? { readOnly: true } : {}) });
+      const lanes: Array<{ ledger: TierLedger; corpusIds: Set<string> }> = [];
+      const check = createReleaseTierCheck(() => lanes, () => 'approval');
+      // Unregistered, its item is read as legacy: a later Private verdict would not hold an answer back.
+      expect(check.inputs([input])[0]!.tier).toBe('legacy');
+      expect(registerGovernedStore(lanes, store, (ledger) => { const lane = newLane(ledger); lane.corpusIds.add(store.corpusId); return lane; })).toBe('registered');
+      expect(check.inputs([input])[0]!.tier).toBe('public_or_personal');
+      expect(registerGovernedStore(lanes, store, newLane)).toBe('already');
+      // A store with no ledger yet holds only legacy items and waits; nothing is created for it.
+      if (!front) expect(registerGovernedStore(lanes, bare, newLane)).toBe('no_ledger');
+      store.close();
+    }
+    bare.close();
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/for \(const store of configuredConnectorStores\) registerConfiguredTierStore\(store\);/);
+    expect(server).toMatch(/adoptConfiguredPrincipal\(mount\);\s*registerConfiguredTierStore\(mount\.store\);/);
   });
 });
 

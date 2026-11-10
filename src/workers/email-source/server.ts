@@ -346,7 +346,7 @@ import {
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
-import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate, registerGovernedStore, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
@@ -3899,6 +3899,13 @@ export async function main(): Promise<void> {
   });
   const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
+  // A configured mount (Reflect, Roam, ...) whose store is ledger-backed is
+  // governed by that ledger: register it, so the visibility gate and every
+  // release check read its items' tiers instead of treating them as legacy.
+  const registerConfiguredTierStore = (store: LocalConnectorStore): void => {
+    registerGovernedStore(tierLanes, store, (ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line) => console.warn(line));
+  };
+  for (const store of configuredConnectorStores) registerConfiguredTierStore(store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
     ...laneConnectorStores,
@@ -4474,6 +4481,7 @@ export async function main(): Promise<void> {
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store)) sourceLaneMounted([mount.store]);
       adoptConfiguredPrincipal(mount);
+      registerConfiguredTierStore(mount.store);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0)) registerTierLegStore(...registration);

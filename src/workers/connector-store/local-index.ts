@@ -3133,6 +3133,15 @@ export class LocalConnectorStore {
     return this.tierLedgerHandle?.dbPath ?? tierLedgerPathForStore(this.dbPath);
   }
 
+  /**
+   * The ledger that decides what this store may serve (its bound tier set's,
+   * or its own), without creating one: undefined when none exists yet, so
+   * everything in it is still legacy. Throws when a bound ledger is missing.
+   */
+  governingTierLedger(): TierLedger | undefined {
+    return this.visibilityLedger();
+  }
+
   /** The ledger this store records tier decisions in, opening the default one on first use. */
   tierLedger(): TierLedger | undefined {
     if (this.tierLedgerDisabled === true) return undefined;
