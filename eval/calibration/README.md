@@ -116,21 +116,31 @@ rebuilt input.
 ## Whole-item round: a probability sample of whole items (#883, #864)
 
 ```bash
-bun eval/calibration/whole-item-commands.ts   # prints exactly what to run on this Mac
+bun eval/calibration/whole-item-commands.ts   # prints exactly what to run, and where
 ```
 
-The commands it prints:
+Sample on the machine that holds the stores (Sparta), then label on the Mac:
 
 ```bash
+# On Sparta
 bun eval/calibration/sample-whole.ts --from-install --count 200
+# On the Mac
+mkdir -p ~/.local/share/olympus-calibration/whole && chmod 700 ~/.local/share/olympus-calibration/whole
+rsync -a --chmod=go-rwx sparta:~/.local/share/olympus-calibration/whole/sample.json \
+  sparta:~/.local/share/olympus-calibration/whole/manifest.json ~/.local/share/olympus-calibration/whole/
 bun eval/calibration/label.ts --dir ~/.local/share/olympus-calibration/whole
 ```
 
-- **Copy:** `--from-install` copies every active account's stores, tier ledger
-  and sniffer file, plus the extraction jobs, into `whole/stores` with
+- **Copy:** `--from-install` finds this machine's stores the way the running
+  Olympus does. It copies every active account's stores, tier ledger and
+  sniffer file into `whole/stores`, plus the extraction jobs, using
   production's snapshot (the copier never opens an install file with SQLite).
-  It removes the copies after sampling unless you pass `--keep-stores`.
-  `--stores DIR` reads copies you already made instead.
+  Imported archives are included, one store set per family, and each family is
+  a source of its own for stratification (`archive.imports.<family>`). It
+  removes the copies after sampling unless you pass `--keep-stores`.
+  `--install-home DIR` does the same for a copy of another machine's home
+  folder, read with the default layout under it. `--stores DIR` reads copies
+  you already made.
 - **Population:** every tier-ledger item that is not moving, not in Secrets,
   still stored and top-level, from the last two years (`--since`). It must
   have at least 15 characters of text, or be an item whose extraction failed.
@@ -194,9 +204,12 @@ reports:
 
 It also reports paired disagreements between every two judges, with an exact
 McNemar test. Output is counts and rates only, with no text, names or item
-ids. `judge-run.ts` and `score.ts` now record the sample's hash, so a result
-run on another sample is refused. On a whole-item sample they also use each
-item's group split for `--split`.
+ids. `judge-run.ts` and `score.ts` now record the sample's hash. The scorer
+refuses a result that has no hash or a different one. Both tools score Secret
+labels as Private instead of dropping them. On a whole-item sample they also
+use each item's group split for `--split`. A judge without a verdict on every
+labeled item fails the criteria on `coverage`, so a subset never passes.
+`--owner-words saved` reads this machine's saved privacy words.
 
 ## Judge runs on a llama.cpp server
 

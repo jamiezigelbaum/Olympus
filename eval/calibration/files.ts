@@ -105,6 +105,15 @@ export interface CalibrationSample {
 
 export type CalibrationLabel = 'personal' | 'private' | 'secret' | 'unsure' | 'skip';
 
+/**
+ * The side a label is scored on by score.ts and judge-run.ts: Secret counts as
+ * Private (it must never be Personal); Not sure, Skip and no label are not scored.
+ */
+export function scoredTier(label: string | undefined): 'personal' | 'private' | undefined {
+  if (label === 'personal') return 'personal';
+  return label === 'private' || label === 'secret' ? 'private' : undefined;
+}
+
 /** Whole-item pass: where the sensitive part of a Private or Secret item is. */
 export type SensitiveWhere = 'excerpt' | 'outside' | 'attachment' | 'names';
 

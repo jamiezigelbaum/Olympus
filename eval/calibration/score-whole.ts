@@ -36,6 +36,7 @@ import {
   paired,
   scoreRows,
   verifyManifest,
+  type CriteriaResult,
   type DesignCell,
   type JudgedRow,
   type Verdict,
@@ -76,6 +77,17 @@ export function placementJudges(sample: CalibrationSample): Record<string, Map<s
     'olympus-final': of((item) => item.whole!.placement.final),
     'olympus-content': of((item) => item.whole!.placement.content),
     'olympus-names': of((item) => item.whole!.placement.metadata),
+  };
+}
+
+/** Acceptance needs a verdict on every labeled item: a subset never passes. */
+function withCoverage(result: CriteriaResult, coverage: { labeled: number; withVerdict: number; missing: number }): CriteriaResult {
+  const complete = coverage.missing === 0;
+  return {
+    ...result,
+    passes: result.passes && complete,
+    passesWithConfidence: result.passesWithConfidence && complete,
+    checks: { ...result.checks, coverage: { value: coverage.missing, bound: coverage.missing, max: 0, passes: complete, passesWithConfidence: complete } },
   };
 }
 
@@ -126,7 +138,9 @@ export function scoreWhole(input: {
   }
 
   const all = { ...placementJudges(sample), ...Object.fromEntries(Object.entries(input.judges).map(([name, file]) => {
-    if (file.sampleSha256 && file.sampleSha256 !== manifest.sampleSha256) throw new Error(`${name} was run on a different sample.`);
+    // A result that does not name its sample cannot be shown to be from this one.
+    if (file.sampleSha256 === undefined) throw new Error(`${name} does not record the sample it was run on: rerun it with this version of score.ts or judge-run.ts.`);
+    if (file.sampleSha256 !== manifest.sampleSha256) throw new Error(`${name} was run on a different sample.`);
     return [name, file.verdicts];
   })) };
   const rowsOf = (verdicts: Map<string, JudgeVerdict>): JudgedRow[] => labeled.flatMap(({ item, owner }) => {
@@ -149,6 +163,8 @@ export function scoreWhole(input: {
   const rowsByJudge: Record<string, JudgedRow[]> = {};
   for (const [name, verdicts] of Object.entries(all)) {
     const rows = rowsOf(verdicts);
+    // Every labeled item needs a verdict: a subset (--limit, --split, --exclude, a crash) cannot pass.
+    const coverage = { labeled: labeled.length, withVerdict: rows.length, missing: labeled.length - rows.length };
     rowsByJudge[name] = rows;
     const inSplit = criteria.split === 'all' ? rows : reweigh(rows.filter((row) => row.split === criteria.split), populations);
     const splitScores = Object.fromEntries((['dev', 'test'] as const).map((split) => {
@@ -158,8 +174,9 @@ export function scoreWhole(input: {
     const privateRows = rows.filter((row) => ownerPrivateSide(row.owner));
     judges[name] = {
       itemsWithVerdict: rows.length,
+      coverage,
       all: scoreRows(rows, confidence),
-      criteria: judgeAgainst(scoreRows(inSplit, confidence), criteria),
+      criteria: withCoverage(judgeAgainst(scoreRows(inSplit, confidence), criteria), coverage),
       bySplit: splitScores,
       bySource: groupedScores(rows, (row) => row.area, confidence),
       notSure: {

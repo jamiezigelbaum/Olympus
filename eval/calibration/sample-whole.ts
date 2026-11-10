@@ -2,13 +2,18 @@
 // items from an install's own stores, frozen before anything is scored.
 //
 //   bun eval/calibration/sample-whole.ts --from-install [--out DIR] [--count 200]
+//   bun eval/calibration/sample-whole.ts --install-home DIR [--out DIR] [--count 200]
 //   bun eval/calibration/sample-whole.ts --stores DIR [--out DIR] [--count 200]
 //     [--seed N] [--since YYYY-MM-DD] [--private-share 0.3] [--min-per-cell 3]
 //     [--min-text-chars 15] [--criteria FILE] [--keep-stores] [--force]
 //
-// --from-install copies this Mac's stores into <out>/stores with production's
-// snapshot (no SQLite handle ever opens an install file), samples, and removes
-// the copies unless --keep-stores. --stores reads copies already made.
+// --from-install copies this machine's stores (found exactly as the running
+// Olympus finds them, imported archives included) into <out>/stores with
+// production's snapshot (no SQLite handle ever opens an install file), samples,
+// and removes the copies unless --keep-stores. Run it on the machine that holds
+// the stores (Sparta), then copy <out> to the machine you label on.
+// --install-home DIR does the same for a COPY of another machine's home folder,
+// read with Olympus's default layout under it. --stores reads copies already made.
 //
 // Population: every item in a tier ledger that is not moving, not in Secrets,
 // still stored, top-level (attachments are shown with their parent), authored
@@ -31,10 +36,10 @@
 // changed. Prints counts only, never text or names.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { CALIBRATION_DIR_DEFAULT, LABELS_FILE, SAMPLE_FILE, type CalibrationSample } from './files.ts';
 import { rng, shuffle } from './sample-random.ts';
-import { buildPopulation, buildWholeItems, snapshotInstall } from './whole-item-stores.ts';
+import { buildPopulation, buildWholeItems, installEnv, snapshotInstall } from './whole-item-stores.ts';
 import { drawStratified, freezeManifest, MANIFEST_FILE, splitByGroup, type AcceptanceCriteria } from './whole-item.ts';
 
 const argv = process.argv.slice(2);
@@ -53,9 +58,10 @@ function twoYearsAgo(): string {
 
 function main(): void {
   const out = flag('--out') ?? WHOLE_DIR_DEFAULT;
-  const fromInstall = argv.includes('--from-install');
+  const installHome = flag('--install-home');
+  const fromInstall = argv.includes('--from-install') || installHome !== undefined;
   const storesFlag = flag('--stores');
-  if (fromInstall === (storesFlag !== undefined)) throw new Error('Pass --from-install, or --stores DIR of store copies (not both).');
+  if (fromInstall === (storesFlag !== undefined)) throw new Error('Pass --from-install, --install-home DIR, or --stores DIR of store copies (one of them).');
   const count = Number(flag('--count') ?? 200);
   const seed = Number(flag('--seed') ?? 20261110);
   const since = flag('--since') ?? twoYearsAgo();
@@ -80,7 +86,7 @@ function main(): void {
   try {
     if (fromInstall) {
       rmSync(stores, { recursive: true, force: true });
-      snapshot = snapshotInstall(stores);
+      snapshot = snapshotInstall(stores, installHome ? installEnv(resolve(installHome)) : process.env);
     }
     const population = buildPopulation(stores, { since, minTextChars });
     const { picked, cells } = drawStratified(population.units, count, privateShare, minPerCell, seed);

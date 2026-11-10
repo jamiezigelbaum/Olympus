@@ -13,8 +13,8 @@
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { accountStorePath, sharedDataPath, type LayoutEnv } from '../../src/core/olympus-layout.ts';
-import { readSourceRegistry, sourceAccountMovePending } from '../../src/core/source-registry.ts';
+import { accountFolder, accountStorePath, olympusDataRoot, sharedDataPath, type LayoutEnv } from '../../src/core/olympus-layout.ts';
+import { readSourceRegistry, sourceAccountMovePending, type SourceRegistryAccount } from '../../src/core/source-registry.ts';
 import { snapshotPrefilterDatabase } from '../../src/workers/classification/prefilter-training-dry-run.ts';
 import { snifferInjectionRule, snifferMaterialForModel, snifferOwnMaterial } from '../../src/workers/classification/sniffer.ts';
 import { tierLedgerPathForStore, tierSnifferPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
@@ -28,6 +28,7 @@ const JUDGE_TEXT_CHARS = 60_000;
 /** What the labeling page keeps of one item or attachment: long documents whole, within reason. */
 export const WHOLE_TEXT_CHARS = 400_000;
 const STORE_FILES = ['secure_local.sqlite', 'internal.sqlite'] as const;
+const ARCHIVE_IMPORTS = 'archive.imports';
 const LEDGER_FILE = 'secure_local.tier-ledger.sqlite';
 const SNIFFER_FILE = 'secure_local.tier-sniffer.sqlite';
 export const EXTRACTION_FILE = 'file-extraction-jobs.sqlite';
@@ -372,22 +373,64 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
   }
 }
 
+/** An account's store sets: one for most sources, one per family for imported archives. */
+export function accountStoreSets(account: SourceRegistryAccount, env: LayoutEnv): Array<{ folder: string; secure: string; internal?: string }> {
+  const storeOf = (name: string) => {
+    try {
+      return accountStorePath(account, name, env);
+    } catch {
+      return undefined;
+    }
+  };
+  const set = (folder: string, secure: string | undefined, internal: string | undefined) => (secure
+    ? [{ folder, secure, ...(internal ? { internal } : {}) }]
+    : []);
+  if (account.source_id !== ARCHIVE_IMPORTS) {
+    return set(`${account.source_id}@${account.slot}`, storeOf('secure_local'), storeOf('internal'));
+  }
+  // Imported archives (a Telegram or WhatsApp export, say) keep one store set per family.
+  const families = new Set<string>();
+  if (account.layout === 'folder') {
+    const stores = join(accountFolder(account, env), 'stores');
+    for (const name of existsSync(stores) ? readdirSync(stores) : []) {
+      const found = /^([A-Za-z0-9_-]+)\.secure_local\.sqlite$/.exec(name);
+      if (found) families.add(found[1]!);
+    }
+  } else {
+    const root = olympusDataRoot(env);
+    const names = existsSync(root) ? readdirSync(root) : [];
+    for (const name of names) {
+      const found = /^archive-([A-Za-z0-9_-]+)-connector-store\.sqlite$/.exec(name);
+      if (!found) continue;
+      // `archive-<family>-internal-…` is that family's Personal store, not a family of its own.
+      const base = /^(.+)-(internal|public)$/.exec(found[1]!)?.[1];
+      if (base && names.includes(`archive-${base}-connector-store.sqlite`)) continue;
+      families.add(found[1]!);
+    }
+  }
+  return [...families].sort().flatMap((family) =>
+    set(`${ARCHIVE_IMPORTS}.${family}@${account.slot}`, storeOf(`${family}.secure_local`), storeOf(`${family}.internal`)));
+}
+
 /**
- * Copies an install's connector stores, their ledgers and sniffer files, and
- * the extraction jobs, into `dest` in the layout above. Each file is copied
- * with its WAL by production's snapshot (no SQLite handle on an install file;
- * an overlapping write is retried or refused), then the copy is folded into
- * one file so it opens read-only.
+ * Copies an install's connector stores (imported archives included, one set
+ * per family), their ledgers and sniffer files, and the extraction jobs, into
+ * `dest` in the layout above. Each file is copied with its WAL by production's
+ * snapshot (no SQLite handle on an install file; an overlapping write is
+ * retried or refused), then the copy is folded into one file so it opens
+ * read-only. `env` picks the install: this machine's by default, or a copied
+ * home (`installEnv`).
  */
-export function snapshotInstall(dest: string, env: LayoutEnv = process.env): { accounts: number; files: number; skippedAccounts: number } {
+export function snapshotInstall(dest: string, env: LayoutEnv = process.env): { accounts: number; storeSets: number; files: number; skippedAccounts: number } {
   mkdirSync(dest, { recursive: true, mode: 0o700 });
   chmodSync(dest, 0o700);
   const registry = readSourceRegistry(env);
   let files = 0;
   let accounts = 0;
+  let storeSets = 0;
   let skippedAccounts = 0;
   const copy = (from: string, to: string) => {
-    if (!existsSync(from)) return false;
+    if (!existsSync(from)) return;
     snapshotPrefilterDatabase(from, to, () => {});
     const db = new Database(to);
     try {
@@ -397,31 +440,37 @@ export function snapshotInstall(dest: string, env: LayoutEnv = process.env): { a
     }
     chmodSync(to, 0o600);
     files += 1;
-    return true;
   };
   for (const account of registry.accounts) {
     if (account.state !== 'active' || sourceAccountMovePending(account)) { skippedAccounts += 1; continue; }
-    let secure: string;
-    try {
-      secure = accountStorePath(account, 'secure_local', env);
-    } catch {
-      // Imported archives keep one store set per family: not part of this sample.
-      skippedAccounts += 1;
-      continue;
-    }
-    if (!existsSync(tierLedgerPathForStore(secure))) { skippedAccounts += 1; continue; }
-    const folder = join(dest, `${account.source_id}@${account.slot}`);
-    mkdirSync(folder, { recursive: true, mode: 0o700 });
-    copy(secure, join(folder, 'secure_local.sqlite'));
-    copy(tierLedgerPathForStore(secure), join(folder, LEDGER_FILE));
-    copy(tierSnifferPathForStore(secure), join(folder, SNIFFER_FILE));
-    try {
-      copy(accountStorePath(account, 'internal', env), join(folder, 'internal.sqlite'));
-    } catch {
-      // A source with no Personal store.
+    const sets = accountStoreSets(account, env).filter((found) => existsSync(tierLedgerPathForStore(found.secure)));
+    if (sets.length === 0) { skippedAccounts += 1; continue; }
+    for (const found of sets) {
+      const folder = join(dest, found.folder);
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      copy(found.secure, join(folder, 'secure_local.sqlite'));
+      copy(tierLedgerPathForStore(found.secure), join(folder, LEDGER_FILE));
+      copy(tierSnifferPathForStore(found.secure), join(folder, SNIFFER_FILE));
+      if (found.internal) copy(found.internal, join(folder, 'internal.sqlite'));
+      storeSets += 1;
     }
     accounts += 1;
   }
   copy(sharedDataPath('file-extraction-jobs', env), join(dest, EXTRACTION_FILE));
-  return { accounts, files, skippedAccounts };
+  return { accounts, storeSets, files, skippedAccounts };
 }
+
+/**
+ * The layout of a COPIED home from another machine: stores are read where
+ * Olympus's default layout puts them under that home. A copied Linux engine
+ * receipt is ignored, since its paths name the other machine.
+ */
+export function installEnv(home: string): LayoutEnv {
+  return {
+    HOME: home,
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+    XDG_STATE_HOME: join(home, '.local', 'state'),
+    OPENCLAW_STATE_DIR: join(home, '.openclaw'),
+  };
+}
+

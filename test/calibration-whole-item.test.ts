@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CalibrationLabels, CalibrationSample } from '../eval/calibration/files.ts';
+import { scoredTier, type CalibrationLabels, type CalibrationSample } from '../eval/calibration/files.ts';
 import { readJudgeFile, scoreWhole } from '../eval/calibration/score-whole.ts';
-import { buildPopulation, buildWholeItems, snapshotInstall } from '../eval/calibration/whole-item-stores.ts';
+import { areaOf, buildPopulation, buildWholeItems, installEnv, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
 import {
   allocate,
   cellKey,
@@ -80,6 +80,19 @@ describe('design', () => {
     const loosened: WholeManifest = { ...manifest, criteria: { ...CRITERIA, privateRecallMin: 0.5 } };
     expect(() => verifyManifest(loosened, '{"items":[]}')).toThrow(/manifest was changed/);
   });
+});
+
+test('score.ts and judge-run.ts score Secret labels as Private instead of dropping them', () => {
+  expect(scoredTier('secret')).toBe('private');
+  expect(scoredTier('private')).toBe('private');
+  expect(scoredTier('personal')).toBe('personal');
+  expect(scoredTier('unsure')).toBeUndefined();
+  expect(scoredTier('skip')).toBeUndefined();
+  for (const file of ['eval/calibration/score.ts', 'eval/calibration/judge-run.ts']) {
+    const source = readFileSync(file, 'utf8');
+    expect(source).toContain('scoredTier(labels[item.id]?.label) !== undefined');
+    expect(source).not.toContain("labels[item.id]?.label === 'private')");
+  }
 });
 
 describe('statistics', () => {
@@ -188,17 +201,26 @@ function storesFixture(root: string) {
 }
 
 describe('copying an install', () => {
-  test('copies each active account with its ledger, folds WAL into the copy, and leaves the install unchanged', () => {
+  test('copies each active account, imported archives per family, from a copied home, and leaves the install unchanged', () => {
     const root = mkdtempSync(join(tmpdir(), 'whole-install-'));
     try {
-      const env = { HOME: root, XDG_DATA_HOME: join(root, 'data') };
-      const data = join(root, 'data', 'openclaw', 'olympus');
+      // A copy of another machine's home: Olympus's default layout under it.
+      const env = installEnv(root);
+      const data = join(root, '.local', 'share', 'openclaw', 'olympus');
       const storesDir = join(data, 'sources', 'gmail.email', 'default', 'stores');
       mkdirSync(storesDir, { recursive: true });
       writeFileSync(join(data, 'registry.json'), JSON.stringify({ schema: 2, accounts: [
         { source_id: 'gmail.email', slot: 'default', state: 'active', layout: 'folder', corpus_ids: ['c'], created_at: '2026-01-01T00:00:00Z' },
         { source_id: 'x.bookmarks', slot: 'default', state: 'deleted', layout: 'folder', corpus_ids: ['d'], created_at: '2026-01-01T00:00:00Z' },
+        { source_id: 'archive.imports', slot: 'default', state: 'active', layout: 'folder', corpus_ids: ['e'], created_at: '2026-01-01T00:00:00Z' },
+        { source_id: 'archive.imports', slot: 'old', state: 'active', layout: 'legacy', corpus_ids: ['f'], created_at: '2026-01-01T00:00:00Z' },
       ] }));
+      const touch = (path: string) => { const db = new Database(path); db.exec('CREATE TABLE t(x TEXT)'); db.close(); };
+      // Imported archives: a Telegram export in its account folder, a WhatsApp export at the legacy paths.
+      const archive = join(data, 'sources', 'archive.imports', 'default', 'stores');
+      mkdirSync(archive, { recursive: true });
+      for (const file of ['telegram.secure_local.sqlite', 'telegram.secure_local.tier-ledger.sqlite', 'telegram.internal.sqlite']) touch(join(archive, file));
+      for (const file of ['archive-whatsapp-connector-store.sqlite', 'archive-whatsapp-connector-store.tier-ledger.sqlite', 'archive-whatsapp-internal-connector-store.sqlite']) touch(join(data, file));
       const live = new Database(join(storesDir, 'secure_local.sqlite'));
       live.exec("PRAGMA journal_mode = WAL; CREATE TABLE items(x TEXT); INSERT INTO items VALUES ('invented');");
       const ledger = new Database(join(storesDir, 'secure_local.tier-ledger.sqlite'));
@@ -206,7 +228,13 @@ describe('copying an install', () => {
       ledger.close();
       const before = readFileSync(join(storesDir, 'secure_local.sqlite'));
       const dest = join(root, 'copies');
-      expect(snapshotInstall(dest, env)).toEqual({ accounts: 1, files: 2, skippedAccounts: 1 });
+      expect(snapshotInstall(dest, env)).toEqual({ accounts: 3, storeSets: 3, files: 8, skippedAccounts: 1 });
+      expect(storeDirs(dest)).toEqual(['archive.imports.telegram@default', 'archive.imports.whatsapp@old', 'gmail.email@default']);
+      for (const dir of ['archive.imports.telegram@default', 'archive.imports.whatsapp@old']) {
+        expect(readdirSync(join(dest, dir)).sort()).toEqual(['internal.sqlite', 'secure_local.sqlite', 'secure_local.tier-ledger.sqlite']);
+      }
+      // Each archive family is a source of its own for stratification.
+      expect(areaOf('archive.imports.telegram@default')).toBe('archive.imports.telegram');
       // The install is untouched; the copy holds what was still only in the WAL.
       expect(readFileSync(join(storesDir, 'secure_local.sqlite')).equals(before)).toBe(true);
       live.close();
@@ -332,6 +360,21 @@ describe('whole items from store copies', () => {
       expect(result.labels.notSure).toBe(sample.items.filter((_, i) => i % 4 === 3).length);
       // A result run on another sample, or a sample edited after freezing, is refused.
       expect(() => scoreWhole({ sample, sampleBytes, manifest, labels, judges: { stale: readJudgeFile({ sampleSha256: 'x', rows: [] }) } })).toThrow(/different sample/);
+      // So is a result that does not say which sample it ran on.
+      expect(() => scoreWhole({ sample, sampleBytes, manifest, labels, judges: { unnamed: readJudgeFile({ rows: [] }) } })).toThrow(/does not record the sample/);
+
+      // A judge that scored only some labeled items fails the criteria, however good its subset.
+      const owner = (id: string) => labels.labels[id]!.label;
+      const right = (ids: readonly string[]) => readJudgeFile({ sampleSha256: manifest.sampleSha256, rows: ids.map((id) => ({ id, judge: owner(id) === 'personal' ? 'personal' : 'private', via: 'judge' })) });
+      const scoredIds = sample.items.filter((item) => owner(item.id) !== 'unsure').map((item) => item.id);
+      const coverage = scoreWhole({ sample, sampleBytes, manifest, labels, judges: { full: right(scoredIds), partial: right(scoredIds.slice(1)) } }).judges as Record<string, {
+        coverage: { missing: number }; criteria: { passes: boolean; checks: Record<string, { passes: boolean }> };
+      }>;
+      expect(coverage['full']!.coverage.missing).toBe(0);
+      expect(coverage['full']!.criteria.checks['coverage']!.passes).toBe(true);
+      expect(coverage['partial']!.coverage.missing).toBe(1);
+      expect(coverage['partial']!.criteria.checks['coverage']!.passes).toBe(false);
+      expect(coverage['partial']!.criteria.passes).toBe(false);
       writeFileSync(join(out, 'sample.json'), sampleBytes.replace('"w001"', '"w999"'));
       expect(() => scoreWhole({ sample, sampleBytes: readFileSync(join(out, 'sample.json'), 'utf8'), manifest, labels, judges: {} })).toThrow(/sample changed/);
     } finally {
