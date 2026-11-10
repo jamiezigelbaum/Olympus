@@ -71,3 +71,15 @@ test('Venice accepts the documented funded response without bundled credits', as
     fetch: async () => Response.json({ data: { accessPermitted: true, balances: { USD: 50.23, DIEM: 100.023 } } }) });
   expect(saved).toEqual(['fixture']);
 });
+
+// #675: an empty or all-null balance is an incomplete response, never a pass.
+for (const balances of [{}, { USD: null, DIEM: null, BUNDLED_CREDITS: null }]) {
+  test(`Venice refuses an incomplete balance ${JSON.stringify(balances)}`, async () => {
+    const saved: string[] = [];
+    const store: SecretStore = { label: 'test', async get() { return undefined; }, async set(_key, value) { saved.push(value); }, async delete() {}, async list() { return []; } };
+    await expect(connectApiKeySource({ source: 'venice', apiKey: 'fixture', secretStore: store,
+      fetch: async () => Response.json({ data: { accessPermitted: true, balances } }) }))
+      .rejects.toThrow('Venice returned an incomplete balance. No credentials were stored; try again.');
+    expect(saved).toEqual([]);
+  });
+}

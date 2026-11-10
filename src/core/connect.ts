@@ -617,6 +617,18 @@ function prepareOAuthSourceConnection(
   };
 }
 
+/**
+ * The list check's refusal for a missing permission. Worded for every caller,
+ * because the CLI has no setup steps; the dashboard's callback page swaps it
+ * for its own sentence that names the walkthrough's step (#675).
+ */
+export const DROPBOX_MISSING_SCOPE_MESSAGE = "Dropbox needs more permissions. On your Dropbox app's Permissions tab, tick files.metadata.read, files.content.read, sharing.read and account_info.read, choose Submit, and sign in again. No credentials were stored.";
+
+/**
+ * The final check after sign-in: one list call. It goes to the same host as
+ * `tokenUrl`, like the account lookup, so the undocumented `--token-url`
+ * override (a test hook, not in the CLI's help) moves both together.
+ */
 export async function checkDropboxConnection(accessToken: string, fetchImpl: OAuthFetch, timeoutMs: number, tokenUrl = 'https://api.dropboxapi.com/oauth2/token'): Promise<void> {
   let response: Response;
   let text: string;
@@ -625,14 +637,17 @@ export async function checkDropboxConnection(accessToken: string, fetchImpl: OAu
       method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: '', limit: 1 }), redirect: 'error',
     }, { timeoutMs, limitBytes: 64 * 1024 }));
-  } catch {
+  } catch (error) {
+    // Each refusal says what happened: an answer too large to use, no answer in time, or no connection.
+    if (isBoundedResponseTooLargeError(error)) throw new Error('Dropbox returned an answer to the final check that Olympus could not use. No credentials were stored; try again.');
+    if (isAbortError(error)) throw new Error('Dropbox did not answer the final check in time. No credentials were stored; try again.');
     throw new Error('Dropbox could not be reached for the final check. No credentials were stored; try again.');
   }
   let missingScope = false;
   if (response.status === 401) {
     try { missingScope = JSON.parse(text)?.error?.['.tag'] === 'missing_scope'; } catch { /* generic refusal */ }
   }
-  if (missingScope) throw new Error('Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.');
+  if (missingScope) throw new Error(DROPBOX_MISSING_SCOPE_MESSAGE);
   if (!response.ok) throw new Error('Dropbox could not complete the list check. No credentials were stored; try again.');
 }
 
