@@ -42,6 +42,10 @@
  * archive, and a file changed during an import stops it visibly (archive-leg.ts, archive-stages.ts). Each later format adds one entry to
  * ARCHIVE_FORMATS in archive-fixtures.ts and nothing here.
  *
+ * Mac server-mode leg (#778; `--skip-server-mode` leaves it out for a candidate before 1.3.2), last because it changes the machine:
+ * the dashboard's server-mode switch on and off through its administrator step (a stand-in answers the password prompt), a restart
+ * of the VM with server mode on, and an agent on a second, standard account with a loopback key (server-mode.ts). Linux reports a skip.
+ *
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
@@ -87,6 +91,7 @@ import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type Visu
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
 import { BESIDE_LIVE_FORMATS, EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import { checkZkapiConfinement } from './zkapi-confinement.ts';
+import { runServerModeLeg } from './server-mode.ts';
 import {
   ARCHIVE_BOUNDS, BULK_SIZES, besideLiveChecks, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, seedLiveChecks,
   type BesideLiveObservation, type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation, type SeedLiveObservation,
@@ -140,6 +145,8 @@ export interface RunOptions {
   skipSuite?: boolean;
   /** Leave out the archive-import leg. For a candidate that has no archive import. */
   skipArchive?: boolean;
+  /** Leave out the Mac server-mode leg (server-mode.ts). For a candidate before 1.3.2, which has no server mode. */
+  skipServerMode?: boolean;
   /** Run only these journeys (by id); omitted runs them all. */
   onlyJourneys?: string[];
   /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
@@ -1326,6 +1333,21 @@ async function runConfinementCheck(run: Run): Promise<void> {
   run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
 }
 
+// After everything else, because it changes how the engine runs, restarts the Mac and adds an account (server-mode.ts). Mac only.
+async function runServerModeCheck(run: Run): Promise<void> {
+  if (run.options.skipServerMode) return;
+  const machine = run.machine!;
+  const checks = await run.phase('server-mode', () => runServerModeLeg({
+    os: machine.os,
+    exec: (script, timeoutMs) => machine.exec(script, { timeoutMs }),
+    dashboard: async () => {
+      const dash = await run.agent('dashboard-json', '', 60_000);
+      return dash.result && typeof dash.result.status === 'number' ? { status: dash.result.status, body: String(dash.result.body ?? '') } : undefined;
+    },
+  }, { log: (line) => run.log(line) }));
+  for (const check of checks) run.add(check);
+}
+
 export async function runReleaseCheck(options: RunOptions): Promise<ReleaseReport> {
   mkdirSync(join(options.outDir, 'logs'), { recursive: true });
   const workDir = join(tmpdir(), `release-check-${options.runId}`);
@@ -1368,6 +1390,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+        if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
       }
       await collectEvidence(run, options.outDir);
     }
@@ -1490,7 +1513,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1529,7 +1552,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   let carry: RunOptions['carry'];
   if ((carryFrom === undefined) !== (changedFiles === undefined)) throw new Error('--carry-from and --changed-files go together');
   if (carryFrom !== undefined && changedFiles !== undefined) {
-    const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--only-journeys', '--agents',
+    const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--skip-server-mode', '--only-journeys', '--agents',
       '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine'].filter(has);
     if (conflicts.length > 0) throw new Error(`--carry-from lets the change decide what runs; drop ${conflicts.join(', ')}`);
     if (!existsSync(resolve(changedFiles))) throw new Error(`--changed-files ${changedFiles} does not exist`);
@@ -1561,6 +1584,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     skipJourneys: skip('--skip-journeys'),
     skipExplore: skip('--skip-explore'),
     skipArchive: skip('--skip-archive'),
+    skipServerMode: has('--skip-server-mode'),
     skipSuite: skip('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
