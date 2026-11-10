@@ -13,6 +13,13 @@
  *
  * Retention is the owner's choice: 7, 30 (default) or 90 days, or 0 (don't
  * keep), which also clears what is kept.
+ *
+ * An item that becomes Secret keeps its location only here too
+ * (docs/TRUST_MODEL.md): the Secrets disposition
+ * (workers/connector-store/secrets-disposition.ts) clears its recorded titles
+ * and locators and leaves a marker, so a receipt written later (built before
+ * the change) records it without them. The marker is retired when the item
+ * leaves Secrets, so a later release is named again.
  */
 import { Database } from 'bun:sqlite';
 import { randomBytes } from 'node:crypto';
@@ -21,11 +28,12 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { AppRequestRecord, ReleasedItem, ReleasedTier } from './app-release-capture.ts';
 import { SHARED_DATA_FILES } from './olympus-layout.ts';
+import { resolveRemoteConnectionsDbPath } from './remote-connections.ts';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
 
 export const APP_RELEASE_LOG_STORE_ID = 'app-release-log';
-export const APP_RELEASE_LOG_SCHEMA_VERSION = 1;
+export const APP_RELEASE_LOG_SCHEMA_VERSION = 2;
 export const APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0] as const;
 export type AppReleaseRetentionDays = (typeof APP_RELEASE_RETENTION_DAYS)[number];
 export const APP_RELEASE_DEFAULT_RETENTION_DAYS: AppReleaseRetentionDays = 30;
@@ -37,6 +45,28 @@ const RETENTION_KEY = 'retention_days';
 /** Beside the remote connections, like the waiting private questions. */
 export function appReleaseLogDbPath(remoteConnectionsDbPath: string): string {
   return join(dirname(remoteConnectionsDbPath), SHARED_DATA_FILES['app-release-log']);
+}
+
+const openLogPaths = new Map<string, number>();
+
+/**
+ * The default log path plus every log this process holds open: the Secrets
+ * disposition clears an item in each.
+ */
+export function appReleaseLogDbPaths(env: Record<string, string | undefined> = process.env): string[] {
+  return [...new Set([appReleaseLogDbPath(resolveRemoteConnectionsDbPath(env)), ...openLogPaths.keys()])];
+}
+
+/**
+ * An item as the log knows it. No account scope is recorded, so every
+ * account's copy of the provider item matches, and a row or marker without a
+ * conversation matches any: a Secret clears too much rather than too little.
+ */
+export interface AppReleaseSecretItem {
+  provider: string;
+  providerItemId: string;
+  /** Only that conversation's item; absent, the provider item in any conversation. */
+  providerConversationId?: string;
 }
 
 export interface AppReleaseLogItem {
@@ -73,6 +103,17 @@ export interface AppReleaseLogStore {
   markAnsweredPrivately(privateQuestionId: string): number;
   /** Removes (or, dry, counts) the items of these corpora. */
   forgetCorpora(corpusIds: readonly string[], dryRun: boolean): number;
+  /**
+   * The item became Secret: its recorded titles and locators are cleared and
+   * a marker keeps a later receipt from writing them back. `proceed`, checked
+   * inside the write, skips it (0) when false. The rows cleared.
+   */
+  forgetSecretItem(item: AppReleaseSecretItem, options?: { proceed?: () => boolean }): number;
+  /**
+   * The item left Secrets: its marker goes, so a later release is recorded
+   * with its title. `stillSecret`, checked inside the write, keeps it.
+   */
+  retireSecretItem(item: Omit<AppReleaseSecretItem, 'providerConversationId'>, options?: { stillSecret?: () => boolean }): void;
   close(): void;
 }
 
@@ -95,6 +136,8 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
     closeSqliteStore(db);
     throw error;
   }
+  openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
+  let registered = true;
 
   const retentionDays = (): AppReleaseRetentionDays => {
     const row = db.query('SELECT value FROM app_release_meta WHERE key = ?').get(RETENTION_KEY) as { value: string } | null;
@@ -131,9 +174,13 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
         );
         const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        // Read in this write: a receipt built before its item became Secret keeps no name.
+        const secret = db.query(`SELECT 1 FROM app_release_secret_items
+          WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
         record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
-          insert.run(id, position, item.source, item.title ?? null, item.tier, item.corpusId ?? null, item.provider ?? null,
-            item.providerItemId ?? null, item.providerConversationId ?? null, item.locator ?? null);
+          const named = !(item.provider && item.providerItemId && secret.get(item.provider, item.providerItemId, item.providerConversationId ?? '', item.providerConversationId ?? ''));
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null,
+            item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
         });
       })();
       expire();
@@ -202,7 +249,30 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
       if (dryRun) return (db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds) as { n: number }).n;
       return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
     },
+    forgetSecretItem(item, options = {}) {
+      const conversation = item.providerConversationId ?? '';
+      return db.transaction(() => {
+        if (options.proceed && !options.proceed()) return 0;
+        db.query(`INSERT OR IGNORE INTO app_release_secret_items (provider, provider_item_id, provider_conversation_id, redacted_at)
+          VALUES (?, ?, ?, ?)`).run(item.provider, item.providerItemId, conversation, now());
+        return db.query(`UPDATE app_release_items SET title = NULL, locator = NULL
+          WHERE provider = ? AND provider_item_id = ? AND (? = '' OR provider_conversation_id IS NULL OR provider_conversation_id = ?)
+            AND (title IS NOT NULL OR locator IS NOT NULL)`).run(item.provider, item.providerItemId, conversation, conversation).changes;
+      }).immediate();
+    },
+    retireSecretItem(item, options = {}) {
+      db.transaction(() => {
+        if (options.stillSecret?.()) return;
+        db.query('DELETE FROM app_release_secret_items WHERE provider = ? AND provider_item_id = ?').run(item.provider, item.providerItemId);
+      }).immediate();
+    },
     close() {
+      if (registered) {
+        registered = false;
+        const count = (openLogPaths.get(dbPath) ?? 1) - 1;
+        if (count > 0) openLogPaths.set(dbPath, count);
+        else openLogPaths.delete(dbPath);
+      }
       closeSqliteStore(db);
     },
   };
@@ -217,6 +287,35 @@ export function forgetAppReleaseItems(dbPath: string, selector: { corpusIds: rea
   const store = openAppReleaseLog(dbPath);
   try {
     return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Forgets a Secret item's names in one log (workers/connector-store/secrets-disposition.ts).
+ * A log that does not exist is not created: it holds no name. The rows cleared.
+ */
+export function forgetSecretAppReleaseItem(dbPath: string, item: AppReleaseSecretItem, options: { proceed?: () => boolean } = {}): number {
+  if (!existsSync(dbPath)) return 0;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    return store.forgetSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+
+/** Retires a Secret item's marker in one log once the item left Secrets. */
+export function retireSecretAppReleaseItem(
+  dbPath: string,
+  item: Omit<AppReleaseSecretItem, 'providerConversationId'>,
+  options: { stillSecret?: () => boolean } = {},
+): void {
+  if (!existsSync(dbPath)) return;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    store.retireSecretItem(item, options);
   } finally {
     store.close();
   }
@@ -258,6 +357,21 @@ function migrations(): SqliteMigration[] {
         );
         CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
         CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+    },
+  }, {
+    version: 2,
+    name: 'app_release_secret_items',
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_secret_items (
+          provider TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          provider_conversation_id TEXT NOT NULL DEFAULT '',
+          redacted_at INTEGER NOT NULL,
+          PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
+        );
+        CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
       `);
     },
   }];

@@ -28566,6 +28566,1830 @@ var init_tier_placement = __esm(() => {
   };
 });
 
+// src/core/operation-caller.ts
+function sanitizeCallerDisplayName(value) {
+  if (typeof value !== "string")
+    return;
+  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned)
+    return;
+  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
+}
+function callerProviderFromLabel(label) {
+  if (!label)
+    return;
+  const named = HOST_NAME_PATTERNS.filter(([, pattern]) => pattern.test(label));
+  return named.length === 1 ? named[0][0] : undefined;
+}
+function operationCallerToWire(caller) {
+  const displayName = sanitizeCallerDisplayName(caller.displayName);
+  return {
+    surface: caller.surface,
+    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
+    ...displayName ? { display_name: displayName } : {},
+    ...caller.provider ? { provider: caller.provider } : {}
+  };
+}
+function parseOperationCallerWire(value) {
+  if (value === undefined || value === null)
+    return { ok: true, caller: undefined };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "caller must be an object when provided." };
+  }
+  const record = value;
+  const unknownFields = Object.keys(record).filter((key2) => !["surface", "connection_id", "display_name", "provider"].includes(key2));
+  if (unknownFields.length > 0) {
+    return { ok: false, message: `caller contains undeclared fields: ${unknownFields.sort().join(", ")}.` };
+  }
+  if (typeof record.surface !== "string" || !OPERATION_CALLER_SURFACES.includes(record.surface)) {
+    return { ok: false, message: `caller.surface must be one of: ${OPERATION_CALLER_SURFACES.join(", ")}.` };
+  }
+  let connectionId;
+  if (record.connection_id !== undefined) {
+    if (typeof record.connection_id !== "string" || record.connection_id.length === 0 || record.connection_id.length > OPERATION_CALLER_CONNECTION_ID_MAX || !CONNECTION_ID_PATTERN.test(record.connection_id)) {
+      return { ok: false, message: "caller.connection_id must be a short identifier when provided." };
+    }
+    connectionId = record.connection_id;
+  }
+  let displayName;
+  if (record.display_name !== undefined) {
+    displayName = sanitizeCallerDisplayName(record.display_name);
+    if (typeof record.display_name !== "string" || displayName === undefined) {
+      return { ok: false, message: "caller.display_name must be a non-empty string when provided." };
+    }
+  }
+  let provider;
+  if (record.provider !== undefined) {
+    if (typeof record.provider !== "string" || !OPERATION_CALLER_PROVIDERS.includes(record.provider)) {
+      return { ok: false, message: `caller.provider must be one of: ${OPERATION_CALLER_PROVIDERS.join(", ")}.` };
+    }
+    provider = record.provider;
+  }
+  return {
+    ok: true,
+    caller: {
+      surface: record.surface,
+      ...connectionId ? { connection_id: connectionId } : {},
+      ...displayName ? { display_name: displayName } : {},
+      ...provider ? { provider } : {}
+    }
+  };
+}
+function markInProcessRemoteRequest(request) {
+  inProcessRemoteRequests.add(request);
+  return request;
+}
+function isInProcessRemoteRequest(request) {
+  return inProcessRemoteRequests.has(request);
+}
+function callerClaimsRemoteConnection(caller) {
+  return caller.surface === "remote" || caller.connection_id !== undefined;
+}
+var OPERATION_CALLER_SURFACES, OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, HOST_NAME_PATTERNS, inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  OPERATION_CALLER_SURFACES = ["native", "mcp", "cli", "remote"];
+  OPERATION_CALLER_PROVIDERS = ["openai", "xai", "meta", "anthropic", "other"];
+  CONNECTION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+  UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  HOST_NAME_PATTERNS = [
+    ["anthropic", /claude|anthropic/i],
+    ["openai", /chatgpt|openai|codex/i],
+    ["xai", /grok|xai|x\.ai/i],
+    ["meta", /\b(?:meta|muse)\b/i]
+  ];
+  inProcessRemoteRequests = new WeakSet;
+});
+
+// connect-relay/shared/tokens.ts
+import { createHash as createHash14, randomBytes as randomBytes6 } from "node:crypto";
+function surfaceFingerprint(digest2) {
+  return createHash14("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
+}
+function mintCredential(kind, installId) {
+  return `${PREFIX[kind]}.${installId}.${randomBytes6(32).toString("base64url")}`;
+}
+function credentialInstallId(kind, value) {
+  if (typeof value !== "string" || value.length > 128)
+    return;
+  return PATTERN[kind].exec(value)?.[1];
+}
+var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", SURFACE_RESPONSE_HEADER = "x-olympus-surface", SURFACE_FINGERPRINT_DOMAIN = `olympus-relay/surface-fingerprint/v1
+`, PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN, HANDOFF_PATH_PREFIX = "/go/", SIGNIN_BRIDGE_PATH = "/connect/signin";
+var init_tokens = __esm(() => {
+  PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c", handoff: "oly2g", private: "oly2p" };
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var exports_pinned_clients = {};
+__export(exports_pinned_clients, {
+  pinnedGrantProvider: () => pinnedGrantProvider,
+  pinnedClient: () => pinnedClient,
+  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
+  isChatGptGrant: () => isChatGptGrant,
+  GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
+  GROK_CLIENT_ID: () => GROK_CLIENT_ID,
+  CURSOR_REDIRECT_URIS: () => CURSOR_REDIRECT_URIS,
+  CURSOR_REDIRECT_URI: () => CURSOR_REDIRECT_URI,
+  CURSOR_CLIENT_ID: () => CURSOR_CLIENT_ID,
+  CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
+  CLAUDE_CLIENT_ID: () => CLAUDE_CLIENT_ID,
+  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
+  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
+  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
+});
+function isClientIdMetadataUrl(clientId) {
+  return clientId.startsWith("https://");
+}
+function isChatGptGrant(connection) {
+  return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
+}
+function pinnedClient(clientId) {
+  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CHATGPT_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CLAUDE_CLIENT_ID) {
+    return { clientId, clientName: "Claude", redirectUris: [CLAUDE_REDIRECT_URI], verifiedHost: "claude.ai", host: "claude" };
+  }
+  if (clientId === GROK_CLIENT_ID) {
+    return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
+  }
+  if (clientId === CURSOR_CLIENT_ID) {
+    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: CURSOR_REDIRECT_URIS, verifiedHost: "cursor.com", host: "cursor" };
+  }
+  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
+  if (callback) {
+    return {
+      clientId,
+      clientName: "ChatGPT",
+      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
+      verifiedHost: "chatgpt.com",
+      host: "chatgpt"
+    };
+  }
+  return;
+}
+function pinnedGrantProvider(connection) {
+  const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
+  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
+}
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
+  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+import { createHash as createHash15, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+function isRemoteConnectionProvider(value) {
+  return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
+}
+function remoteConnectionProvider(connection) {
+  return pinnedGrantProvider(connection) ?? (isRemoteConnectionProvider(connection.chosen) ? connection.chosen : undefined) ?? callerProviderFromLabel(connection.displayName) ?? "other";
+}
+function isWellFormedOAuthAccessToken(token) {
+  return ACCESS_TOKEN_PATTERN.test(token) || credentialInstallId("access", token) !== undefined;
+}
+function isWellFormedOAuthRefreshToken(token) {
+  return REFRESH_TOKEN_PATTERN.test(token) || credentialInstallId("refresh", token) !== undefined;
+}
+function isRegisteredOAuthClientId(value) {
+  return REGISTERED_CLIENT_ID_PATTERN.test(value);
+}
+function normalizePairingCode(input) {
+  if (typeof input !== "string" || input.length > 64)
+    return;
+  const compact = input.toUpperCase().replace(/[\s-]/g, "");
+  if (compact.length !== PAIRING_CODE_LENGTH)
+    return;
+  for (const char of compact)
+    if (!PAIRING_ALPHABET.includes(char))
+      return;
+  return compact;
+}
+function digest2(value) {
+  return createHash15("sha256").update(value, "utf8").digest();
+}
+function randomPairingSymbols(length) {
+  const limit = 256 - 256 % PAIRING_ALPHABET.length;
+  let out = "";
+  while (out.length < length) {
+    for (const byte of randomBytes7(length * 2)) {
+      if (byte >= limit)
+        continue;
+      out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
+      if (out.length === length)
+        break;
+    }
+  }
+  return out;
+}
+function createRemoteOAuthStore(db, now, recordLastUse) {
+  const refreshGrace = new Map;
+  const readToken = (token, kind) => db.query(`
+      SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
+             c.display_name, c.revoked_at, c.provider
+      FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
+      WHERE t.token_hash = ? AND t.kind = ?
+    `).get(digest2(token), kind);
+  const tokenConnection = (row) => ({
+    id: row.connection_id,
+    displayName: row.display_name,
+    clientId: row.client_id,
+    provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider })
+  });
+  const issueTokens = (connectionId, clientId, resource, at, installId) => {
+    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes7(32).toString("base64url")}`;
+    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes7(32).toString("base64url")}`;
+    const insert = db.query(`
+      INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const createdAt = at.toISOString();
+    insert.run(digest2(accessToken), connectionId, "access", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString());
+    insert.run(digest2(refreshToken), connectionId, "refresh", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString());
+    db.query("DELETE FROM remote_oauth_tokens WHERE expires_at <= ?").run(createdAt);
+    return { accessToken, refreshToken, expiresIn: REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS };
+  };
+  const revokeGrant = (connectionId) => {
+    for (const [key2, entry] of refreshGrace)
+      if (entry.connectionId === connectionId)
+        refreshGrace.delete(key2);
+    db.transaction(() => {
+      db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND kind = 'oauth' AND revoked_at IS NULL").run(now().toISOString(), connectionId);
+      db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(connectionId);
+    })();
+  };
+  const toClient = (row) => ({
+    clientId: row.client_id,
+    clientName: row.client_name,
+    redirectUris: JSON.parse(row.redirect_uris),
+    createdAt: row.created_at
+  });
+  return {
+    mintPairingCode() {
+      const at = now();
+      const expiresAt = new Date(at.getTime() + REMOTE_PAIRING_CODE_TTL_MS).toISOString();
+      return db.transaction(() => {
+        db.query("DELETE FROM remote_pairing_codes WHERE expires_at <= ? OR used_at IS NOT NULL").run(at.toISOString());
+        for (let attempt = 0;attempt < 16; attempt += 1) {
+          const selector = randomPairingSymbols(PAIRING_SELECTOR_LENGTH);
+          const secret2 = randomPairingSymbols(PAIRING_SECRET_LENGTH);
+          const inserted = db.query(`
+            INSERT OR IGNORE INTO remote_pairing_codes (selector, secret_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+          `).run(selector, digest2(secret2), at.toISOString(), expiresAt);
+          if (inserted.changes === 1) {
+            return { code: `${selector}-${secret2.slice(0, 4)}-${secret2.slice(4)}`, expiresAt };
+          }
+        }
+        throw new Error("Could not mint a unique pairing code.");
+      })();
+    },
+    checkPairingCode(input) {
+      const normalized = normalizePairingCode(input);
+      if (!normalized)
+        return { ok: false, reason: "malformed" };
+      const selector = normalized.slice(0, PAIRING_SELECTOR_LENGTH);
+      const presented = digest2(normalized.slice(PAIRING_SELECTOR_LENGTH));
+      const atIso = now().toISOString();
+      return db.transaction(() => {
+        const row = db.query(`
+          SELECT secret_hash FROM remote_pairing_codes
+          WHERE selector = ? AND used_at IS NULL AND expires_at > ? AND failed_attempts < ?
+        `).get(selector, atIso, REMOTE_PAIRING_CODE_MAX_FAILURES);
+        if (!row)
+          return { ok: false, reason: "unknown" };
+        const stored = Buffer.from(row.secret_hash);
+        if (stored.length !== presented.length || !timingSafeEqual3(stored, presented)) {
+          db.query("UPDATE remote_pairing_codes SET failed_attempts = failed_attempts + 1 WHERE selector = ?").run(selector);
+          return { ok: false, reason: "wrong_secret" };
+        }
+        const consumed = db.query("UPDATE remote_pairing_codes SET used_at = ? WHERE selector = ? AND used_at IS NULL").run(atIso, selector);
+        return consumed.changes === 1 ? { ok: true } : { ok: false, reason: "unknown" };
+      })();
+    },
+    registerClient(input) {
+      const at = now();
+      return db.transaction(() => {
+        const count = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
+        if (count >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS) {
+          db.query(`
+            DELETE FROM remote_oauth_clients
+            WHERE created_at <= ?
+              AND client_id NOT IN (SELECT client_id FROM remote_connections WHERE client_id IS NOT NULL)
+          `).run(new Date(at.getTime() - UNUSED_CLIENT_PRUNE_AGE_MS).toISOString());
+          const after = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
+          if (after >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS)
+            return "capacity";
+        }
+        const clientId = `olympus_client_${randomBytes7(12).toString("hex")}`;
+        const createdAt = at.toISOString();
+        db.query("INSERT INTO remote_oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)").run(clientId, input.clientName, JSON.stringify(input.redirectUris), createdAt);
+        return { clientId, clientName: input.clientName, redirectUris: [...input.redirectUris], createdAt };
+      })();
+    },
+    getRegisteredClient(clientId) {
+      if (!isRegisteredOAuthClientId(clientId))
+        return;
+      const row = db.query("SELECT * FROM remote_oauth_clients WHERE client_id = ?").get(clientId);
+      return row ? toClient(row) : undefined;
+    },
+    createGrant(input) {
+      const at = now();
+      return db.transaction(() => {
+        const id = randomBytes7(9).toString("hex");
+        const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
+        db.query(`
+          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
+          VALUES (?, ?, 'oauth', NULL, ?, ?, ?)
+        `).run(id, input.displayName, input.clientId, at.toISOString(), provider);
+        const tokens = issueTokens(id, input.clientId, input.resource, at, input.installId);
+        return { connection: { id, displayName: input.displayName, clientId: input.clientId, provider }, tokens };
+      })();
+    },
+    verifyAccessToken(token, resource) {
+      if (!isWellFormedOAuthAccessToken(token))
+        return { ok: false, reason: "unknown" };
+      const row = readToken(token, "access");
+      if (!row)
+        return { ok: false, reason: "unknown" };
+      const at = now();
+      if (row.revoked_at !== null)
+        return { ok: false, reason: "revoked" };
+      if (Date.parse(row.expires_at) <= at.getTime())
+        return { ok: false, reason: "expired" };
+      if (row.resource !== resource)
+        return { ok: false, reason: "wrong_audience" };
+      recordLastUse(row.connection_id, at);
+      return { ok: true, connection: tokenConnection(row) };
+    },
+    refresh(input) {
+      if (!isWellFormedOAuthRefreshToken(input.refreshToken))
+        return { ok: false, reason: "unknown" };
+      const at = now();
+      return db.transaction(() => {
+        const row = readToken(input.refreshToken, "refresh");
+        if (!row)
+          return { ok: false, reason: "unknown" };
+        if (row.revoked_at !== null)
+          return { ok: false, reason: "revoked" };
+        const audiences = typeof input.resource === "string" ? [input.resource] : input.resource;
+        if (row.used_at !== null) {
+          if (!audiences.includes(row.resource))
+            return { ok: false, reason: "wrong_audience" };
+          const key2 = Buffer.from(row.token_hash).toString("hex");
+          const grace = refreshGrace.get(key2);
+          if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
+            const successor = db.query("SELECT used_at FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'refresh'").get(grace.successorRefreshHash);
+            if (successor && successor.used_at === null) {
+              return {
+                ok: true,
+                connection: tokenConnection(row),
+                tokens: grace.tokens
+              };
+            }
+          }
+          refreshGrace.delete(key2);
+          revokeGrant(row.connection_id);
+          return { ok: false, reason: "reused" };
+        }
+        if (Date.parse(row.expires_at) <= at.getTime())
+          return { ok: false, reason: "expired" };
+        if (row.client_id !== input.clientId)
+          return { ok: false, reason: "client_mismatch" };
+        if (!audiences.includes(row.resource))
+          return { ok: false, reason: "wrong_audience" };
+        db.query("UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?").run(at.toISOString(), row.token_hash);
+        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
+        const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at, credentialInstallId("refresh", input.refreshToken));
+        for (const [key2, entry] of refreshGrace)
+          if (entry.expiresAt <= at.getTime())
+            refreshGrace.delete(key2);
+        refreshGrace.set(Buffer.from(row.token_hash).toString("hex"), {
+          tokens,
+          successorRefreshHash: digest2(tokens.refreshToken),
+          connectionId: row.connection_id,
+          clientId: row.client_id,
+          expiresAt: at.getTime() + REMOTE_OAUTH_REFRESH_GRACE_MS
+        });
+        return {
+          ok: true,
+          connection: tokenConnection(row),
+          tokens
+        };
+      }).immediate();
+    },
+    revokeToken(token) {
+      if (isWellFormedOAuthRefreshToken(token)) {
+        const row = readToken(token, "refresh");
+        if (row)
+          revokeGrant(row.connection_id);
+        return;
+      }
+      if (isWellFormedOAuthAccessToken(token)) {
+        db.query("DELETE FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'access'").run(digest2(token));
+      }
+    },
+    revokeGrant,
+    liveAccessTokens(resource, limit) {
+      const rows = db.query(`
+        SELECT t.token_hash, t.client_id, t.expires_at
+        FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
+        WHERE t.kind = 'access' AND t.resource = ? AND t.expires_at > ? AND c.revoked_at IS NULL
+        ORDER BY t.expires_at DESC
+        LIMIT ?
+      `).all(resource, now().toISOString(), Math.max(0, Math.floor(limit)));
+      return rows.map((row) => ({ tokenHash: Buffer.from(row.token_hash), clientId: row.client_id, expiresAt: row.expires_at }));
+    }
+  };
+}
+function remoteOAuthSchemaMigration(version) {
+  return {
+    version,
+    name: "add_oauth_grants",
+    up(db) {
+      db.exec(`
+        CREATE TABLE remote_connections_v2 (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('bearer', 'oauth')),
+          token_hash BLOB UNIQUE,
+          client_id TEXT,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          revoked_at TEXT,
+          CHECK ((kind = 'bearer' AND token_hash IS NOT NULL)
+              OR (kind = 'oauth' AND token_hash IS NULL AND client_id IS NOT NULL))
+        );
+        INSERT INTO remote_connections_v2 (id, display_name, kind, token_hash, created_at, last_used_at, revoked_at)
+          SELECT id, display_name, kind, token_hash, created_at, last_used_at, revoked_at FROM remote_connections;
+        DROP TABLE remote_connections;
+        ALTER TABLE remote_connections_v2 RENAME TO remote_connections;
+
+        CREATE TABLE remote_oauth_tokens (
+          token_hash BLOB PRIMARY KEY,
+          connection_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('access', 'refresh')),
+          resource TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT
+        );
+        CREATE INDEX remote_oauth_tokens_connection ON remote_oauth_tokens(connection_id);
+
+        CREATE TABLE remote_oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE remote_pairing_codes (
+          selector TEXT PRIMARY KEY,
+          secret_hash BLOB NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          failed_attempts INTEGER NOT NULL DEFAULT 0
+        );
+      `);
+    }
+  };
+}
+var REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600, REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, REMOTE_PAIRING_CODE_MAX_FAILURES = 5, REMOTE_OAUTH_REFRESH_GRACE_MS = 45000, REMOTE_OAUTH_MAX_REGISTERED_CLIENTS = 500, REMOTE_OAUTH_ACCESS_TOKEN_PREFIX = "olympus_at_", REMOTE_OAUTH_REFRESH_TOKEN_PREFIX = "olympus_rt_", ACCESS_TOKEN_PATTERN, REFRESH_TOKEN_PATTERN, REGISTERED_CLIENT_ID_PATTERN, PAIRING_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789", PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  ACCESS_TOKEN_PATTERN = /^olympus_at_[A-Za-z0-9_-]{43}$/;
+  REFRESH_TOKEN_PATTERN = /^olympus_rt_[A-Za-z0-9_-]{43}$/;
+  REGISTERED_CLIENT_ID_PATTERN = /^olympus_client_[a-f0-9]{24}$/;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+function createReleaseCapture() {
+  return { heldBack: 0 };
+}
+function runWithReleaseCapture(capture, fn) {
+  return storage.run(capture, fn);
+}
+function noteReleasedItems(items, heldBack = 0, withheld = false) {
+  const capture = storage.getStore();
+  if (!capture)
+    return;
+  capture.items = items.map((item) => ({ ...item }));
+  capture.heldBack = Math.max(0, Math.floor(Number.isFinite(heldBack) ? heldBack : 0));
+  capture.withheld = withheld;
+}
+function boundedString(value, max) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+function releasedTierOf(trustDomain) {
+  if (trustDomain === "public_safe")
+    return "public";
+  if (trustDomain === "internal")
+    return "personal";
+  return "private";
+}
+function releasedItemFromEvidence(evidence, source, title) {
+  const shownTitle = boundedString(title, TITLE_MAX);
+  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
+  const provider = boundedString(evidence.provider, ID_MAX);
+  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
+  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
+  const locator = boundedString(evidence.uri, ID_MAX);
+  return {
+    source: boundedString(source, 80) ?? "Other source",
+    ...shownTitle ? { title: shownTitle } : {},
+    tier: releasedTierOf(evidence.trust_domain),
+    ...corpusId ? { corpusId } : {},
+    ...provider ? { provider } : {},
+    ...providerItemId ? { providerItemId } : {},
+    ...providerConversationId ? { providerConversationId } : {},
+    ...locator ? { locator } : {}
+  };
+}
+function appConnectionOf(caller) {
+  if (!caller || caller.surface === "cli")
+    return;
+  const display = boundedString(caller.displayName, 80);
+  const id = boundedString(caller.connectionId, 128);
+  if (caller.surface === "remote") {
+    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
+    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
+  }
+  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
+}
+function setPrivateAnswerCompletionHook(next) {
+  completionHook = next;
+}
+function notePrivateAnswerCompleted(privateQuestionId) {
+  try {
+    if (typeof privateQuestionId !== "string" || !privateQuestionId)
+      return;
+    completedPrivateAnswers.add(privateQuestionId);
+    while (completedPrivateAnswers.size > COMPLETED_MAX)
+      completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
+    completionHook?.(privateQuestionId);
+  } catch {}
+}
+function notePrivateQuestion(privateQuestionId) {
+  const capture = storage.getStore();
+  if (capture && typeof privateQuestionId === "string" && privateQuestionId)
+    capture.privateQuestionId = privateQuestionId;
+}
+function setAppReleaseRecorder(next) {
+  recorder = next;
+}
+function recordAppRequest(input) {
+  try {
+    const write = recorder ?? input.fallback;
+    if (!write)
+      return;
+    const connection = appConnectionOf(input.caller);
+    const question = boundedString(input.question, 2000);
+    if (!connection || !question || input.capture.items === undefined)
+      return;
+    const withheld = input.withheldAfter === true || input.capture.withheld === true;
+    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
+    write({
+      at: (input.now ?? Date.now)(),
+      connection,
+      question,
+      items: withheld ? [] : input.capture.items,
+      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
+      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
+      withheld,
+      ...privateQuestionId ? { privateQuestionId } : {}
+    });
+  } catch {}
+}
+function rememberJobQuestion(jobId, question, now = Date.now()) {
+  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
+    return;
+  for (const [key2, entry] of jobQuestions)
+    if (entry.expires <= now)
+      jobQuestions.delete(key2);
+  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
+  while (jobQuestions.size > JOB_QUESTIONS_MAX)
+    jobQuestions.delete(jobQuestions.keys().next().value);
+}
+function jobQuestion(jobId, now = Date.now()) {
+  if (typeof jobId !== "string")
+    return;
+  const entry = jobQuestions.get(jobId);
+  if (!entry || entry.expires <= now)
+    return;
+  return entry.question;
+}
+function forgetJobQuestions() {
+  jobQuestions.clear();
+  completedPrivateAnswers.clear();
+}
+function sourceAnswerQuestion(name, args, status, jobId) {
+  if (name === "source_answer") {
+    const question = typeof args.question === "string" ? args.question : undefined;
+    if (status === "working")
+      rememberJobQuestion(jobId, question);
+    return question;
+  }
+  if (name === "source_answer_result")
+    return jobQuestion(args.job_id);
+  return;
+}
+function recordRemoteOperation(input) {
+  const { operation, args, output } = input;
+  if (operation !== "source_answer" && operation !== "source_answer_result")
+    return;
+  const question = sourceAnswerQuestion(operation, args, output.status, output.job_id);
+  if (output.kind !== "source_answer" || output.status !== "answered" && output.status !== "withheld")
+    return;
+  recordAppRequest({
+    caller: input.caller,
+    question,
+    capture: input.privateQuestionId ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
+    privateQuestionId: input.privateQuestionId
+  });
+}
+var storage, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage = new AsyncLocalStorage2;
+  PROVIDER_APP_NAMES = {
+    openai: "ChatGPT",
+    anthropic: "Claude",
+    xai: "Grok",
+    meta: "Meta AI"
+  };
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
+
+// src/core/waiting-private-questions.ts
+var exports_waiting_private_questions = {};
+__export(exports_waiting_private_questions, {
+  waitingPrivateQuestionsDbPath: () => waitingPrivateQuestionsDbPath,
+  revokeWaitingPrivateQuestions: () => revokeWaitingPrivateQuestions,
+  openWaitingPrivateQuestionStore: () => openWaitingPrivateQuestionStore,
+  normalizeWaitingSelectors: () => normalizeWaitingSelectors,
+  normalizeWaitingQuestion: () => normalizeWaitingQuestion,
+  forgetWaitingPrivateQuestions: () => forgetWaitingPrivateQuestions,
+  WAITING_QUESTION_RETRY_REASONS: () => WAITING_QUESTION_RETRY_REASONS,
+  WAITING_QUESTION_RETRY_LIMIT: () => WAITING_QUESTION_RETRY_LIMIT,
+  WAITING_QUESTION_LIMITS: () => WAITING_QUESTION_LIMITS,
+  WAITING_PRIVATE_QUESTIONS_STORE_ID: () => WAITING_PRIVATE_QUESTIONS_STORE_ID,
+  WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION: () => WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION,
+  CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
+});
+import { Database as Database5 } from "bun:sqlite";
+import { createHash as createHash16, randomBytes as randomBytes8 } from "node:crypto";
+import { chmodSync as chmodSync10, existsSync as existsSync26, lstatSync as lstatSync16, mkdirSync as mkdirSync16 } from "node:fs";
+import { homedir as homedir18 } from "node:os";
+import { dirname as dirname31, isAbsolute as isAbsolute16, join as join34 } from "node:path";
+function waitingPrivateQuestionsDbPath(remoteConnectionsDbPath) {
+  return join34(dirname31(remoteConnectionsDbPath), SHARED_DATA_FILES["waiting-private-questions"]);
+}
+function normalizeWaitingQuestion(question) {
+  return question.normalize("NFKC").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+}
+function normalizeWaitingSelectors(raw) {
+  const out = {};
+  for (const field of SELECTOR_TEXT_FIELDS) {
+    const value = raw[field];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string")
+      return;
+    const trimmed = value.trim();
+    if (trimmed)
+      out[field] = trimmed;
+  }
+  const corpora = [];
+  if (raw.corpus_id !== undefined) {
+    if (typeof raw.corpus_id !== "string")
+      return;
+    if (raw.corpus_id.trim())
+      corpora.push(raw.corpus_id.trim());
+  }
+  if (raw.corpus_ids !== undefined) {
+    if (!Array.isArray(raw.corpus_ids) || raw.corpus_ids.some((id) => typeof id !== "string"))
+      return;
+    for (const id of raw.corpus_ids)
+      if (id.trim())
+        corpora.push(id.trim());
+  }
+  if (corpora.length > 0)
+    out.corpus_ids = [...new Set(corpora)].sort();
+  if (raw.selected_items !== undefined) {
+    if (!Array.isArray(raw.selected_items))
+      return;
+    const items = [];
+    for (const entry of raw.selected_items) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+        return;
+      const item = {};
+      for (const field of SELECTED_ITEM_FIELDS) {
+        const value = entry[field];
+        if (value === undefined)
+          continue;
+        if (typeof value !== "string")
+          return;
+        item[field] = value;
+      }
+      items.push(item);
+    }
+    if (items.length > 0)
+      out.selected_items = items;
+  }
+  const mode = raw.retrieval_mode ?? "hybrid";
+  if (mode !== "keyword" && mode !== "hybrid")
+    return;
+  out.retrieval_mode = mode;
+  return out;
+}
+function canonicalSelectors(selectors) {
+  return JSON.stringify(sortKeys(selectors ?? {}));
+}
+function sortKeys(value) {
+  if (Array.isArray(value))
+    return value.map(sortKeys);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, sortKeys(value[key2])]));
+  }
+  return value;
+}
+function utf8Length(text2) {
+  return Buffer.byteLength(text2, "utf8");
+}
+function openWaitingPrivateQuestionStore(dbPath, options = {}) {
+  const now = options.now ?? Date.now;
+  const listeners = new Set;
+  const notify = () => queueMicrotask(() => {
+    for (const listener of listeners)
+      listener();
+  });
+  hardenPrivatePath(dbPath);
+  const db = new Database5(dbPath, { create: true });
+  try {
+    chmodSync10(dbPath, 384);
+    const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE;`);
+    const mode = db.query("PRAGMA journal_mode").get()?.journal_mode;
+    if (mode !== "delete")
+      throw new Error("The waiting private questions store could not use its rollback journal yet.");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
+      runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations());
+    }).immediate();
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  const revocationOf = (connectionId) => {
+    const row = db.query("SELECT generation FROM connection_revocations WHERE connection_id = ?").get(connectionId);
+    return row?.generation ?? 0;
+  };
+  const expire = (at) => {
+    db.query("DELETE FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ?").run(at - WAITING_QUESTION_LIMITS.ttlMs);
+  };
+  const revokeInTransaction = (connectionId) => {
+    const removed = db.query("DELETE FROM waiting_questions WHERE connection_id = ?").run(connectionId).changes;
+    db.query(`
+      INSERT INTO connection_revocations (connection_id, generation) VALUES (?, 1)
+      ON CONFLICT(connection_id) DO UPDATE SET generation = generation + 1
+    `).run(connectionId);
+    return removed;
+  };
+  return {
+    dbPath,
+    ticket(connectionId) {
+      return { connectionId, revocation: revocationOf(connectionId) };
+    },
+    record(ticket, input) {
+      const question = typeof input.question === "string" ? input.question.trim() : "";
+      if (!question || utf8Length(question) > (input.retainEachAsk ? WAITING_QUESTION_LIMITS.localQuestionBytes : WAITING_QUESTION_LIMITS.questionBytes))
+        return;
+      if (typeof ticket.connectionId !== "string" || !ticket.connectionId)
+        return;
+      if (input.surface !== "chatgpt" && input.surface !== "remote")
+        return;
+      if (input.state !== "waiting" && input.state !== "unchecked")
+        return;
+      const selectors = canonicalSelectors(input.selectors);
+      if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
+        return;
+      const detail = input.detail === "full" ? "full" : "summary";
+      const dedupeKey = createHash16("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes8(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const at = now();
+      let active = false;
+      try {
+        active = options.isActive ? options.isActive(ticket.connectionId) === true : true;
+      } catch {
+        return;
+      }
+      if (!active) {
+        db.transaction(() => revokeInTransaction(ticket.connectionId)).immediate();
+        return;
+      }
+      return db.transaction(() => {
+        if (revocationOf(ticket.connectionId) !== ticket.revocation)
+          return;
+        expire(at);
+        const existing = db.query("SELECT * FROM waiting_questions WHERE dedupe_key = ?").get(dedupeKey);
+        let ref;
+        if (existing?.result && JSON.parse(existing.result).status === "answered" && at - (existing.answered_at ?? at) < WAITING_QUESTION_LIMITS.reanswerAfterMs) {
+          db.query("UPDATE waiting_questions SET asked_at = ? WHERE id = ?").run(at, existing.id);
+          return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
+        }
+        if (existing) {
+          const generation = existing.generation + 1;
+          db.query(`
+            UPDATE waiting_questions
+            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0
+            WHERE id = ?
+          `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
+          ref = { id: existing.id, generation, connectionId: ticket.connectionId };
+        } else {
+          const id = randomBytes8(16).toString("base64url");
+          db.query(`
+            INSERT INTO waiting_questions
+              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
+          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private", input.path === "venice" ? "venice" : null);
+          ref = { id, generation: 1, connectionId: ticket.connectionId };
+        }
+        notify();
+        return ref;
+      }).immediate();
+    },
+    list(options2) {
+      const at = now();
+      if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
+        expire(at);
+      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, failed" : "*";
+      const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
+      const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
+      return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
+    },
+    get(id) {
+      if (typeof id !== "string")
+        return;
+      const row = db.query("SELECT * FROM waiting_questions WHERE id = ? AND (answered_at IS NOT NULL OR asked_at > ?)").get(id, now() - WAITING_QUESTION_LIMITS.ttlMs);
+      return row ? toQuestion(row) : undefined;
+    },
+    dismiss(id) {
+      if (typeof id !== "string")
+        return false;
+      return db.query("DELETE FROM waiting_questions WHERE id = ?").run(id).changes > 0;
+    },
+    dismissAll() {
+      return db.transaction(() => {
+        const removed = db.query("DELETE FROM waiting_questions").run().changes;
+        db.query("DELETE FROM waiting_meta WHERE key = ?").run(OLDER_REMOVED_KEY);
+        return removed;
+      }).immediate();
+    },
+    markSeen(ids) {
+      let changed = 0;
+      db.transaction(() => {
+        for (const id of ids) {
+          if (typeof id === "string")
+            changed += db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND seen = 0").run(id).changes;
+        }
+      }).immediate();
+      return changed;
+    },
+    acknowledge(ref) {
+      return db.query("DELETE FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    settleUnchecked(ref, verdict) {
+      const where = "id = ? AND generation = ? AND connection_id = ? AND state = 'unchecked'";
+      notify();
+      return verdict === "match" ? db.query(`UPDATE waiting_questions SET state = 'waiting' WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0 : db.query(`DELETE FROM waiting_questions WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    unchecked() {
+      const rows = db.query("SELECT * FROM waiting_questions WHERE state = 'unchecked' AND asked_at > ? ORDER BY asked_at ASC, rowid ASC").all(now() - WAITING_QUESTION_LIMITS.ttlMs);
+      return rows.map(toQuestion);
+    },
+    revokeConnection(connectionId) {
+      if (typeof connectionId !== "string" || !connectionId)
+        return 0;
+      return db.transaction(() => revokeInTransaction(connectionId)).immediate();
+    },
+    reconcileConnections(isActive) {
+      const ids = db.query("SELECT DISTINCT connection_id FROM waiting_questions").all().map((row) => row.connection_id).filter((id) => !isActive(id));
+      if (ids.length === 0)
+        return 0;
+      return db.transaction(() => ids.reduce((sum, id) => sum + revokeInTransaction(id), 0)).immediate();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    markRead(ref) {
+      return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    saveAnswer(ref, result, sent) {
+      const serialized = JSON.stringify(result);
+      if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
+        return false;
+      if (sent !== undefined && options.isActive) {
+        try {
+          if (!options.isActive(ref.connectionId))
+            return false;
+        } catch {
+          return false;
+        }
+      }
+      const saved = db.transaction(() => {
+        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, result.status === "failed" ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
+        return changed;
+      }).immediate();
+      if (saved && result.status === "answered")
+        notePrivateAnswerCompleted(ref.id);
+      return saved;
+    },
+    retry(ref, reason = "answer_failed") {
+      const safeReason = WAITING_QUESTION_RETRY_REASONS.includes(reason) ? reason : "answer_failed";
+      return db.transaction(() => {
+        const row = db.query("SELECT attempts, retry_reasons FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId);
+        if (!row)
+          return false;
+        const attempts = row.attempts + 1;
+        const reasons = [...JSON.parse(row.retry_reasons), safeReason].slice(-WAITING_QUESTION_RETRY_LIMIT);
+        const exhausted = attempts >= WAITING_QUESTION_RETRY_LIMIT;
+        const result = exhausted ? { status: "failed", citations: [], unanswered: [], leftOut: [], read: [] } : null;
+        const delay = Math.min(30 * 60000, 5000 * 2 ** Math.min(row.attempts, 9));
+        return db.query("UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, failed = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, exhausted ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
+    },
+    invalidate(ref) {
+      return db.transaction(() => {
+        const row = db.query("SELECT destination, result FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").get(ref.id, ref.generation, ref.connectionId);
+        const old = row?.result ? JSON.parse(row.result) : undefined;
+        const disclosure = row?.destination === "venice" && old?.sentItems ? JSON.stringify({ status: "withdrawn", reason: "Sent to Venice, but the sources changed. The answer was withdrawn.", sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
+        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
+    },
+    deleteForCorpora(corpusIds, knownCorpusIds, options2 = {}) {
+      const ids = new Set(corpusIds);
+      const known = knownCorpusIds ? new Set(knownCorpusIds) : undefined;
+      return db.transaction(() => {
+        const rows = db.query("SELECT * FROM waiting_questions").all();
+        let removed = 0;
+        for (const row of rows) {
+          if (questionTakenWithCorpora(row, ids, known, options2.answeredOnly === true)) {
+            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
+          }
+        }
+        return removed;
+      }).immediate();
+    },
+    deleteForAccountScope(input) {
+      const ids = new Set(input.corpusIds);
+      const readsScope = (item) => {
+        if (typeof item.corpusId !== "string" || !ids.has(item.corpusId))
+          return false;
+        const source = item.provenance?.sourceItem;
+        return source?.provider === input.provider && source?.accountScope === input.accountScope;
+      };
+      return db.transaction(() => {
+        const rows = db.query("SELECT * FROM waiting_questions WHERE result IS NOT NULL").all();
+        let removed = 0;
+        for (const row of rows) {
+          const result = toQuestion(row).result;
+          if (result?.read.some(readsScope)) {
+            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
+          }
+        }
+        return removed;
+      }).immediate();
+    },
+    close() {
+      closeSqliteStore(db);
+    }
+  };
+}
+function questionTakenWithCorpora(row, ids, known, answeredOnly = false) {
+  const result = toQuestion(row).result;
+  if (!result)
+    return !answeredOnly;
+  return result.read.some((item) => typeof item.corpusId !== "string" || ids.has(item.corpusId) || known !== undefined && !known.has(item.corpusId));
+}
+function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
+  if (!existsSync26(dbPath))
+    return 0;
+  const answeredOnly = options.answeredOnly === true;
+  if (options.dryRun !== true) {
+    const store = openWaitingPrivateQuestionStore(dbPath);
+    try {
+      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds, { answeredOnly });
+    } finally {
+      store.close();
+    }
+  }
+  const db = new Database5(dbPath, { readonly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get())
+      return 0;
+    const ids = new Set(input.corpusIds);
+    const known = input.knownCorpusIds ? new Set(input.knownCorpusIds) : undefined;
+    const rows = db.query("SELECT * FROM waiting_questions").all();
+    return rows.filter((row) => questionTakenWithCorpora(row, ids, known, answeredOnly)).length;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId, options = {}) {
+  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
+    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS
+  });
+  try {
+    store.revokeConnection(connectionId);
+  } finally {
+    store.close();
+  }
+}
+function toQuestion(row) {
+  let selectors = {};
+  try {
+    const parsed = JSON.parse(row.selectors);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))
+      selectors = parsed;
+  } catch {
+    selectors = {};
+  }
+  return {
+    id: row.id,
+    path: row.destination === "venice" ? "venice" : row.answer_path === "anonymous" ? "anonymous" : "private",
+    connectionId: row.connection_id,
+    surface: row.surface === "chatgpt" ? "chatgpt" : "remote",
+    question: row.question,
+    detail: row.detail === "full" ? "full" : "summary",
+    selectors,
+    state: row.state === "waiting" ? "waiting" : "unchecked",
+    seen: row.seen === 1,
+    generation: row.generation,
+    askedAt: new Date(row.asked_at).toISOString(),
+    ...row.has_result !== undefined ? { hasResult: row.has_result === 1 } : {},
+    ...row.result ? { result: JSON.parse(row.result) } : {},
+    ...row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {},
+    ...row.failed === 1 ? { failed: true } : {},
+    ...row.retry_reasons && row.retry_reasons !== "[]" ? { retryReasons: JSON.parse(row.retry_reasons) } : {},
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at
+  };
+}
+function migrations() {
+  return [{
+    version: 1,
+    name: "create_waiting_private_questions",
+    up(db) {
+      db.exec(`
+        CREATE TABLE waiting_questions (
+          id TEXT PRIMARY KEY,
+          dedupe_key TEXT NOT NULL UNIQUE,
+          connection_id TEXT NOT NULL,
+          surface TEXT NOT NULL CHECK(surface IN ('chatgpt', 'remote')),
+          question TEXT NOT NULL,
+          detail TEXT NOT NULL CHECK(detail IN ('summary', 'full')),
+          selectors TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('waiting', 'unchecked')),
+          seen INTEGER NOT NULL DEFAULT 0,
+          generation INTEGER NOT NULL,
+          asked_at INTEGER NOT NULL
+        );
+        CREATE INDEX waiting_questions_connection ON waiting_questions (connection_id, asked_at);
+        CREATE TABLE connection_revocations (
+          connection_id TEXT PRIMARY KEY,
+          generation INTEGER NOT NULL
+        );
+        CREATE TABLE waiting_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    }
+  }, {
+    version: 2,
+    name: "private_answers_inbox",
+    up(db) {
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN result TEXT;
+        ALTER TABLE waiting_questions ADD COLUMN answered_at INTEGER;
+        ALTER TABLE waiting_questions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE waiting_questions ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;`);
+    }
+  }, {
+    version: 3,
+    name: "private_answer_auto_budgets",
+    up(db) {
+      db.exec("CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)");
+    }
+  }, {
+    version: 4,
+    name: "anonymous_answers_inbox",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))");
+    }
+  }, {
+    version: 5,
+    name: "ask_destination",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN destination TEXT CHECK(destination IS NULL OR destination = 'venice')");
+    }
+  }, {
+    version: 6,
+    name: "bounded_retry_reasons",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN retry_reasons TEXT NOT NULL DEFAULT '[]'");
+    }
+  }, {
+    version: 7,
+    name: "failure_listing_metadata",
+    up(db) {
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+        UPDATE waiting_questions SET failed = CASE WHEN json_valid(result)
+          THEN COALESCE(json_extract(result, '$.status') = 'failed', 0) ELSE 0 END;`);
+    }
+  }];
+}
+function hardenPrivatePath(dbPath) {
+  if (!isAbsolute16(dbPath))
+    throw new TypeError("The waiting private questions database path must be absolute.");
+  const leafDir = dirname31(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir18()]).has(leafDir)) {
+    throw new Error("The waiting private questions database must live inside a dedicated private directory.");
+  }
+  mkdirSync16(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync16(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error("The waiting private questions database must live in a real private directory.");
+  }
+  chmodSync10(leafDir, 448);
+  if (existsSync26(dbPath)) {
+    const fileStat = lstatSync16(dbPath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+      throw new Error("The waiting private questions database must be a regular file, not a symlink.");
+    }
+  }
+}
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
+var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
+  init_sqlite_migrations();
+  init_olympus_layout();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
+  });
+  SELECTOR_TEXT_FIELDS = [
+    "query",
+    "account",
+    "approved_scope_key",
+    "chat_scope",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before"
+  ];
+  SELECTED_ITEM_FIELDS = [
+    "corpus_id",
+    "family",
+    "provider",
+    "account_scope",
+    "provider_item_id",
+    "local_item_id",
+    "provider_thread_id",
+    "provider_conversation_id",
+    "provider_file_id",
+    "source_version",
+    "title",
+    "conversation_label",
+    "author_label",
+    "uri",
+    "authored_at",
+    "updated_at"
+  ];
+  WAITING_QUESTION_RETRY_REASONS = [
+    "answer_failed",
+    "no_model",
+    "model_downloading",
+    "evidence_changed",
+    "eligibility_unavailable",
+    "save_refused"
+  ];
+});
+
+// src/core/remote-connections.ts
+var exports_remote_connections = {};
+__export(exports_remote_connections, {
+  resolveRemoteConnectionsDbPathForCli: () => resolveRemoteConnectionsDbPathForCli,
+  resolveRemoteConnectionsDbPath: () => resolveRemoteConnectionsDbPath,
+  remoteConnectionsPreV2BackupPath: () => remoteConnectionsPreV2BackupPath,
+  openRemoteConnectionStore: () => openRemoteConnectionStore,
+  isWellFormedRemoteConnectionToken: () => isWellFormedRemoteConnectionToken,
+  hashRemoteConnectionToken: () => hashRemoteConnectionToken,
+  defaultRemoteConnectionsDbPath: () => defaultRemoteConnectionsDbPath,
+  connectionProviderMigration: () => connectionProviderMigration,
+  REMOTE_CONNECTION_TOKEN_PREFIX: () => REMOTE_CONNECTION_TOKEN_PREFIX,
+  REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS: () => REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
+  REMOTE_CONNECTIONS_STORE_ID: () => REMOTE_CONNECTIONS_STORE_ID,
+  REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
+});
+import { Database as Database6 } from "bun:sqlite";
+import { createHash as createHash17, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { chmodSync as chmodSync11, existsSync as existsSync27, lstatSync as lstatSync17, mkdirSync as mkdirSync17 } from "node:fs";
+import { homedir as homedir19 } from "node:os";
+import { dirname as dirname32, isAbsolute as isAbsolute17 } from "node:path";
+function remoteConnectionsPreV2BackupPath(dbPath) {
+  return `${dbPath}.pre-v2.bak`;
+}
+function resolveRemoteConnectionsDbPath(env = process.env) {
+  return defaultRemoteConnectionsDbPath(env);
+}
+function resolveRemoteConnectionsDbPathForCli(env = process.env) {
+  if (standaloneLinuxDataDir(env))
+    return resolveRemoteConnectionsDbPath(env);
+  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
+  if (!workerEnv)
+    return resolveRemoteConnectionsDbPath(env);
+  return resolveRemoteConnectionsDbPath({
+    ...env.HOME !== undefined ? { HOME: env.HOME } : {},
+    ...workerEnv.XDG_DATA_HOME ? { XDG_DATA_HOME: workerEnv.XDG_DATA_HOME } : {}
+  });
+}
+function defaultRemoteConnectionsDbPath(env = process.env) {
+  const path = sharedDataPath("remote-connections", env);
+  if (!isAbsolute17(path)) {
+    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
+  }
+  return path;
+}
+function isWellFormedRemoteConnectionToken(token) {
+  return TOKEN_PATTERN2.test(token);
+}
+function hashRemoteConnectionToken(token) {
+  return createHash17("sha256").update(token, "utf8").digest();
+}
+function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
+  const now = options.now ?? (() => new Date);
+  hardenPrivateDatabasePath(dbPath);
+  const db = new Database6(dbPath, { create: true });
+  try {
+    chmodSync11(dbPath, 384);
+    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
+    assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
+    backupBeforeOAuthMigration(db, dbPath);
+    runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  let closed = false;
+  const recordLastUse = (id, at) => {
+    if (closed)
+      return;
+    try {
+      db.exec(`PRAGMA busy_timeout = ${LAST_USED_BUSY_TIMEOUT_MS};`);
+      try {
+        db.query("UPDATE remote_connections SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL").run(at, id);
+      } finally {
+        db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2};`);
+      }
+    } catch {}
+  };
+  const readRow = (id) => db.query("SELECT * FROM remote_connections WHERE id = ?").get(id);
+  const oauth = createRemoteOAuthStore(db, now, (id, at) => {
+    const row = readRow(id);
+    const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+    if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+      recordLastUse(id, at.toISOString());
+    }
+  });
+  return {
+    dbPath,
+    oauth,
+    create(displayName, options2 = {}) {
+      const name = requireDisplayName(displayName);
+      if (options2.provider !== undefined && !isRemoteConnectionProvider(options2.provider)) {
+        throw new OperationError("invalid_params", "A connection's host must be openai, xai, meta, anthropic or other.");
+      }
+      const route = options2.route ?? "remote";
+      if (!["remote", "loopback", "tailnet"].includes(route) || route !== "remote" && options2.installId) {
+        throw new OperationError("invalid_params", "Choose a supported connection route.");
+      }
+      const provider = remoteConnectionProvider({ displayName: name, chosen: options2.provider ?? null });
+      const id = randomBytes9(CONNECTION_ID_BYTES).toString("hex");
+      const secret2 = randomBytes9(CONNECTION_SECRET_BYTES).toString("base64url");
+      const token = options2.installId ? mintCredential("access", options2.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret2}`;
+      const createdAt = now().toISOString();
+      db.query(`
+        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider, route)
+        VALUES (?, ?, 'bearer', ?, ?, ?, ?)
+      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider, route);
+      const row = readRow(id);
+      if (!row)
+        throw new Error("Remote connection could not be read after creation.");
+      return { connection: toRecord(row), token };
+    },
+    list() {
+      return db.query("SELECT * FROM remote_connections ORDER BY created_at, id").all().map(toRecord);
+    },
+    revoke(id) {
+      if (typeof id !== "string" || !CONNECTION_ID_PATTERN2.test(id)) {
+        throw new OperationError("invalid_params", "Connection id must be the id shown by olympus connections list.");
+      }
+      db.transaction(() => {
+        db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now().toISOString(), id);
+        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(id);
+      })();
+      const row = readRow(id);
+      if (!row) {
+        throw new OperationError("invalid_params", `No remote connection has id ${id}.`, "Run olympus connections list.");
+      }
+      if (row.kind === "oauth")
+        oauth.revokeGrant(id);
+      try {
+        revokeWaitingPrivateQuestions(dbPath, id);
+      } catch {
+        console.warn("[olympus] waiting private questions: could not remove a revoked connection's questions now; they are removed before the list is next shown");
+      }
+      return toRecord(row);
+    },
+    verifyToken(token, route = "remote") {
+      const match = typeof token === "string" ? TOKEN_PATTERN2.exec(token) : null;
+      const routed = typeof token === "string" ? credentialInstallId("access", token) : undefined;
+      if (!match && !routed)
+        return { ok: false, reason: "malformed" };
+      const presented = hashRemoteConnectionToken(token);
+      const row = match ? readRow(match[1]) : db.query("SELECT * FROM remote_connections WHERE kind = 'bearer' AND token_hash = ?").get(presented);
+      const bearer = row && row.kind === "bearer" && row.token_hash ? row : null;
+      const stored = bearer ? Buffer.from(bearer.token_hash) : Buffer.alloc(presented.length);
+      const equal2 = stored.length === presented.length && timingSafeEqual4(stored, presented);
+      if (!bearer || !equal2 || bearer.route !== route)
+        return { ok: false, reason: "unknown" };
+      if (bearer.revoked_at !== null)
+        return { ok: false, reason: "revoked" };
+      const at = now();
+      const lastUsedMs = bearer.last_used_at ? Date.parse(bearer.last_used_at) : Number.NaN;
+      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+        recordLastUse(bearer.id, at.toISOString());
+      }
+      return { ok: true, connection: toRecord(bearer) };
+    },
+    close() {
+      closed = true;
+      closeSqliteStore(db);
+    }
+  };
+}
+function toRecord(row) {
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    kind: row.kind === "oauth" ? "oauth" : "bearer",
+    clientId: row.client_id ?? null,
+    route: row.route,
+    provider: remoteConnectionProvider({
+      clientId: row.client_id,
+      displayName: row.display_name,
+      chosen: isRemoteConnectionProvider(row.provider) ? row.provider : null
+    }),
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    revokedAt: row.revoked_at
+  };
+}
+function requireDisplayName(value) {
+  const name = sanitizeCallerDisplayName(value);
+  if (!name) {
+    throw new OperationError("invalid_params", "A connection needs a name, for example: olympus connections add muse.");
+  }
+  return name;
+}
+function remoteConnectionMigrations() {
+  return [{
+    version: 1,
+    name: "create_remote_connections",
+    up(db) {
+      db.exec(`
+        CREATE TABLE remote_connections (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('bearer')),
+          token_hash BLOB NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          revoked_at TEXT
+        );
+      `);
+    }
+  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3), {
+    version: 4,
+    name: "bind_connection_route",
+    up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (columns.some((column) => column.name === "route"))
+        return;
+      db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
+    }
+  }];
+}
+function connectionProviderMigration(version) {
+  return {
+    version,
+    name: "add_connection_provider",
+    up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (!columns.some((column) => column.name === "provider")) {
+        db.exec(`
+          ALTER TABLE remote_connections ADD COLUMN provider TEXT
+            CHECK(provider IS NULL OR provider IN ('openai', 'xai', 'meta', 'anthropic', 'other'));
+        `);
+      }
+      const unset = db.query("SELECT id, display_name, client_id FROM remote_connections WHERE provider IS NULL").all();
+      const fill = db.query("UPDATE remote_connections SET provider = ? WHERE id = ? AND provider IS NULL");
+      for (const row of unset) {
+        fill.run(remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name }), row.id);
+      }
+    }
+  };
+}
+function backupBeforeOAuthMigration(db, dbPath) {
+  if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1)
+    return;
+  const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
+  if (existsSync27(backupPath))
+    return;
+  db.query("VACUUM INTO ?").run(backupPath);
+  chmodSync11(backupPath, 384);
+}
+function hardenPrivateDatabasePath(dbPath) {
+  if (!isAbsolute17(dbPath)) {
+    throw new TypeError("Remote connections database path must be absolute.");
+  }
+  const leafDir = dirname32(dbPath);
+  const forbiddenLeafDirs = new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir19()]);
+  if (forbiddenLeafDirs.has(leafDir)) {
+    throw new Error("Remote connections database must live inside a dedicated private leaf directory.");
+  }
+  mkdirSync17(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync17(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error("Remote connections database leaf must be a real private directory.");
+  }
+  chmodSync11(leafDir, 448);
+  if (existsSync27(dbPath)) {
+    const dbStat = lstatSync17(dbPath);
+    if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
+      throw new Error("Remote connections database must be a regular file, not a symlink.");
+    }
+  }
+}
+var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 4, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN2;
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+  CONNECTION_ID_PATTERN2 = /^[a-f0-9]{18}$/;
+  TOKEN_PATTERN2 = /^olympus_conn_([a-f0-9]{18})_([A-Za-z0-9_-]{43})$/;
+});
+
+// src/core/app-release-log.ts
+var exports_app_release_log = {};
+__export(exports_app_release_log, {
+  retireSecretAppReleaseItem: () => retireSecretAppReleaseItem,
+  openAppReleaseLog: () => openAppReleaseLog,
+  isAppReleaseRetentionDays: () => isAppReleaseRetentionDays,
+  forgetSecretAppReleaseItem: () => forgetSecretAppReleaseItem,
+  forgetAppReleaseItems: () => forgetAppReleaseItems,
+  appReleaseLogDbPaths: () => appReleaseLogDbPaths,
+  appReleaseLogDbPath: () => appReleaseLogDbPath,
+  APP_RELEASE_RETENTION_DAYS: () => APP_RELEASE_RETENTION_DAYS,
+  APP_RELEASE_LOG_STORE_ID: () => APP_RELEASE_LOG_STORE_ID,
+  APP_RELEASE_LOG_SCHEMA_VERSION: () => APP_RELEASE_LOG_SCHEMA_VERSION,
+  APP_RELEASE_DEFAULT_RETENTION_DAYS: () => APP_RELEASE_DEFAULT_RETENTION_DAYS
+});
+import { Database as Database7 } from "bun:sqlite";
+import { randomBytes as randomBytes10 } from "node:crypto";
+import { chmodSync as chmodSync12, existsSync as existsSync28, lstatSync as lstatSync18, mkdirSync as mkdirSync18 } from "node:fs";
+import { homedir as homedir20 } from "node:os";
+import { dirname as dirname33, isAbsolute as isAbsolute18, join as join35 } from "node:path";
+function appReleaseLogDbPath(remoteConnectionsDbPath) {
+  return join35(dirname33(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
+}
+function appReleaseLogDbPaths(env = process.env) {
+  return [...new Set([appReleaseLogDbPath(resolveRemoteConnectionsDbPath(env)), ...openLogPaths.keys()])];
+}
+function isAppReleaseRetentionDays(value) {
+  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
+}
+function openAppReleaseLog(dbPath, options = {}) {
+  const now = options.now ?? Date.now;
+  hardenPrivatePath2(dbPath);
+  const db = new Database7(dbPath, { create: true });
+  try {
+    chmodSync12(dbPath, 384);
+    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
+      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations2());
+    }).immediate();
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
+  let registered3 = true;
+  const retentionDays = () => {
+    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
+    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+  };
+  const clear = () => db.transaction(() => {
+    db.query("DELETE FROM app_release_items").run();
+    return db.query("DELETE FROM app_release_requests").run().changes;
+  })();
+  const expire = () => {
+    const days = retentionDays();
+    if (days === 0) {
+      clear();
+      return;
+    }
+    const before = now() - days * DAY_MS;
+    db.transaction(() => {
+      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
+      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
+    })();
+  };
+  return {
+    record(record) {
+      if (retentionDays() === 0)
+        return;
+      const id = `apr_${randomBytes10(12).toString("base64url")}`;
+      db.transaction(() => {
+        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionId ?? null);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const secret2 = db.query(`SELECT 1 FROM app_release_secret_items
+          WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
+        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
+          const named = !(item.provider && item.providerItemId && secret2.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+        });
+      })();
+      expire();
+      return id;
+    },
+    list() {
+      expire();
+      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
+        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
+      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
+      return requests.map((row) => ({
+        id: row.id,
+        at: row.at,
+        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
+        question: row.question,
+        heldBack: row.held_back,
+        answeredPrivately: row.answered_privately === 1,
+        withheld: row.withheld === 1,
+        items: items.all(row.id).map((item) => ({
+          position: item.position,
+          source: item.source,
+          ...item.title ? { title: item.title } : {},
+          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
+          madePrivate: item.made_private === 1
+        }))
+      }));
+    },
+    retentionDays,
+    setRetentionDays(days) {
+      if (!isAppReleaseRetentionDays(days))
+        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
+      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
+      expire();
+    },
+    clear,
+    item(requestId, position) {
+      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
+        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
+      if (!row)
+        return;
+      return {
+        source: row.source,
+        ...row.title ? { title: row.title } : {},
+        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
+        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
+        ...row.provider ? { provider: row.provider } : {},
+        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
+        ...row.locator ? { locator: row.locator } : {},
+        madePrivate: row.made_private === 1
+      };
+    },
+    markMadePrivate(requestId, position) {
+      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
+    },
+    markAnsweredPrivately(privateQuestionId) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionId).changes;
+    },
+    forgetCorpora(corpusIds, dryRun) {
+      if (corpusIds.length === 0)
+        return 0;
+      const marks = corpusIds.map(() => "?").join(", ");
+      if (dryRun)
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds).n;
+      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
+    },
+    forgetSecretItem(item, options2 = {}) {
+      const conversation = item.providerConversationId ?? "";
+      return db.transaction(() => {
+        if (options2.proceed && !options2.proceed())
+          return 0;
+        db.query(`INSERT OR IGNORE INTO app_release_secret_items (provider, provider_item_id, provider_conversation_id, redacted_at)
+          VALUES (?, ?, ?, ?)`).run(item.provider, item.providerItemId, conversation, now());
+        return db.query(`UPDATE app_release_items SET title = NULL, locator = NULL
+          WHERE provider = ? AND provider_item_id = ? AND (? = '' OR provider_conversation_id IS NULL OR provider_conversation_id = ?)
+            AND (title IS NOT NULL OR locator IS NOT NULL)`).run(item.provider, item.providerItemId, conversation, conversation).changes;
+      }).immediate();
+    },
+    retireSecretItem(item, options2 = {}) {
+      db.transaction(() => {
+        if (options2.stillSecret?.())
+          return;
+        db.query("DELETE FROM app_release_secret_items WHERE provider = ? AND provider_item_id = ?").run(item.provider, item.providerItemId);
+      }).immediate();
+    },
+    close() {
+      if (registered3) {
+        registered3 = false;
+        const count = (openLogPaths.get(dbPath) ?? 1) - 1;
+        if (count > 0)
+          openLogPaths.set(dbPath, count);
+        else
+          openLogPaths.delete(dbPath);
+      }
+      closeSqliteStore(db);
+    }
+  };
+}
+function forgetAppReleaseItems(dbPath, selector, options = {}) {
+  if (!existsSync28(dbPath) || selector.corpusIds.length === 0)
+    return 0;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+  } finally {
+    store.close();
+  }
+}
+function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
+  if (!existsSync28(dbPath))
+    return 0;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    return store.forgetSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+function retireSecretAppReleaseItem(dbPath, item, options = {}) {
+  if (!existsSync28(dbPath))
+    return;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    store.retireSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+function migrations2() {
+  return [{
+    version: 1,
+    name: "app_release_log",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_requests (
+          id TEXT PRIMARY KEY,
+          at INTEGER NOT NULL,
+          connection_id TEXT,
+          connection_name TEXT NOT NULL,
+          connection_kind TEXT NOT NULL,
+          question TEXT NOT NULL,
+          held_back INTEGER NOT NULL DEFAULT 0,
+          answered_privately INTEGER NOT NULL DEFAULT 0,
+          withheld INTEGER NOT NULL DEFAULT 0,
+          private_question_id TEXT
+        );
+        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
+        CREATE INDEX app_release_requests_at ON app_release_requests (at);
+        CREATE TABLE app_release_items (
+          request_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          title TEXT,
+          tier TEXT NOT NULL,
+          corpus_id TEXT,
+          provider TEXT,
+          provider_item_id TEXT,
+          provider_conversation_id TEXT,
+          locator TEXT,
+          made_private INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (request_id, position)
+        );
+        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
+        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+    }
+  }, {
+    version: 2,
+    name: "app_release_secret_items",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_secret_items (
+          provider TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          provider_conversation_id TEXT NOT NULL DEFAULT '',
+          redacted_at INTEGER NOT NULL,
+          PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
+        );
+        CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
+      `);
+    }
+  }];
+}
+function hardenPrivatePath2(dbPath) {
+  if (!isAbsolute18(dbPath))
+    throw new TypeError("The AI apps log path must be absolute.");
+  const leafDir = dirname33(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir20()]).has(leafDir)) {
+    throw new Error("The AI apps log must live inside a dedicated private directory.");
+  }
+  mkdirSync18(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync18(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
+    throw new Error("The AI apps log must live in a real private directory.");
+  chmodSync12(leafDir, 448);
+  if (existsSync28(dbPath)) {
+    const fileStat = lstatSync18(dbPath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile())
+      throw new Error("The AI apps log must be a regular file, not a symlink.");
+  }
+}
+var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 2, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
+var init_app_release_log = __esm(() => {
+  init_olympus_layout();
+  init_remote_connections();
+  init_sqlite_migrations();
+  APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
+  DAY_MS = 24 * 60 * 60000;
+  openLogPaths = new Map;
+});
+
 // src/workers/source-index/built-in-reasoning/manifest.ts
 function unslothQwen(size, revision, bytes, sha256) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
@@ -28741,7 +30565,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
@@ -28847,7 +30671,7 @@ function snifferCacheModelId(lane) {
   return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
-  const model = createHash14("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
+  const model = createHash18("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -28870,8 +30694,8 @@ function snifferPromptVersions(ownerContext) {
   const context2 = boundedOwnerContext(ownerContext);
   if (!context2)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest2 = createHash14("sha256").update(context2).digest("hex").slice(0, 8);
-  return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest2}` };
+  const digest3 = createHash18("sha256").update(context2).digest("hex").slice(0, 8);
+  return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest3}` };
 }
 function parseSnifferBatchResponse(text2, expected) {
   const verdicts = new Map;
@@ -29134,8 +30958,8 @@ var init_sniffer = __esm(() => {
     required: ["verdicts"],
     additionalProperties: false
   };
-  SNIFFER_PROMPT_VERSION = `p-${createHash14("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash14("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
     insurance: "financial",
     money: "financial",
@@ -29152,7 +30976,7 @@ var init_sniffer = __esm(() => {
 });
 
 // src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync26 } from "node:fs";
+import { existsSync as existsSync29 } from "node:fs";
 function secretsDisposition() {
   return SECRETS_DISPOSITION;
 }
@@ -29183,7 +31007,7 @@ function settleSecretsCopies(options) {
   return { disposition, chunks, sideStores };
 }
 function forgetSecretInSideStores(options) {
-  const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
+  const result = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
   const { identity: identity2, ledger } = options;
   const owedJobLedgers = [];
   const stillOwed = () => ledger.hasSecretSideStoreDebt(identity2);
@@ -29207,7 +31031,7 @@ function forgetSecretInSideStores(options) {
     result.failed += 1;
   }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath !== ":memory:" && existsSync26(snifferPath)) {
+  if (snifferPath !== ":memory:" && existsSync29(snifferPath)) {
     try {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
       try {
@@ -29220,6 +31044,17 @@ function forgetSecretInSideStores(options) {
       } finally {
         sniffer.close();
       }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  for (const logPath of appReleaseLogDbPaths()) {
+    try {
+      result.appReleaseTitles += forgetSecretAppReleaseItem(logPath, {
+        provider: identity2.provider,
+        providerItemId: identity2.providerItemId,
+        ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}
+      }, options.onlyWhileOwed ? { proceed: stillOwed } : {});
     } catch {
       result.failed += 1;
     }
@@ -29253,7 +31088,7 @@ function forgetSecretInSideStores(options) {
     }
   }
   try {
-    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync26(path)));
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync29(path)));
   } catch {}
   try {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
@@ -29301,7 +31136,7 @@ function snifferRetriesSettlement(ledger, identity2) {
     return false;
   }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath === ":memory:" || !existsSync26(snifferPath))
+  if (snifferPath === ":memory:" || !existsSync29(snifferPath))
     return false;
   try {
     const sniffer = new TierSnifferStore({ dbPath: snifferPath });
@@ -29356,6 +31191,13 @@ function retireSecretRedactions(ledger, options = {}) {
         try {
           if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret)
             secret2 = true;
+        } catch {
+          failed += 1;
+        }
+      }
+      for (const logPath of appReleaseLogDbPaths()) {
+        try {
+          retireSecretAppReleaseItem(logPath, { provider: item.provider, providerItemId: item.providerItemId }, { stillSecret });
         } catch {
           failed += 1;
         }
@@ -29417,6 +31259,7 @@ function forgetSecretJobNames(identity2) {
 }
 var SECRETS_DISPOSITION = "tombstone_now";
 var init_secrets_disposition = __esm(() => {
+  init_app_release_log();
   init_sniffer();
   init_sniffer_store();
   init_tier_ledger_path();
@@ -30229,8 +32072,8 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { createHash as createHash15 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { createHash as createHash19 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -31004,7 +32847,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash15("sha256").update(value).digest("hex");
+  return createHash19("sha256").update(value).digest("hex");
 }
 function memoizeQueryEmbeddings(provider) {
   const queries = new Map;
@@ -31047,7 +32890,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage2;
+  priorityQueryEmbedding = new AsyncLocalStorage3;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -31206,10 +33049,10 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash16, randomUUID as randomUUID8 } from "node:crypto";
-import { existsSync as existsSync27, lstatSync as lstatSync16, mkdirSync as mkdirSync16, statSync as statSync14 } from "node:fs";
-import { dirname as dirname31 } from "node:path";
-import { Database as Database5 } from "bun:sqlite";
+import { createHash as createHash20, randomUUID as randomUUID8 } from "node:crypto";
+import { existsSync as existsSync30, lstatSync as lstatSync19, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
+import { dirname as dirname34 } from "node:path";
+import { Database as Database8 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
 }
@@ -32689,11 +34532,11 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest2 = createHash16("sha256");
+  const digest3 = createHash20("sha256");
   for (const row of rows)
-    digest2.update(`${row.chunk_pk}\x00${row.content_hash}
+    digest3.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
-  return digest2.digest("hex");
+  return digest3.digest("hex");
 }
 function statusScopeContentFilter(scope) {
   if (!scope)
@@ -32783,7 +34626,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash16("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash20("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -34193,7 +36036,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString2(value) {
-  return createHash16("sha256").update(value).digest("hex");
+  return createHash20("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -34380,14 +36223,14 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync16(this.dbPath);
+        const stat2 = lstatSync19(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync16(dirname31(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync19(dirname34(this.dbPath), { recursive: true, mode: 448 });
       }
-      this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.db = new Database8(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -34531,7 +36374,7 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync27(path))
+      if (path === ":memory:" || !existsSync30(path))
         return;
       return this.tierLedger();
     }
@@ -35651,7 +37494,7 @@ var init_local_index = __esm(() => {
         seen.add(sha);
         if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
-        if (!isMediaCachePath(row.media_path, sha) || !existsSync27(row.media_path))
+        if (!isMediaCachePath(row.media_path, sha) || !existsSync30(row.media_path))
           continue;
         images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
       }
@@ -36810,7 +38653,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash16("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash20("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -37127,7 +38970,7 @@ var init_local_index = __esm(() => {
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
         for (const row of rows) {
-          if (existsSync27(row.media_path))
+          if (existsSync30(row.media_path))
             retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
         }
         reassertedMediaHolders.add(holderKey);
@@ -37706,8 +39549,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash16("sha256");
-      const outputDigest = createHash16("sha256");
+      const inputDigest = createHash20("sha256");
+      const outputDigest = createHash20("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -37777,8 +39620,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash16("sha256");
-      const outputDigest = createHash16("sha256");
+      const inputDigest = createHash20("sha256");
+      const outputDigest = createHash20("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -39400,7 +41243,7 @@ var init_local_index = __esm(() => {
               continue;
             if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
-            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync27(row.media_path)) {
+            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync30(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
               skip.add(row);
             }
@@ -39845,7 +41688,7 @@ var init_local_index = __esm(() => {
       }
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const scanDb = this.dbPath === ":memory:" ? this.db : new Database5(this.dbPath, { readonly: true, create: false, strict: true });
+      const scanDb = this.dbPath === ":memory:" ? this.db : new Database8(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       const bestByItem = new Map;
       let dimensionMismatches = 0;
@@ -41043,9 +42886,9 @@ var init_local_index = __esm(() => {
 });
 
 // src/core/source-storage.ts
-import { Database as Database6 } from "bun:sqlite";
-import { existsSync as existsSync28, lstatSync as lstatSync17, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync15 } from "node:fs";
-import { basename as basename8, join as join34, resolve as resolve12, sep as sep9 } from "node:path";
+import { Database as Database9 } from "bun:sqlite";
+import { existsSync as existsSync31, lstatSync as lstatSync20, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync15 } from "node:fs";
+import { basename as basename8, join as join36, resolve as resolve12, sep as sep9 } from "node:path";
 import { tmpdir as tmpdir3 } from "node:os";
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
@@ -41077,25 +42920,25 @@ function openTierSniffer(account, options, env = process.env) {
   return new TierSnifferStore(options);
 }
 function createStorageSnapshotReaders() {
-  const directory = mkdtempSync2(join34(tmpdir3(), "olympus-storage-snapshot-"));
+  const directory = mkdtempSync2(join36(tmpdir3(), "olympus-storage-snapshot-"));
   const snapshotPath = (path) => {
     const target = resolve12(directory, path);
     if (!target.startsWith(`${directory}${sep9}`))
       throw new Error("Not a storage snapshot");
     let current2 = directory;
     for (const part of target.slice(directory.length + 1).split(sep9)) {
-      current2 = join34(current2, part);
-      if (lstatSync17(current2).isSymbolicLink())
+      current2 = join36(current2, part);
+      if (lstatSync20(current2).isSymbolicLink())
         throw new Error("Not a storage snapshot");
     }
-    if (!lstatSync17(target).isFile() || lstatSync17(target).nlink !== 1)
+    if (!lstatSync20(target).isFile() || lstatSync20(target).nlink !== 1)
       throw new Error("Not a storage snapshot");
     return target;
   };
   return {
     directory,
     database(path) {
-      const db = new Database6(snapshotPath(path), { readonly: true, create: false });
+      const db = new Database9(snapshotPath(path), { readonly: true, create: false });
       try {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         return db;
@@ -41173,7 +43016,7 @@ function reclaimEmptyCaptureClaims(env = process.env) {
       continue;
     let stat2;
     try {
-      stat2 = lstatSync17(claim);
+      stat2 = lstatSync20(claim);
     } catch {
       continue;
     }
@@ -41201,7 +43044,7 @@ function removeClaimUnderItsLock(claim, ownLock, leaseTarget) {
       if (!names.every(ownLock))
         return false;
       for (const name of names)
-        rmSync9(join34(claim, name), { force: true });
+        rmSync9(join36(claim, name), { force: true });
       rmdirSync2(claim);
       return true;
     } catch {
@@ -41210,14 +43053,14 @@ function removeClaimUnderItsLock(claim, ownLock, leaseTarget) {
   };
   if (leaseTarget) {
     try {
-      return withFileLeaseSync(join34(claim, leaseTarget), () => remove(), { acquireTimeoutMs: 1 });
+      return withFileLeaseSync(join36(claim, leaseTarget), () => remove(), { acquireTimeoutMs: 1 });
     } catch {
       return false;
     }
   }
   let lock;
   try {
-    lock = tryHoldFileFlock(join34(claim, WHATSAPP_BRIDGE_LOCK_NAME));
+    lock = tryHoldFileFlock(join36(claim, WHATSAPP_BRIDGE_LOCK_NAME));
   } catch {
     return false;
   }
@@ -41413,7 +43256,7 @@ function hasUnmergedWrites2(path) {
     if (statSync15(`${path}-wal`).size > 0)
       return true;
   } catch {}
-  return existsSync28(`${path}-journal`);
+  return existsSync31(`${path}-journal`);
 }
 function isBusyError(error) {
   const code = String(error?.code ?? "");
@@ -41427,7 +43270,7 @@ function openToLookAt(path, busyTimeoutMs) {
       break;
     let db;
     try {
-      db = new Database6(path, mode);
+      db = new Database9(path, mode);
       db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)}; PRAGMA query_only = ON;`);
       db.query("SELECT count(*) AS n FROM sqlite_master").get();
       return db;
@@ -41469,7 +43312,7 @@ function storeFileQuickCheck(path, busyTimeoutMs = 2000) {
 function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
   let db;
   try {
-    db = new Database6(path, { readwrite: true, create: false });
+    db = new Database9(path, { readwrite: true, create: false });
     db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)};`);
     const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     const [busy, log, checkpointed] = row ? Object.values(row) : [];
@@ -41518,7 +43361,7 @@ var init_source_storage = __esm(() => {
 });
 
 // src/core/pairing-placement.ts
-import { mkdirSync as mkdirSync17, rmdirSync as rmdirSync3 } from "node:fs";
+import { mkdirSync as mkdirSync20, rmdirSync as rmdirSync3 } from "node:fs";
 async function settlePairingPlacement(account, env, options = {}) {
   const slot = account.slot ?? DEFAULT_ACCOUNT_SLOT;
   const entryLayout = (read) => {
@@ -41551,7 +43394,7 @@ async function settlePairingPlacement(account, env, options = {}) {
   if (layout !== "legacy")
     return layout;
   const claimDir = legacyCaptureClaimDir(account.sourceId, env);
-  const made = claimDir ? mkdirSync17(claimDir, { recursive: true, mode: 448 }) : undefined;
+  const made = claimDir ? mkdirSync20(claimDir, { recursive: true, mode: 448 }) : undefined;
   const settled = entryLayout(readSourceRegistryUnderLease) ?? "legacy";
   if (settled === "folder" && made && claimDir) {
     try {
@@ -41586,20 +43429,20 @@ var init_pairing_placement = __esm(() => {
 });
 
 // src/core/whatsapp-bridge-name.ts
-import { createHash as createHash17 } from "node:crypto";
-import { existsSync as existsSync29, readdirSync as readdirSync6, readFileSync as readFileSync28 } from "node:fs";
-import { join as join35 } from "node:path";
+import { createHash as createHash21 } from "node:crypto";
+import { existsSync as existsSync32, readdirSync as readdirSync6, readFileSync as readFileSync28 } from "node:fs";
+import { join as join37 } from "node:path";
 function whatsappBridgeFileName(sourceDir) {
-  const hash = createHash17("sha256");
+  const hash = createHash21("sha256");
   for (const name of ["main.go", "go.mod", "go.sum"]) {
-    const path = join35(sourceDir, name);
-    if (!existsSync29(path))
+    const path = join37(sourceDir, name);
+    if (!existsSync32(path))
       throw new Error(`The packaged WhatsApp bridge source is incomplete: missing ${name}.`);
     hash.update(name).update("\x00").update(readFileSync28(path)).update("\x00");
   }
   const others = readdirSync6(sourceDir).filter((name) => name.endsWith(".go") && !name.endsWith("_test.go") && name !== "main.go").sort();
   for (const name of others)
-    hash.update(name).update("\x00").update(readFileSync28(join35(sourceDir, name))).update("\x00");
+    hash.update(name).update("\x00").update(readFileSync28(join37(sourceDir, name))).update("\x00");
   return `olympus-whatsapp-bridge-${hash.digest("hex").slice(0, 16)}`;
 }
 var init_whatsapp_bridge_name = __esm(() => {
@@ -41608,16 +43451,16 @@ var init_whatsapp_bridge_name = __esm(() => {
 });
 
 // src/core/messaging-pairing.ts
-import { Database as Database7 } from "bun:sqlite";
-import { chmodSync as chmodSync10, existsSync as existsSync30, linkSync as linkSync2, lstatSync as lstatSync18, mkdirSync as mkdirSync18, renameSync as renameSync5, rmSync as rmSync10, rmdirSync as rmdirSync4, statSync as statSync16 } from "node:fs";
+import { Database as Database10 } from "bun:sqlite";
+import { chmodSync as chmodSync13, existsSync as existsSync33, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync21, renameSync as renameSync5, rmSync as rmSync10, rmdirSync as rmdirSync4, statSync as statSync16 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
-import { randomBytes as randomBytes6 } from "node:crypto";
-import { homedir as homedir18 } from "node:os";
-import { dirname as dirname32, join as join36, resolve as resolve13 } from "node:path";
+import { randomBytes as randomBytes11 } from "node:crypto";
+import { homedir as homedir21 } from "node:os";
+import { dirname as dirname35, join as join38, resolve as resolve13 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 async function pairMessagingSource(options) {
   const env = { ...process.env, ...options.env ?? {} };
-  const packageRoot = resolve13(options.packageRoot ?? join36(dirname32(fileURLToPath4(import.meta.url)), "..", ".."));
+  const packageRoot = resolve13(options.packageRoot ?? join38(dirname35(fileURLToPath4(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const account = { sourceId: options.source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID };
@@ -41631,13 +43474,13 @@ async function pairMessagingSource(options) {
   };
   const sessionPath = options.source === "telegram" ? telegramSessionBasePath(pathContext) : whatsappStateDir(pathContext);
   if (layout === "folder") {
-    mkdirSync18(options.source === "telegram" ? dirname32(sessionPath) : sessionPath, { recursive: true, mode: 448 });
+    mkdirSync21(options.source === "telegram" ? dirname35(sessionPath) : sessionPath, { recursive: true, mode: 448 });
   }
   const pairing = async () => {
     if (options.source === "telegram")
       assertPairingPlacement(options.source, layout, registryEnv);
     const historyAccount = options.source === "telegram" ? telegramHistoryAccount(registryEnv) : undefined;
-    const sessionExisted = options.source === "telegram" && existsSync30(`${sessionPath}.session`);
+    const sessionExisted = options.source === "telegram" && existsSync33(`${sessionPath}.session`);
     const helper = await resolveHelper(options, packageRoot);
     const aside = historyAccount !== undefined ? prepareLoginAside(sessionPath) : undefined;
     const pairingPath = aside?.base ?? sessionPath;
@@ -41651,7 +43494,7 @@ async function pairMessagingSource(options) {
         OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === "artifact" ? "false" : "true"
       }
     };
-    const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join36(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
+    const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join38(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
     let result;
     let receipt;
     const bridgeLock = options.source === "whatsapp" ? takeWhatsAppBridgeLock(sessionPath, () => assertPairingPlacement(options.source, layout, registryEnv)) : undefined;
@@ -41807,8 +43650,8 @@ async function pairMessagingSource(options) {
   }
 }
 function takeWhatsAppBridgeLock(stateDir, stillPlaced) {
-  const made = mkdirSync18(stateDir, { recursive: true, mode: 448 }) !== undefined;
-  const lockPath = join36(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
+  const made = mkdirSync21(stateDir, { recursive: true, mode: 448 }) !== undefined;
+  const lockPath = join38(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
   const lock = tryHoldFileFlock(lockPath);
   if (!lock) {
     throw new Error("A WhatsApp bridge is already running on this session: WhatsApp capture, or another pairing. Finish or cancel the other pairing; a WhatsApp account that is paired and capturing does not need pairing again.");
@@ -41840,8 +43683,8 @@ function assertPairingPlacement(source, layout, env) {
 }
 async function resolveHelper(options, packageRoot) {
   if (options.source === "telegram") {
-    const script2 = options.telegramHelperPath ?? join36(packageRoot, "scripts", "telegram-pair.py");
-    if (!existsSync30(script2))
+    const script2 = options.telegramHelperPath ?? join38(packageRoot, "scripts", "telegram-pair.py");
+    if (!existsSync33(script2))
       throw new Error("The packaged Telegram pairing helper is missing. Reinstall Olympus and retry.");
     return readyTelegramPython({
       ...options,
@@ -41850,68 +43693,68 @@ async function resolveHelper(options, packageRoot) {
     });
   }
   if (options.whatsappBridgePath) {
-    if (!existsSync30(options.whatsappBridgePath))
+    if (!existsSync33(options.whatsappBridgePath))
       throw new Error("The configured WhatsApp pairing bridge does not exist.");
     return options.whatsappBridgePath;
   }
-  const sourceDir = join36(packageRoot, "tools", "whatsapp-bridge");
+  const sourceDir = join38(packageRoot, "tools", "whatsapp-bridge");
   const packaged = packagedWhatsAppBridgePath(packageRoot);
-  if (existsSync30(packaged)) {
+  if (existsSync33(packaged)) {
     assertTrustedBridge(packaged, "The installed WhatsApp bridge is not a trusted owner-controlled executable. Reinstall Olympus and retry.");
     return packaged;
   }
   const output = whatsappBridgeCachePath(packageRoot, options);
-  const cacheHome = options.env?.XDG_CACHE_HOME ?? join36(options.homeDir ?? options.env?.HOME ?? homedir18(), ".cache");
+  const cacheHome = options.env?.XDG_CACHE_HOME ?? join38(options.homeDir ?? options.env?.HOME ?? homedir21(), ".cache");
   ensurePrivateRootDirectorySync(cacheHome);
-  ensurePrivateDirectoryTreeSync(cacheHome, dirname32(output));
-  for (const directory of [cacheHome, join36(cacheHome, "olympus"), dirname32(output)]) {
-    const stat2 = lstatSync18(directory);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname35(output));
+  for (const directory of [cacheHome, join38(cacheHome, "olympus"), dirname35(output)]) {
+    const stat2 = lstatSync21(directory);
     if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid() || (stat2.mode & 18) !== 0) {
       throw new Error("The Olympus bridge cache must be owned by this user and not writable by other users.");
     }
   }
-  if (existsSync30(output)) {
+  if (existsSync33(output)) {
     assertTrustedBridge(output, "The cached WhatsApp bridge is not a trusted owner-controlled executable.");
     return output;
   }
   const which = options.which ?? ((command) => Bun.which(command));
-  const home = options.homeDir ?? options.env?.HOME ?? homedir18();
-  const userBins = [join36(home, ".local", "bin"), join36(home, "go", "bin"), "/usr/local/go/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
-  const find = (command) => which(command) ?? (options.which ? undefined : userBins.map((dir) => join36(dir, command)).find((path) => isExecutableFile2(path)));
+  const home = options.homeDir ?? options.env?.HOME ?? homedir21();
+  const userBins = [join38(home, ".local", "bin"), join38(home, "go", "bin"), "/usr/local/go/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+  const find = (command) => which(command) ?? (options.which ? undefined : userBins.map((dir) => join38(dir, command)).find((path) => isExecutableFile2(path)));
   const go = find("go");
   const compiler = find("cc") ?? find("clang") ?? find("gcc");
   if (!go || !compiler) {
     throw codedPairingError("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.", "bridge_build_tools_missing");
   }
-  mkdirSync18(join36(output, ".."), { recursive: true, mode: 448 });
+  mkdirSync21(join38(output, ".."), { recursive: true, mode: 448 });
   const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, compiler, sourceDir, outputPath: output });
-  if (!built || !existsSync30(output)) {
+  if (!built || !existsSync33(output)) {
     throw codedPairingError("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.", "bridge_build_failed");
   }
-  chmodSync10(output, 448);
+  chmodSync13(output, 448);
   return output;
 }
 function whatsappBridgePathForPackage(packageRoot, context2 = {}) {
   const packaged = packagedWhatsAppBridgePath(packageRoot);
-  return existsSync30(packaged) ? packaged : whatsappBridgeCachePath(packageRoot, context2);
+  return existsSync33(packaged) ? packaged : whatsappBridgeCachePath(packageRoot, context2);
 }
 function packagedWhatsAppBridgePath(packageRoot) {
-  const sourceDir = join36(packageRoot, "tools", "whatsapp-bridge");
-  return join36(sourceDir, "bin", whatsappBridgeFileName(sourceDir));
+  const sourceDir = join38(packageRoot, "tools", "whatsapp-bridge");
+  return join38(sourceDir, "bin", whatsappBridgeFileName(sourceDir));
 }
 function whatsappBridgeCachePath(packageRoot, context2) {
-  const home = context2.homeDir ?? context2.env?.HOME ?? homedir18();
-  const cacheHome = context2.env?.XDG_CACHE_HOME ?? join36(home, ".cache");
-  return join36(cacheHome, "olympus", "bin", whatsappBridgeFileName(join36(packageRoot, "tools", "whatsapp-bridge")));
+  const home = context2.homeDir ?? context2.env?.HOME ?? homedir21();
+  const cacheHome = context2.env?.XDG_CACHE_HOME ?? join38(home, ".cache");
+  return join38(cacheHome, "olympus", "bin", whatsappBridgeFileName(join38(packageRoot, "tools", "whatsapp-bridge")));
 }
 function assertTrustedBridge(path, message2) {
-  const stat2 = lstatSync18(path);
+  const stat2 = lstatSync21(path);
   if (!stat2.isFile() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid() || (stat2.mode & 18) !== 0 || (stat2.mode & 64) === 0) {
     throw new Error(message2);
   }
 }
 function whatsappBridgeBuildEnv(input, base = process.env) {
-  const dirs = [...new Set([dirname32(input.go), dirname32(input.compiler)])];
+  const dirs = [...new Set([dirname35(input.go), dirname35(input.compiler)])];
   const path = [...dirs, ...(base.PATH ?? "").split(":").filter((dir) => dir && !dirs.includes(dir))].join(":");
   return { ...base, CGO_ENABLED: "1", CC: input.compiler, PATH: path };
 }
@@ -41945,11 +43788,11 @@ async function buildWhatsAppBridge(input) {
     rmSync10(temporary, { force: true });
     return false;
   }
-  if (result !== 0 || !existsSync30(temporary)) {
+  if (result !== 0 || !existsSync33(temporary)) {
     rmSync10(temporary, { force: true });
     return false;
   }
-  chmodSync10(temporary, 448);
+  chmodSync13(temporary, 448);
   renameSync5(temporary, input.outputPath);
   return true;
 }
@@ -41983,7 +43826,7 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
     return {
       source,
       executable: helperExecutable,
-      args: [join36(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"],
+      args: [join38(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"],
       env: {
         ...layout === "folder" ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath },
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
@@ -42056,7 +43899,7 @@ function prepareLoginAside(base) {
     if (left.pid !== process.pid && !processAlive(left.pid))
       rmSync10(left.path, { force: true });
   }
-  const aside = telegramStagedSessionBase(base, { pid: process.pid, tag: randomBytes6(4).toString("hex") });
+  const aside = telegramStagedSessionBase(base, { pid: process.pid, tag: randomBytes11(4).toString("hex") });
   const admitted = loginIdentity(`${base}.session`);
   if (admitted !== undefined)
     copyLogin(`${base}.session`, `${aside}.session`);
@@ -42065,10 +43908,10 @@ function prepareLoginAside(base) {
 function copyLogin(from, to) {
   let db;
   try {
-    db = new Database7(from, { readonly: true });
+    db = new Database10(from, { readonly: true });
     db.run("PRAGMA busy_timeout = 5000");
     db.run("VACUUM INTO ?", [to]);
-    chmodSync10(to, 384);
+    chmodSync13(to, 384);
   } catch {
     rmSync10(to, { force: true });
   } finally {
@@ -42079,7 +43922,7 @@ function copyLogin(from, to) {
 function keepLoginAside(aside, base) {
   const from = `${aside.base}.session`;
   const to = `${base}.session`;
-  if (existsSync30(`${from}-journal`)) {
+  if (existsSync33(`${from}-journal`)) {
     throw new Error("Telegram pairing did not finish writing its login. Re-run olympus connect telegram --pair in your private terminal.");
   }
   if (loginIdentity(to) !== aside.admitted)
@@ -42106,7 +43949,7 @@ function loginChangedMeanwhile() {
   return new Error("Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.");
 }
 function writeLoginInto(from, to) {
-  const db = new Database7(to);
+  const db = new Database10(to);
   try {
     db.run("PRAGMA busy_timeout = 5000");
     let tables;
@@ -42353,9 +44196,9 @@ var init_messaging_pairing = __esm(() => {
 var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
 
 // src/core/messaging-capture.ts
-import { existsSync as existsSync31, mkdirSync as mkdirSync19, rmSync as rmSync11 } from "node:fs";
-import { homedir as homedir19 } from "node:os";
-import { dirname as dirname33, join as join37 } from "node:path";
+import { existsSync as existsSync34, mkdirSync as mkdirSync22, rmSync as rmSync11 } from "node:fs";
+import { homedir as homedir22 } from "node:os";
+import { dirname as dirname36, join as join39 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
@@ -42500,7 +44343,7 @@ class MessagingCaptureSupervisor {
         delete childEnv[name];
       Object.assign(childEnv, folderCaptureEnv(account, layoutEnv2));
       for (const dir of folderCaptureDirs(account, layoutEnv2))
-        mkdirSync19(dir, { recursive: true, mode: 448 });
+        mkdirSync22(dir, { recursive: true, mode: 448 });
     }
     const secrets = this.options.secretStore ?? createDefaultSecretStore();
     for (const mapping of grant.producer.secretEnvironment) {
@@ -42521,7 +44364,7 @@ class MessagingCaptureSupervisor {
     if (generation !== this.generation - 1)
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     const spawn3 = this.options.spawn ?? spawnCapture;
-    const lock = grant.source === "whatsapp" ? tryHoldFileFlock(join37(whatsappStateDirOf(grant, account, layoutEnv2), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
+    const lock = grant.source === "whatsapp" ? tryHoldFileFlock(join39(whatsappStateDirOf(grant, account, layoutEnv2), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
     if (grant.source === "whatsapp" && !lock)
       return { source: grant.source, state: "blocked", reason: "helper_running" };
     let child;
@@ -42579,11 +44422,11 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join37(dirname33(fileURLToPath5(import.meta.url)), "..", "..");
-    return { executable, args: [join37(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
+    const packageRoot = options.packageRoot ?? join39(dirname36(fileURLToPath5(import.meta.url)), "..", "..");
+    return { executable, args: [join39(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
-    executable: options.whatsappBridgePath ?? join37(homedir19(), ".cache", "olympus", "bin", "olympus-whatsapp-bridge"),
+    executable: options.whatsappBridgePath ?? join39(homedir22(), ".cache", "olympus", "bin", "olympus-whatsapp-bridge"),
     args: ["--capture-approved"]
   };
 }
@@ -42619,10 +44462,10 @@ function whatsappStateDirOf(grant, account, env) {
 }
 function sessionExists(grant, account, env) {
   if (account.layout === "folder") {
-    return grant.source === "telegram" ? existsSync31(`${accountSessionPath(account, env)}.session`) : existsSync31(join37(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
+    return grant.source === "telegram" ? existsSync34(`${accountSessionPath(account, env)}.session`) : existsSync34(join39(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
   }
   const sessionPath = grant.sessionPath ?? "";
-  return grant.source === "telegram" ? existsSync31(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync31(join37(sessionPath, WHATSAPP_SESSION_FILE));
+  return grant.source === "telegram" ? existsSync34(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync34(join39(sessionPath, WHATSAPP_SESSION_FILE));
 }
 function spawnCapture(input) {
   const child = Bun.spawn([input.executable, ...input.args], {
@@ -42794,7 +44637,7 @@ var init_open_targets = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash19, randomBytes as randomBytes7 } from "node:crypto";
+import { createHash as createHash23, randomBytes as randomBytes12 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -42818,7 +44661,7 @@ class DashboardLaunchTickets {
     }
     const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
     const expiresAtMs = nowMs + ttlSeconds * 1000;
-    const ticket = randomBytes7(32).toString("base64url");
+    const ticket = randomBytes12(32).toString("base64url");
     this.tickets.set(ticket, {
       expiresAtMs,
       originTag: dashboardLaunchOriginTag(origin),
@@ -42857,14 +44700,14 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash19("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash23("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
 function dashboardLaunchPageHeaders() {
   const script2 = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
-  const scriptHash = createHash19("sha256").update(script2).digest("base64");
+  const scriptHash = createHash23("sha256").update(script2).digest("base64");
   return {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
@@ -42960,7 +44803,7 @@ var init_dashboard_launch = __esm(() => {
 
 // src/core/dashboard-opening.ts
 import { accessSync as accessSync5, constants as fsConstants4, statSync as statSync17 } from "node:fs";
-import { join as join38 } from "node:path";
+import { join as join40 } from "node:path";
 function olympusCommandHint(input = {}) {
   const env = input.env ?? process.env;
   const isExecutable = (path) => {
@@ -42972,7 +44815,7 @@ function olympusCommandHint(input = {}) {
     }
   };
   const dirs = (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
-  if (dirs.some((dir) => isExecutable(join38(dir, "olympus"))))
+  if (dirs.some((dir) => isExecutable(join40(dir, "olympus"))))
     return "olympus";
   const own3 = input.pluginBin;
   if (own3 && isExecutable(own3) && !/\s/.test(own3))
@@ -43039,7 +44882,7 @@ var init_dashboard_opening = __esm(() => {
 });
 
 // src/core/mac-engine-daemon.ts
-import { lstatSync as lstatSync20, readFileSync as readFileSync31 } from "node:fs";
+import { lstatSync as lstatSync23, readFileSync as readFileSync31 } from "node:fs";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { userInfo } from "node:os";
 function validateMacEngineOwner(userName, uid) {
@@ -43050,7 +44893,7 @@ function validateMacEngineOwner(userName, uid) {
 function macEngineManager(home2, daemonPath = MAC_ENGINE_DAEMON_PLIST) {
   let stat2;
   try {
-    stat2 = lstatSync20(daemonPath);
+    stat2 = lstatSync23(daemonPath);
   } catch (error) {
     if (error.code === "ENOENT")
       return "agent";
@@ -43177,227 +45020,9 @@ var init_mac_engine_daemon = __esm(() => {
   init_operation_error();
 });
 
-// src/core/app-release-log.ts
-var exports_app_release_log = {};
-__export(exports_app_release_log, {
-  openAppReleaseLog: () => openAppReleaseLog,
-  isAppReleaseRetentionDays: () => isAppReleaseRetentionDays,
-  forgetAppReleaseItems: () => forgetAppReleaseItems,
-  appReleaseLogDbPath: () => appReleaseLogDbPath,
-  APP_RELEASE_RETENTION_DAYS: () => APP_RELEASE_RETENTION_DAYS,
-  APP_RELEASE_LOG_STORE_ID: () => APP_RELEASE_LOG_STORE_ID,
-  APP_RELEASE_LOG_SCHEMA_VERSION: () => APP_RELEASE_LOG_SCHEMA_VERSION,
-  APP_RELEASE_DEFAULT_RETENTION_DAYS: () => APP_RELEASE_DEFAULT_RETENTION_DAYS
-});
-import { Database as Database8 } from "bun:sqlite";
-import { randomBytes as randomBytes8 } from "node:crypto";
-import { chmodSync as chmodSync11, existsSync as existsSync33, lstatSync as lstatSync21, mkdirSync as mkdirSync21 } from "node:fs";
-import { homedir as homedir21 } from "node:os";
-import { dirname as dirname35, isAbsolute as isAbsolute17, join as join40 } from "node:path";
-function appReleaseLogDbPath(remoteConnectionsDbPath) {
-  return join40(dirname35(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
-}
-function isAppReleaseRetentionDays(value) {
-  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
-}
-function openAppReleaseLog(dbPath, options = {}) {
-  const now = options.now ?? Date.now;
-  hardenPrivatePath(dbPath);
-  const db = new Database8(dbPath, { create: true });
-  try {
-    chmodSync11(dbPath, 384);
-    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
-    db.transaction(() => {
-      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
-      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations());
-    }).immediate();
-  } catch (error) {
-    closeSqliteStore(db);
-    throw error;
-  }
-  const retentionDays = () => {
-    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
-    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
-    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
-  };
-  const clear = () => db.transaction(() => {
-    db.query("DELETE FROM app_release_items").run();
-    return db.query("DELETE FROM app_release_requests").run().changes;
-  })();
-  const expire = () => {
-    const days = retentionDays();
-    if (days === 0) {
-      clear();
-      return;
-    }
-    const before = now() - days * DAY_MS;
-    db.transaction(() => {
-      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
-      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
-    })();
-  };
-  return {
-    record(record) {
-      if (retentionDays() === 0)
-        return;
-      const id = `apr_${randomBytes8(12).toString("base64url")}`;
-      db.transaction(() => {
-        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionId ?? null);
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
-          insert.run(id, position, item.source, item.title ?? null, item.tier, item.corpusId ?? null, item.provider ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, item.locator ?? null);
-        });
-      })();
-      expire();
-      return id;
-    },
-    list() {
-      expire();
-      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
-        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
-      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
-      return requests.map((row) => ({
-        id: row.id,
-        at: row.at,
-        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
-        question: row.question,
-        heldBack: row.held_back,
-        answeredPrivately: row.answered_privately === 1,
-        withheld: row.withheld === 1,
-        items: items.all(row.id).map((item) => ({
-          position: item.position,
-          source: item.source,
-          ...item.title ? { title: item.title } : {},
-          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
-          madePrivate: item.made_private === 1
-        }))
-      }));
-    },
-    retentionDays,
-    setRetentionDays(days) {
-      if (!isAppReleaseRetentionDays(days))
-        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
-      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
-      expire();
-    },
-    clear,
-    item(requestId, position) {
-      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
-        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
-      if (!row)
-        return;
-      return {
-        source: row.source,
-        ...row.title ? { title: row.title } : {},
-        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
-        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
-        ...row.provider ? { provider: row.provider } : {},
-        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
-        ...row.locator ? { locator: row.locator } : {},
-        madePrivate: row.made_private === 1
-      };
-    },
-    markMadePrivate(requestId, position) {
-      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
-    },
-    markAnsweredPrivately(privateQuestionId) {
-      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionId).changes;
-    },
-    forgetCorpora(corpusIds, dryRun) {
-      if (corpusIds.length === 0)
-        return 0;
-      const marks = corpusIds.map(() => "?").join(", ");
-      if (dryRun)
-        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds).n;
-      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
-    },
-    close() {
-      closeSqliteStore(db);
-    }
-  };
-}
-function forgetAppReleaseItems(dbPath, selector, options = {}) {
-  if (!existsSync33(dbPath) || selector.corpusIds.length === 0)
-    return 0;
-  const store = openAppReleaseLog(dbPath);
-  try {
-    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
-  } finally {
-    store.close();
-  }
-}
-function migrations() {
-  return [{
-    version: 1,
-    name: "app_release_log",
-    up(db) {
-      db.exec(`
-        CREATE TABLE app_release_requests (
-          id TEXT PRIMARY KEY,
-          at INTEGER NOT NULL,
-          connection_id TEXT,
-          connection_name TEXT NOT NULL,
-          connection_kind TEXT NOT NULL,
-          question TEXT NOT NULL,
-          held_back INTEGER NOT NULL DEFAULT 0,
-          answered_privately INTEGER NOT NULL DEFAULT 0,
-          withheld INTEGER NOT NULL DEFAULT 0,
-          private_question_id TEXT
-        );
-        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
-        CREATE INDEX app_release_requests_at ON app_release_requests (at);
-        CREATE TABLE app_release_items (
-          request_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          source TEXT NOT NULL,
-          title TEXT,
-          tier TEXT NOT NULL,
-          corpus_id TEXT,
-          provider TEXT,
-          provider_item_id TEXT,
-          provider_conversation_id TEXT,
-          locator TEXT,
-          made_private INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (request_id, position)
-        );
-        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
-        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      `);
-    }
-  }];
-}
-function hardenPrivatePath(dbPath) {
-  if (!isAbsolute17(dbPath))
-    throw new TypeError("The AI apps log path must be absolute.");
-  const leafDir = dirname35(dbPath);
-  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir21()]).has(leafDir)) {
-    throw new Error("The AI apps log must live inside a dedicated private directory.");
-  }
-  mkdirSync21(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync21(leafDir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
-    throw new Error("The AI apps log must live in a real private directory.");
-  chmodSync11(leafDir, 448);
-  if (existsSync33(dbPath)) {
-    const fileStat = lstatSync21(dbPath);
-    if (fileStat.isSymbolicLink() || !fileStat.isFile())
-      throw new Error("The AI apps log must be a regular file, not a symlink.");
-  }
-}
-var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 1, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days";
-var init_app_release_log = __esm(() => {
-  init_olympus_layout();
-  init_sqlite_migrations();
-  APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
-  DAY_MS = 24 * 60 * 60000;
-});
-
 // src/workers/archive-import/state.ts
-import { existsSync as existsSync34, mkdirSync as mkdirSync22, readFileSync as readFileSync32 } from "node:fs";
-import { dirname as dirname36 } from "node:path";
+import { existsSync as existsSync36, mkdirSync as mkdirSync24, readFileSync as readFileSync32 } from "node:fs";
+import { dirname as dirname38 } from "node:path";
 import { randomUUID as randomUUID9 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
@@ -43431,7 +45056,7 @@ function validRecord(value) {
   return typeof value.archive_id === "string" && isArchiveId(value.archive_id) && typeof value.format === "string" && typeof value.provider === "string" && typeof value.family === "string" && typeof value.label === "string" && typeof value.root_path === "string" && value.root_path.startsWith("/") && isRecord3(value.root_identity) && typeof value.root_identity.dev === "string" && typeof value.root_identity.ino === "string" && typeof value.chosen_rel_path === "string" && Array.isArray(value.files) && value.files.length > 0 && typeof value.manifest_sha256 === "string" && (value.status === "importing" || value.status === "imported" || value.status === "stopped" || value.status === "removing") && typeof value.created_at === "string" && typeof value.updated_at === "string" && isRecord3(value.findings) && isRecord3(value.findings.gaps) && isRecord3(value.findings.skipped) && Array.isArray(value.findings.samples) && (value.target === undefined || isRecord3(value.target) && typeof value.target.source_id === "string" && typeof value.target.slot === "string");
 }
 function readState(path) {
-  if (!existsSync34(path))
+  if (!existsSync36(path))
     return { version: 1, archives: [] };
   const parsed = JSON.parse(readFileSync32(path, "utf8"));
   if (!isRecord3(parsed) || parsed.version !== 1 || !Array.isArray(parsed.archives)) {
@@ -43626,7 +45251,7 @@ class ArchiveImportStateStore {
   }
   mutate(change) {
     recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
-    mkdirSync22(dirname36(this.path), { recursive: true, mode: 448 });
+    mkdirSync24(dirname38(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState(this.path);
       if (change(state) === false)
@@ -44267,17 +45892,17 @@ var init_scope_safe_fs = __esm(() => {
 });
 
 // src/workers/archive-import/media-bindings.ts
-import { Database as Database9 } from "bun:sqlite";
-import { createHash as createHash20 } from "node:crypto";
-import { chmodSync as chmodSync12, existsSync as existsSync36, mkdirSync as mkdirSync23 } from "node:fs";
-import { dirname as dirname37 } from "node:path";
+import { Database as Database11 } from "bun:sqlite";
+import { createHash as createHash24 } from "node:crypto";
+import { chmodSync as chmodSync14, existsSync as existsSync38, mkdirSync as mkdirSync25 } from "node:fs";
+import { dirname as dirname39 } from "node:path";
 function archiveMediaBindingsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-media-bindings.sqlite");
 }
 function defaultArchiveMediaBindingsPath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-media-bindings.sqlite", env);
 }
-function migrations2() {
+function migrations3() {
   return [{
     version: 1,
     name: "create_append_only_media_bindings",
@@ -44314,7 +45939,7 @@ function bindingOf(row) {
   };
 }
 function mediaBindingId(archiveId, relPath) {
-  return `mb-${createHash20("sha256").update(`${archiveId}\x00${relPath}`).digest("hex").slice(0, 32)}`;
+  return `mb-${createHash24("sha256").update(`${archiveId}\x00${relPath}`).digest("hex").slice(0, 32)}`;
 }
 
 class ArchiveMediaBindingStore {
@@ -44326,14 +45951,14 @@ class ArchiveMediaBindingStore {
     this.now = options.now ?? (() => new Date);
     if (options.path !== ":memory:") {
       recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, options.path, options.env ?? process.env);
-      mkdirSync23(dirname37(options.path), { recursive: true, mode: 448 });
+      mkdirSync25(dirname39(options.path), { recursive: true, mode: 448 });
     }
-    this.db = new Database9(options.path, { create: true });
+    this.db = new Database11(options.path, { create: true });
     if (options.path !== ":memory:")
-      chmodSync12(options.path, 384);
+      chmodSync14(options.path, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     assertSqliteSchemaCanOpen(this.db, ARCHIVE_MEDIA_BINDINGS_STORE_ID, SCHEMA_VERSION);
-    runSqliteMigrations(this.db, ARCHIVE_MEDIA_BINDINGS_STORE_ID, migrations2());
+    runSqliteMigrations(this.db, ARCHIVE_MEDIA_BINDINGS_STORE_ID, migrations3());
   }
   bind(archiveId, relPath, version) {
     const bindingId = mediaBindingId(archiveId, relPath);
@@ -44378,7 +46003,7 @@ function createArchiveMediaBindings(options) {
       return;
     if (store)
       return store;
-    return existsSync36(options.path) ? open2() : undefined;
+    return existsSync38(options.path) ? open2() : undefined;
   };
   return {
     path: options.path,
@@ -44624,7 +46249,7 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash25 } from "node:crypto";
 function createXBookmarksSourceConnector(options) {
   const account = requireAccount(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
@@ -44725,7 +46350,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash21("sha256").update(JSON.stringify({ text: text2, title, url, folders })).digest("hex")
+      contentHash: createHash25("sha256").update(JSON.stringify({ text: text2, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -44776,10 +46401,10 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash22, randomUUID as randomUUID10 } from "node:crypto";
-import { chmodSync as chmodSync13, mkdirSync as mkdirSync24 } from "node:fs";
-import { dirname as dirname38 } from "node:path";
-import { Database as Database10 } from "bun:sqlite";
+import { createHash as createHash26, randomUUID as randomUUID10 } from "node:crypto";
+import { chmodSync as chmodSync15, mkdirSync as mkdirSync26 } from "node:fs";
+import { dirname as dirname40 } from "node:path";
+import { Database as Database12 } from "bun:sqlite";
 
 class LocalXBookmarksReconcileStateStore {
   dbPath;
@@ -44788,11 +46413,11 @@ class LocalXBookmarksReconcileStateStore {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
       recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
-      mkdirSync24(dirname38(dbPath), { recursive: true, mode: 448 });
+      mkdirSync26(dirname40(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database10(dbPath, { create: true });
+    this.db = new Database12(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync13(dbPath, 384);
+      chmodSync15(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, X_BOOKMARKS_RECONCILE_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, xBookmarksReconcileStateMigrations());
@@ -46927,7 +48552,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash22("sha256").update(JSON.stringify({
+  return createHash26("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -46953,7 +48578,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash22("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash26("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -47169,8 +48794,8 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/core/account-files.ts
-import { lstatSync as lstatSync23 } from "node:fs";
-import { join as join43 } from "node:path";
+import { lstatSync as lstatSync25 } from "node:fs";
+import { join as join44 } from "node:path";
 function lifecycleSourceIds() {
   return [...new Set([...FOLDER_LAYOUT_SOURCES, ...mountedStoreSources()])];
 }
@@ -47283,22 +48908,22 @@ function legacyTelegramCaptureState(account, env) {
 function legacyWhatsAppCaptureState(account, env, pairing) {
   const stateDir = whatsappStateDir({ env, layout: account.layout });
   const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join43(transcribeStateDir, "media") : undefined);
+  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join44(transcribeStateDir, "media") : undefined);
   return [
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join43(stateDir, "spool"),
+    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join44(stateDir, "spool"),
     ...pairing,
-    join43(stateDir, "media"),
+    join44(stateDir, "media"),
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ];
 }
 function dropboxIngestionPolicyPath(context2) {
   if (!context2.homeDir || process.platform === "linux")
     return defaultDropboxIngestionPolicyPath(context2.env);
-  return join43(context2.homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
+  return join44(context2.homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
 }
 function existsOnDisk(path) {
   try {
-    lstatSync23(path);
+    lstatSync25(path);
     return true;
   } catch {
     return false;
@@ -49559,7 +51184,7 @@ var init_browser = __esm(() => {
 });
 
 // src/workers/archive-import/zip-reader.ts
-import { createHash as createHash23 } from "node:crypto";
+import { createHash as createHash27 } from "node:crypto";
 function decodeCp437(bytes) {
   let out = "";
   for (const byte of bytes)
@@ -49786,7 +51411,7 @@ class ZipArchive {
     }
   }
   memberTable() {
-    const hash = createHash23("sha256");
+    const hash = createHash27("sha256");
     let count = 0;
     for (const entry of this.entries()) {
       hash.update(`${JSON.stringify([entry.name, entry.method, entry.flags, entry.crc32, entry.compressedSize, entry.uncompressedSize, entry.localHeaderOffset])}
@@ -50390,7 +52015,7 @@ var init_zip_reader = __esm(() => {
 });
 
 // src/workers/archive-import/manifest.ts
-import { createHash as createHash24 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 function lastComponent(relPath, rootPath) {
   const source = relPath === "" ? rootPath : relPath;
   const parts = source.split("/").filter((part) => part !== "");
@@ -50627,7 +52252,7 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   };
 }
 function sha256(bytes) {
-  return createHash24("sha256").update(bytes).digest("hex");
+  return createHash28("sha256").update(bytes).digest("hex");
 }
 function zipMemberTable(reader, head) {
   if (!ZipArchive.looksLikeZip(head))
@@ -50674,7 +52299,7 @@ function archiveFileEntries(files) {
   }));
 }
 function archiveManifestSha256(files) {
-  return createHash24("sha256").update(JSON.stringify(files.map((file) => [
+  return createHash28("sha256").update(JSON.stringify(files.map((file) => [
     file.rel_path,
     file.dev,
     file.ino,
@@ -50727,7 +52352,7 @@ function verifyArchiveManifest(root, files, options = {}) {
 function* archiveFileDigestSteps(root, file) {
   const reader = root.openFile(file.rel_path, { expected: manifestFileVersion(file) });
   try {
-    const hash = createHash24("sha256");
+    const hash = createHash28("sha256");
     for (let offset = 0;offset < file.size; offset += ARCHIVE_DIGEST_RANGE_BYTES) {
       hash.update(reader.readAt(offset, Math.min(ARCHIVE_DIGEST_RANGE_BYTES, file.size - offset)));
       reader.assertCurrent();
@@ -50780,14 +52405,14 @@ var init_manifest3 = __esm(() => {
 });
 
 // src/workers/archive-import/requests.ts
-import { existsSync as existsSync37, mkdirSync as mkdirSync25, readFileSync as readFileSync33 } from "node:fs";
-import { dirname as dirname39, join as join44 } from "node:path";
+import { existsSync as existsSync39, mkdirSync as mkdirSync27, readFileSync as readFileSync33 } from "node:fs";
+import { dirname as dirname41, join as join45 } from "node:path";
 import { randomUUID as randomUUID11 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
 function withArchiveImportApprovals(statePath, run) {
-  return withFileLeaseSync(join44(dirname39(statePath), "archive-import-approvals"), () => run());
+  return withFileLeaseSync(join45(dirname41(statePath), "archive-import-approvals"), () => run());
 }
 function isRecord4(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -50811,7 +52436,7 @@ function validRequest(value) {
   return typeof value.request_id === "string" && isArchiveId(value.request_id) && (value.origin === "agent" || value.origin === "dashboard") && named && typeof value.label === "string" && typeof value.status === "string" && STATUSES.has(value.status) && (value.archive_id === undefined || typeof value.archive_id === "string" && isArchiveId(value.archive_id)) && (value.code === undefined || typeof value.code === "string") && (value.approved === undefined || validApproval(value.approved)) && typeof value.created_at === "string" && typeof value.updated_at === "string";
 }
 function readRequests(path) {
-  if (!existsSync37(path))
+  if (!existsSync39(path))
     return { version: 1, requests: [] };
   const parsed = JSON.parse(readFileSync33(path, "utf8"));
   if (!isRecord4(parsed) || parsed.version !== 1 || !Array.isArray(parsed.requests) || !parsed.requests.every(validRequest)) {
@@ -50960,7 +52585,7 @@ class ArchiveImportRequestStore {
   }
   mutate(change) {
     recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
-    mkdirSync25(dirname39(this.path), { recursive: true, mode: 448 });
+    mkdirSync27(dirname41(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readRequests(this.path);
       if (change(state) === false)
@@ -51007,1537 +52632,6 @@ var SOURCE_DELETE_HOLDS;
 var init_source_delete_holds = __esm(() => {
   init_requests();
   SOURCE_DELETE_HOLDS = [archiveImportDeleteHold];
-});
-
-// src/core/operation-caller.ts
-function sanitizeCallerDisplayName(value) {
-  if (typeof value !== "string")
-    return;
-  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
-  if (!cleaned)
-    return;
-  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
-}
-function callerProviderFromLabel(label) {
-  if (!label)
-    return;
-  const named = HOST_NAME_PATTERNS.filter(([, pattern]) => pattern.test(label));
-  return named.length === 1 ? named[0][0] : undefined;
-}
-function operationCallerToWire(caller) {
-  const displayName = sanitizeCallerDisplayName(caller.displayName);
-  return {
-    surface: caller.surface,
-    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
-    ...displayName ? { display_name: displayName } : {},
-    ...caller.provider ? { provider: caller.provider } : {}
-  };
-}
-function parseOperationCallerWire(value) {
-  if (value === undefined || value === null)
-    return { ok: true, caller: undefined };
-  if (typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, message: "caller must be an object when provided." };
-  }
-  const record = value;
-  const unknownFields = Object.keys(record).filter((key2) => !["surface", "connection_id", "display_name", "provider"].includes(key2));
-  if (unknownFields.length > 0) {
-    return { ok: false, message: `caller contains undeclared fields: ${unknownFields.sort().join(", ")}.` };
-  }
-  if (typeof record.surface !== "string" || !OPERATION_CALLER_SURFACES.includes(record.surface)) {
-    return { ok: false, message: `caller.surface must be one of: ${OPERATION_CALLER_SURFACES.join(", ")}.` };
-  }
-  let connectionId;
-  if (record.connection_id !== undefined) {
-    if (typeof record.connection_id !== "string" || record.connection_id.length === 0 || record.connection_id.length > OPERATION_CALLER_CONNECTION_ID_MAX || !CONNECTION_ID_PATTERN.test(record.connection_id)) {
-      return { ok: false, message: "caller.connection_id must be a short identifier when provided." };
-    }
-    connectionId = record.connection_id;
-  }
-  let displayName;
-  if (record.display_name !== undefined) {
-    displayName = sanitizeCallerDisplayName(record.display_name);
-    if (typeof record.display_name !== "string" || displayName === undefined) {
-      return { ok: false, message: "caller.display_name must be a non-empty string when provided." };
-    }
-  }
-  let provider;
-  if (record.provider !== undefined) {
-    if (typeof record.provider !== "string" || !OPERATION_CALLER_PROVIDERS.includes(record.provider)) {
-      return { ok: false, message: `caller.provider must be one of: ${OPERATION_CALLER_PROVIDERS.join(", ")}.` };
-    }
-    provider = record.provider;
-  }
-  return {
-    ok: true,
-    caller: {
-      surface: record.surface,
-      ...connectionId ? { connection_id: connectionId } : {},
-      ...displayName ? { display_name: displayName } : {},
-      ...provider ? { provider } : {}
-    }
-  };
-}
-function markInProcessRemoteRequest(request) {
-  inProcessRemoteRequests.add(request);
-  return request;
-}
-function isInProcessRemoteRequest(request) {
-  return inProcessRemoteRequests.has(request);
-}
-function callerClaimsRemoteConnection(caller) {
-  return caller.surface === "remote" || caller.connection_id !== undefined;
-}
-var OPERATION_CALLER_SURFACES, OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, HOST_NAME_PATTERNS, inProcessRemoteRequests;
-var init_operation_caller = __esm(() => {
-  OPERATION_CALLER_SURFACES = ["native", "mcp", "cli", "remote"];
-  OPERATION_CALLER_PROVIDERS = ["openai", "xai", "meta", "anthropic", "other"];
-  CONNECTION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
-  UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
-  HOST_NAME_PATTERNS = [
-    ["anthropic", /claude|anthropic/i],
-    ["openai", /chatgpt|openai|codex/i],
-    ["xai", /grok|xai|x\.ai/i],
-    ["meta", /\b(?:meta|muse)\b/i]
-  ];
-  inProcessRemoteRequests = new WeakSet;
-});
-
-// connect-relay/shared/tokens.ts
-import { createHash as createHash25, randomBytes as randomBytes9 } from "node:crypto";
-function surfaceFingerprint(digest2) {
-  return createHash25("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
-}
-function mintCredential(kind, installId) {
-  return `${PREFIX[kind]}.${installId}.${randomBytes9(32).toString("base64url")}`;
-}
-function credentialInstallId(kind, value) {
-  if (typeof value !== "string" || value.length > 128)
-    return;
-  return PATTERN[kind].exec(value)?.[1];
-}
-var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", SURFACE_RESPONSE_HEADER = "x-olympus-surface", SURFACE_FINGERPRINT_DOMAIN = `olympus-relay/surface-fingerprint/v1
-`, PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN, HANDOFF_PATH_PREFIX = "/go/", SIGNIN_BRIDGE_PATH = "/connect/signin";
-var init_tokens = __esm(() => {
-  PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c", handoff: "oly2g", private: "oly2p" };
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var exports_pinned_clients = {};
-__export(exports_pinned_clients, {
-  pinnedGrantProvider: () => pinnedGrantProvider,
-  pinnedClient: () => pinnedClient,
-  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
-  isChatGptGrant: () => isChatGptGrant,
-  GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
-  GROK_CLIENT_ID: () => GROK_CLIENT_ID,
-  CURSOR_REDIRECT_URIS: () => CURSOR_REDIRECT_URIS,
-  CURSOR_REDIRECT_URI: () => CURSOR_REDIRECT_URI,
-  CURSOR_CLIENT_ID: () => CURSOR_CLIENT_ID,
-  CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
-  CLAUDE_CLIENT_ID: () => CLAUDE_CLIENT_ID,
-  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
-  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
-  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
-});
-function isClientIdMetadataUrl(clientId) {
-  return clientId.startsWith("https://");
-}
-function isChatGptGrant(connection) {
-  return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
-}
-function pinnedClient(clientId) {
-  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com", host: "chatgpt" };
-  }
-  if (clientId === CHATGPT_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com", host: "chatgpt" };
-  }
-  if (clientId === CLAUDE_CLIENT_ID) {
-    return { clientId, clientName: "Claude", redirectUris: [CLAUDE_REDIRECT_URI], verifiedHost: "claude.ai", host: "claude" };
-  }
-  if (clientId === GROK_CLIENT_ID) {
-    return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
-  }
-  if (clientId === CURSOR_CLIENT_ID) {
-    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: CURSOR_REDIRECT_URIS, verifiedHost: "cursor.com", host: "cursor" };
-  }
-  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
-  if (callback) {
-    return {
-      clientId,
-      clientName: "ChatGPT",
-      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
-      verifiedHost: "chatgpt.com",
-      host: "chatgpt"
-    };
-  }
-  return;
-}
-function pinnedGrantProvider(connection) {
-  const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
-  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
-}
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
-  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-import { createHash as createHash26, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
-function isRemoteConnectionProvider(value) {
-  return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
-}
-function remoteConnectionProvider(connection) {
-  return pinnedGrantProvider(connection) ?? (isRemoteConnectionProvider(connection.chosen) ? connection.chosen : undefined) ?? callerProviderFromLabel(connection.displayName) ?? "other";
-}
-function isWellFormedOAuthAccessToken(token) {
-  return ACCESS_TOKEN_PATTERN.test(token) || credentialInstallId("access", token) !== undefined;
-}
-function isWellFormedOAuthRefreshToken(token) {
-  return REFRESH_TOKEN_PATTERN.test(token) || credentialInstallId("refresh", token) !== undefined;
-}
-function isRegisteredOAuthClientId(value) {
-  return REGISTERED_CLIENT_ID_PATTERN.test(value);
-}
-function normalizePairingCode(input) {
-  if (typeof input !== "string" || input.length > 64)
-    return;
-  const compact = input.toUpperCase().replace(/[\s-]/g, "");
-  if (compact.length !== PAIRING_CODE_LENGTH)
-    return;
-  for (const char of compact)
-    if (!PAIRING_ALPHABET.includes(char))
-      return;
-  return compact;
-}
-function digest2(value) {
-  return createHash26("sha256").update(value, "utf8").digest();
-}
-function randomPairingSymbols(length) {
-  const limit = 256 - 256 % PAIRING_ALPHABET.length;
-  let out = "";
-  while (out.length < length) {
-    for (const byte of randomBytes10(length * 2)) {
-      if (byte >= limit)
-        continue;
-      out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
-      if (out.length === length)
-        break;
-    }
-  }
-  return out;
-}
-function createRemoteOAuthStore(db, now, recordLastUse) {
-  const refreshGrace = new Map;
-  const readToken = (token, kind) => db.query(`
-      SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
-             c.display_name, c.revoked_at, c.provider
-      FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
-      WHERE t.token_hash = ? AND t.kind = ?
-    `).get(digest2(token), kind);
-  const tokenConnection = (row) => ({
-    id: row.connection_id,
-    displayName: row.display_name,
-    clientId: row.client_id,
-    provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider })
-  });
-  const issueTokens = (connectionId, clientId, resource, at, installId) => {
-    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes10(32).toString("base64url")}`;
-    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes10(32).toString("base64url")}`;
-    const insert = db.query(`
-      INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    const createdAt = at.toISOString();
-    insert.run(digest2(accessToken), connectionId, "access", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString());
-    insert.run(digest2(refreshToken), connectionId, "refresh", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString());
-    db.query("DELETE FROM remote_oauth_tokens WHERE expires_at <= ?").run(createdAt);
-    return { accessToken, refreshToken, expiresIn: REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS };
-  };
-  const revokeGrant = (connectionId) => {
-    for (const [key2, entry] of refreshGrace)
-      if (entry.connectionId === connectionId)
-        refreshGrace.delete(key2);
-    db.transaction(() => {
-      db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND kind = 'oauth' AND revoked_at IS NULL").run(now().toISOString(), connectionId);
-      db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(connectionId);
-    })();
-  };
-  const toClient = (row) => ({
-    clientId: row.client_id,
-    clientName: row.client_name,
-    redirectUris: JSON.parse(row.redirect_uris),
-    createdAt: row.created_at
-  });
-  return {
-    mintPairingCode() {
-      const at = now();
-      const expiresAt = new Date(at.getTime() + REMOTE_PAIRING_CODE_TTL_MS).toISOString();
-      return db.transaction(() => {
-        db.query("DELETE FROM remote_pairing_codes WHERE expires_at <= ? OR used_at IS NOT NULL").run(at.toISOString());
-        for (let attempt = 0;attempt < 16; attempt += 1) {
-          const selector = randomPairingSymbols(PAIRING_SELECTOR_LENGTH);
-          const secret2 = randomPairingSymbols(PAIRING_SECRET_LENGTH);
-          const inserted = db.query(`
-            INSERT OR IGNORE INTO remote_pairing_codes (selector, secret_hash, created_at, expires_at)
-            VALUES (?, ?, ?, ?)
-          `).run(selector, digest2(secret2), at.toISOString(), expiresAt);
-          if (inserted.changes === 1) {
-            return { code: `${selector}-${secret2.slice(0, 4)}-${secret2.slice(4)}`, expiresAt };
-          }
-        }
-        throw new Error("Could not mint a unique pairing code.");
-      })();
-    },
-    checkPairingCode(input) {
-      const normalized = normalizePairingCode(input);
-      if (!normalized)
-        return { ok: false, reason: "malformed" };
-      const selector = normalized.slice(0, PAIRING_SELECTOR_LENGTH);
-      const presented = digest2(normalized.slice(PAIRING_SELECTOR_LENGTH));
-      const atIso = now().toISOString();
-      return db.transaction(() => {
-        const row = db.query(`
-          SELECT secret_hash FROM remote_pairing_codes
-          WHERE selector = ? AND used_at IS NULL AND expires_at > ? AND failed_attempts < ?
-        `).get(selector, atIso, REMOTE_PAIRING_CODE_MAX_FAILURES);
-        if (!row)
-          return { ok: false, reason: "unknown" };
-        const stored = Buffer.from(row.secret_hash);
-        if (stored.length !== presented.length || !timingSafeEqual3(stored, presented)) {
-          db.query("UPDATE remote_pairing_codes SET failed_attempts = failed_attempts + 1 WHERE selector = ?").run(selector);
-          return { ok: false, reason: "wrong_secret" };
-        }
-        const consumed = db.query("UPDATE remote_pairing_codes SET used_at = ? WHERE selector = ? AND used_at IS NULL").run(atIso, selector);
-        return consumed.changes === 1 ? { ok: true } : { ok: false, reason: "unknown" };
-      })();
-    },
-    registerClient(input) {
-      const at = now();
-      return db.transaction(() => {
-        const count = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
-        if (count >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS) {
-          db.query(`
-            DELETE FROM remote_oauth_clients
-            WHERE created_at <= ?
-              AND client_id NOT IN (SELECT client_id FROM remote_connections WHERE client_id IS NOT NULL)
-          `).run(new Date(at.getTime() - UNUSED_CLIENT_PRUNE_AGE_MS).toISOString());
-          const after = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
-          if (after >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS)
-            return "capacity";
-        }
-        const clientId = `olympus_client_${randomBytes10(12).toString("hex")}`;
-        const createdAt = at.toISOString();
-        db.query("INSERT INTO remote_oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)").run(clientId, input.clientName, JSON.stringify(input.redirectUris), createdAt);
-        return { clientId, clientName: input.clientName, redirectUris: [...input.redirectUris], createdAt };
-      })();
-    },
-    getRegisteredClient(clientId) {
-      if (!isRegisteredOAuthClientId(clientId))
-        return;
-      const row = db.query("SELECT * FROM remote_oauth_clients WHERE client_id = ?").get(clientId);
-      return row ? toClient(row) : undefined;
-    },
-    createGrant(input) {
-      const at = now();
-      return db.transaction(() => {
-        const id = randomBytes10(9).toString("hex");
-        const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
-        db.query(`
-          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
-          VALUES (?, ?, 'oauth', NULL, ?, ?, ?)
-        `).run(id, input.displayName, input.clientId, at.toISOString(), provider);
-        const tokens = issueTokens(id, input.clientId, input.resource, at, input.installId);
-        return { connection: { id, displayName: input.displayName, clientId: input.clientId, provider }, tokens };
-      })();
-    },
-    verifyAccessToken(token, resource) {
-      if (!isWellFormedOAuthAccessToken(token))
-        return { ok: false, reason: "unknown" };
-      const row = readToken(token, "access");
-      if (!row)
-        return { ok: false, reason: "unknown" };
-      const at = now();
-      if (row.revoked_at !== null)
-        return { ok: false, reason: "revoked" };
-      if (Date.parse(row.expires_at) <= at.getTime())
-        return { ok: false, reason: "expired" };
-      if (row.resource !== resource)
-        return { ok: false, reason: "wrong_audience" };
-      recordLastUse(row.connection_id, at);
-      return { ok: true, connection: tokenConnection(row) };
-    },
-    refresh(input) {
-      if (!isWellFormedOAuthRefreshToken(input.refreshToken))
-        return { ok: false, reason: "unknown" };
-      const at = now();
-      return db.transaction(() => {
-        const row = readToken(input.refreshToken, "refresh");
-        if (!row)
-          return { ok: false, reason: "unknown" };
-        if (row.revoked_at !== null)
-          return { ok: false, reason: "revoked" };
-        const audiences = typeof input.resource === "string" ? [input.resource] : input.resource;
-        if (row.used_at !== null) {
-          if (!audiences.includes(row.resource))
-            return { ok: false, reason: "wrong_audience" };
-          const key2 = Buffer.from(row.token_hash).toString("hex");
-          const grace = refreshGrace.get(key2);
-          if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
-            const successor = db.query("SELECT used_at FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'refresh'").get(grace.successorRefreshHash);
-            if (successor && successor.used_at === null) {
-              return {
-                ok: true,
-                connection: tokenConnection(row),
-                tokens: grace.tokens
-              };
-            }
-          }
-          refreshGrace.delete(key2);
-          revokeGrant(row.connection_id);
-          return { ok: false, reason: "reused" };
-        }
-        if (Date.parse(row.expires_at) <= at.getTime())
-          return { ok: false, reason: "expired" };
-        if (row.client_id !== input.clientId)
-          return { ok: false, reason: "client_mismatch" };
-        if (!audiences.includes(row.resource))
-          return { ok: false, reason: "wrong_audience" };
-        db.query("UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?").run(at.toISOString(), row.token_hash);
-        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
-        const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at, credentialInstallId("refresh", input.refreshToken));
-        for (const [key2, entry] of refreshGrace)
-          if (entry.expiresAt <= at.getTime())
-            refreshGrace.delete(key2);
-        refreshGrace.set(Buffer.from(row.token_hash).toString("hex"), {
-          tokens,
-          successorRefreshHash: digest2(tokens.refreshToken),
-          connectionId: row.connection_id,
-          clientId: row.client_id,
-          expiresAt: at.getTime() + REMOTE_OAUTH_REFRESH_GRACE_MS
-        });
-        return {
-          ok: true,
-          connection: tokenConnection(row),
-          tokens
-        };
-      }).immediate();
-    },
-    revokeToken(token) {
-      if (isWellFormedOAuthRefreshToken(token)) {
-        const row = readToken(token, "refresh");
-        if (row)
-          revokeGrant(row.connection_id);
-        return;
-      }
-      if (isWellFormedOAuthAccessToken(token)) {
-        db.query("DELETE FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'access'").run(digest2(token));
-      }
-    },
-    revokeGrant,
-    liveAccessTokens(resource, limit) {
-      const rows = db.query(`
-        SELECT t.token_hash, t.client_id, t.expires_at
-        FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
-        WHERE t.kind = 'access' AND t.resource = ? AND t.expires_at > ? AND c.revoked_at IS NULL
-        ORDER BY t.expires_at DESC
-        LIMIT ?
-      `).all(resource, now().toISOString(), Math.max(0, Math.floor(limit)));
-      return rows.map((row) => ({ tokenHash: Buffer.from(row.token_hash), clientId: row.client_id, expiresAt: row.expires_at }));
-    }
-  };
-}
-function remoteOAuthSchemaMigration(version) {
-  return {
-    version,
-    name: "add_oauth_grants",
-    up(db) {
-      db.exec(`
-        CREATE TABLE remote_connections_v2 (
-          id TEXT PRIMARY KEY,
-          display_name TEXT NOT NULL,
-          kind TEXT NOT NULL CHECK(kind IN ('bearer', 'oauth')),
-          token_hash BLOB UNIQUE,
-          client_id TEXT,
-          created_at TEXT NOT NULL,
-          last_used_at TEXT,
-          revoked_at TEXT,
-          CHECK ((kind = 'bearer' AND token_hash IS NOT NULL)
-              OR (kind = 'oauth' AND token_hash IS NULL AND client_id IS NOT NULL))
-        );
-        INSERT INTO remote_connections_v2 (id, display_name, kind, token_hash, created_at, last_used_at, revoked_at)
-          SELECT id, display_name, kind, token_hash, created_at, last_used_at, revoked_at FROM remote_connections;
-        DROP TABLE remote_connections;
-        ALTER TABLE remote_connections_v2 RENAME TO remote_connections;
-
-        CREATE TABLE remote_oauth_tokens (
-          token_hash BLOB PRIMARY KEY,
-          connection_id TEXT NOT NULL,
-          kind TEXT NOT NULL CHECK(kind IN ('access', 'refresh')),
-          resource TEXT NOT NULL,
-          client_id TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          expires_at TEXT NOT NULL,
-          used_at TEXT
-        );
-        CREATE INDEX remote_oauth_tokens_connection ON remote_oauth_tokens(connection_id);
-
-        CREATE TABLE remote_oauth_clients (
-          client_id TEXT PRIMARY KEY,
-          client_name TEXT NOT NULL,
-          redirect_uris TEXT NOT NULL,
-          created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE remote_pairing_codes (
-          selector TEXT PRIMARY KEY,
-          secret_hash BLOB NOT NULL,
-          created_at TEXT NOT NULL,
-          expires_at TEXT NOT NULL,
-          used_at TEXT,
-          failed_attempts INTEGER NOT NULL DEFAULT 0
-        );
-      `);
-    }
-  };
-}
-var REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600, REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, REMOTE_PAIRING_CODE_MAX_FAILURES = 5, REMOTE_OAUTH_REFRESH_GRACE_MS = 45000, REMOTE_OAUTH_MAX_REGISTERED_CLIENTS = 500, REMOTE_OAUTH_ACCESS_TOKEN_PREFIX = "olympus_at_", REMOTE_OAUTH_REFRESH_TOKEN_PREFIX = "olympus_rt_", ACCESS_TOKEN_PATTERN, REFRESH_TOKEN_PATTERN, REGISTERED_CLIENT_ID_PATTERN, PAIRING_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789", PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  ACCESS_TOKEN_PATTERN = /^olympus_at_[A-Za-z0-9_-]{43}$/;
-  REFRESH_TOKEN_PATTERN = /^olympus_rt_[A-Za-z0-9_-]{43}$/;
-  REGISTERED_CLIENT_ID_PATTERN = /^olympus_client_[a-f0-9]{24}$/;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-function createReleaseCapture() {
-  return { heldBack: 0 };
-}
-function runWithReleaseCapture(capture, fn) {
-  return storage.run(capture, fn);
-}
-function noteReleasedItems(items, heldBack = 0, withheld = false) {
-  const capture = storage.getStore();
-  if (!capture)
-    return;
-  capture.items = items.map((item) => ({ ...item }));
-  capture.heldBack = Math.max(0, Math.floor(Number.isFinite(heldBack) ? heldBack : 0));
-  capture.withheld = withheld;
-}
-function boundedString(value, max2) {
-  if (typeof value !== "string")
-    return;
-  const trimmed = value.trim();
-  return trimmed ? trimmed.slice(0, max2) : undefined;
-}
-function releasedTierOf(trustDomain) {
-  if (trustDomain === "public_safe")
-    return "public";
-  if (trustDomain === "internal")
-    return "personal";
-  return "private";
-}
-function releasedItemFromEvidence(evidence, source, title) {
-  const shownTitle = boundedString(title, TITLE_MAX);
-  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
-  const provider = boundedString(evidence.provider, ID_MAX);
-  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
-  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
-  const locator = boundedString(evidence.uri, ID_MAX);
-  return {
-    source: boundedString(source, 80) ?? "Other source",
-    ...shownTitle ? { title: shownTitle } : {},
-    tier: releasedTierOf(evidence.trust_domain),
-    ...corpusId ? { corpusId } : {},
-    ...provider ? { provider } : {},
-    ...providerItemId ? { providerItemId } : {},
-    ...providerConversationId ? { providerConversationId } : {},
-    ...locator ? { locator } : {}
-  };
-}
-function appConnectionOf(caller) {
-  if (!caller || caller.surface === "cli")
-    return;
-  const display = boundedString(caller.displayName, 80);
-  const id = boundedString(caller.connectionId, 128);
-  if (caller.surface === "remote") {
-    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
-    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
-  }
-  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
-}
-function setPrivateAnswerCompletionHook(next) {
-  completionHook = next;
-}
-function notePrivateAnswerCompleted(privateQuestionId) {
-  try {
-    if (typeof privateQuestionId !== "string" || !privateQuestionId)
-      return;
-    completedPrivateAnswers.add(privateQuestionId);
-    while (completedPrivateAnswers.size > COMPLETED_MAX)
-      completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
-    completionHook?.(privateQuestionId);
-  } catch {}
-}
-function notePrivateQuestion(privateQuestionId) {
-  const capture = storage.getStore();
-  if (capture && typeof privateQuestionId === "string" && privateQuestionId)
-    capture.privateQuestionId = privateQuestionId;
-}
-function setAppReleaseRecorder(next) {
-  recorder = next;
-}
-function recordAppRequest(input) {
-  try {
-    const write = recorder ?? input.fallback;
-    if (!write)
-      return;
-    const connection = appConnectionOf(input.caller);
-    const question = boundedString(input.question, 2000);
-    if (!connection || !question || input.capture.items === undefined)
-      return;
-    const withheld = input.withheldAfter === true || input.capture.withheld === true;
-    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
-    write({
-      at: (input.now ?? Date.now)(),
-      connection,
-      question,
-      items: withheld ? [] : input.capture.items,
-      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
-      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
-      withheld,
-      ...privateQuestionId ? { privateQuestionId } : {}
-    });
-  } catch {}
-}
-function rememberJobQuestion(jobId, question, now = Date.now()) {
-  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
-    return;
-  for (const [key2, entry] of jobQuestions)
-    if (entry.expires <= now)
-      jobQuestions.delete(key2);
-  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
-  while (jobQuestions.size > JOB_QUESTIONS_MAX)
-    jobQuestions.delete(jobQuestions.keys().next().value);
-}
-function jobQuestion(jobId, now = Date.now()) {
-  if (typeof jobId !== "string")
-    return;
-  const entry = jobQuestions.get(jobId);
-  if (!entry || entry.expires <= now)
-    return;
-  return entry.question;
-}
-function forgetJobQuestions() {
-  jobQuestions.clear();
-  completedPrivateAnswers.clear();
-}
-function sourceAnswerQuestion(name, args, status, jobId) {
-  if (name === "source_answer") {
-    const question = typeof args.question === "string" ? args.question : undefined;
-    if (status === "working")
-      rememberJobQuestion(jobId, question);
-    return question;
-  }
-  if (name === "source_answer_result")
-    return jobQuestion(args.job_id);
-  return;
-}
-function recordRemoteOperation(input) {
-  const { operation, args, output } = input;
-  if (operation !== "source_answer" && operation !== "source_answer_result")
-    return;
-  const question = sourceAnswerQuestion(operation, args, output.status, output.job_id);
-  if (output.kind !== "source_answer" || output.status !== "answered" && output.status !== "withheld")
-    return;
-  recordAppRequest({
-    caller: input.caller,
-    question,
-    capture: input.privateQuestionId ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
-    privateQuestionId: input.privateQuestionId
-  });
-}
-var storage, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
-var init_app_release_capture = __esm(() => {
-  storage = new AsyncLocalStorage3;
-  PROVIDER_APP_NAMES = {
-    openai: "ChatGPT",
-    anthropic: "Claude",
-    xai: "Grok",
-    meta: "Meta AI"
-  };
-  completedPrivateAnswers = new Set;
-  JOB_QUESTION_TTL_MS = 30 * 60000;
-  jobQuestions = new Map;
-});
-
-// src/core/waiting-private-questions.ts
-var exports_waiting_private_questions = {};
-__export(exports_waiting_private_questions, {
-  waitingPrivateQuestionsDbPath: () => waitingPrivateQuestionsDbPath,
-  revokeWaitingPrivateQuestions: () => revokeWaitingPrivateQuestions,
-  openWaitingPrivateQuestionStore: () => openWaitingPrivateQuestionStore,
-  normalizeWaitingSelectors: () => normalizeWaitingSelectors,
-  normalizeWaitingQuestion: () => normalizeWaitingQuestion,
-  forgetWaitingPrivateQuestions: () => forgetWaitingPrivateQuestions,
-  WAITING_QUESTION_RETRY_REASONS: () => WAITING_QUESTION_RETRY_REASONS,
-  WAITING_QUESTION_RETRY_LIMIT: () => WAITING_QUESTION_RETRY_LIMIT,
-  WAITING_QUESTION_LIMITS: () => WAITING_QUESTION_LIMITS,
-  WAITING_PRIVATE_QUESTIONS_STORE_ID: () => WAITING_PRIVATE_QUESTIONS_STORE_ID,
-  WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION: () => WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION,
-  CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
-});
-import { Database as Database11 } from "bun:sqlite";
-import { createHash as createHash27, randomBytes as randomBytes11 } from "node:crypto";
-import { chmodSync as chmodSync14, existsSync as existsSync38, lstatSync as lstatSync24, mkdirSync as mkdirSync26 } from "node:fs";
-import { homedir as homedir22 } from "node:os";
-import { dirname as dirname40, isAbsolute as isAbsolute18, join as join45 } from "node:path";
-function waitingPrivateQuestionsDbPath(remoteConnectionsDbPath) {
-  return join45(dirname40(remoteConnectionsDbPath), SHARED_DATA_FILES["waiting-private-questions"]);
-}
-function normalizeWaitingQuestion(question) {
-  return question.normalize("NFKC").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
-}
-function normalizeWaitingSelectors(raw) {
-  const out = {};
-  for (const field of SELECTOR_TEXT_FIELDS) {
-    const value = raw[field];
-    if (value === undefined)
-      continue;
-    if (typeof value !== "string")
-      return;
-    const trimmed = value.trim();
-    if (trimmed)
-      out[field] = trimmed;
-  }
-  const corpora = [];
-  if (raw.corpus_id !== undefined) {
-    if (typeof raw.corpus_id !== "string")
-      return;
-    if (raw.corpus_id.trim())
-      corpora.push(raw.corpus_id.trim());
-  }
-  if (raw.corpus_ids !== undefined) {
-    if (!Array.isArray(raw.corpus_ids) || raw.corpus_ids.some((id) => typeof id !== "string"))
-      return;
-    for (const id of raw.corpus_ids)
-      if (id.trim())
-        corpora.push(id.trim());
-  }
-  if (corpora.length > 0)
-    out.corpus_ids = [...new Set(corpora)].sort();
-  if (raw.selected_items !== undefined) {
-    if (!Array.isArray(raw.selected_items))
-      return;
-    const items = [];
-    for (const entry of raw.selected_items) {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry))
-        return;
-      const item = {};
-      for (const field of SELECTED_ITEM_FIELDS) {
-        const value = entry[field];
-        if (value === undefined)
-          continue;
-        if (typeof value !== "string")
-          return;
-        item[field] = value;
-      }
-      items.push(item);
-    }
-    if (items.length > 0)
-      out.selected_items = items;
-  }
-  const mode = raw.retrieval_mode ?? "hybrid";
-  if (mode !== "keyword" && mode !== "hybrid")
-    return;
-  out.retrieval_mode = mode;
-  return out;
-}
-function canonicalSelectors(selectors) {
-  return JSON.stringify(sortKeys(selectors ?? {}));
-}
-function sortKeys(value) {
-  if (Array.isArray(value))
-    return value.map(sortKeys);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, sortKeys(value[key2])]));
-  }
-  return value;
-}
-function utf8Length(text2) {
-  return Buffer.byteLength(text2, "utf8");
-}
-function openWaitingPrivateQuestionStore(dbPath, options = {}) {
-  const now = options.now ?? Date.now;
-  const listeners = new Set;
-  const notify = () => queueMicrotask(() => {
-    for (const listener of listeners)
-      listener();
-  });
-  hardenPrivatePath2(dbPath);
-  const db = new Database11(dbPath, { create: true });
-  try {
-    chmodSync14(dbPath, 384);
-    const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
-    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE;`);
-    const mode = db.query("PRAGMA journal_mode").get()?.journal_mode;
-    if (mode !== "delete")
-      throw new Error("The waiting private questions store could not use its rollback journal yet.");
-    db.transaction(() => {
-      assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
-      runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations3());
-    }).immediate();
-  } catch (error) {
-    closeSqliteStore(db);
-    throw error;
-  }
-  const revocationOf = (connectionId) => {
-    const row = db.query("SELECT generation FROM connection_revocations WHERE connection_id = ?").get(connectionId);
-    return row?.generation ?? 0;
-  };
-  const expire = (at) => {
-    db.query("DELETE FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ?").run(at - WAITING_QUESTION_LIMITS.ttlMs);
-  };
-  const revokeInTransaction = (connectionId) => {
-    const removed = db.query("DELETE FROM waiting_questions WHERE connection_id = ?").run(connectionId).changes;
-    db.query(`
-      INSERT INTO connection_revocations (connection_id, generation) VALUES (?, 1)
-      ON CONFLICT(connection_id) DO UPDATE SET generation = generation + 1
-    `).run(connectionId);
-    return removed;
-  };
-  return {
-    dbPath,
-    ticket(connectionId) {
-      return { connectionId, revocation: revocationOf(connectionId) };
-    },
-    record(ticket, input) {
-      const question = typeof input.question === "string" ? input.question.trim() : "";
-      if (!question || utf8Length(question) > (input.retainEachAsk ? WAITING_QUESTION_LIMITS.localQuestionBytes : WAITING_QUESTION_LIMITS.questionBytes))
-        return;
-      if (typeof ticket.connectionId !== "string" || !ticket.connectionId)
-        return;
-      if (input.surface !== "chatgpt" && input.surface !== "remote")
-        return;
-      if (input.state !== "waiting" && input.state !== "unchecked")
-        return;
-      const selectors = canonicalSelectors(input.selectors);
-      if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
-        return;
-      const detail = input.detail === "full" ? "full" : "summary";
-      const dedupeKey = createHash27("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes11(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
-      const at = now();
-      let active = false;
-      try {
-        active = options.isActive ? options.isActive(ticket.connectionId) === true : true;
-      } catch {
-        return;
-      }
-      if (!active) {
-        db.transaction(() => revokeInTransaction(ticket.connectionId)).immediate();
-        return;
-      }
-      return db.transaction(() => {
-        if (revocationOf(ticket.connectionId) !== ticket.revocation)
-          return;
-        expire(at);
-        const existing = db.query("SELECT * FROM waiting_questions WHERE dedupe_key = ?").get(dedupeKey);
-        let ref;
-        if (existing?.result && JSON.parse(existing.result).status === "answered" && at - (existing.answered_at ?? at) < WAITING_QUESTION_LIMITS.reanswerAfterMs) {
-          db.query("UPDATE waiting_questions SET asked_at = ? WHERE id = ?").run(at, existing.id);
-          return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
-        }
-        if (existing) {
-          const generation = existing.generation + 1;
-          db.query(`
-            UPDATE waiting_questions
-            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0
-            WHERE id = ?
-          `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
-          ref = { id: existing.id, generation, connectionId: ticket.connectionId };
-        } else {
-          const id = randomBytes11(16).toString("base64url");
-          db.query(`
-            INSERT INTO waiting_questions
-              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
-          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private", input.path === "venice" ? "venice" : null);
-          ref = { id, generation: 1, connectionId: ticket.connectionId };
-        }
-        notify();
-        return ref;
-      }).immediate();
-    },
-    list(options2) {
-      const at = now();
-      if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
-        expire(at);
-      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, failed" : "*";
-      const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
-      const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
-      return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
-    },
-    get(id) {
-      if (typeof id !== "string")
-        return;
-      const row = db.query("SELECT * FROM waiting_questions WHERE id = ? AND (answered_at IS NOT NULL OR asked_at > ?)").get(id, now() - WAITING_QUESTION_LIMITS.ttlMs);
-      return row ? toQuestion(row) : undefined;
-    },
-    dismiss(id) {
-      if (typeof id !== "string")
-        return false;
-      return db.query("DELETE FROM waiting_questions WHERE id = ?").run(id).changes > 0;
-    },
-    dismissAll() {
-      return db.transaction(() => {
-        const removed = db.query("DELETE FROM waiting_questions").run().changes;
-        db.query("DELETE FROM waiting_meta WHERE key = ?").run(OLDER_REMOVED_KEY);
-        return removed;
-      }).immediate();
-    },
-    markSeen(ids) {
-      let changed = 0;
-      db.transaction(() => {
-        for (const id of ids) {
-          if (typeof id === "string")
-            changed += db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND seen = 0").run(id).changes;
-        }
-      }).immediate();
-      return changed;
-    },
-    acknowledge(ref) {
-      return db.query("DELETE FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").run(ref.id, ref.generation, ref.connectionId).changes > 0;
-    },
-    settleUnchecked(ref, verdict) {
-      const where = "id = ? AND generation = ? AND connection_id = ? AND state = 'unchecked'";
-      notify();
-      return verdict === "match" ? db.query(`UPDATE waiting_questions SET state = 'waiting' WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0 : db.query(`DELETE FROM waiting_questions WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0;
-    },
-    unchecked() {
-      const rows = db.query("SELECT * FROM waiting_questions WHERE state = 'unchecked' AND asked_at > ? ORDER BY asked_at ASC, rowid ASC").all(now() - WAITING_QUESTION_LIMITS.ttlMs);
-      return rows.map(toQuestion);
-    },
-    revokeConnection(connectionId) {
-      if (typeof connectionId !== "string" || !connectionId)
-        return 0;
-      return db.transaction(() => revokeInTransaction(connectionId)).immediate();
-    },
-    reconcileConnections(isActive) {
-      const ids = db.query("SELECT DISTINCT connection_id FROM waiting_questions").all().map((row) => row.connection_id).filter((id) => !isActive(id));
-      if (ids.length === 0)
-        return 0;
-      return db.transaction(() => ids.reduce((sum, id) => sum + revokeInTransaction(id), 0)).immediate();
-    },
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    markRead(ref) {
-      return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
-    },
-    saveAnswer(ref, result, sent) {
-      const serialized = JSON.stringify(result);
-      if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
-        return false;
-      if (sent !== undefined && options.isActive) {
-        try {
-          if (!options.isActive(ref.connectionId))
-            return false;
-        } catch {
-          return false;
-        }
-      }
-      const saved = db.transaction(() => {
-        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, result.status === "failed" ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
-        return changed;
-      }).immediate();
-      if (saved && result.status === "answered")
-        notePrivateAnswerCompleted(ref.id);
-      return saved;
-    },
-    retry(ref, reason = "answer_failed") {
-      const safeReason = WAITING_QUESTION_RETRY_REASONS.includes(reason) ? reason : "answer_failed";
-      return db.transaction(() => {
-        const row = db.query("SELECT attempts, retry_reasons FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId);
-        if (!row)
-          return false;
-        const attempts = row.attempts + 1;
-        const reasons = [...JSON.parse(row.retry_reasons), safeReason].slice(-WAITING_QUESTION_RETRY_LIMIT);
-        const exhausted = attempts >= WAITING_QUESTION_RETRY_LIMIT;
-        const result = exhausted ? { status: "failed", citations: [], unanswered: [], leftOut: [], read: [] } : null;
-        const delay = Math.min(30 * 60000, 5000 * 2 ** Math.min(row.attempts, 9));
-        return db.query("UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, failed = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, exhausted ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
-      }).immediate();
-    },
-    invalidate(ref) {
-      return db.transaction(() => {
-        const row = db.query("SELECT destination, result FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").get(ref.id, ref.generation, ref.connectionId);
-        const old = row?.result ? JSON.parse(row.result) : undefined;
-        const disclosure = row?.destination === "venice" && old?.sentItems ? JSON.stringify({ status: "withdrawn", reason: "Sent to Venice, but the sources changed. The answer was withdrawn.", sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
-        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
-      }).immediate();
-    },
-    deleteForCorpora(corpusIds, knownCorpusIds, options2 = {}) {
-      const ids = new Set(corpusIds);
-      const known = knownCorpusIds ? new Set(knownCorpusIds) : undefined;
-      return db.transaction(() => {
-        const rows = db.query("SELECT * FROM waiting_questions").all();
-        let removed = 0;
-        for (const row of rows) {
-          if (questionTakenWithCorpora(row, ids, known, options2.answeredOnly === true)) {
-            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
-          }
-        }
-        return removed;
-      }).immediate();
-    },
-    deleteForAccountScope(input) {
-      const ids = new Set(input.corpusIds);
-      const readsScope = (item) => {
-        if (typeof item.corpusId !== "string" || !ids.has(item.corpusId))
-          return false;
-        const source = item.provenance?.sourceItem;
-        return source?.provider === input.provider && source?.accountScope === input.accountScope;
-      };
-      return db.transaction(() => {
-        const rows = db.query("SELECT * FROM waiting_questions WHERE result IS NOT NULL").all();
-        let removed = 0;
-        for (const row of rows) {
-          const result = toQuestion(row).result;
-          if (result?.read.some(readsScope)) {
-            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
-          }
-        }
-        return removed;
-      }).immediate();
-    },
-    close() {
-      closeSqliteStore(db);
-    }
-  };
-}
-function questionTakenWithCorpora(row, ids, known, answeredOnly = false) {
-  const result = toQuestion(row).result;
-  if (!result)
-    return !answeredOnly;
-  return result.read.some((item) => typeof item.corpusId !== "string" || ids.has(item.corpusId) || known !== undefined && !known.has(item.corpusId));
-}
-function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
-  if (!existsSync38(dbPath))
-    return 0;
-  const answeredOnly = options.answeredOnly === true;
-  if (options.dryRun !== true) {
-    const store = openWaitingPrivateQuestionStore(dbPath);
-    try {
-      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds, { answeredOnly });
-    } finally {
-      store.close();
-    }
-  }
-  const db = new Database11(dbPath, { readonly: true });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
-    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get())
-      return 0;
-    const ids = new Set(input.corpusIds);
-    const known = input.knownCorpusIds ? new Set(input.knownCorpusIds) : undefined;
-    const rows = db.query("SELECT * FROM waiting_questions").all();
-    return rows.filter((row) => questionTakenWithCorpora(row, ids, known, answeredOnly)).length;
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId, options = {}) {
-  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
-    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS
-  });
-  try {
-    store.revokeConnection(connectionId);
-  } finally {
-    store.close();
-  }
-}
-function toQuestion(row) {
-  let selectors = {};
-  try {
-    const parsed = JSON.parse(row.selectors);
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))
-      selectors = parsed;
-  } catch {
-    selectors = {};
-  }
-  return {
-    id: row.id,
-    path: row.destination === "venice" ? "venice" : row.answer_path === "anonymous" ? "anonymous" : "private",
-    connectionId: row.connection_id,
-    surface: row.surface === "chatgpt" ? "chatgpt" : "remote",
-    question: row.question,
-    detail: row.detail === "full" ? "full" : "summary",
-    selectors,
-    state: row.state === "waiting" ? "waiting" : "unchecked",
-    seen: row.seen === 1,
-    generation: row.generation,
-    askedAt: new Date(row.asked_at).toISOString(),
-    ...row.has_result !== undefined ? { hasResult: row.has_result === 1 } : {},
-    ...row.result ? { result: JSON.parse(row.result) } : {},
-    ...row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {},
-    ...row.failed === 1 ? { failed: true } : {},
-    ...row.retry_reasons && row.retry_reasons !== "[]" ? { retryReasons: JSON.parse(row.retry_reasons) } : {},
-    attempts: row.attempts,
-    nextAttemptAt: row.next_attempt_at
-  };
-}
-function migrations3() {
-  return [{
-    version: 1,
-    name: "create_waiting_private_questions",
-    up(db) {
-      db.exec(`
-        CREATE TABLE waiting_questions (
-          id TEXT PRIMARY KEY,
-          dedupe_key TEXT NOT NULL UNIQUE,
-          connection_id TEXT NOT NULL,
-          surface TEXT NOT NULL CHECK(surface IN ('chatgpt', 'remote')),
-          question TEXT NOT NULL,
-          detail TEXT NOT NULL CHECK(detail IN ('summary', 'full')),
-          selectors TEXT NOT NULL,
-          state TEXT NOT NULL CHECK(state IN ('waiting', 'unchecked')),
-          seen INTEGER NOT NULL DEFAULT 0,
-          generation INTEGER NOT NULL,
-          asked_at INTEGER NOT NULL
-        );
-        CREATE INDEX waiting_questions_connection ON waiting_questions (connection_id, asked_at);
-        CREATE TABLE connection_revocations (
-          connection_id TEXT PRIMARY KEY,
-          generation INTEGER NOT NULL
-        );
-        CREATE TABLE waiting_meta (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        );
-      `);
-    }
-  }, {
-    version: 2,
-    name: "private_answers_inbox",
-    up(db) {
-      db.exec(`ALTER TABLE waiting_questions ADD COLUMN result TEXT;
-        ALTER TABLE waiting_questions ADD COLUMN answered_at INTEGER;
-        ALTER TABLE waiting_questions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE waiting_questions ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;`);
-    }
-  }, {
-    version: 3,
-    name: "private_answer_auto_budgets",
-    up(db) {
-      db.exec("CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)");
-    }
-  }, {
-    version: 4,
-    name: "anonymous_answers_inbox",
-    up(db) {
-      db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))");
-    }
-  }, {
-    version: 5,
-    name: "ask_destination",
-    up(db) {
-      db.exec("ALTER TABLE waiting_questions ADD COLUMN destination TEXT CHECK(destination IS NULL OR destination = 'venice')");
-    }
-  }, {
-    version: 6,
-    name: "bounded_retry_reasons",
-    up(db) {
-      db.exec("ALTER TABLE waiting_questions ADD COLUMN retry_reasons TEXT NOT NULL DEFAULT '[]'");
-    }
-  }, {
-    version: 7,
-    name: "failure_listing_metadata",
-    up(db) {
-      db.exec(`ALTER TABLE waiting_questions ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
-        UPDATE waiting_questions SET failed = CASE WHEN json_valid(result)
-          THEN COALESCE(json_extract(result, '$.status') = 'failed', 0) ELSE 0 END;`);
-    }
-  }];
-}
-function hardenPrivatePath2(dbPath) {
-  if (!isAbsolute18(dbPath))
-    throw new TypeError("The waiting private questions database path must be absolute.");
-  const leafDir = dirname40(dbPath);
-  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir22()]).has(leafDir)) {
-    throw new Error("The waiting private questions database must live inside a dedicated private directory.");
-  }
-  mkdirSync26(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync24(leafDir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-    throw new Error("The waiting private questions database must live in a real private directory.");
-  }
-  chmodSync14(leafDir, 448);
-  if (existsSync38(dbPath)) {
-    const fileStat = lstatSync24(dbPath);
-    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
-      throw new Error("The waiting private questions database must be a regular file, not a symlink.");
-    }
-  }
-}
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
-var init_waiting_private_questions = __esm(() => {
-  init_app_release_capture();
-  init_sqlite_migrations();
-  init_olympus_layout();
-  WAITING_QUESTION_LIMITS = Object.freeze({
-    questionBytes: 2048,
-    localQuestionBytes: 8 * 1024,
-    selectorBytes: 4096,
-    answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000,
-    reanswerAfterMs: 10 * 60000
-  });
-  SELECTOR_TEXT_FIELDS = [
-    "query",
-    "account",
-    "approved_scope_key",
-    "chat_scope",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before"
-  ];
-  SELECTED_ITEM_FIELDS = [
-    "corpus_id",
-    "family",
-    "provider",
-    "account_scope",
-    "provider_item_id",
-    "local_item_id",
-    "provider_thread_id",
-    "provider_conversation_id",
-    "provider_file_id",
-    "source_version",
-    "title",
-    "conversation_label",
-    "author_label",
-    "uri",
-    "authored_at",
-    "updated_at"
-  ];
-  WAITING_QUESTION_RETRY_REASONS = [
-    "answer_failed",
-    "no_model",
-    "model_downloading",
-    "evidence_changed",
-    "eligibility_unavailable",
-    "save_refused"
-  ];
-});
-
-// src/core/remote-connections.ts
-var exports_remote_connections = {};
-__export(exports_remote_connections, {
-  resolveRemoteConnectionsDbPathForCli: () => resolveRemoteConnectionsDbPathForCli,
-  resolveRemoteConnectionsDbPath: () => resolveRemoteConnectionsDbPath,
-  remoteConnectionsPreV2BackupPath: () => remoteConnectionsPreV2BackupPath,
-  openRemoteConnectionStore: () => openRemoteConnectionStore,
-  isWellFormedRemoteConnectionToken: () => isWellFormedRemoteConnectionToken,
-  hashRemoteConnectionToken: () => hashRemoteConnectionToken,
-  defaultRemoteConnectionsDbPath: () => defaultRemoteConnectionsDbPath,
-  connectionProviderMigration: () => connectionProviderMigration,
-  REMOTE_CONNECTION_TOKEN_PREFIX: () => REMOTE_CONNECTION_TOKEN_PREFIX,
-  REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS: () => REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
-  REMOTE_CONNECTIONS_STORE_ID: () => REMOTE_CONNECTIONS_STORE_ID,
-  REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
-});
-import { Database as Database12 } from "bun:sqlite";
-import { createHash as createHash28, randomBytes as randomBytes12, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
-import { chmodSync as chmodSync15, existsSync as existsSync39, lstatSync as lstatSync25, mkdirSync as mkdirSync27 } from "node:fs";
-import { homedir as homedir23 } from "node:os";
-import { dirname as dirname41, isAbsolute as isAbsolute19 } from "node:path";
-function remoteConnectionsPreV2BackupPath(dbPath) {
-  return `${dbPath}.pre-v2.bak`;
-}
-function resolveRemoteConnectionsDbPath(env = process.env) {
-  return defaultRemoteConnectionsDbPath(env);
-}
-function resolveRemoteConnectionsDbPathForCli(env = process.env) {
-  if (standaloneLinuxDataDir(env))
-    return resolveRemoteConnectionsDbPath(env);
-  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
-  if (!workerEnv)
-    return resolveRemoteConnectionsDbPath(env);
-  return resolveRemoteConnectionsDbPath({
-    ...env.HOME !== undefined ? { HOME: env.HOME } : {},
-    ...workerEnv.XDG_DATA_HOME ? { XDG_DATA_HOME: workerEnv.XDG_DATA_HOME } : {}
-  });
-}
-function defaultRemoteConnectionsDbPath(env = process.env) {
-  const path = sharedDataPath("remote-connections", env);
-  if (!isAbsolute19(path)) {
-    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
-  }
-  return path;
-}
-function isWellFormedRemoteConnectionToken(token) {
-  return TOKEN_PATTERN2.test(token);
-}
-function hashRemoteConnectionToken(token) {
-  return createHash28("sha256").update(token, "utf8").digest();
-}
-function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
-  const now = options.now ?? (() => new Date);
-  hardenPrivateDatabasePath(dbPath);
-  const db = new Database12(dbPath, { create: true });
-  try {
-    chmodSync15(dbPath, 384);
-    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
-    assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
-    backupBeforeOAuthMigration(db, dbPath);
-    runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
-  } catch (error) {
-    closeSqliteStore(db);
-    throw error;
-  }
-  let closed = false;
-  const recordLastUse = (id, at) => {
-    if (closed)
-      return;
-    try {
-      db.exec(`PRAGMA busy_timeout = ${LAST_USED_BUSY_TIMEOUT_MS};`);
-      try {
-        db.query("UPDATE remote_connections SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL").run(at, id);
-      } finally {
-        db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2};`);
-      }
-    } catch {}
-  };
-  const readRow = (id) => db.query("SELECT * FROM remote_connections WHERE id = ?").get(id);
-  const oauth = createRemoteOAuthStore(db, now, (id, at) => {
-    const row = readRow(id);
-    const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
-    if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-      recordLastUse(id, at.toISOString());
-    }
-  });
-  return {
-    dbPath,
-    oauth,
-    create(displayName, options2 = {}) {
-      const name = requireDisplayName(displayName);
-      if (options2.provider !== undefined && !isRemoteConnectionProvider(options2.provider)) {
-        throw new OperationError("invalid_params", "A connection's host must be openai, xai, meta, anthropic or other.");
-      }
-      const route = options2.route ?? "remote";
-      if (!["remote", "loopback", "tailnet"].includes(route) || route !== "remote" && options2.installId) {
-        throw new OperationError("invalid_params", "Choose a supported connection route.");
-      }
-      const provider = remoteConnectionProvider({ displayName: name, chosen: options2.provider ?? null });
-      const id = randomBytes12(CONNECTION_ID_BYTES).toString("hex");
-      const secret2 = randomBytes12(CONNECTION_SECRET_BYTES).toString("base64url");
-      const token = options2.installId ? mintCredential("access", options2.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret2}`;
-      const createdAt = now().toISOString();
-      db.query(`
-        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider, route)
-        VALUES (?, ?, 'bearer', ?, ?, ?, ?)
-      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider, route);
-      const row = readRow(id);
-      if (!row)
-        throw new Error("Remote connection could not be read after creation.");
-      return { connection: toRecord(row), token };
-    },
-    list() {
-      return db.query("SELECT * FROM remote_connections ORDER BY created_at, id").all().map(toRecord);
-    },
-    revoke(id) {
-      if (typeof id !== "string" || !CONNECTION_ID_PATTERN2.test(id)) {
-        throw new OperationError("invalid_params", "Connection id must be the id shown by olympus connections list.");
-      }
-      db.transaction(() => {
-        db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now().toISOString(), id);
-        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(id);
-      })();
-      const row = readRow(id);
-      if (!row) {
-        throw new OperationError("invalid_params", `No remote connection has id ${id}.`, "Run olympus connections list.");
-      }
-      if (row.kind === "oauth")
-        oauth.revokeGrant(id);
-      try {
-        revokeWaitingPrivateQuestions(dbPath, id);
-      } catch {
-        console.warn("[olympus] waiting private questions: could not remove a revoked connection's questions now; they are removed before the list is next shown");
-      }
-      return toRecord(row);
-    },
-    verifyToken(token, route = "remote") {
-      const match = typeof token === "string" ? TOKEN_PATTERN2.exec(token) : null;
-      const routed = typeof token === "string" ? credentialInstallId("access", token) : undefined;
-      if (!match && !routed)
-        return { ok: false, reason: "malformed" };
-      const presented = hashRemoteConnectionToken(token);
-      const row = match ? readRow(match[1]) : db.query("SELECT * FROM remote_connections WHERE kind = 'bearer' AND token_hash = ?").get(presented);
-      const bearer = row && row.kind === "bearer" && row.token_hash ? row : null;
-      const stored = bearer ? Buffer.from(bearer.token_hash) : Buffer.alloc(presented.length);
-      const equal2 = stored.length === presented.length && timingSafeEqual4(stored, presented);
-      if (!bearer || !equal2 || bearer.route !== route)
-        return { ok: false, reason: "unknown" };
-      if (bearer.revoked_at !== null)
-        return { ok: false, reason: "revoked" };
-      const at = now();
-      const lastUsedMs = bearer.last_used_at ? Date.parse(bearer.last_used_at) : Number.NaN;
-      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
-        recordLastUse(bearer.id, at.toISOString());
-      }
-      return { ok: true, connection: toRecord(bearer) };
-    },
-    close() {
-      closed = true;
-      closeSqliteStore(db);
-    }
-  };
-}
-function toRecord(row) {
-  return {
-    id: row.id,
-    displayName: row.display_name,
-    kind: row.kind === "oauth" ? "oauth" : "bearer",
-    clientId: row.client_id ?? null,
-    route: row.route,
-    provider: remoteConnectionProvider({
-      clientId: row.client_id,
-      displayName: row.display_name,
-      chosen: isRemoteConnectionProvider(row.provider) ? row.provider : null
-    }),
-    createdAt: row.created_at,
-    lastUsedAt: row.last_used_at,
-    revokedAt: row.revoked_at
-  };
-}
-function requireDisplayName(value) {
-  const name = sanitizeCallerDisplayName(value);
-  if (!name) {
-    throw new OperationError("invalid_params", "A connection needs a name, for example: olympus connections add muse.");
-  }
-  return name;
-}
-function remoteConnectionMigrations() {
-  return [{
-    version: 1,
-    name: "create_remote_connections",
-    up(db) {
-      db.exec(`
-        CREATE TABLE remote_connections (
-          id TEXT PRIMARY KEY,
-          display_name TEXT NOT NULL,
-          kind TEXT NOT NULL CHECK(kind IN ('bearer')),
-          token_hash BLOB NOT NULL UNIQUE,
-          created_at TEXT NOT NULL,
-          last_used_at TEXT,
-          revoked_at TEXT
-        );
-      `);
-    }
-  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3), {
-    version: 4,
-    name: "bind_connection_route",
-    up(db) {
-      const columns = db.query("PRAGMA table_info(remote_connections)").all();
-      if (columns.some((column) => column.name === "route"))
-        return;
-      db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
-    }
-  }];
-}
-function connectionProviderMigration(version) {
-  return {
-    version,
-    name: "add_connection_provider",
-    up(db) {
-      const columns = db.query("PRAGMA table_info(remote_connections)").all();
-      if (!columns.some((column) => column.name === "provider")) {
-        db.exec(`
-          ALTER TABLE remote_connections ADD COLUMN provider TEXT
-            CHECK(provider IS NULL OR provider IN ('openai', 'xai', 'meta', 'anthropic', 'other'));
-        `);
-      }
-      const unset = db.query("SELECT id, display_name, client_id FROM remote_connections WHERE provider IS NULL").all();
-      const fill = db.query("UPDATE remote_connections SET provider = ? WHERE id = ? AND provider IS NULL");
-      for (const row of unset) {
-        fill.run(remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name }), row.id);
-      }
-    }
-  };
-}
-function backupBeforeOAuthMigration(db, dbPath) {
-  if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1)
-    return;
-  const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
-  if (existsSync39(backupPath))
-    return;
-  db.query("VACUUM INTO ?").run(backupPath);
-  chmodSync15(backupPath, 384);
-}
-function hardenPrivateDatabasePath(dbPath) {
-  if (!isAbsolute19(dbPath)) {
-    throw new TypeError("Remote connections database path must be absolute.");
-  }
-  const leafDir = dirname41(dbPath);
-  const forbiddenLeafDirs = new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir23()]);
-  if (forbiddenLeafDirs.has(leafDir)) {
-    throw new Error("Remote connections database must live inside a dedicated private leaf directory.");
-  }
-  mkdirSync27(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync25(leafDir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-    throw new Error("Remote connections database leaf must be a real private directory.");
-  }
-  chmodSync15(leafDir, 448);
-  if (existsSync39(dbPath)) {
-    const dbStat = lstatSync25(dbPath);
-    if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
-      throw new Error("Remote connections database must be a regular file, not a symlink.");
-    }
-  }
-}
-var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 4, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN2;
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-  CONNECTION_ID_PATTERN2 = /^[a-f0-9]{18}$/;
-  TOKEN_PATTERN2 = /^olympus_conn_([a-f0-9]{18})_([A-Za-z0-9_-]{43})$/;
 });
 
 // src/core/source-watch.ts
@@ -226992,9 +227086,9 @@ init_open_targets();
 init_package_root();
 init_linux_engine_layout();
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync32, lstatSync as lstatSync19, mkdirSync as mkdirSync20, readFileSync as readFileSync30, renameSync as renameSync6, rmSync as rmSync12, statSync as statSync18, writeFileSync as writeFileSync7 } from "node:fs";
-import { homedir as homedir20, platform as osPlatform2 } from "node:os";
-import { dirname as dirname34, isAbsolute as isAbsolute16, join as join39 } from "node:path";
+import { existsSync as existsSync35, lstatSync as lstatSync22, mkdirSync as mkdirSync23, readFileSync as readFileSync30, renameSync as renameSync6, rmSync as rmSync12, statSync as statSync18, writeFileSync as writeFileSync7 } from "node:fs";
+import { homedir as homedir23, platform as osPlatform2 } from "node:os";
+import { dirname as dirname37, isAbsolute as isAbsolute19, join as join41 } from "node:path";
 var OPEN_HANDLER_BUNDLE_ID = "ai.olympusplugin.open";
 var OPEN_HANDLER_DESKTOP_ID = `${OPEN_HANDLER_BUNDLE_ID}.desktop`;
 var OPEN_HANDLER_MIME_TYPE = `x-scheme-handler/${OLYMPUS_URL_SCHEME}`;
@@ -227002,7 +227096,7 @@ var OPEN_HANDLER_MARK = "Written by olympus open-handler install";
 var LSREGISTER_PATH = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 function openHandlerPaths(platform2, homeDir, env = {}) {
   if (platform2 === "darwin") {
-    return { handlerPath: join39(homeDir, "Library", "Application Support", "Olympus", "Olympus.app") };
+    return { handlerPath: join41(homeDir, "Library", "Application Support", "Olympus", "Olympus.app") };
   }
   const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
   return {
@@ -227039,9 +227133,9 @@ function renderMacOpenHandlerScript(program) {
 }
 function renderLinuxDesktopEntry2(program, launcherPath) {
   assertProgram(program);
-  const workDir = launcherPath ? dirname34(launcherPath) : programWorkingDirectory(program);
+  const workDir = launcherPath ? dirname37(launcherPath) : programWorkingDirectory(program);
   for (const path of [program.runtimePath, program.entryPath, workDir, ...launcherPath ? [launcherPath] : []]) {
-    if (!isAbsolute16(path) || /[\x00-\x1f\x7f"`$\\%]/.test(path))
+    if (!isAbsolute19(path) || /[\x00-\x1f\x7f"`$\\%]/.test(path))
       throw new Error(`The path ${path} cannot be written into a desktop entry.`);
   }
   return [
@@ -227103,14 +227197,14 @@ function installMac(options) {
   const exec = options.exec ?? defaultExec;
   const program = options.program ?? defaultProgram();
   const { handlerPath } = openHandlerPaths("darwin", home(options));
-  if (existsSync32(handlerPath) && !ownedHandler("darwin", handlerPath)) {
+  if (existsSync35(handlerPath) && !ownedHandler("darwin", handlerPath)) {
     return { ok: false, platform: "darwin", action: "failed", path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
   }
   const script2 = renderMacOpenHandlerScript(program);
-  const support = dirname34(handlerPath);
-  mkdirSync20(support, { recursive: true, mode: 448 });
-  const staging = join39(support, ".Olympus-next.app");
-  const scriptPath = join39(support, ".open-handler.applescript");
+  const support = dirname37(handlerPath);
+  mkdirSync23(support, { recursive: true, mode: 448 });
+  const staging = join41(support, ".Olympus-next.app");
+  const scriptPath = join41(support, ".open-handler.applescript");
   rmSync12(staging, { recursive: true, force: true });
   writeFileSync7(scriptPath, script2, { mode: 384 });
   try {
@@ -227118,7 +227212,7 @@ function installMac(options) {
   } finally {
     rmSync12(scriptPath, { force: true });
   }
-  const plist = join39(staging, "Contents", "Info.plist");
+  const plist = join41(staging, "Contents", "Info.plist");
   must(exec("/usr/bin/plutil", ["-replace", "CFBundleIdentifier", "-string", OPEN_HANDLER_BUNDLE_ID, plist]), "name the link handler");
   must(exec("/usr/bin/plutil", ["-replace", "CFBundleName", "-string", "Olympus", plist]), "name the link handler");
   must(exec("/usr/bin/plutil", ["-replace", "LSUIElement", "-bool", "YES", plist]), "hide the link handler from the Dock");
@@ -227130,7 +227224,7 @@ function installMac(options) {
     plist
   ]), "claim olympus:// links");
   must(exec("/usr/bin/codesign", ["--force", "--sign", "-", staging]), "sign the link handler");
-  if (existsSync32(handlerPath)) {
+  if (existsSync35(handlerPath)) {
     exec(LSREGISTER_PATH, ["-u", handlerPath]);
     rmSync12(handlerPath, { recursive: true, force: true });
   }
@@ -227148,9 +227242,9 @@ function installMac(options) {
 function uninstallMac(options) {
   const exec = options.exec ?? defaultExec;
   const { handlerPath } = openHandlerPaths("darwin", home(options));
-  const staging = join39(dirname34(handlerPath), ".Olympus-next.app");
+  const staging = join41(dirname37(handlerPath), ".Olympus-next.app");
   rmSync12(staging, { recursive: true, force: true });
-  if (!existsSync32(handlerPath))
+  if (!existsSync35(handlerPath))
     return { ok: true, platform: "darwin", action: "absent", path: handlerPath };
   if (!ownedHandler("darwin", handlerPath)) {
     return { ok: false, platform: "darwin", action: "failed", path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
@@ -227165,13 +227259,13 @@ function installLinux(options) {
   const program = options.program ?? defaultProgram();
   const { handlerPath } = openHandlerPaths("linux", home(options), options.env ?? process.env);
   const entry = renderLinuxDesktopEntry2(program, readLinuxEngineReceipt(layout.receiptPath) ? layout.launcherPath : undefined);
-  if (existsSync32(handlerPath) && !ownedHandler("linux", handlerPath)) {
+  if (existsSync35(handlerPath) && !ownedHandler("linux", handlerPath)) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
-  mkdirSync20(dirname34(handlerPath), { recursive: true, mode: 448 });
+  mkdirSync23(dirname37(handlerPath), { recursive: true, mode: 448 });
   writeAtomic(handlerPath, entry, 420);
   const registered3 = exec("xdg-mime", ["default", OPEN_HANDLER_DESKTOP_ID, OPEN_HANDLER_MIME_TYPE]).status === 0;
-  exec("update-desktop-database", [dirname34(handlerPath)]);
+  exec("update-desktop-database", [dirname37(handlerPath)]);
   return {
     ok: registered3,
     platform: "linux",
@@ -227186,19 +227280,19 @@ function uninstallLinux(options) {
   const { handlerPath, mimeappsPath } = openHandlerPaths("linux", home(options), options.env ?? process.env);
   if (mimeappsPath)
     forgetLinuxDefault(mimeappsPath);
-  if (!existsSync32(handlerPath))
+  if (!existsSync35(handlerPath))
     return { ok: true, platform: "linux", action: "absent", path: handlerPath };
   if (!ownedHandler("linux", handlerPath)) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
   rmSync12(handlerPath, { force: true });
-  exec("update-desktop-database", [dirname34(handlerPath)]);
+  exec("update-desktop-database", [dirname37(handlerPath)]);
   return { ok: true, platform: "linux", action: "removed", path: handlerPath };
 }
 function forgetLinuxDefault(mimeappsPath) {
-  if (!existsSync32(mimeappsPath))
+  if (!existsSync35(mimeappsPath))
     return false;
-  const stat2 = lstatSync19(mimeappsPath);
+  const stat2 = lstatSync22(mimeappsPath);
   if (!stat2.isFile() || stat2.isSymbolicLink())
     return false;
   const text2 = readFileSync30(mimeappsPath, "utf8");
@@ -227223,10 +227317,10 @@ function forgetLinuxDefault(mimeappsPath) {
 function ownedHandler(platform2, handlerPath) {
   try {
     if (platform2 === "darwin") {
-      const plist = join39(handlerPath, "Contents", "Info.plist");
-      return lstatSync19(handlerPath).isDirectory() && readFileSync30(plist, "utf8").includes(OPEN_HANDLER_BUNDLE_ID);
+      const plist = join41(handlerPath, "Contents", "Info.plist");
+      return lstatSync22(handlerPath).isDirectory() && readFileSync30(plist, "utf8").includes(OPEN_HANDLER_BUNDLE_ID);
     }
-    const stat2 = lstatSync19(handlerPath);
+    const stat2 = lstatSync22(handlerPath);
     return stat2.isFile() && !stat2.isSymbolicLink() && readFileSync30(handlerPath, "utf8").includes(OPEN_HANDLER_MARK);
   } catch {
     return false;
@@ -227234,10 +227328,10 @@ function ownedHandler(platform2, handlerPath) {
 }
 function defaultProgram() {
   const root = olympusPackageRoot();
-  return { runtimePath: process.execPath, entryPath: join39(root, "dist", "cli.js"), workingDirectory: root };
+  return { runtimePath: process.execPath, entryPath: join41(root, "dist", "cli.js"), workingDirectory: root };
 }
 function programWorkingDirectory(program) {
-  return program.workingDirectory ?? dirname34(dirname34(program.entryPath));
+  return program.workingDirectory ?? dirname37(dirname37(program.entryPath));
 }
 function refuseForeignUser(platform2, options) {
   if (platform2 !== "darwin" && platform2 !== "linux")
@@ -227262,7 +227356,7 @@ function refuseForeignUser(platform2, options) {
 }
 function assertProgram(program) {
   for (const path of [program.runtimePath, program.entryPath, programWorkingDirectory(program)]) {
-    if (!isAbsolute16(path) || /[\x00-\x1f\x7f]/.test(path))
+    if (!isAbsolute19(path) || /[\x00-\x1f\x7f]/.test(path))
       throw new Error("The link handler needs absolute paths to Bun and the Olympus CLI.");
   }
 }
@@ -227270,8 +227364,8 @@ function appleScriptString(value) {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
 }
 function home(options) {
-  const value = options.homeDir ?? homedir20();
-  if (!isAbsolute16(value))
+  const value = options.homeDir ?? homedir23();
+  if (!isAbsolute19(value))
     throw new Error("The home folder must be an absolute path.");
   return value;
 }
