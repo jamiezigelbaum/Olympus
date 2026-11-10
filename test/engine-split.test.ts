@@ -14,7 +14,7 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex as SecretLocations } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
-import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { createExistingStoreTierLane, createLaneTieredStoreSet, createTieredLaneSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { EngineCommandClient, OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
 import {
   createEngineCommandHandler,
@@ -367,7 +367,6 @@ describe('owner actions the background runs, forwarded from the front', () => {
     for (const reply of [
       sentReceipt({ status: 409, body: { error: { code: 'disconnect_first' } } }),
       sentReceipt({ status: 200, body: { ok: true, worker_restarting: false } }),
-      { id: 'c', state: 'failed', instance_id: 'b', error: 'boom' } as EngineCommandReceipt,
     ]) {
       const gate = createFrontGate();
       let restarts = 0;
@@ -375,6 +374,23 @@ describe('owner actions the background runs, forwarded from the front', () => {
       await routes(new Request('http://127.0.0.1/v1/cli/data-delete', { method: 'POST', body: '{}' }));
       expect(gate.isOpen()).toBe(true);
       expect(restarts).toBe(0);
+    }
+  });
+
+  test('a delete whose outcome is unknown keeps the gate closed and restarts the front', async () => {
+    for (const send of [
+      async (): Promise<EngineCommandReceipt> => { throw new Error('The background did not answer in time.'); },
+      async (): Promise<EngineCommandReceipt> => ({ id: 'c', state: 'failed', instance_id: 'b', error: 'boom' }),
+    ]) {
+      const gate = createFrontGate();
+      let restarts = 0;
+      const routes = createEngineFrontRoutes({ client: { send }, gate, restartFront: () => { restarts += 1; } });
+      const response = await routes(new Request('http://127.0.0.1/v1/cli/data-delete', { method: 'POST', body: '{}' }));
+      expect(response!.status).toBe(503);
+      expect(await response!.json()).toMatchObject({ error: { code: 'worker_restarting' } });
+      // The background may have marked the account: nothing is read again until the front has restarted.
+      expect(gate.isOpen()).toBe(false);
+      expect(restarts).toBe(1);
     }
   });
 
@@ -561,6 +577,35 @@ describe('the front writes nothing the background owns', () => {
     openReadOnlyDashboardHistory(dashboard).close();
     new LocalSourceWatchStore(watches, { readOnly: true }).close();
     new LocalFileExtractionJobStore(jobs, { readonly: true }).close();
+  });
+
+  test('a read-only store in the front reads its tier ledger read-only, so its lane keeps its privacy checks', async () => {
+    const root = tempRoot();
+    const internalPath = join(root, 'internal.sqlite');
+    const securePath = join(root, 'secure.sqlite');
+    const stores = [
+      new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.fixture', family: 'file', trustDomain: 'internal' }),
+      new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.fixture', family: 'file', trustDomain: 'secure_local' }),
+    ] as const;
+    createLaneTieredStoreSet({ setId: 'front-set', internalStore: stores[0], secureStore: stores[1], registerWithLedger: false });
+    await flushMicrotasks(50);
+    for (const store of stores) store.close();
+    forbidWritableStoreOpens();
+    const secure = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.fixture', family: 'file', trustDomain: 'secure_local', readOnly: true });
+    const ledger = secure.tierLedger();
+    expect(ledger).toBeDefined();
+    expect(ledger!.dbPath).toBe(tieredStoreSetLedgerPath(securePath));
+    // Each factory takes that ledger; none falls back to a writable open.
+    const internal = new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.fixture', family: 'file', trustDomain: 'internal', readOnly: true });
+    // WhatsApp, Readwise and X: an existing Personal store, with Private created on first need.
+    expect(() => createExistingStoreTierLane({
+      setId: 'front-existing', store: internal,
+      newLegs: { secure_local: { corpusId: 'secure_local.fixture', dbPath: securePath, create: () => { throw new Error('not created in the front'); } } },
+    })).not.toThrow();
+    expect(() => createTieredLaneSet({ setId: 'front-lane', legs: { secure_local: { onDemand: { corpusId: 'secure_local.fixture', dbPath: securePath } }, internal: { store: internal } } } as never)).not.toThrow();
+    await flushMicrotasks(50);
+    internal.close();
+    secure.close();
   });
 
   test('a lane\'s tiered set in the front opens read-only and does no write work', async () => {

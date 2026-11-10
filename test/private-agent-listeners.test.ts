@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { authenticateRemoteRequest } from '../src/workers/remote-mcp.ts';
+import { createFrontGate } from '../src/workers/engine-split/runtime.ts';
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
@@ -269,4 +270,23 @@ test('only Tailscale interfaces are considered, never a carrier-grade NAT addres
   expect(isTailscaleInterfaceName('eth0', 'linux')).toBe(false);
   expect(isTailscaleInterfaceName('utun4', 'darwin')).toBe(true);
   expect(isTailscaleInterfaceName('en0', 'darwin')).toBe(false);
+});
+
+test('in the engine split, the private listeners pass the front\'s read gate a source-data delete closes', async () => {
+  const store = storeFixture();
+  const key = store.create('Loopback agent', { route: 'loopback' });
+  const handlers = new Map<string, (r: Request) => Promise<Response>>();
+  const gate = createFrontGate();
+  const manager = createPrivateAgentListeners({ connections: () => store, mcp, privacyPending: () => false, addresses: () => [],
+    listen: (address, handler) => { handlers.set(address, handler); return { port: 17841, stop: () => {} }; },
+    gate: (handler) => gate.wrap(handler),
+  });
+  cleanup.push(() => manager.close());
+  manager.refresh();
+  const handler = handlers.get('127.0.0.1')!;
+  expect((await handler(request(key.token))).status).not.toBe(503);
+  gate.close();
+  const closed = await handler(request(key.token));
+  expect(closed.status).toBe(503);
+  expect(await closed.json()).toMatchObject({ error: { code: 'worker_restarting' } });
 });

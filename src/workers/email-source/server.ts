@@ -7476,6 +7476,7 @@ export async function main(): Promise<void> {
     connections: remoteConnections,
     mcp: sharedRemoteMcpOptions,
     privacyPending: () => privacyChoicePending(sovereigntyEngine),
+    ...(frontGate ? { gate: (handler: (request: Request) => Promise<Response>) => frontGate.wrap(handler) } : {}),
   });
   updateChecker.start();
   }

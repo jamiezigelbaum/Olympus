@@ -55,6 +55,12 @@ export function createPrivateAgentListeners(options: {
   port?: number;
   /** Injection for bind/lifecycle tests; production always calls Bun.serve. */
   listen?: (address: string, handler: Handler) => Listener;
+  /**
+   * The engine split's front: the read gate a source-data delete closes
+   * (engine-split/runtime.ts), so these listeners admit nothing and return
+   * nothing read before the delete once it starts.
+   */
+  gate?: (handler: Handler) => (request: Request, server: undefined) => Promise<Response>;
 }): PrivateAgentListeners {
   const port = options.port ?? PRIVATE_AGENT_PORT;
   const active = new Map<string, { route: PrivateAgentRoute; server: Listener }>();
@@ -76,7 +82,8 @@ export function createPrivateAgentListeners(options: {
       connections: options.connections, connectionRoute: route,
       isRelayed: () => false,
     }), { pending: options.privacyPending });
-    return [route, mcp];
+    const gated = options.gate?.(mcp);
+    return [route, gated ? (request: Request) => gated(request, undefined) : mcp];
   })) as Record<PrivateAgentRoute, Handler>;
 
   function stop(address: string) {

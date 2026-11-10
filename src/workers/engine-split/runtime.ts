@@ -235,7 +235,10 @@ export function createEngineFrontRoutes(input: {
   pid?: number;
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
-  const send = async (kind: EngineForwardedKind, request: Request): Promise<Response> => {
+  /** The background's answer, or why there is none: the command was not answered, or it failed there. */
+  const exchange = async (kind: EngineForwardedKind, request: Request): Promise<
+    { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string }
+  > => {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
@@ -245,13 +248,16 @@ export function createEngineFrontRoutes(input: {
         { timeoutMs: input.timeoutMs ?? (kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
       );
     } catch (error) {
-      return Response.json({ error: { code: 'engine_background_unavailable', message: error instanceof Error ? error.message : 'The background engine is not answering.' } }, { status: 503 });
+      return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
     }
-    if (receipt.state !== 'done') {
-      return Response.json({ error: { code: 'engine_background_failed', message: receipt.error ?? 'The background could not run this.' } }, { status: 502 });
-    }
-    const answer = receipt.result as EngineForwardedResponse;
-    return new Response(answer.body, { status: answer.status, headers: answer.headers });
+    if (receipt.state !== 'done') return { failed: receipt.error ?? 'The background could not run this.' };
+    return { answer: receipt.result as EngineForwardedResponse };
+  };
+  const send = async (kind: EngineForwardedKind, request: Request): Promise<Response> => {
+    const outcome = await exchange(kind, request);
+    if ('unanswered' in outcome) return Response.json({ error: { code: 'engine_background_unavailable', message: outcome.unanswered } }, { status: 503 });
+    if ('failed' in outcome) return Response.json({ error: { code: 'engine_background_failed', message: outcome.failed } }, { status: 502 });
+    return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
   };
   return (request) => {
     if (request.method !== 'POST') return undefined;
@@ -262,15 +268,24 @@ export function createEngineFrontRoutes(input: {
       if (kind === 'tier_override' && tierCommandOnlyReads(await request.clone().text())) return undefined;
       if (kind !== 'delete_source_data') return send(kind, request);
       input.gate.close();
-      let response: Response;
+      let outcome: Awaited<ReturnType<typeof exchange>>;
       try {
-        response = await send(kind, request);
-      } catch (error) {
-        input.gate.reopen();
-        throw error;
+        outcome = await exchange(kind, request);
+      } catch {
+        outcome = { unanswered: 'The delete could not be sent.' };
       }
+      if (!('answer' in outcome)) {
+        // Unknown whether the background marked the account: reads stay
+        // closed, and the front restarts, which closes every connection; the
+        // new front waits for the background, which deletes at its boot if it
+        // marked the account and otherwise changed nothing.
+        input.restartFront();
+        return restartingResponse();
+      }
+      const response = new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
       const restarting = response.status === 200
         && (await response.clone().json().catch(() => undefined) as { worker_restarting?: unknown } | undefined)?.worker_restarting === true;
+      // The background's own answer: a refusal or a dry run changed nothing.
       if (restarting) input.restartFront();
       else input.gate.reopen();
       return response;
