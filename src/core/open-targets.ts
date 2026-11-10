@@ -233,4 +233,21 @@ export const DASHBOARD_IMPORT_LANDING_PREFIX = 'import.';
 export function dashboardImportLandingToken(sourceId: string): string {
   return `${DASHBOARD_IMPORT_LANDING_PREFIX}${sourceId}`;
 }
+/**
+ * The panel's own landing on one source's row (`#olympus-open=source.<card id>`), linked from the
+ * Sources tab's ⋯ Details only: Home lists no sources (#1085), so this is how a row's See why, Unpair,
+ * Import an archive and Details for support stay one click away. Never an olympus:// target.
+ */
+export const DASHBOARD_SOURCE_LANDING_PREFIX = 'source.';
+
+export function dashboardSourceLandingToken(sourceId: string): string {
+  return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
+}
+/**
+ * The panel's own landing on every source's row at once (`#olympus-open=sources`), linked from the Sources
+ * tab only: imported archives, a source's imports and each row's details, which Home no longer lists (#1085).
+ * The panel reads it as a landing on this id, which no source has.
+ */
+export const DASHBOARD_ALL_SOURCES_LANDING = 'sources';
+export const DASHBOARD_ALL_SOURCES_ID = 'all.sources';
 export const DASHBOARD_LAUNCH_OPEN_KEY = 'olympus_open';
