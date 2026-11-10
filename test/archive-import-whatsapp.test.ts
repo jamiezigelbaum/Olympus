@@ -1409,10 +1409,12 @@ describe('whatsapp archive on the shared spine', () => {
   test('a crash between a page and the pass that records it counts every finding once and stores every message once', async () => {
     const f = fixture();
     const messages: SyntheticMessage[] = [];
-    for (let index = 0; index < 30; index += 1) {
-      messages.push(...syntheticChat(1, { start: `2026-02-${String(10 + (index % 18)).padStart(2, '0')}T0${index % 10}:00:00`, label: `n${index}` }));
-      if (index % 5 === 0) messages.push(notice(`2026-02-${String(10 + (index % 18)).padStart(2, '0')}T0${index % 10}:00:30`));
-      if (index % 7 === 0) messages.push({ at: `2026-02-${String(10 + (index % 18)).padStart(2, '0')}T0${index % 10}:00:40`, sender: 'Sam Example', text: '<Media omitted>' });
+    // Kept small on purpose: every message is several durable store writes, and on a loaded CI disk 30 of them
+    // outlasted the 5 s default (#985). Fourteen still crash after two pages and resume over the rest.
+    for (let index = 0; index < 14; index += 1) {
+      messages.push(...syntheticChat(1, { start: `2026-02-${String(10 + (index % 7)).padStart(2, '0')}T0${index % 10}:00:00`, label: `n${index}` }));
+      if (index % 5 === 0) messages.push(notice(`2026-02-${String(10 + (index % 7)).padStart(2, '0')}T0${index % 10}:00:30`));
+      if (index % 7 === 0) messages.push({ at: `2026-02-${String(10 + (index % 7)).padStart(2, '0')}T0${index % 10}:00:40`, sender: 'Sam Example', text: '<Media omitted>' });
     }
     put(f.exports, '_chat.txt', chatText(messages, { style: 'android-24-dmy' }));
     const archiveId = f.start(join(f.exports, '_chat.txt'));
@@ -1438,13 +1440,13 @@ describe('whatsapp archive on the shared spine', () => {
     await importAll(f.runtime, archiveId, { pageSize: 4, maxItems: 9 });
     const record = f.runtime.state.get(archiveId)!;
     expect(record.status).toBe('imported');
-    expect(rowsOf(f.env, archiveId)).toHaveLength(30 + Math.ceil(30 / 7));
-    expect(record.findings.skipped).toEqual({ [WHATSAPP_FINDINGS.systemMessage]: 6 });
-    // The zone, and the one message dated before the message above it (the fixture's days wrap round at the 19th message).
+    expect(rowsOf(f.env, archiveId)).toHaveLength(14 + Math.ceil(14 / 7));
+    expect(record.findings.skipped).toEqual({ [WHATSAPP_FINDINGS.systemMessage]: 3 });
+    // The zone, and the one message dated before the message above it (the fixture's days wrap round at the 8th message).
     expect(record.findings.gaps).toEqual({
       [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1,
       [ARCHIVE_COMMON_FINDINGS.itemStartAssumed]: 1,
-      [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 5,
+      [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 2,
     });
   });
 
