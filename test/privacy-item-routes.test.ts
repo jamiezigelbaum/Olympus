@@ -183,4 +183,11 @@ describe('the dashboard\'s routes', () => {
     ]);
     expect((await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier: 'secrets' }))).status).toBe(400);
   });
+
+  test('Check the judge answers a local session only, and says when it is not set up', async () => {
+    const f = fixture();
+    const session = await localSession(f.guarded);
+    const response = await f.guarded(post('/dashboard/privacy/judge-check', session, { action: 'status' }));
+    expect(response.status).toBe(501);
+  });
 });

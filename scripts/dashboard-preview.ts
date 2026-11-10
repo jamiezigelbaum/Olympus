@@ -1,3 +1,8 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createJudgeCheck } from '../src/workers/classification/judge-check.ts';
+import type { OwnerTierItem } from '../src/workers/classification/tier-owner-items.ts';
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
@@ -2010,8 +2015,13 @@ function previewPrivacyItemsAction(path: string, body: Record<string, unknown>):
   const shown = ({ judge: _judge, ...item }: PreviewPrivacyItem) => item;
   if (path.endsWith('/find')) {
     const words = typeof body.query === 'string' ? body.query.trim().toLowerCase() : '';
-    const found = words ? previewPrivacyItems.filter((item) => [item.title, item.sender ?? '', item.location ?? ''].some((field) => field.toLowerCase().includes(words))) : previewPrivacyItems;
-    return Response.json({ ok: true, items: found.map(shown) });
+    const filter = body.filter;
+    const found = words
+      ? previewPrivacyItems.filter((item) => [item.title, item.sender ?? '', item.location ?? ''].some((field) => field.toLowerCase().includes(words)))
+      : previewPrivacyItems.filter((item) => filter === 'changed' ? item.owner_set : filter === 'personal' ? item.tier === 'Personal' : filter === 'private' ? item.tier === 'Private' : true);
+    // The mockup's counts, as a large install would show them.
+    const counts = { personal: 47_006, private: 1_204, changed: previewPrivacyItems.filter((item) => item.owner_set).length };
+    return Response.json({ ok: true, items: found.map(shown), counts });
   }
   const item = previewPrivacyItems.find((candidate) => candidate.item_id === body.item_id);
   if (!item) return Response.json({ ok: false, code: 'not_found', message: 'Olympus no longer holds that item.' });
@@ -2022,6 +2032,54 @@ function previewPrivacyItemsAction(path: string, body: Record<string, unknown>):
   }
   Object.assign(item, { tier: body.tier === 'personal' ? 'Personal' : 'Private', owner_set: true, decided_by: 'override', judge_reason: null });
   return Response.json({ ok: true, item: shown(item), changed: 'set', applies: 'now', results: [] });
+}
+
+// "Check the judge" (#887): the real round logic (judge-check.ts) over ten
+// fixture items, its file in a temporary folder. Nothing reaches a worker.
+function previewJudgeCheckItems(): OwnerTierItem[] {
+  const item = (id: string, source: string, title: string, sender: string | null, tier: 'Personal' | 'Private', confidence: number, preview: string): OwnerTierItem => ({
+    item_id: `oti_judge_${id}`, source, family: 'message', title, sender, location: null, tier, names_tier: 'Personal', decided_by: 'sniffer',
+    owner_set: false, judge_reason: `ordinary:${confidence.toFixed(2)}`, decided_at: '2026-11-03T10:00:00.000Z', preview,
+  });
+  return [
+    item('quote', 'gmail', 'Re: Quote for kitchen works, Obras Lisboa', 'Obras Lisboa', 'Private', 0.52, 'Here is the revised quote: €18,400 for the kitchen, with the worktop and the electrics.'),
+    item('enrol', 'dropbox', 'Escola_Azul_enrolment_form.pdf', null, 'Personal', 0.55, 'Enrolment form · Escola Azul · pupil name, date of birth, parent contacts, health notes.'),
+    item('dinner', 'whatsapp', '“Dinner Thursday at ours? Bring Leo”', 'Marta', 'Personal', 0.58, 'Dinner Thursday at ours? Bring Leo, the kids can play in the garden.'),
+    item('pdf', 'telegram', 'Tiago Ferreira', 'Tiago Ferreira', 'Private', 0.6, '“Can you send me the PDF from last week? The one for the bank. They want it before Friday or the transfer for the Alfama flat slips to next month.”'),
+    item('gym', 'gmail', 'Your class schedule for November', 'Ginásio Central', 'Personal', 0.62, 'Your classes this month: Tuesday and Thursday at 7:30.'),
+    item('rent', 'gmail', 'Rent receipt, November', 'Tiago Ferreira', 'Private', 0.64, 'Received €1,450 for November rent. Thank you.'),
+    item('book', 'telegram', 'Book club', 'Ana', 'Personal', 0.66, 'Next book is The Years. We meet on the 20th.'),
+    item('scan', 'dropbox', 'passport_scan.jpg', null, 'Private', 0.9, 'Passport scan.'),
+    item('fair', 'gmail', 'Escola Azul: autumn fair on 22 November', 'Escola Azul', 'Personal', 0.95, 'Dear parents, the autumn fair is on Saturday 22 November.'),
+    item('trip', 'whatsapp', '“Train at 9:14 from Santa Apolónia”', 'Ana', 'Personal', 0.97, 'Train at 9:14 from Santa Apolónia, platform 3.'),
+  ];
+}
+let previewJudgeCheck = createPreviewJudgeCheck();
+function createPreviewJudgeCheck() {
+  const items = previewJudgeCheckItems();
+  let seed = 11;
+  return createJudgeCheck({
+    items: {
+      find: () => ({ items }),
+      set: ({ itemId, choice }) => {
+        const found = items.find((candidate) => candidate.item_id === itemId)!;
+        Object.assign(found, { tier: choice === 'personal' ? 'Personal' : 'Private', owner_set: true });
+        return { ok: true, item: found, changed: 'set', applies: 'now', results: [] };
+      },
+    },
+    get: (itemId) => items.find((candidate) => candidate.item_id === itemId),
+    path: join(mkdtempSync(join(tmpdir(), 'olympus-preview-judge-')), 'judge-check.json'),
+    random: () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; },
+  });
+}
+function previewJudgeCheckAction(body: Record<string, unknown>): Response {
+  const action = body.action;
+  const round = action === 'start' ? previewJudgeCheck.start()
+    : action === 'answer' ? previewJudgeCheck.answer(String(body.item_id), body.answer as 'Personal' | 'Private' | 'not_sure')
+      : action === 'put_away' ? previewJudgeCheck.putAway()
+        : action === 'resume' ? previewJudgeCheck.resume()
+          : previewJudgeCheck.status();
+  return Response.json({ ok: true, round });
 }
 
 function previewPrivateAnswersAction(body: Record<string, unknown>, count: number, state: string): Response {
@@ -2131,6 +2189,10 @@ if (import.meta.main) {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
       return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount, state);
     }
+    if (request.method === 'POST' && url.pathname === '/dashboard/privacy/judge-check') {
+      if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
+      return previewJudgeCheckAction(await request.json().catch(() => ({})) as Record<string, unknown>);
+    }
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/privacy/items/')) {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
       return previewPrivacyItemsAction(url.pathname, await request.json().catch(() => ({})) as Record<string, unknown>);
@@ -2221,7 +2283,8 @@ if (import.meta.main) {
       const namedState = url.searchParams.get('state') ?? '';
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
-      if (dashboardHtmlRoutePage(url) === 'privacy_items' && request.headers.get('sec-fetch-dest') !== 'iframe') previewPrivacyItems = previewPrivacyItemsFixture();
+      if (dashboardHtmlRoutePage(url) === 'privacy_items') previewPrivacyItems = previewPrivacyItemsFixture();
+      if (dashboardHtmlRoutePage(url) === 'private_answers' && url.searchParams.has('judge-reset')) previewJudgeCheck = createPreviewJudgeCheck();
       if (stateOverride?.startsWith('privacy-')) { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [

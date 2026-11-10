@@ -3736,6 +3736,7 @@ export const DASHBOARD_PRIVACY_ITEMS_COPY = {
   searchLabel: 'Search your items',
   searchPlaceholder: 'Search by title, sender or file name',
   recentHeading: 'Recently sorted',
+  filtersLabel: 'Show',
   resultsHeading: 'Matching items',
   loading: 'Loading…',
   empty: 'Nothing sorted yet. Items show here once Olympus has read them.',
@@ -3810,3 +3811,51 @@ export function judgeReasonPhrase(code: string | null | undefined): string | und
   const category = bare.split(':')[0] ?? '';
   return Object.prototype.hasOwnProperty.call(JUDGE_REASON_PHRASES, category) ? JUDGE_REASON_PHRASES[category] : undefined;
 }
+
+/**
+ * "Check the judge" on Private questions' Inbox (issue #887; mockups
+ * release-1.5/l3/v2 L3-4, L3-5). Optional; the judge's label shows only after
+ * the owner's answer; the result is a count and a likely range, measured
+ * against the owner's answers, never the model's own confidence.
+ */
+export const DASHBOARD_JUDGE_CHECK_COPY = {
+  title: 'Check the judge',
+  optional: 'optional',
+  roundDone: 'round done',
+  intro: '{total} of your items: the ones the judge was least sure about, plus a few picked at random. Olympus keeps reading and answering while you do this.',
+  offer: 'Answer 10 items to see how often the judge agrees with you.',
+  paused: 'You answered {answered} of {total}.',
+  start: 'Start',
+  resume: 'Continue',
+  putAway: 'Put away',
+  position: 'Item {position} of {total}',
+  question: 'How should this item be treated?',
+  personal: 'Personal',
+  personalHint: 'AI apps can read it',
+  private: 'Private',
+  privateHint: 'Only your private model',
+  notSure: 'Not sure',
+  notSureHint: 'Leave it to the judge',
+  hidden: "The judge's own answer shows after yours, so it doesn't sway you. Your answer settles this one item only. It never becomes a rule for {group}.",
+  hiddenGroup: '{sender} or this chat',
+  hiddenGroupNoSender: 'its sender, chat or folder',
+  you: 'You:',
+  agreed: 'Judge agreed',
+  changed: 'Judge said {judge} · changed',
+  notSureRow: 'Not sure · judge said {judge}',
+  soFar: 'So far the judge agreed with you on {agreed} of {compared}.',
+  tooFew: "That's too few to say how accurate it is.",
+  stop: 'Stop for now',
+  result: 'The judge agreed with you on {agreed} of {compared}.',
+  resultNone: 'You answered Not sure on every item, so there is nothing to compare yet.',
+  rangeLine: 'From {compared} answers, it would likely agree with you on {low}% to {high}% of your items.',
+  rangeLabel: 'Likely range {low}% to {high}%, on a scale of 0 to 100%',
+  honest: 'More answers make the range narrower. The number itself can go down as well as up. Your answers fix those items; they don\'t change how the judge decides.',
+  summary: '{changed} changed to your answer · {confirmed} confirmed · {notSure} “Not sure” left with the judge',
+  seeThem: 'See them in Your items',
+  done: 'Done',
+  more: 'Check 10 more',
+  nothing: 'Nothing to check yet: the judge has not sorted enough items.',
+  failed: 'That did not save. Try again.',
+  unreachable: 'Olympus is not responding. Try again in a moment.',
+} as const;

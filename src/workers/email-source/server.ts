@@ -1,5 +1,6 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
-import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
+import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
+import { createJudgeCheck } from '../classification/judge-check.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
@@ -6070,6 +6071,8 @@ export async function main(): Promise<void> {
     runningVersion: runningOlympusVersion(), platform: process.platform,
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
+  // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
+  const ownerTierItemsEngine = createOwnerTierItems();
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
@@ -6091,7 +6094,9 @@ export async function main(): Promise<void> {
     archiveImportAgent: archiveImportDashboard.agent,
     // One item's privacy label (issue #1060): the same stores and ledgers
     // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
-    ownerTierItems: createOwnerTierItems(),
+    ownerTierItems: ownerTierItemsEngine,
+    // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {

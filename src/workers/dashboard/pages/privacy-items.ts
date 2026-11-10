@@ -43,6 +43,13 @@ const PRIVACY_ITEMS_CSS = `
 .pi .pifind:focus-within { outline: 2px solid var(--link); outline-offset: 1px; }
 .pi .pifind input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--t1); font: inherit; }
 .pi .picap { margin: 14px 0 8px; color: var(--t3); font-size: 13px; }
+.pi .picap[hidden] { display: none; }
+.pi .pichips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 14px; }
+.pi .pichip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; color: var(--t2); font: inherit; font-size: var(--fs-body); background: none; cursor: pointer; }
+.pi .pichip[aria-pressed="true"] { background: var(--panel2); border-color: var(--link); color: var(--t1); font-weight: 600; }
+.pi .pichip:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.pi .pichip i { font-style: normal; color: var(--t3); font-weight: 400; margin-left: 4px; }
+.pi .pichip i:empty { display: none; }
 .pi .pimsg { margin: 0 0 8px; color: var(--t2); }
 .pi .pimsg:empty { display: none; }
 .pi .pimsg[data-state="error"] { color: var(--bad); }
@@ -148,7 +155,12 @@ function renderBody(options: DashboardPageOptions | undefined, token: string | u
   }
   return `<div class="pi" data-privacy-items><div class="pigrid"><div class="pimain">${head}`
     + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml(C.searchLabel)}" placeholder="${escapeHtml(C.searchPlaceholder)}"></label>`
-    + `<p class="picap" data-pi-heading>${escapeHtml(C.recentHeading)}</p>`
+    + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml(C.filtersLabel)}">`
+    + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml(C.recentHeading)}</button>`
+    + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>`
+    + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>`
+    + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml(C.changedByYou)}<i data-pi-count="changed"></i></button></div>`
+    + `<p class="picap" data-pi-heading hidden>${escapeHtml(C.resultsHeading)}</p>`
     + `<p class="pimsg" data-pi-msg role="status">${escapeHtml(C.loading)}</p>`
     + `<ul class="pilist" data-pi-list></ul>`
     + `<p class="pnote piapps" data-pi-apps>${escapeHtml(C.apps)}</p></div>`
@@ -218,6 +230,8 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   var items = [];
   var selected = null;
   var query = '';
+  var filter = '';
+  var counts = null;
   var seq = 0;
   var debounce = null;
   var toastTimer = null;
@@ -337,14 +351,29 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     if (error) msg.setAttribute('data-state', 'error'); else msg.removeAttribute('data-state');
   }
 
+  function renderFilters() {
+    var chips = root.querySelectorAll('[data-pi-filter]');
+    for (var i = 0; i < chips.length; i += 1) chips[i].setAttribute('aria-pressed', !query && chips[i].getAttribute('data-pi-filter') === filter ? 'true' : 'false');
+    var shown = root.querySelectorAll('[data-pi-count]');
+    for (var j = 0; j < shown.length; j += 1) {
+      var value = counts ? counts[shown[j].getAttribute('data-pi-count')] : undefined;
+      shown[j].textContent = typeof value === 'number' ? value.toLocaleString('en-GB') : '';
+    }
+    if (query) heading.removeAttribute('hidden'); else heading.setAttribute('hidden', '');
+  }
+
   async function load() {
     var mine = ++seq;
     var words = query;
-    heading.textContent = words ? C.resultsHeading : C.recentHeading;
-    var response = await post(config.paths.find, words ? { query: words } : { recent: true });
+    renderFilters();
+    var body = words ? { query: words } : { recent: true };
+    if (!words && filter) body.filter = filter;
+    var response = await post(config.paths.find, body);
     if (mine !== seq) return;
     if (!response.ok) { setMessage(response.message, true); return; }
     items = Array.isArray(response.result.items) ? response.result.items : [];
+    if (response.result.counts) counts = response.result.counts;
+    renderFilters();
     setMessage(items.length ? '' : words ? C.noMatch : C.empty, false);
     render();
   }
@@ -372,6 +401,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     var response = await post(config.paths.set, { item_id: id, tier: tier === 'Personal' ? 'personal' : 'private' });
     if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
     var previous = changes[id];
+    if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
     var judge = previous ? previous.judge : item.owner_set ? undefined : item.tier;
     changes[id] = { chosen: tier, judge: judge, applies: response.result.applies };
@@ -387,6 +417,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     var response = await post(config.paths.set, { item_id: id, tier: 'judge' });
     if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
     delete changes[id];
+    if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     merge(response.result.item, item);
     render();
     showToast(C.toastJudge, null);
@@ -415,6 +446,15 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       return;
     }
     if (target.closest('[data-pi-close]')) { selected = null; render(); return; }
+    var chip = target.closest('[data-pi-filter]');
+    if (chip) {
+      filter = chip.getAttribute('data-pi-filter') || '';
+      query = '';
+      search.value = '';
+      selected = null;
+      load();
+      return;
+    }
     var pick = target.closest('[data-pi-choose]');
     if (pick && selected) {
       var item = find(selected);

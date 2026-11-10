@@ -2601,12 +2601,18 @@ export class TierLedger {
 
   /**
    * The most recently decided items, newest first (the dashboard's "recently
-   * sorted" list, tier-owner-items.ts). Content-free: ledger rows only.
+   * sorted" list, tier-owner-items.ts), optionally only those with one
+   * content tier (its Personal and Private filters). Content-free: ledger rows only.
    */
-  recentDecisions(limit = 25): TierLedgerRecord[] {
-    const rows = this.db.query(`
+  recentDecisions(limit = 25, contentTier?: TierKey): TierLedgerRecord[] {
+    const capped = Math.max(1, Math.min(limit, 200));
+    const rows = (contentTier === undefined
+      ? this.db.query(`
       SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 200))) as TierItemRow[];
+    `).all(capped)
+      : this.db.query(`
+      SELECT * FROM tier_items WHERE content_tier = ? ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(contentTier, capped)) as TierItemRow[];
     return rows.map(recordFromRow);
   }
 

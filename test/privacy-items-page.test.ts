@@ -37,7 +37,7 @@ const appointment = (): Item => ({
 const windows: Window[] = [];
 afterEach(async () => { while (windows.length) await windows.pop()!.happyDOM.close(); });
 
-function render(options: Parameters<typeof renderDashboardLocalPage>[1]['options']): string {
+function render(options: NonNullable<Parameters<typeof renderDashboardLocalPage>[1]['options']>): string {
   return renderDashboardLocalPage('privacy_items', { url: URL_ITEMS, options });
 }
 
@@ -60,7 +60,14 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
     let result: unknown;
     if (path === DASHBOARD_PRIVACY_ITEMS_PATHS.find) {
       const words = typeof request.query === 'string' ? request.query.toLowerCase() : '';
-      result = { ok: true, items: state.filter((item) => !words || (item.title ?? '').toLowerCase().includes(words)).map(({ judge: _judge, ...item }) => item) };
+      const filter = request.filter;
+      result = {
+        ok: true,
+        items: state.filter((item) => (!words || (item.title ?? '').toLowerCase().includes(words))
+          && (filter === undefined || (filter === 'changed' ? item.owner_set : item.tier === (filter === 'personal' ? 'Personal' : 'Private'))))
+          .map(({ judge: _judge, ...item }) => item),
+        counts: { personal: 47_006, private: 1_204, changed: state.filter((item) => item.owner_set).length },
+      };
     } else if (options.refuse) {
       result = { ok: false, code: 'secret_item', message: 'This item is Secret. Secret items are not changed from here.' };
     } else {
@@ -113,7 +120,10 @@ describe('finding an item', () => {
     const p = await page([invoice(), appointment()]);
     expect(p.posts[0]).toEqual({ path: DASHBOARD_PRIVACY_ITEMS_PATHS.find, body: { recent: true } });
     expect(p.document.querySelectorAll('[data-pi-item]')).toHaveLength(2);
-    expect(p.text('[data-pi-heading]')).toBe(C.recentHeading);
+    expect(p.$('[data-pi-heading]')!.hasAttribute('hidden')).toBe(true);
+    expect(p.text('[data-pi-filter][aria-pressed="true"]')).toBe(C.recentHeading);
+    expect(p.text('[data-pi-filter="private"]')).toBe('Private1,204');
+    expect(p.text('[data-pi-filter="changed"]')).toBe(`${C.changedByYou}0`);
     expect(p.text('[data-pi-apps]')).toBe(C.apps);
     await p.click('[data-pi-item="oti_inv"]');
     expect(p.$('[data-pi-side] [data-pi-detail="oti_inv"]')).not.toBeNull();
@@ -148,11 +158,34 @@ describe('finding an item', () => {
     expect(p.posts.at(-1)).toEqual({ path: DASHBOARD_PRIVACY_ITEMS_PATHS.find, body: { query: 'appoint' } });
     expect(p.document.querySelectorAll('[data-pi-item]')).toHaveLength(1);
     expect(p.text('[data-pi-heading]')).toBe(C.resultsHeading);
+    expect(p.$('[data-pi-filter][aria-pressed="true"]')).toBeNull();
     search.value = 'nothing like it';
     search.dispatchEvent(new p.window.Event('input'));
     await p.clock.advance(PRIVACY_ITEMS_SEARCH_DEBOUNCE_MS);
     await flushMicrotasks();
     expect(p.text('[data-pi-msg]')).toBe(C.noMatch);
+  });
+});
+
+describe('the filters', () => {
+  test('Private, Personal and Changed by you list only those, each with its count', async () => {
+    const p = await page([invoice(), appointment()]);
+    await p.click('[data-pi-filter="private"]');
+    expect(p.posts.at(-1)!.body).toEqual({ recent: true, filter: 'private' });
+    expect([...p.document.querySelectorAll('[data-pi-item]')].map((row) => row.getAttribute('data-pi-item'))).toEqual(['oti_inv']);
+    expect(p.$('[data-pi-filter="private"]')!.getAttribute('aria-pressed')).toBe('true');
+    await p.click('[data-pi-filter="changed"]');
+    expect(p.text('[data-pi-msg]')).toBe(C.empty);
+    await p.click('[data-pi-filter=""]');
+    await p.click('[data-pi-item="oti_appt"]');
+    await p.click('[data-pi-choose="Private"]');
+    // The change counts at once.
+    expect(p.text('[data-pi-filter="changed"]')).toBe(`${C.changedByYou}1`);
+    await p.click('[data-pi-filter="changed"]');
+    expect([...p.document.querySelectorAll('[data-pi-item]')].map((row) => row.getAttribute('data-pi-item'))).toEqual(['oti_appt']);
+    await p.click('[data-pi-item="oti_appt"]');
+    await p.click('[data-pi-undo]');
+    expect(p.text('[data-pi-filter="changed"]')).toBe(`${C.changedByYou}0`);
   });
 });
 

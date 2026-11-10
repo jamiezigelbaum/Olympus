@@ -627,6 +627,7 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
 export const DASHBOARD_PRIVACY_ITEM_PATHS: readonly string[] = [
   '/dashboard/privacy/items/find',
   '/dashboard/privacy/items/set',
+  '/dashboard/privacy/judge-check',
 ];
 
 function isDashboardPrivacyItemRoute(request: Request): boolean {

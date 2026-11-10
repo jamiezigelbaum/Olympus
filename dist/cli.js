@@ -2928,6 +2928,7 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/archive-import/stop" },
     { method: "POST", path: "/dashboard/privacy/items/find" },
     { method: "POST", path: "/dashboard/privacy/items/set" },
+    { method: "POST", path: "/dashboard/privacy/judge-check" },
     { method: "POST", path: "/dashboard/agents/pairing-code" },
     { method: "POST", path: "/dashboard/agents/keys" },
     { method: "POST", path: "/dashboard/agents/revoke" },
@@ -23350,10 +23351,13 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25) {
-    const rows = this.db.query(`
+  recentDecisions(limit = 25, contentTier) {
+    const capped = Math.max(1, Math.min(limit, 200));
+    const rows = contentTier === undefined ? this.db.query(`
       SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 200)));
+    `).all(capped) : this.db.query(`
+      SELECT * FROM tier_items WHERE content_tier = ? ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(contentTier, capped);
     return rows.map(recordFromRow);
   }
   listClearedOverrideRows(limit = 100) {
@@ -55322,7 +55326,7 @@ function archiveFindingList(kind) {
 function privateAnswerFailure(reason, mapping = PRIVATE_ANSWER_FAILURES) {
   return typeof reason === "string" && Object.prototype.hasOwnProperty.call(mapping, reason) ? mapping[reason] : { message: "Olympus could not answer this.", action: "Try again." };
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES, DASHBOARD_PRIVACY_ITEMS_COPY, JUDGE_REASON_PHRASES, DASHBOARD_JUDGE_CHECK_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -56956,6 +56960,114 @@ var init_vocabulary = __esm(() => {
     evidence_changed: { message: "Items changed before Olympus could finish the answer.", href: "/dashboard?keys", action: "Check setup" },
     eligibility_unavailable: { message: "Olympus could not check whether the items are still available.", href: "/dashboard?keys", action: "Check setup" },
     save_refused: { message: "Olympus could not save the answer.", href: "/dashboard?keys", action: "Check setup" }
+  };
+  DASHBOARD_PRIVACY_ITEMS_COPY = {
+    tab: "Your items",
+    title: "Your items",
+    intro: "Olympus judges each item on its own. If it got one wrong, change it here.",
+    searchLabel: "Search your items",
+    searchPlaceholder: "Search by title, sender or file name",
+    recentHeading: "Recently sorted",
+    filtersLabel: "Show",
+    resultsHeading: "Matching items",
+    loading: "Loading…",
+    empty: "Nothing sorted yet. Items show here once Olympus has read them.",
+    noMatch: "No items match. Try part of a title, a sender or a file name.",
+    apps: "An AI app can ask to make an item Private. Only you, here on this computer, can make one Personal.",
+    changedByYou: "Changed by you",
+    notSorted: "Not sorted yet",
+    moving: "Moving to {tier}",
+    untitled: "Untitled item",
+    close: "Close",
+    previewCaption: "What it says · shown only on this computer",
+    noPreview: "Olympus has not read this item's text yet.",
+    whoCaption: "Who can read this item",
+    personalLine: "Your AI apps and agents can read it.",
+    privateLine: "Only your private model reads it.",
+    judgeChose: "The judge chose {tier}:",
+    judgeMarked: "The judge marked this {tier}.",
+    youChose: "You chose {tier}",
+    justNow: "just now",
+    judgeSaid: "The judge said {tier}.",
+    undo: "Undo",
+    promise: "Your choice changes this one item. It never becomes a rule for {group}, and re-judging leaves it alone.",
+    promiseGroup: "{sender} or your other items",
+    promiseGroupNoSender: "its sender, chat or folder",
+    afterPersonal: "Search and answers in your AI apps now include this item.",
+    afterPrivate: "Your AI apps no longer see this item.",
+    afterNextPass: "Olympus is moving it now; search and answers catch up within a few minutes.",
+    undoGivesBack: "Undo gives it back to the judge.",
+    confirmTitle: "Make this item Personal?",
+    now: "now",
+    after: "after",
+    afterPersonalLine: "Your AI apps and agents can read it and quote it in answers.",
+    confirmOnly: "Only this item changes. Everything else stays as the judge sorted it. You can undo this at any time.",
+    cancel: "Cancel",
+    makePersonal: "Make Personal",
+    toastPersonal: "Made Personal. Your AI apps can now read it.",
+    toastPrivate: "Made Private. Your AI apps no longer see it.",
+    toastJudge: "Back to the judge's label.",
+    failed: "That did not change. Try again.",
+    unreachable: "Olympus is not responding. Try again in a moment.",
+    locked: "Open dashboard controls to see and change your items.",
+    openControls: "Open dashboard controls →",
+    unlockIntro: "Your items need a session opened here, not by an agent or the launch link.",
+    unlock: "Unlock on this computer"
+  };
+  JUDGE_REASON_PHRASES = {
+    health: "it is about health.",
+    therapy: "it is about therapy or mental health.",
+    financial: "it has money details, like amounts or account numbers.",
+    legal: "it is about a legal matter.",
+    identity: "it has identity details, like ID or account numbers.",
+    intimate: "it is intimate.",
+    family: "it is about family.",
+    work: "it is work material.",
+    reference: "it is reference material.",
+    ordinary: "it is everyday material with nothing sensitive in it.",
+    injection: "it held instructions aimed at the judge, so it was kept Private to be safe.",
+    unresolved: "the judge could not decide, so it was kept Private to be safe."
+  };
+  DASHBOARD_JUDGE_CHECK_COPY = {
+    title: "Check the judge",
+    optional: "optional",
+    roundDone: "round done",
+    intro: "{total} of your items: the ones the judge was least sure about, plus a few picked at random. Olympus keeps reading and answering while you do this.",
+    offer: "Answer 10 items to see how often the judge agrees with you.",
+    paused: "You answered {answered} of {total}.",
+    start: "Start",
+    resume: "Continue",
+    putAway: "Put away",
+    position: "Item {position} of {total}",
+    question: "How should this item be treated?",
+    personal: "Personal",
+    personalHint: "AI apps can read it",
+    private: "Private",
+    privateHint: "Only your private model",
+    notSure: "Not sure",
+    notSureHint: "Leave it to the judge",
+    hidden: "The judge's own answer shows after yours, so it doesn't sway you. Your answer settles this one item only. It never becomes a rule for {group}.",
+    hiddenGroup: "{sender} or this chat",
+    hiddenGroupNoSender: "its sender, chat or folder",
+    you: "You:",
+    agreed: "Judge agreed",
+    changed: "Judge said {judge} · changed",
+    notSureRow: "Not sure · judge said {judge}",
+    soFar: "So far the judge agreed with you on {agreed} of {compared}.",
+    tooFew: "That's too few to say how accurate it is.",
+    stop: "Stop for now",
+    result: "The judge agreed with you on {agreed} of {compared}.",
+    resultNone: "You answered Not sure on every item, so there is nothing to compare yet.",
+    rangeLine: "From {compared} answers, it would likely agree with you on {low}% to {high}% of your items.",
+    rangeLabel: "Likely range {low}% to {high}%, on a scale of 0 to 100%",
+    honest: "More answers make the range narrower. The number itself can go down as well as up. Your answers fix those items; they don't change how the judge decides.",
+    summary: "{changed} changed to your answer · {confirmed} confirmed · {notSure} “Not sure” left with the judge",
+    seeThem: "See them in Your items",
+    done: "Done",
+    more: "Check 10 more",
+    nothing: "Nothing to check yet: the judge has not sorted enough items.",
+    failed: "That did not save. Try again.",
+    unreachable: "Olympus is not responding. Try again in a moment."
   };
 });
 
@@ -144434,7 +144546,8 @@ import { Database as Database24 } from "bun:sqlite";
 function createOwnerTierItems(context2 = {}) {
   return {
     find: (input) => findOwnerTierItems(input, context2),
-    set: (input) => setOwnerTierItem(input, context2)
+    set: (input) => setOwnerTierItem(input, context2),
+    counts: () => countOwnerTierItems(context2)
   };
 }
 function ownerTierItemId(identity2) {
@@ -144473,7 +144586,10 @@ function findOwnerTierItems(input, context2 = {}) {
     throw new OperationError("invalid_params", "Give words to search for, or ask for the recently sorted items.");
   if (input.recent && query)
     throw new OperationError("invalid_params", "Search, or list the recently sorted items, not both.");
-  const rows = input.recent ? recentRows(limit * 3, context2) : searchRows(query, limit * 3, context2);
+  if (input.filter !== undefined && (!input.recent || !["personal", "private", "changed"].includes(input.filter))) {
+    throw new OperationError("invalid_params", "filter is personal, private or changed, with the recently sorted items.");
+  }
+  const rows = input.recent ? recentRows(limit * 3, context2, input.filter) : searchRows(query, limit * 3, context2);
   const items = [];
   for (const row of rows) {
     if (items.length >= limit)
@@ -144484,7 +144600,10 @@ function findOwnerTierItems(input, context2 = {}) {
       continue;
     if (input.personalNamesOnly && namesAbovePersonal(state))
       continue;
-    items.push(view3(row, state));
+    const item = view3(row, state);
+    if (input.withPreview && !input.personalNamesOnly)
+      item.preview = previewOf(identity2, context2);
+    items.push(item);
   }
   return { items };
 }
@@ -144539,12 +144658,12 @@ function searchRows(query, limit, context2) {
   }
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
-function recentRows(limit, context2) {
+function recentRows(limit, context2, filter) {
   const decided = new Map;
   for (const ledger of knownTierLedgers(context2)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context2.now, (opened) => opened.recentDecisions(limit), ledger.boundLedgerId);
+      records = withLedgerAt(ledger.path, context2.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record: record4 }) => record4).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined), ledger.boundLedgerId);
     } catch {}
     for (const record4 of records) {
       const key2 = tierLedgerIdentityKey(identityOfRecord2(record4));
@@ -144572,6 +144691,35 @@ function recentRows(limit, context2) {
     }
   }
   return rows;
+}
+function previewOf(identity2, context2) {
+  for (const dbPath of knownStorePaths(context2)) {
+    const text3 = withStore(dbPath, undefined, (db) => db.query(`
+      SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+      ORDER BY c.chunk_index
+      LIMIT 1
+    `).get(identity2.provider, identity2.accountScope, identity2.providerItemId, identity2.providerConversationId ?? "")?.text);
+    const trimmed2 = text3?.trim();
+    if (trimmed2)
+      return trimmed2.length > OWNER_ITEM_PREVIEW_MAX ? `${trimmed2.slice(0, OWNER_ITEM_PREVIEW_MAX).trimEnd()}…` : trimmed2;
+  }
+  return null;
+}
+function countOwnerTierItems(context2 = {}) {
+  const counts = { personal: 0, private: 0, changed: 0 };
+  for (const ledger of knownTierLedgers(context2)) {
+    try {
+      withLedgerAt(ledger.path, context2.now, (opened) => {
+        const byTier = opened.counts().byContentTier;
+        counts.personal += byTier.private;
+        counts.private += byTier.secure;
+        counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").length;
+      }, ledger.boundLedgerId);
+    } catch {}
+  }
+  return counts;
 }
 function identityOfRow2(row) {
   return {
@@ -144648,6 +144796,24 @@ function view3(row, state) {
     decided_at: record4?.decidedAt ?? null
   };
 }
+function getOwnerTierItem(itemId, context2 = {}, options = {}) {
+  const identity2 = parseOwnerTierItemId(itemId);
+  let located;
+  try {
+    located = locateTierItemByIdentity(identity2, context2);
+  } catch {
+    return;
+  }
+  if (located.length === 0)
+    return;
+  const state = readLocatedState(located, context2);
+  if (state.secret)
+    return;
+  const item = view3(storedRowFor(identity2, located, context2), state);
+  if (options.withPreview)
+    item.preview = previewOf(identity2, context2);
+  return item;
+}
 function setOwnerTierItem(input, context2 = {}) {
   const { choice } = input;
   if (choice !== "personal" && choice !== "private" && choice !== "judge") {
@@ -144722,13 +144888,178 @@ function storedRowFor(identity2, located, context2) {
     locator_uri: null
   };
 }
-var OWNER_ITEM_DEFAULT_LIMIT = 20, OWNER_ITEM_MAX_LIMIT = 50, OWNER_ITEM_QUERY_MAX = 200, ITEM_ID_PREFIX = "oti_";
+var OWNER_ITEM_DEFAULT_LIMIT = 20, OWNER_ITEM_MAX_LIMIT = 50, OWNER_ITEM_QUERY_MAX = 200, OWNER_ITEM_PREVIEW_MAX = 600, ITEM_ID_PREFIX = "oti_";
 var init_tier_owner_items = __esm(() => {
   init_operation_error();
   init_tier_cli();
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rules();
+});
+
+// src/workers/classification/judge-check.ts
+import { existsSync as existsSync90, mkdirSync as mkdirSync56, readFileSync as readFileSync77 } from "node:fs";
+import { dirname as dirname91 } from "node:path";
+function judgeCheckPath(env = process.env) {
+  return env[JUDGE_CHECK_PATH_ENV]?.trim() || defaultOwnerConfigPath("judge-check.json", env);
+}
+function wilsonInterval(agreed, compared, z = 1.96) {
+  if (compared <= 0)
+    return { low: 0, high: 1 };
+  const p = agreed / compared;
+  const z2 = z * z;
+  const denominator = 1 + z2 / compared;
+  const centre = (p + z2 / (2 * compared)) / denominator;
+  const half = z * Math.sqrt(p * (1 - p) / compared + z2 / (4 * compared * compared)) / denominator;
+  return { low: Math.max(0, centre - half), high: Math.min(1, centre + half) };
+}
+function judgeConfidence(reason) {
+  if (!reason)
+    return 1;
+  const last = reason.slice(reason.lastIndexOf(":") + 1);
+  const value2 = Number(last);
+  return Number.isFinite(value2) && last.trim() !== "" ? value2 : 1;
+}
+function judged(item) {
+  return (item.tier === "Personal" || item.tier === "Private") && !item.owner_set && item.decided_by !== "override" && item.decided_by !== "owner_rule" && item.moving_to === undefined;
+}
+function createJudgeCheck(options) {
+  const path = options.path ?? judgeCheckPath(options.env);
+  const random = options.random ?? Math.random;
+  const read = () => {
+    if (!existsSync90(path))
+      return { v: 1 };
+    try {
+      const parsed = JSON.parse(readFileSync77(path, "utf8"));
+      return parsed && parsed.v === 1 ? parsed : { v: 1 };
+    } catch {
+      return { v: 1 };
+    }
+  };
+  const write = (state) => {
+    mkdirSync56(dirname91(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify(state)}
+`);
+  };
+  const shown = (itemId) => {
+    const item = options.get(itemId);
+    return {
+      item_id: itemId,
+      source: item?.source ?? "unknown",
+      family: item?.family ?? "unknown",
+      title: item?.title ?? null,
+      sender: item?.sender ?? null,
+      location: item?.location ?? null,
+      preview: item?.preview ?? null
+    };
+  };
+  const viewOf = (state) => {
+    const round = state.round;
+    if (!round)
+      return { state: "none", put_away: state.put_away === true, total: 0, answered: [], compared: 0, agreed: 0, not_sure: 0, changed: 0 };
+    const answered = round.items.filter((item) => item.answer !== undefined).map((item) => ({
+      ...shown(item.item_id),
+      answer: item.answer,
+      judge: item.judge,
+      changed: item.changed === true
+    }));
+    const compared = answered.filter((item) => item.answer !== "not_sure");
+    const agreed = compared.filter((item) => item.answer === item.judge).length;
+    const next = round.items.findIndex((item) => item.answer === undefined);
+    const done = next < 0;
+    return {
+      state: done ? "done" : "active",
+      put_away: state.put_away === true,
+      total: round.items.length,
+      ...done ? {} : { current: shown(round.items[next].item_id), position: next + 1 },
+      answered,
+      compared: compared.length,
+      agreed,
+      not_sure: answered.length - compared.length,
+      changed: answered.filter((item) => item.changed).length,
+      ...done && compared.length > 0 ? { range: wilsonInterval(agreed, compared.length) } : {}
+    };
+  };
+  const sample = (seen) => {
+    const pool = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL }).items.filter((item) => judged(item) && !seen.has(item.item_id));
+    const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
+    const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
+    const rest = byDoubt.slice(doubtful.length);
+    const picked = [...doubtful];
+    while (picked.length < JUDGE_CHECK_ROUND_SIZE && rest.length > 0) {
+      picked.push(rest.splice(Math.floor(random() * rest.length), 1)[0]);
+    }
+    for (let index = picked.length - 1;index > 0; index -= 1) {
+      const other = Math.floor(random() * (index + 1));
+      [picked[index], picked[other]] = [picked[other], picked[index]];
+    }
+    return picked.map((item) => ({ item_id: item.item_id, judge: item.tier }));
+  };
+  return {
+    status: () => viewOf(read()),
+    start() {
+      const state = read();
+      if (state.round && viewOf(state).state === "active") {
+        state.put_away = false;
+        write(state);
+        return viewOf(state);
+      }
+      const seen = [...state.seen ?? [], ...state.round?.items.map((item) => item.item_id) ?? []].slice(-JUDGE_CHECK_SEEN_MAX);
+      const next = {
+        v: 1,
+        round: { started_at: (options.now?.() ?? new Date).toISOString(), items: sample(new Set(seen)) },
+        put_away: false,
+        seen
+      };
+      write(next);
+      return viewOf(next);
+    },
+    answer(itemId, answer) {
+      if (answer !== "Personal" && answer !== "Private" && answer !== "not_sure") {
+        throw new JudgeCheckError("invalid_answer", "The answer is Personal, Private or Not sure.");
+      }
+      const state = read();
+      const round = state.round;
+      if (!round)
+        throw new JudgeCheckError("no_round", "There is no round to answer. Start one first.");
+      const current2 = round.items.find((item) => item.answer === undefined);
+      if (!current2 || current2.item_id !== itemId) {
+        throw new JudgeCheckError("not_current", "That is not the item waiting for an answer.");
+      }
+      current2.answer = answer;
+      if (answer !== "not_sure" && answer !== current2.judge) {
+        const choice = answer === "Personal" ? "personal" : "private";
+        const result = options.items.set({ itemId, choice, allowLower: true });
+        current2.changed = result.ok;
+      }
+      write(state);
+      return viewOf(state);
+    },
+    putAway() {
+      const state = read();
+      state.put_away = true;
+      write(state);
+      return viewOf(state);
+    },
+    resume() {
+      const state = read();
+      state.put_away = false;
+      write(state);
+      return viewOf(state);
+    }
+  };
+}
+var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_PATH_ENV = "OLYMPUS_JUDGE_CHECK_PATH", JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
+var init_judge_check = __esm(() => {
+  init_atomic_file();
+  init_owner_config_read();
+  JudgeCheckError = class JudgeCheckError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.code = code;
+    }
+  };
 });
 
 // src/workers/classification/sniffer-decision-mass.ts
@@ -145352,8 +145683,8 @@ var init_local_model_discovery = __esm(() => {
 });
 
 // src/workers/messaging-spool-wake.ts
-import { existsSync as existsSync90, watch } from "node:fs";
-import { dirname as dirname91, resolve as resolve25 } from "node:path";
+import { existsSync as existsSync91, watch } from "node:fs";
+import { dirname as dirname92, resolve as resolve25 } from "node:path";
 function createSpoolChangeSubscription(spoolDir, options = {}) {
   const target = resolve25(spoolDir);
   return (wake) => {
@@ -145384,9 +145715,9 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
       for (const watcher of watchers)
         watcher.close();
       watchers = [];
-      let parent = dirname91(target);
-      while (!existsSync90(parent) && dirname91(parent) !== parent)
-        parent = dirname91(parent);
+      let parent = dirname92(target);
+      while (!existsSync91(parent) && dirname92(parent) !== parent)
+        parent = dirname92(parent);
       const next = target.slice(parent.length + (parent === "/" ? 0 : 1)).split("/")[0];
       try {
         const watcher = watchDir(parent, { persistent: false }, (_event, name) => {
@@ -145397,7 +145728,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
         });
         watcher.on("error", retry);
         watchers.push(watcher);
-        if (existsSync90(target)) {
+        if (existsSync91(target)) {
           const spool = watchDir(target, { persistent: false }, (_event, name) => {
             if (name == null || name.toString().endsWith(".jsonl"))
               wake();
@@ -146848,7 +147179,7 @@ var WORKER_SHUTDOWN_DEADLINE_MS = 15000;
 var init_worker_shutdown = () => {};
 
 // src/core/update-check.ts
-import { readFileSync as readFileSync77 } from "node:fs";
+import { readFileSync as readFileSync78 } from "node:fs";
 import { join as join121 } from "node:path";
 function installerForPlatform(platform2) {
   if (platform2 === "darwin")
@@ -146903,7 +147234,7 @@ function newerVersion(remote, running) {
 }
 function runningOlympusVersion() {
   try {
-    const value2 = JSON.parse(readFileSync77(join121(olympusPackageRoot(), "package.json"), "utf8")).version;
+    const value2 = JSON.parse(readFileSync78(join121(olympusPackageRoot(), "package.json"), "utf8")).version;
     return typeof value2 === "string" ? value2 : "unknown";
   } catch {
     return "unknown";
@@ -147450,10 +147781,10 @@ var init_model_setup = __esm(() => {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes24 } from "node:crypto";
-import { chmodSync as chmodSync35, lstatSync as lstatSync47, mkdirSync as mkdirSync56, readFileSync as readFileSync78 } from "node:fs";
-import { dirname as dirname92, join as join122 } from "node:path";
+import { chmodSync as chmodSync35, lstatSync as lstatSync47, mkdirSync as mkdirSync57, readFileSync as readFileSync79 } from "node:fs";
+import { dirname as dirname93, join as join122 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
-  return join122(dirname92(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
+  return join122(dirname93(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
   return randomBytes24(32).toString("base64url");
@@ -147475,7 +147806,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text3 = readFileSync78(path, "utf8").trim();
+      const text3 = readFileSync79(path, "utf8").trim();
       if (SECRET_PATTERN.test(text3))
         return { secret: text3, source: "file", path };
       existing = "invalid";
@@ -147485,7 +147816,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   }
   const secret2 = newDashboardSessionSecret();
   try {
-    mkdirSync56(dirname92(path), { recursive: true, mode: 448 });
+    mkdirSync57(dirname93(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${secret2}
 `);
     chmodSync35(path, 384);
@@ -148083,16 +148414,16 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync91,
-  mkdirSync as mkdirSync57,
-  readFileSync as readFileSync79,
+  existsSync as existsSync92,
+  mkdirSync as mkdirSync58,
+  readFileSync as readFileSync80,
   renameSync as renameSync20,
   rmSync as rmSync36,
   writeFileSync as writeFileSync23
 } from "node:fs";
 import { randomUUID as randomUUID32 } from "node:crypto";
 import { homedir as homedir40 } from "node:os";
-import { dirname as dirname93, isAbsolute as isAbsolute35, join as join123 } from "node:path";
+import { dirname as dirname94, isAbsolute as isAbsolute35, join as join123 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir40(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
   const cacheRoot = configuredRoot && isAbsolute35(configuredRoot) ? configuredRoot : join123(homeDir, ".cache");
@@ -148266,11 +148597,11 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync91(path))
+  if (!existsSync92(path))
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync79(path, "utf8"));
+    payload2 = JSON.parse(readFileSync80(path, "utf8"));
   } catch {
     return;
   }
@@ -148302,7 +148633,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID32()}.tmp`;
   try {
-    mkdirSync57(dirname93(path), { recursive: true, mode: 448 });
+    mkdirSync58(dirname94(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync23(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -149099,7 +149430,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 
 // src/workers/email-source/dashboard-messaging-service.ts
 import { spawn as spawn12 } from "node:child_process";
-import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readFileSync as readFileSync80 } from "node:fs";
+import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readFileSync as readFileSync81 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename19, join as join124 } from "node:path";
 function sourceOf(value2) {
@@ -149146,7 +149477,7 @@ function readQr(path) {
     const stat6 = fstatSync8(fd2);
     if (!stat6.isFile() || stat6.size > 1024 * 1024 || (stat6.mode & 63) !== 0 || typeof process.getuid === "function" && stat6.uid !== process.getuid())
       throw new Error("Invalid QR artifact.");
-    const bytes = readFileSync80(fd2);
+    const bytes = readFileSync81(fd2);
     if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
       throw new Error("Invalid QR artifact.");
     return `data:image/png;base64,${bytes.toString("base64")}`;
@@ -149711,7 +150042,7 @@ var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes27 } from "node:crypto";
-import { existsSync as existsSync92, mkdirSync as mkdirSync58, readdirSync as readdirSync27, realpathSync as realpathSync21, rmSync as rmSync37, statSync as statSync39, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { existsSync as existsSync93, mkdirSync as mkdirSync59, readdirSync as readdirSync27, realpathSync as realpathSync21, rmSync as rmSync37, statSync as statSync39, statfsSync as statfsSync4, utimesSync } from "node:fs";
 import { open as open5 } from "node:fs/promises";
 import { sep as sep20, join as join125, resolve as resolve26 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -149762,7 +150093,7 @@ function createArchiveUploads(options) {
   const stagingRoot = () => {
     if (rootPath)
       return rootPath;
-    mkdirSync58(options.root, { recursive: true, mode: 448 });
+    mkdirSync59(options.root, { recursive: true, mode: 448 });
     rootPath = realpathSync21.native(options.root);
     return rootPath;
   };
@@ -149841,7 +150172,7 @@ function createArchiveUploads(options) {
     try {
       const parent = join125(found.files, ...segments.slice(0, -1));
       try {
-        mkdirSync58(parent, { recursive: true, mode: 448 });
+        mkdirSync59(parent, { recursive: true, mode: 448 });
         if (!contained(realpathSync21.native(found.files), realpathSync21.native(parent)))
           throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       } catch (error2) {
@@ -149924,7 +150255,7 @@ function createArchiveUploads(options) {
         await handle.close().catch(() => {
           return;
         });
-      if (created && existsSync92(target))
+      if (created && existsSync93(target))
         rmSync37(target, { force: true });
       found.paths.delete(key2);
       found.partials.delete(key2);
@@ -149943,7 +150274,7 @@ function createArchiveUploads(options) {
       const root = stagingRoot();
       const uploadId = randomBytes27(16).toString("hex");
       const dir = join125(root, uploadId);
-      mkdirSync58(join125(dir, "files"), { recursive: true, mode: 448 });
+      mkdirSync59(join125(dir, "files"), { recursive: true, mode: 448 });
       sessions.set(uploadId, {
         id: uploadId,
         dir,
@@ -149973,7 +150304,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID2.test(uploadId))
         return false;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync92(options.root) ? join125(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync93(options.root) ? join125(stagingRoot(), uploadId) : undefined);
       if (!dir)
         return false;
       if (keep?.(dir)) {
@@ -150020,14 +150351,14 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID2.test(uploadId))
         return;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync92(options.root) ? join125(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync93(options.root) ? join125(stagingRoot(), uploadId) : undefined);
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
       rmSync37(dir, { recursive: true, force: true });
     },
     sweep(needed) {
-      if (!rootPath && !existsSync92(options.root))
+      if (!rootPath && !existsSync93(options.root))
         return;
       let root;
       try {
@@ -150106,7 +150437,7 @@ var init_staging = __esm(() => {
 });
 
 // src/core/messaging-account-move.ts
-import { readFileSync as readFileSync81 } from "node:fs";
+import { readFileSync as readFileSync82 } from "node:fs";
 import { homedir as homedir41 } from "node:os";
 import { join as join126, resolve as resolve27 } from "node:path";
 function namesDefaultLegacySession(source, value2, env) {
@@ -150225,7 +150556,7 @@ function repointGrant(env, source, sessionEnv) {
   const path = captureGrantPathFromEnv(source, env);
   let before;
   try {
-    before = readFileSync81(path, "utf8");
+    before = readFileSync82(path, "utf8");
   } catch {
     return false;
   }
@@ -150239,7 +150570,7 @@ function repointGrant(env, source, sessionEnv) {
   const producerEnv = { ...read.grant.producer.env ?? {} };
   delete producerEnv[sessionEnv];
   const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
-  if (readFileSync81(path, "utf8") !== before)
+  if (readFileSync82(path, "utf8") !== before)
     return false;
   writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
 `);
@@ -150267,7 +150598,7 @@ import {
   stat as stat6,
   unlink
 } from "node:fs/promises";
-import { dirname as dirname94 } from "node:path";
+import { dirname as dirname95 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -150381,7 +150712,7 @@ async function appendSourceAnswerLatencyLine(path, record6, options = {}) {
   const line2 = `${JSON.stringify(record6)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir5(dirname94(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname95(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line2), maxBytes);
@@ -150587,7 +150918,7 @@ var init_locator_result_projector2 = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash84 } from "node:crypto";
-import { readFileSync as readFileSync82 } from "node:fs";
+import { readFileSync as readFileSync83 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir42 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -150754,7 +151085,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync82(trustPath, "utf8");
+        this.caPem = readFileSync83(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -150857,7 +151188,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url2 = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url2, init, timeoutMs, readFileSync82(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url2, init, timeoutMs, readFileSync83(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url2, init, timeoutMs);
 }
@@ -162585,6 +162916,7 @@ var init_host_page = __esm(() => {
     connect: "connect",
     agents: "agents",
     privateAnswers: "private-answers",
+    privacyItems: "privacy-items",
     connector: "connector",
     help: "help",
     settings: "settings"
@@ -163598,6 +163930,237 @@ var LOCAL_PAGE_CSS = `
 }
 `;
 
+// src/workers/dashboard/source-logos.ts
+function sourceLogoTile(sourceId, status) {
+  const brand = BRANDS[sourceId];
+  const glyph = GLYPHS[sourceId];
+  const letter = LETTERS[sourceId];
+  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml2(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
+  const kind = brand ? "brand" : glyph ? "glyph" : "letter";
+  return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
+}
+function sourceLogoTilesByProvider() {
+  const tiles = {};
+  for (const id of [...Object.keys(BRANDS), ...Object.keys(GLYPHS), ...Object.keys(LETTERS)]) {
+    const provider = id.split(".")[0];
+    if (!(provider in tiles))
+      tiles[provider] = sourceLogoTile(id);
+  }
+  return tiles;
+}
+var BRANDS, GLYPHS, LETTERS, SOURCE_LOGO_CSS = `
+.logotile { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: #fff; }
+.logotile svg { width: 22px; height: 22px; }
+.logotile.glyph { background: color-mix(in srgb, var(--t2, #888) 22%, transparent); color: var(--t1, #eee); }
+.logotile.letter { background: transparent; }
+.logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
+.logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
+.logodot.ok { background: #3fb950; }
+.logodot.attention { background: #e3a03a; }
+.logodot.off { background: #8b8b8b; }
+`;
+var init_source_logos = __esm(() => {
+  init_components();
+  BRANDS = {
+    "gmail.email": { color: "#EA4335", path: "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" },
+    "google_drive.docs": { color: "#4285F4", path: "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" },
+    "dropbox.files": { color: "#0061FF", path: "M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" },
+    "x.bookmarks": { color: "#000000", path: "M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" },
+    "telegram.messages": { color: "#26A5E4", path: "M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" },
+    "whatsapp.personal.messages": { color: "#25D366", path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" },
+    "evernote.notes": { color: "#00A82D", path: "M8.222 5.393c0 .239-.02.637-.256.895-.257.24-.652.259-.888.259H4.552c-.73 0-1.165 0-1.46.04-.159.02-.356.1-.455.14-.04.019-.04 0-.02-.02L8.38.796c.02-.02.04-.02.02.02-.04.099-.118.298-.138.457-.04.298-.04.736-.04 1.472v2.647zm5.348 17.869c-.67-.438-1.026-1.015-1.164-1.373a2.924 2.924 0 01-.217-1.095 3.007 3.007 0 013-3.004c.493 0 .888.398.888.895a.88.88 0 01-.454.776c-.099.06-.237.1-.336.12-.098.02-.473.06-.65.218-.198.16-.356.418-.356.697 0 .298.118.577.316.776.355.358.829.557 1.342.557a2.436 2.436 0 002.427-2.447c0-1.214-.809-2.29-1.875-2.766-.158-.08-.414-.14-.651-.2a8.04 8.04 0 00-.592-.1c-.829-.1-2.901-.755-3.04-2.605 0 0-.611 2.785-1.835 3.54-.118.06-.276.12-.454.16-.177.04-.374.06-.434.06-1.993.12-4.105-.517-5.565-2.03 0 0-.987-.815-1.5-3.103-.118-.558-.355-1.553-.493-2.488-.06-.338-.08-.597-.099-.836 0-.975.592-1.631 1.342-1.73h4.026c.69 0 1.086-.18 1.342-.42.336-.317.415-.775.415-1.312V1.354C9.05.617 9.703 0 10.669 0h.474c.197 0 .434.02.651.04.158.02.296.06.533.12 1.204.298 1.46 1.532 1.46 1.532s2.27.398 3.415.597c1.085.199 3.77.378 4.282 3.104 1.204 6.487.474 12.775.415 12.775-.849 6.129-5.901 5.83-5.901 5.83a4.1 4.1 0 01-2.428-.736zm4.54-13.034c-.652-.06-1.204.2-1.402.697-.04.1-.079.219-.059.278.02.06.06.08.099.1.237.12.631.179 1.204.239.572.06.967.1 1.223.06.04 0 .08-.02.119-.08.04-.06.02-.18.02-.28-.06-.536-.553-.934-1.204-1.014z" }
+  };
+  GLYPHS = {
+    "local.files": "M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2h8A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
+    "archive.imports": "M3 7l9-4 9 4v10l-9 4-9-4zm9 2.2L5.4 6.6 12 9.4l6.6-2.8zM5 8.6v7.1l6 2.7v-7.1zm14 0-6 2.7v7.1l6-2.7z"
+  };
+  LETTERS = {
+    "readwise.library": { letter: "R", color: "#111111" }
+  };
+});
+
+// src/workers/dashboard/pages/judge-check.ts
+function judgeCheckClientScript(input) {
+  const config2 = {
+    csrfToken: input.csrfToken,
+    path: DASHBOARD_JUDGE_CHECK_PATH,
+    itemsHref: dashboardLocalPageHref("privacyItems", input.token),
+    logos: sourceLogoTilesByProvider(),
+    copy: DASHBOARD_JUDGE_CHECK_COPY
+  };
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var J = config.copy;
+  var mount = document.querySelector('[data-judge-check]');
+  if (!mount) return;
+  var round = null;
+  var message = '';
+  function fill(template, values) { return String(template).replace(/\\{(\\w+)\\}/g, function (m, key) { return values[key] === undefined ? m : values[key]; }); }
+  function esc(value) { return String(value).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function logo(item, small) {
+    var tile = config.logos[item.source] || '<span class="logotile letter" aria-hidden="true"><span class="logoletter" style="background:#5b5bd6">' + esc((item.source || '?').charAt(0).toUpperCase()) + '</span></span>';
+    return small ? tile.replace('class="logotile', 'class="logotile sm') : tile;
+  }
+  function pill(tier) { return '<span class="pipill ' + esc(tier) + '">' + esc(tier) + '</span>'; }
+  function title(item) { return item.title || (item.location ? String(item.location).split('/').pop() : '') || item.sender || ''; }
+  function pct(value) { return Math.round(value * 100); }
+
+  async function send(body) {
+    var response;
+    try {
+      response = await fetch(config.path, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (error) { message = J.unreachable; render(); return; }
+    var result = {};
+    try { result = (await response.json()) || {}; } catch (error) { result = {}; }
+    if (response.ok && result.ok === true && result.round) { round = result.round; message = ''; }
+    else message = (result.error && result.error.message) || J.failed;
+    render();
+  }
+
+  function answeredRow(item) {
+    var you = item.answer === 'not_sure' ? '' : '<span>' + esc(J.you) + ' ' + pill(item.answer) + '</span>';
+    var verdict = item.answer === 'not_sure' ? fill(J.notSureRow, { judge: item.judge })
+      : item.answer === item.judge ? J.agreed : fill(J.changed, { judge: item.judge });
+    return '<div class="jcdone" data-jc-answered="' + esc(item.item_id) + '">' + logo(item, true) + '<span class="grow">' + esc(title(item)) + '</span>' + you + '<span class="jcverdict">' + esc(verdict) + '</span></div>';
+  }
+
+  function head(state) {
+    return '<div class="jchead" data-jc-head><div><b class="jctitle">' + esc(J.title) + '</b> <span class="jcopt">· ' + esc(state) + '</span>'
+      + (round && round.state === 'active' ? '<p class="jcintro">' + esc(fill(J.intro, { total: round.total })) + '</p>' : '') + '</div>'
+      + '<button type="button" class="jcx" data-jc-act="put_away" aria-label="' + esc(J.putAway) + '">✕</button></div>';
+  }
+
+  function render() {
+    var msg = '<p class="jcmsg" data-jc-msg role="status">' + esc(message) + '</p>';
+    if (!round) { mount.innerHTML = message ? '<div class="jccard">' + msg + '</div>' : ''; return; }
+    var html = '';
+    if (round.put_away || round.state === 'none') {
+      var paused = round.state === 'active';
+      html = '<div class="jccard jcline" data-jc-offer><p><b class="jctitle">' + esc(J.title) + '</b> <span class="jcopt">· ' + esc(J.optional) + '</span> · '
+        + esc(paused ? fill(J.paused, { answered: round.answered.length, total: round.total }) : J.offer) + '</p>'
+        + '<button type="button" class="btn" data-jc-act="' + (paused ? 'resume' : 'start') + '">' + esc(paused ? J.resume : J.start) + '</button></div>';
+      mount.innerHTML = html + (message ? '<div class="jccard">' + msg + '</div>' : '');
+      return;
+    }
+    if (round.total === 0) {
+      mount.innerHTML = '<div class="jccard">' + head(J.optional) + '<p class="jcintro" data-jc-nothing>' + esc(J.nothing) + '</p>' + msg + '</div>';
+      return;
+    }
+    if (round.state === 'active') {
+      var item = round.current;
+      var group = item.sender ? fill(J.hiddenGroup, { sender: item.sender }) : J.hiddenGroupNoSender;
+      html = '<div class="jccard" data-jc-round>' + head(J.optional)
+        + '<div class="jcitem" data-jc-item="' + esc(item.item_id) + '"><span class="jcpos" data-jc-position>' + esc(fill(J.position, { position: round.position, total: round.total })) + '</span>'
+        + '<div class="jcwho">' + logo(item) + '<span><span class="jcname">' + esc(title(item)) + '</span><span class="jcmeta">' + esc(item.sender && title(item) !== item.sender ? item.sender : '') + '</span></span></div>'
+        + (item.preview ? '<div class="jcprev" data-jc-preview>' + esc(item.preview) + '</div>' : '')
+        + '<p class="jcq">' + esc(J.question) + '</p>'
+        + '<div class="jcthree" data-jc-answers>'
+        + '<button type="button" class="btn" data-jc-answer="Personal">' + esc(J.personal) + '<small>' + esc(J.personalHint) + '</small></button>'
+        + '<button type="button" class="btn" data-jc-answer="Private">' + esc(J.private) + '<small>' + esc(J.privateHint) + '</small></button>'
+        + '<button type="button" class="btn" data-jc-answer="not_sure">' + esc(J.notSure) + '<small>' + esc(J.notSureHint) + '</small></button></div>'
+        + '<p class="jchidden">' + esc(fill(J.hidden, { group: group })) + '</p></div>'
+        + (round.answered.length ? '<div data-jc-answered-list style="margin-top:12px">' + round.answered.map(answeredRow).join('') + '</div>' : '')
+        + '<div class="jcsofar"><p data-jc-sofar>' + (round.compared ? fill(esc(J.soFar), { agreed: '<b>' + round.agreed, compared: round.compared + '</b>' }) + ' ' + esc(J.tooFew) : '') + '</p>'
+        + '<button type="button" class="btn" data-jc-act="put_away">' + esc(J.stop) + '</button></div>' + msg + '</div>';
+      mount.innerHTML = html;
+      return;
+    }
+    var result = round.compared ? esc(fill(J.result, { agreed: round.agreed, compared: round.compared })) : esc(J.resultNone);
+    var range = '';
+    if (round.range) {
+      var low = pct(round.range.low), high = pct(round.range.high), mark = round.compared ? pct(round.agreed / round.compared) : 0;
+      range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.compared, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
+        + '<div data-jc-range role="img" aria-label="' + esc(fill(J.rangeLabel, { low: low, high: high })) + '"><div class="jcscale"><i style="left:' + low + '%;width:' + (high - low) + '%"></i><s style="left:' + mark + '%"></s></div>'
+        + '<div class="jcticks"><span>0%</span><span>50%</span><span>100%</span></div></div>';
+    }
+    var changed = round.answered.filter(function (answered) { return answered.changed; });
+    var confirmed = round.answered.filter(function (answered) { return answered.answer === answered.judge; }).length;
+    html = '<div class="jccard" data-jc-result>' + head(J.roundDone)
+      + '<p class="jcresult" data-jc-count>' + result + '</p>' + range
+      + '<p class="jchonest">' + esc(J.honest) + '</p>'
+      + '<div style="margin-top:12px" data-jc-fixed>' + changed.map(answeredRow).join('')
+      + '<div class="jcdone jcsum"><span class="grow">' + esc(fill(J.summary, { changed: changed.length, confirmed: confirmed, notSure: round.not_sure })) + '</span><a href="' + esc(config.itemsHref) + '">' + esc(J.seeThem) + '</a></div></div>'
+      + '<div class="jcnext"><button type="button" class="btn" data-jc-act="put_away">' + esc(J.done) + '</button><button type="button" class="btn primary" data-jc-act="start">' + esc(J.more) + '</button></div>' + msg + '</div>';
+    mount.innerHTML = html;
+  }
+
+  mount.addEventListener('click', function (event) {
+    var target = event.target && event.target.closest ? event.target : null;
+    if (!target) return;
+    var answer = target.closest('[data-jc-answer]');
+    if (answer && round && round.current) {
+      var buttons = mount.querySelectorAll('[data-jc-answer]');
+      for (var i = 0; i < buttons.length; i += 1) buttons[i].disabled = true;
+      send({ action: 'answer', item_id: round.current.item_id, answer: answer.getAttribute('data-jc-answer') });
+      return;
+    }
+    var act = target.closest('[data-jc-act]');
+    if (act) send({ action: act.getAttribute('data-jc-act') });
+  });
+  send({ action: 'status' });
+})();`;
+}
+var DASHBOARD_JUDGE_CHECK_PATH = "/dashboard/privacy/judge-check", JUDGE_CHECK_MOUNT = '<div class="jc" data-judge-check aria-live="polite"></div>', JUDGE_CHECK_CSS = `
+.jc:empty { display: none; }
+.jc { margin: 0 0 14px; }
+.jc .jccard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+.jc .jchead { display: flex; align-items: flex-start; gap: 12px; }
+.jc .jchead > div { flex: 1; min-width: 0; }
+.jc .jctitle { font-size: var(--fs-row); color: var(--t1); }
+.jc .jcopt { color: var(--t3); }
+.jc .jcintro { margin: 4px 0 0; color: var(--t2); font-size: var(--fs-body); }
+.jc .jcx { flex: none; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; color: var(--t3); font-size: 18px; border: 0; background: none; cursor: pointer; }
+.jc .jcx:focus-visible { outline: 2px solid var(--link); }
+.jc .jcline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.jc .jcline p { flex: 1; min-width: 12em; margin: 0; color: var(--t2); font-size: var(--fs-body); }
+.jc .jcitem { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); min-width: 0; }
+.jc .jcpos { color: var(--t3); font-size: 13px; }
+.jc .jcwho { display: flex; gap: 12px; align-items: center; margin-top: 8px; min-width: 0; }
+.jc .jcwho > span:last-child { min-width: 0; }
+.jc .jcname { display: block; color: var(--t1); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jc .jcmeta { display: block; color: var(--t3); font-size: var(--fs-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jc .jcprev { margin-top: 10px; background: var(--bg); border: 1px solid var(--line2); border-radius: 8px; padding: 11px 13px; color: var(--t2); font-size: var(--fs-body); line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 12em; overflow: auto; }
+.jc .jcq { margin: 12px 0 0; color: var(--t1); font-weight: 600; }
+.jc .jcthree { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.jc .jcthree .btn { padding: 9px 8px; text-align: center; white-space: normal; }
+.jc .jcthree small { display: block; color: var(--t3); font-weight: 400; font-size: 12.5px; margin-top: 2px; }
+.jc .jchidden { margin: 10px 0 0; color: var(--t3); font-size: 13px; }
+.jc .jcdone { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line2); color: var(--t2); font-size: var(--fs-body); min-width: 0; flex-wrap: wrap; }
+.jc .jcdone .grow { flex: 1; min-width: 8em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jc .jcverdict { color: var(--t3); }
+.jc .jcsofar { display: flex; gap: 12px; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line2); flex-wrap: wrap; }
+.jc .jcsofar p { flex: 1; min-width: 12em; margin: 0; color: var(--t2); font-size: var(--fs-body); }
+.jc .jcsofar b, .jc .jcrange b { color: var(--t1); }
+.jc .jcresult { margin: 10px 0 0; font-size: 20px; font-weight: 600; color: var(--t1); }
+.jc .jcrange { margin: 6px 0 0; color: var(--t2); }
+.jc .jcscale { position: relative; height: 8px; border-radius: 4px; background: var(--panel2); border: 1px solid var(--line2); margin: 14px 0 4px; }
+.jc .jcscale > i { position: absolute; top: -1px; bottom: -1px; border-radius: 4px; background: color-mix(in srgb, var(--link) 55%, transparent); border: 1px solid var(--link); }
+.jc .jcscale > s { position: absolute; top: -5px; width: 2px; height: 18px; background: var(--t1); }
+.jc .jcticks { display: flex; justify-content: space-between; color: var(--t4); font-size: 12px; }
+.jc .jchonest { margin: 14px 0 0; color: var(--t2); font-size: var(--fs-body); }
+.jc .jcsum { color: var(--t3); }
+.jc .jcsum a { color: var(--link); }
+.jc .jcnext { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }
+.jc .jcmsg { margin: 10px 0 0; color: var(--bad); font-size: var(--fs-body); }
+.jc .jcmsg:empty { display: none; }
+.jc .pipill { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.jc .pipill.Personal { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+.jc .pipill.Private { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.jc .logotile.sm { width: 28px; height: 28px; border-radius: 7px; }
+.jc .logotile.sm svg { width: 17px; height: 17px; }
+@media (max-width: 719px) { .jc .jcthree small { display: none; } }
+`;
+var init_judge_check2 = __esm(() => {
+  init_components();
+  init_host_page();
+  init_source_logos();
+  init_vocabulary();
+});
+
 // src/workers/dashboard/pages/private-answers.ts
 function renderDashboardPrivateAnswersPage(options) {
   const basePath = options?.basePath;
@@ -163608,12 +164171,12 @@ function renderDashboardPrivateAnswersPage(options) {
     nav: dashboardTopNav({ active: "privacy", unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...readToken(basePath) ? { token: readToken(basePath) } : {} }),
     meta: "",
     body: dashboardPrivacyTabs("questions", readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS, SOURCE_LOGO_CSS, JUDGE_CHECK_CSS]
   });
 }
 function dashboardPrivacyTabs(active, token) {
   const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>` : `<a class="ptab" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>`;
-  return `<nav class="ptabs" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + "</nav>";
+  return `<nav class="ptabs" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("items", dashboardLocalPageHref("privacyItems", token), DASHBOARD_PRIVACY_ITEMS_COPY.tab) + "</nav>";
 }
 function readToken(basePath) {
   if (!basePath)
@@ -163639,7 +164202,7 @@ function renderPrivateAnswersBody(options) {
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
     ready = true;
-    script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
+    script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, ...readToken(options?.basePath) ? { token: readToken(options?.basePath) } : {} })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date) : "";
   return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}</div>${script2}`;
@@ -163690,7 +164253,7 @@ function renderFailureNotice(reason) {
 }
 function renderWaiting(waiting, now) {
   const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
-  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>${waiting ? JUDGE_CHECK_MOUNT : ""}`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
@@ -164253,46 +164816,8 @@ var init_private_answers = __esm(() => {
   init_top_nav();
   init_outside_help();
   init_vocabulary();
-});
-
-// src/workers/dashboard/source-logos.ts
-function sourceLogoTile(sourceId, status) {
-  const brand = BRANDS[sourceId];
-  const glyph = GLYPHS[sourceId];
-  const letter = LETTERS[sourceId];
-  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml2(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
-  const kind = brand ? "brand" : glyph ? "glyph" : "letter";
-  return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
-}
-var BRANDS, GLYPHS, LETTERS, SOURCE_LOGO_CSS = `
-.logotile { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: #fff; }
-.logotile svg { width: 22px; height: 22px; }
-.logotile.glyph { background: color-mix(in srgb, var(--t2, #888) 22%, transparent); color: var(--t1, #eee); }
-.logotile.letter { background: transparent; }
-.logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
-.logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
-.logodot.ok { background: #3fb950; }
-.logodot.attention { background: #e3a03a; }
-.logodot.off { background: #8b8b8b; }
-`;
-var init_source_logos = __esm(() => {
-  init_components();
-  BRANDS = {
-    "gmail.email": { color: "#EA4335", path: "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" },
-    "google_drive.docs": { color: "#4285F4", path: "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" },
-    "dropbox.files": { color: "#0061FF", path: "M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" },
-    "x.bookmarks": { color: "#000000", path: "M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" },
-    "telegram.messages": { color: "#26A5E4", path: "M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" },
-    "whatsapp.personal.messages": { color: "#25D366", path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" },
-    "evernote.notes": { color: "#00A82D", path: "M8.222 5.393c0 .239-.02.637-.256.895-.257.24-.652.259-.888.259H4.552c-.73 0-1.165 0-1.46.04-.159.02-.356.1-.455.14-.04.019-.04 0-.02-.02L8.38.796c.02-.02.04-.02.02.02-.04.099-.118.298-.138.457-.04.298-.04.736-.04 1.472v2.647zm5.348 17.869c-.67-.438-1.026-1.015-1.164-1.373a2.924 2.924 0 01-.217-1.095 3.007 3.007 0 013-3.004c.493 0 .888.398.888.895a.88.88 0 01-.454.776c-.099.06-.237.1-.336.12-.098.02-.473.06-.65.218-.198.16-.356.418-.356.697 0 .298.118.577.316.776.355.358.829.557 1.342.557a2.436 2.436 0 002.427-2.447c0-1.214-.809-2.29-1.875-2.766-.158-.08-.414-.14-.651-.2a8.04 8.04 0 00-.592-.1c-.829-.1-2.901-.755-3.04-2.605 0 0-.611 2.785-1.835 3.54-.118.06-.276.12-.454.16-.177.04-.374.06-.434.06-1.993.12-4.105-.517-5.565-2.03 0 0-.987-.815-1.5-3.103-.118-.558-.355-1.553-.493-2.488-.06-.338-.08-.597-.099-.836 0-.975.592-1.631 1.342-1.73h4.026c.69 0 1.086-.18 1.342-.42.336-.317.415-.775.415-1.312V1.354C9.05.617 9.703 0 10.669 0h.474c.197 0 .434.02.651.04.158.02.296.06.533.12 1.204.298 1.46 1.532 1.46 1.532s2.27.398 3.415.597c1.085.199 3.77.378 4.282 3.104 1.204 6.487.474 12.775.415 12.775-.849 6.129-5.901 5.83-5.901 5.83a4.1 4.1 0 01-2.428-.736zm4.54-13.034c-.652-.06-1.204.2-1.402.697-.04.1-.079.219-.059.278.02.06.06.08.099.1.237.12.631.179 1.204.239.572.06.967.1 1.223.06.04 0 .08-.02.119-.08.04-.06.02-.18.02-.28-.06-.536-.553-.934-1.204-1.014z" }
-  };
-  GLYPHS = {
-    "local.files": "M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2h8A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
-    "archive.imports": "M3 7l9-4 9 4v10l-9 4-9-4zm9 2.2L5.4 6.6 12 9.4l6.6-2.8zM5 8.6v7.1l6 2.7v-7.1zm14 0-6 2.7v7.1l6-2.7z"
-  };
-  LETTERS = {
-    "readwise.library": { letter: "R", color: "#111111" }
-  };
+  init_judge_check2();
+  init_source_logos();
 });
 
 // src/workers/dashboard/model-pickers.ts
@@ -165017,6 +165542,456 @@ ${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .set
 `;
 });
 
+// src/workers/dashboard/pages/privacy-items.ts
+function renderDashboardPrivacyItemsPage(options) {
+  const basePath = options?.basePath;
+  const token = readToken3(basePath);
+  return pageShell({
+    title: "Olympus",
+    crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
+    ...basePath === undefined ? {} : { basePath },
+    nav: dashboardTopNav({ active: "privacy", unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...token ? { token } : {} }),
+    meta: "",
+    body: dashboardPrivacyTabs("items", token) + renderBody(options, token),
+    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, PRIVACY_TABS_CSS, SOURCE_LOGO_CSS, PRIVACY_ITEMS_CSS]
+  });
+}
+function readToken3(basePath) {
+  if (!basePath)
+    return;
+  const query = basePath.indexOf("?");
+  if (query < 0)
+    return;
+  return new URLSearchParams(basePath.slice(query + 1)).get("token") ?? undefined;
+}
+function renderBody(options, token) {
+  const csrfToken = options?.controlSessionCsrfToken;
+  const head = `<h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.title)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.intro)}</p>`;
+  if (csrfToken === undefined) {
+    const gate = `${dashboardLocalPageHref("keys", token)}#${DASHBOARD_CONTROL_GATE_ID}`;
+    return `<div class="pi">${head}<p class="pnote" data-pi-locked>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.openControls)}</a></p></div>`;
+  }
+  if (options?.outsideHelpLocalSession !== true) {
+    return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
+  }
+  return `<div class="pi" data-privacy-items><div class="pigrid"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>`;
+}
+function privacyItemsClientScript(input) {
+  const config2 = {
+    csrfToken: input.csrfToken,
+    unlockOnly: input.unlockOnly,
+    unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
+    paths: DASHBOARD_PRIVACY_ITEMS_PATHS,
+    toastMs: PRIVACY_ITEMS_TOAST_MS,
+    debounceMs: PRIVACY_ITEMS_SEARCH_DEBOUNCE_MS,
+    logos: input.unlockOnly ? {} : sourceLogoTilesByProvider(),
+    reasons: JUDGE_REASON_PHRASES,
+    copy: DASHBOARD_PRIVACY_ITEMS_COPY
+  };
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var C = config.copy;
+  var root = document.querySelector('[data-privacy-items]');
+  if (!root) return;
+  function fill(template, values) { return String(template).replace(/\\{(\\w+)\\}/g, function (m, key) { return values[key] === undefined ? m : values[key]; }); }
+  function esc(value) { return String(value).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var unlock = root.querySelector('form[data-pi-unlock]');
+  if (unlock) {
+    unlock.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var button = unlock.querySelector('button');
+      if (button) button.disabled = true;
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (response.ok) { window.location.reload(); return; }
+        var msg = unlock.querySelector('[data-pi-msg]');
+        if (msg) { msg.textContent = C.failed; msg.setAttribute('data-state', 'error'); }
+        if (button) button.disabled = false;
+      }, function () {
+        var msg = unlock.querySelector('[data-pi-msg]');
+        if (msg) { msg.textContent = C.unreachable; msg.setAttribute('data-state', 'error'); }
+        if (button) button.disabled = false;
+      });
+    });
+  }
+  if (config.unlockOnly) return;
+
+  var list = root.querySelector('[data-pi-list]');
+  var side = root.querySelector('[data-pi-side]');
+  var msg = root.querySelector('[data-pi-msg]');
+  var heading = root.querySelector('[data-pi-heading]');
+  var search = root.querySelector('[data-pi-search]');
+  var dialog = root.querySelector('[data-pi-confirm]');
+  var toast = root.querySelector('[data-pi-toast]');
+  var items = [];
+  var selected = null;
+  var query = '';
+  var filter = '';
+  var counts = null;
+  var seq = 0;
+  var debounce = null;
+  var toastTimer = null;
+  var toastUndo = null;
+  var pendingLower = null;
+  // This visit's changes, by item: what the owner chose and what the judge had said.
+  var changes = {};
+  var statusFor = {};
+
+  async function post(path, body) {
+    var response;
+    try {
+      response = await fetch(path, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      return { ok: false, message: C.unreachable };
+    }
+    var result = {};
+    try { result = (await response.json()) || {}; } catch (error) { result = {}; }
+    if (response.ok && result.ok === true) return { ok: true, result: result };
+    var message = (result.error && result.error.message) || result.message || C.failed;
+    return { ok: false, message: message };
+  }
+
+  function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
+  function find(id) { for (var i = 0; i < items.length; i += 1) if (items[i].item_id === id) return items[i]; return null; }
+  function shown(item) { var change = changes[item.item_id]; return change ? change.chosen : item.tier; }
+  function changedByYou(item) { return !!changes[item.item_id] || item.owner_set === true; }
+  function logo(item, small) {
+    var tile = config.logos[item.source];
+    if (!tile) tile = '<span class="logotile letter" aria-hidden="true"><span class="logoletter" style="background:#5b5bd6">' + esc((item.source || '?').charAt(0).toUpperCase()) + '</span></span>';
+    return small ? tile.replace('class="logotile', 'class="logotile sm') : tile;
+  }
+  function pill(tier) { return tier ? '<span class="pipill ' + esc(tier) + '">' + esc(tier) + '</span>' : '<span class="pipill">' + esc(C.notSorted) + '</span>'; }
+  function title(item) { return item.title || (item.location ? String(item.location).split('/').pop() : '') || C.untitled; }
+  function meta(item) {
+    var parts = [];
+    var where = item.sender || (item.location && String(item.location).indexOf('/') >= 0 ? String(item.location).split('/').slice(0, -1).join('/') : '');
+    if (where) parts.push(where);
+    if (item.decided_at) {
+      var at = new Date(item.decided_at);
+      if (!isNaN(at.getTime())) parts.push(at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }));
+    }
+    return parts.join(' · ');
+  }
+  function lower(text) { return text ? text.charAt(0).toLowerCase() + text.slice(1) : text; }
+  function reason(item) {
+    var code = item.judge_reason;
+    if (!code) return undefined;
+    var bare = code.indexOf('record_held:') === 0 ? code.slice('record_held:'.length) : code;
+    var category = bare.split(':')[0];
+    return Object.prototype.hasOwnProperty.call(config.reasons, category) ? config.reasons[category] : undefined;
+  }
+
+  function row(item) {
+    var open = selected === item.item_id;
+    var tier = shown(item);
+    var note = changedByYou(item) ? '<span class="piyou">' + esc(C.changedByYou) + '</span>'
+      : item.moving_to ? '<span class="piyou">' + esc(fill(C.moving, { tier: item.moving_to })) + '</span>' : '';
+    return '<li><button type="button" class="pirow" data-pi-item="' + esc(item.item_id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
+      + logo(item) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>'
+      + '<span class="piend">' + pill(tier) + note + '</span></button></li>';
+  }
+
+  function option(item, tier, line) {
+    var on = shown(item) === tier;
+    return '<button type="button" class="piopt" role="radio" data-pi-choose="' + tier + '" aria-checked="' + (on ? 'true' : 'false') + '"' + (on ? ' tabindex="-1"' : '') + '>'
+      + '<b><i class="piradio" aria-hidden="true"></i>' + esc(tier) + '</b><span>' + esc(line) + '</span></button>';
+  }
+
+  function detail(item) {
+    var tier = shown(item);
+    var change = changes[item.item_id];
+    var preview = item.preview ? '<div class="piprev" data-pi-preview>' + esc(item.preview) + '</div>' : '<div class="piprev" data-pi-preview>' + esc(C.noPreview) + '</div>';
+    var why = '';
+    var foot = '';
+    if (changedByYou(item)) {
+      var said = change && change.judge ? ' ' + esc(fill(C.judgeSaid, { tier: change.judge })) : '';
+      why = '<div class="piundo" data-pi-undo-row><p class="piwhy"><b>' + esc(fill(C.youChose, { tier: tier || '' })) + '</b>' + (change ? ' ' + esc(C.justNow) + '.' : '.') + said + '</p>'
+        + '<button type="button" class="btn" data-pi-undo>' + esc(C.undo) + '</button></div>';
+      var effect = change && change.applies === 'next_pass' ? C.afterNextPass : tier === 'Personal' ? C.afterPersonal : C.afterPrivate;
+      foot = esc(effect) + ' ' + esc(C.undoGivesBack);
+    } else {
+      var phrase = reason(item);
+      if (tier) why = '<p class="piwhy" data-pi-why>' + (phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }))) + '</p>';
+      var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;
+      foot = esc(fill(C.promise, { group: group }));
+    }
+    return '<section class="pidetail" data-pi-detail="' + esc(item.item_id) + '" aria-label="' + esc(title(item)) + '">'
+      + '<div class="pidhead">' + logo(item, true) + '<div class="grow"><h4>' + esc(title(item)) + '</h4><span class="pimeta">' + esc(meta(item)) + '</span></div>'
+      + '<button type="button" class="pix" data-pi-close aria-label="' + esc(C.close) + '">✕</button></div>'
+      + '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
+      + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
+      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
+      + why
+      + '<p class="pistatus" data-pi-status role="status">' + esc(statusFor[item.item_id] || '') + '</p>'
+      + '<p class="pifoot" data-pi-foot>' + foot + '</p></section>';
+  }
+
+  function render() {
+    var item = selected ? find(selected) : null;
+    if (!item) selected = null;
+    var html = '';
+    for (var i = 0; i < items.length; i += 1) {
+      html += row(items[i]);
+      if (item && items[i] === item && narrow()) html += '<li>' + detail(item) + '</li>';
+    }
+    list.innerHTML = html;
+    side.innerHTML = item && !narrow() ? detail(item) : '';
+  }
+
+  function setMessage(text, error) {
+    msg.textContent = text || '';
+    if (error) msg.setAttribute('data-state', 'error'); else msg.removeAttribute('data-state');
+  }
+
+  function renderFilters() {
+    var chips = root.querySelectorAll('[data-pi-filter]');
+    for (var i = 0; i < chips.length; i += 1) chips[i].setAttribute('aria-pressed', !query && chips[i].getAttribute('data-pi-filter') === filter ? 'true' : 'false');
+    var shown = root.querySelectorAll('[data-pi-count]');
+    for (var j = 0; j < shown.length; j += 1) {
+      var value = counts ? counts[shown[j].getAttribute('data-pi-count')] : undefined;
+      shown[j].textContent = typeof value === 'number' ? value.toLocaleString('en-GB') : '';
+    }
+    if (query) heading.removeAttribute('hidden'); else heading.setAttribute('hidden', '');
+  }
+
+  async function load() {
+    var mine = ++seq;
+    var words = query;
+    renderFilters();
+    var body = words ? { query: words } : { recent: true };
+    if (!words && filter) body.filter = filter;
+    var response = await post(config.paths.find, body);
+    if (mine !== seq) return;
+    if (!response.ok) { setMessage(response.message, true); return; }
+    items = Array.isArray(response.result.items) ? response.result.items : [];
+    if (response.result.counts) counts = response.result.counts;
+    renderFilters();
+    setMessage(items.length ? '' : words ? C.noMatch : C.empty, false);
+    render();
+  }
+
+  function showToast(text, undoItem) {
+    toast.querySelector('[data-pi-toast-text]').textContent = text;
+    var undoButton = toast.querySelector('[data-pi-toast-undo]');
+    toastUndo = undoItem || null;
+    if (undoItem) undoButton.removeAttribute('hidden'); else undoButton.setAttribute('hidden', '');
+    toast.removeAttribute('hidden');
+    if (toastTimer !== null) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () { toast.setAttribute('hidden', ''); toastTimer = null; toastUndo = null; }, config.toastMs);
+  }
+
+  function merge(updated, before) {
+    if (!updated) return;
+    if (before && before.preview !== undefined && updated.preview === undefined) updated.preview = before.preview;
+    for (var i = 0; i < items.length; i += 1) if (items[i].item_id === updated.item_id) items[i] = updated;
+  }
+
+  async function choose(id, tier) {
+    var item = find(id);
+    if (!item) return;
+    delete statusFor[id];
+    var response = await post(config.paths.set, { item_id: id, tier: tier === 'Personal' ? 'personal' : 'private' });
+    if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
+    var previous = changes[id];
+    if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
+    // What the judge had said: the label before this visit's first change, if nobody had set it before.
+    var judge = previous ? previous.judge : item.owner_set ? undefined : item.tier;
+    changes[id] = { chosen: tier, judge: judge, applies: response.result.applies };
+    merge(response.result.item, item);
+    render();
+    showToast(tier === 'Personal' ? C.toastPersonal : C.toastPrivate, id);
+  }
+
+  async function undo(id) {
+    var item = find(id);
+    if (!item) return;
+    delete statusFor[id];
+    var response = await post(config.paths.set, { item_id: id, tier: 'judge' });
+    if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
+    delete changes[id];
+    if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
+    merge(response.result.item, item);
+    render();
+    showToast(C.toastJudge, null);
+  }
+
+  function openConfirm(id) {
+    var item = find(id);
+    if (!item) return;
+    pendingLower = id;
+    dialog.querySelector('[data-pi-confirm-item]').innerHTML = logo(item, true) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>';
+    if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
+  }
+  function closeConfirm() {
+    pendingLower = null;
+    if (typeof dialog.close === 'function' && dialog.open) dialog.close(); else dialog.removeAttribute('open');
+  }
+
+  root.addEventListener('click', function (event) {
+    var target = event.target && event.target.closest ? event.target : null;
+    if (!target) return;
+    var rowButton = target.closest('[data-pi-item]');
+    if (rowButton) {
+      var id = rowButton.getAttribute('data-pi-item');
+      selected = selected === id ? null : id;
+      render();
+      return;
+    }
+    if (target.closest('[data-pi-close]')) { selected = null; render(); return; }
+    var chip = target.closest('[data-pi-filter]');
+    if (chip) {
+      filter = chip.getAttribute('data-pi-filter') || '';
+      query = '';
+      search.value = '';
+      selected = null;
+      load();
+      return;
+    }
+    var pick = target.closest('[data-pi-choose]');
+    if (pick && selected) {
+      var item = find(selected);
+      var tier = pick.getAttribute('data-pi-choose');
+      if (!item || shown(item) === tier) return;
+      // Lowering always asks first; raising only adds protection.
+      if (tier === 'Personal') openConfirm(selected); else choose(selected, tier);
+      return;
+    }
+    if (target.closest('[data-pi-undo]') && selected) { undo(selected); return; }
+  });
+  dialog.addEventListener('click', function (event) {
+    // A click on the backdrop lands on the dialog itself, outside its body.
+    if (event.target === dialog) { closeConfirm(); return; }
+    var target = event.target && event.target.closest ? event.target : null;
+    if (!target) return;
+    if (target.closest('[data-pi-confirm-close]') || target.closest('[data-pi-confirm-cancel]')) { closeConfirm(); return; }
+    if (target.closest('[data-pi-confirm-ok]')) {
+      var id = pendingLower;
+      closeConfirm();
+      if (id) choose(id, 'Personal');
+    }
+  });
+  // Esc: the browser closes the dialog and sends cancel.
+  dialog.addEventListener('cancel', function () { pendingLower = null; });
+  dialog.addEventListener('close', function () { pendingLower = null; });
+  toast.querySelector('[data-pi-toast-undo]').addEventListener('click', function () {
+    var id = toastUndo;
+    toast.setAttribute('hidden', '');
+    if (toastTimer !== null) { window.clearTimeout(toastTimer); toastTimer = null; }
+    toastUndo = null;
+    if (id) undo(id);
+  });
+  search.addEventListener('input', function () {
+    if (debounce !== null) window.clearTimeout(debounce);
+    debounce = window.setTimeout(function () { debounce = null; query = String(search.value || '').trim(); selected = null; load(); }, config.debounceMs);
+  });
+  if (window.matchMedia) {
+    var media = window.matchMedia('(max-width: 719px)');
+    if (media && media.addEventListener) media.addEventListener('change', render);
+  }
+  load();
+})();`;
+}
+var DASHBOARD_PRIVACY_ITEMS_PATHS, PRIVACY_ITEMS_TOAST_MS = 6000, PRIVACY_ITEMS_SEARCH_DEBOUNCE_MS = 250, PRIVACY_ITEMS_CSS = `
+.pi { width: 100%; min-width: 0; max-width: min(1120px, 100%); }
+.pi .pigrid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr); gap: 28px; align-items: start; }
+.pi .pimain, .pi .piside { min-width: 0; }
+.pi .piside:empty { display: none; }
+.pi h3.sect { margin: 0 0 6px; }
+.pi .pifind { display: flex; gap: 10px; align-items: center; margin: 12px 0 0; background: var(--bg); border: 1px solid var(--field, var(--line)); border-radius: 9px; padding: 9px 12px; color: var(--t3); }
+.pi .pifind:focus-within { outline: 2px solid var(--link); outline-offset: 1px; }
+.pi .pifind input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--t1); font: inherit; }
+.pi .picap { margin: 14px 0 8px; color: var(--t3); font-size: 13px; }
+.pi .picap[hidden] { display: none; }
+.pi .pichips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 14px; }
+.pi .pichip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; color: var(--t2); font: inherit; font-size: var(--fs-body); background: none; cursor: pointer; }
+.pi .pichip[aria-pressed="true"] { background: var(--panel2); border-color: var(--link); color: var(--t1); font-weight: 600; }
+.pi .pichip:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.pi .pichip i { font-style: normal; color: var(--t3); font-weight: 400; margin-left: 4px; }
+.pi .pichip i:empty { display: none; }
+.pi .pimsg { margin: 0 0 8px; color: var(--t2); }
+.pi .pimsg:empty { display: none; }
+.pi .pimsg[data-state="error"] { color: var(--bad); }
+.pi .pilist { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.pi .pilist > li { min-width: 0; }
+.pi .pirow { display: flex; gap: 12px; align-items: center; width: 100%; padding: 11px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.pi .pirow:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.pi .pirow[aria-expanded="true"] { border-color: var(--link); background: var(--panel2); }
+.pi .grow { flex: 1; min-width: 0; }
+.pi .pititle { display: block; color: var(--t1); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pi .pimeta { display: block; color: var(--t3); font-size: var(--fs-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pi .piend { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }
+.pi .piyou { color: var(--t3); font-size: 12.5px; white-space: nowrap; }
+.pi .pipill, .pidialog .pipill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; background: var(--panel2); color: var(--t2); }
+.pi .pipill.Personal, .pidialog .pipill.Personal { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+.pi .pipill.Private, .pidialog .pipill.Private { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.pi .logotile.sm, .pidialog .logotile.sm { width: 28px; height: 28px; border-radius: 7px; }
+.pi .logotile.sm svg, .pidialog .logotile.sm svg { width: 17px; height: 17px; }
+.pi .pidetail { background: var(--panel); border: 1px solid var(--link); border-radius: 12px; padding: 18px 20px; min-width: 0; }
+.pi .pilist .pidetail { margin-top: 0; }
+.pi .pidhead { display: flex; gap: 12px; align-items: flex-start; }
+.pi .pidhead h4 { margin: 0; font-size: var(--fs-row); line-height: 1.35; overflow-wrap: anywhere; }
+.pi .pidhead .pimeta { white-space: normal; }
+.pi .pix, .pidialog .pix { flex: none; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; color: var(--t3); font-size: 18px; border: 0; background: none; cursor: pointer; }
+.pi .pix:focus-visible, .pidialog .pix:focus-visible { outline: 2px solid var(--link); }
+.pi .pidcap { color: var(--t3); font-size: 12.5px; margin: 16px 0 6px; }
+.pi .piprev { background: var(--bg); border: 1px solid var(--line2); border-radius: 8px; padding: 11px 13px; color: var(--t2); font-size: var(--fs-body); line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 16em; overflow: auto; }
+.pi .pipair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pi .piopt, .pidialog .piopt { display: block; width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--bg); min-width: 0; color: inherit; font: inherit; text-align: left; }
+.pi .piopt { cursor: pointer; }
+.pi .piopt:disabled { cursor: default; }
+.pi .piopt:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.pi .piopt b, .pidialog .piopt b { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--t1); white-space: nowrap; }
+.pi .piopt > span, .pidialog .piopt > span { display: block; color: var(--t3); font-size: 13px; margin-top: 3px; line-height: 1.4; }
+.pi .piopt[aria-checked="true"], .pidialog .piopt.on { border-color: var(--link); background: var(--panel2); box-shadow: inset 0 0 0 1px var(--link); }
+.pi .piradio { flex: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--t4); box-sizing: border-box; }
+.pi .piopt[aria-checked="true"] .piradio { border: 4px solid var(--link); }
+.pi .piwhy { margin: 12px 0 0; color: var(--t2); font-size: var(--fs-body); }
+.pi .piundo { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
+.pi .piundo .piwhy { margin: 0; flex: 1; }
+.pi .pistatus { margin: 10px 0 0; color: var(--bad); font-size: var(--fs-body); }
+.pi .pistatus:empty { display: none; }
+.pi .pifoot { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 13px; line-height: 1.5; }
+.pi .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.pi .paunlock .hint { color: var(--t2); }
+.pi .piapps { margin-top: 14px; color: var(--t3); font-size: 13px; }
+.pidialog { padding: 0; box-shadow: 0 20px 60px rgba(0, 0, 0, .5); }
+.pidialog .pidbody { padding: 20px 22px; }
+.pidialog .pidtop { display: flex; align-items: flex-start; gap: 12px; }
+.pidialog .pidtop h3 { flex: 1; }
+.pidialog .pidtop .pix { margin: -6px -8px 0 0; }
+.pidialog .piitem { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.pidialog .pititle { display: block; color: var(--t1); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pidialog .pimeta { display: block; color: var(--t3); font-size: var(--fs-body); }
+.pidialog .piarrow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px; align-items: stretch; margin: 14px 0; }
+.pidialog .piarrow > i { align-self: center; font-style: normal; color: var(--t3); font-size: 20px; }
+.pidialog .pionly { color: var(--t2); font-size: var(--fs-body); }
+.pitoast { position: fixed; right: 24px; bottom: 24px; display: flex; gap: 14px; align-items: center; max-width: calc(100% - 32px); box-sizing: border-box; background: var(--t1); color: var(--bg); border-radius: 10px; padding: 10px 16px; box-shadow: 0 8px 30px rgba(0, 0, 0, .4); z-index: 60; }
+.pitoast[hidden] { display: none; }
+.pitoast > span { min-width: 0; }
+.pitoast button { flex: none; white-space: nowrap; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; padding: 0; }
+.pitoast button[hidden] { display: none; }
+@media (max-width: 719px) {
+  .pi .pigrid { grid-template-columns: minmax(0, 1fr); }
+  .pitoast { left: 16px; right: 16px; bottom: 16px; }
+}
+`;
+var init_privacy_items = __esm(() => {
+  init_components();
+  init_host_page();
+  init_outside_help();
+  init_source_logos();
+  init_top_nav();
+  init_vocabulary();
+  init_private_answers();
+  DASHBOARD_PRIVACY_ITEMS_PATHS = {
+    find: "/dashboard/privacy/items/find",
+    set: "/dashboard/privacy/items/set"
+  };
+});
+
 // src/workers/dashboard/index.ts
 function dashboardHtmlRoutePage(url2) {
   const params = url2.searchParams;
@@ -165034,6 +166009,8 @@ function dashboardHtmlRoutePage(url2) {
     return "agents";
   if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers))
     return "private_answers";
+  if (params.has(DASHBOARD_LOCAL_PAGES.privacyItems))
+    return "privacy_items";
   if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM))
     return "outside_help_moved";
   if (params.has(DASHBOARD_LOCAL_PAGES.connector))
@@ -165069,6 +166046,8 @@ function renderDashboardLocalPage(page2, input) {
       return renderDashboardAgentsPage(options);
     case "private_answers":
       return renderDashboardPrivateAnswersPage(options);
+    case "privacy_items":
+      return renderDashboardPrivacyItemsPage(options);
     case "connector":
       return renderDashboardConnectorPage(options);
     case "settings":
@@ -165081,6 +166060,7 @@ var init_dashboard = __esm(() => {
   init_host_page();
   init_local();
   init_private_answers();
+  init_privacy_items();
   init_host_page();
   init_vocabulary();
   DASHBOARD_LEGACY_QUERY_PARAMS = ["source", "background", "sensitivity", "setup", "privacy", "embedding-ledger"];
@@ -165930,7 +166910,8 @@ var init_http = __esm(() => {
   ];
   DASHBOARD_PRIVACY_ITEM_PATHS = [
     "/dashboard/privacy/items/find",
-    "/dashboard/privacy/items/set"
+    "/dashboard/privacy/items/set",
+    "/dashboard/privacy/judge-check"
   ];
   DASHBOARD_MESSAGING_PATHS = [
     "/dashboard/messaging/start",
@@ -166200,13 +167181,13 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync36, copyFileSync as copyFileSync3, existsSync as existsSync93, lstatSync as lstatSync48, mkdirSync as mkdirSync59, readFileSync as readFileSync83 } from "node:fs";
-import { dirname as dirname95 } from "node:path";
+import { chmodSync as chmodSync36, copyFileSync as copyFileSync3, existsSync as existsSync94, lstatSync as lstatSync48, mkdirSync as mkdirSync60, readFileSync as readFileSync84 } from "node:fs";
+import { dirname as dirname96 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync93(path)) {
+  if (!existsSync94(path)) {
     return {
       path,
       present: false,
@@ -166214,7 +167195,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text4 = readFileSync83(path, "utf8");
+  const text4 = readFileSync84(path, "utf8");
   const raw = JSON.parse(text4);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -166255,7 +167236,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp2 = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync93(path)) {
+  if (existsSync94(path)) {
     const stat7 = lstatSync48(path);
     if (stat7.isSymbolicLink() || !stat7.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -166264,7 +167245,7 @@ function writeSourceIngestionExclusionsFile(options) {
     copyFileSync3(path, backupPath);
     chmodSync36(backupPath, 384);
   } else {
-    mkdirSync59(dirname95(path), { recursive: true, mode: 448 });
+    mkdirSync60(dirname96(path), { recursive: true, mode: 448 });
   }
   writePrivateFileAtomicSync(path, text4);
   return {
@@ -170125,8 +171106,8 @@ __export(exports_live_sync, {
   EVERNOTE_HANDLE: () => EVERNOTE_HANDLE,
   EVERNOTE_ACCOUNT_ROLE: () => EVERNOTE_ACCOUNT_ROLE
 });
-import { existsSync as existsSync94, mkdirSync as mkdirSync60, readFileSync as readFileSync84 } from "node:fs";
-import { dirname as dirname96 } from "node:path";
+import { existsSync as existsSync95, mkdirSync as mkdirSync61, readFileSync as readFileSync85 } from "node:fs";
+import { dirname as dirname97 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
     enforceable: EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA
@@ -170178,10 +171159,10 @@ function createEvernoteTierLane(options = {}) {
   return { set: set2, ledger, secure, internal };
 }
 function readPassFile(path) {
-  if (!existsSync94(path))
+  if (!existsSync95(path))
     return { version: 1, status: {} };
   try {
-    const parsed = JSON.parse(readFileSync84(path, "utf8"));
+    const parsed = JSON.parse(readFileSync85(path, "utf8"));
     if (parsed.version !== 1 || typeof parsed.status !== "object" || parsed.status === null)
       return { version: 1, status: {} };
     const record8 = parsed.record?.version === 1 && parsed.record.notes && typeof parsed.record.notes === "object" ? parsed.record : undefined;
@@ -170192,12 +171173,12 @@ function readPassFile(path) {
   }
 }
 function writePassFile(path, file) {
-  mkdirSync60(dirname96(path), { recursive: true, mode: 448 });
+  mkdirSync61(dirname97(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify(file));
 }
 function evernotePassStatus(env = process.env) {
   const path = resolvedRawPath(EVERNOTE_SOURCE_ID, "evernote-pass.json", env);
-  if (!existsSync94(path))
+  if (!existsSync95(path))
     return;
   return readPassFile(path).status;
 }
@@ -170412,7 +171393,7 @@ function createEvernoteLiveSync(options) {
     bindNotebookChoice: (choice) => {
       boundChoice = choice;
     },
-    status: () => existsSync94(passPath) ? readPassFile(passPath).status : undefined,
+    status: () => existsSync95(passPath) ? readPassFile(passPath).status : undefined,
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
 }
@@ -170446,7 +171427,7 @@ var init_live_sync3 = __esm(() => {
 
 // src/workers/email-source/index.ts
 import { createHash as createHash90, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { readFileSync as readFileSync85, statSync as statSync40 } from "node:fs";
+import { readFileSync as readFileSync86, statSync as statSync40 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 import { join as join128, resolve as resolve28 } from "node:path";
 
@@ -170482,6 +171463,7 @@ function createEmailSourceWorker(options = {}) {
   const consultAsk = options.consultAsk;
   const archiveImportAgent = options.archiveImportAgent;
   const ownerTierItems = options.ownerTierItems;
+  const judgeCheck = options.judgeCheck;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync ?? (() => options.readwiseConnectorStoreSync);
@@ -171027,6 +172009,15 @@ function createEmailSourceWorker(options = {}) {
                   ...controlSessionCsrfToken !== undefined && localSession ? { destinations: sourceDashboard?.privateAnswers?.destinations() } : {},
                   ...waiting ? { waiting } : {}
                 }
+              }
+            }));
+          }
+          if (page2 === "privacy_items") {
+            return html2(renderDashboardLocalPage("privacy_items", {
+              url: url2,
+              options: {
+                ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local"
               }
             }));
           }
@@ -172165,6 +173156,39 @@ function createEmailSourceWorker(options = {}) {
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
         }
+        if (request.method === "POST" && url2.pathname === "/dashboard/privacy/judge-check") {
+          if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            throw new EmailSourceWorkerError(403, "mac_dashboard_only", "Checking the judge happens only in the dashboard on this computer, in an unlocked browser.");
+          }
+          if (!judgeCheck) {
+            throw new EmailSourceWorkerError(501, "judge_check_not_supported", "Checking the judge is not set up in this engine.");
+          }
+          const record8 = await parseObjectBody(request);
+          const action = asOptionalString(record8.action);
+          try {
+            if (action === "status")
+              return json({ ok: true, round: judgeCheck.status() });
+            if (action === "start")
+              return json({ ok: true, round: judgeCheck.start() });
+            if (action === "put_away")
+              return json({ ok: true, round: judgeCheck.putAway() });
+            if (action === "resume")
+              return json({ ok: true, round: judgeCheck.resume() });
+            if (action === "answer") {
+              const itemId = asOptionalString(record8.item_id);
+              const answer = asOptionalString(record8.answer);
+              if (!itemId || answer !== "Personal" && answer !== "Private" && answer !== "not_sure") {
+                throw new EmailSourceWorkerError(400, "invalid_request", "item_id and an answer (Personal, Private or not_sure) are required.");
+              }
+              return json({ ok: true, round: judgeCheck.answer(itemId, answer) });
+            }
+          } catch (error2) {
+            if (error2 instanceof JudgeCheckError)
+              throw new EmailSourceWorkerError(409, error2.code, error2.message);
+            throw error2;
+          }
+          throw new EmailSourceWorkerError(400, "invalid_request", "action must be status, start, answer, put_away or resume.");
+        }
         if (request.method === "POST" && url2.pathname.startsWith("/dashboard/privacy/items/")) {
           if (!ownerTierItems) {
             throw new EmailSourceWorkerError(501, "privacy_items_not_supported", "Changing one item's privacy is not set up in this engine.");
@@ -172177,11 +173201,17 @@ function createEmailSourceWorker(options = {}) {
             const query = asOptionalString(record8.query);
             const recent = asOptionalBoolean(record8.recent);
             const limit = asOptionalNumber(record8.limit, "limit");
+            const filter = asOptionalString(record8.filter);
+            if (filter !== undefined && filter !== "personal" && filter !== "private" && filter !== "changed") {
+              throw new EmailSourceWorkerError(400, "invalid_request", 'filter must be "personal", "private" or "changed".');
+            }
             return json({ ok: true, ...ownerTierItems.find({
               ...query !== undefined ? { query } : {},
               ...recent !== undefined ? { recent } : {},
-              ...limit !== undefined ? { limit } : {}
-            }) });
+              ...limit !== undefined ? { limit } : {},
+              ...filter !== undefined ? { filter } : {},
+              withPreview: true
+            }), ...ownerTierItems.counts ? { counts: ownerTierItems.counts() } : {} });
           }
           if (url2.pathname === "/dashboard/privacy/items/set") {
             const itemId = asOptionalString(record8.item_id);
@@ -174644,7 +175674,7 @@ function dashboardStorageNotices() {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync85(join128(homedir43(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync86(join128(homedir43(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -175251,6 +176281,7 @@ var init_email_source = __esm(() => {
   init_selected_item_safety();
   init_venice_models();
   init_public_surface();
+  init_judge_check();
   init_staging();
   init_messaging_capture();
   init_unpaired_sources();
@@ -175490,14 +176521,14 @@ var init_analyst_anthropic = __esm(() => {
 });
 
 // src/core/model-choices.ts
-import { readFileSync as readFileSync86 } from "node:fs";
-import { dirname as dirname97, join as join129 } from "node:path";
+import { readFileSync as readFileSync87 } from "node:fs";
+import { dirname as dirname98, join as join129 } from "node:path";
 function modelChoicesPath(policyPath) {
-  return join129(dirname97(policyPath), "model-choices.json");
+  return join129(dirname98(policyPath), "model-choices.json");
 }
 function readModelChoices(policyPath) {
   try {
-    const value2 = JSON.parse(readFileSync86(modelChoicesPath(policyPath), "utf8"));
+    const value2 = JSON.parse(readFileSync87(modelChoicesPath(policyPath), "utf8"));
     if (value2?.schema !== "olympus.model-choices.v1")
       return { schema: "olympus.model-choices.v1" };
     return {
@@ -175809,8 +176840,8 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync95, readFileSync as readFileSync87 } from "node:fs";
-import { dirname as dirname98, join as join130 } from "node:path";
+import { existsSync as existsSync96, readFileSync as readFileSync88 } from "node:fs";
+import { dirname as dirname99, join as join130 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -175896,7 +176927,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync95(snapshotPath))
+    if (!existsSync96(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -176009,7 +177040,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value2 = Number.parseInt(readFileSync87("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value2 = Number.parseInt(readFileSync88("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value2) && value2 > 0 ? value2 : undefined;
   } catch {
     return;
@@ -176026,10 +177057,10 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join130(dir, "node_modules");
-    if (!existsSync95(join130(candidate, "@parcel", "watcher")))
+    if (!existsSync96(join130(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join130(dirname98(candidate), "package.json"));
+      const requireFrom = createRequire8(join130(dirname99(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -179107,9 +180138,9 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync96, mkdirSync as mkdirSync61, opendirSync, readFileSync as readFileSync88 } from "node:fs";
+import { existsSync as existsSync97, mkdirSync as mkdirSync62, opendirSync, readFileSync as readFileSync89 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname99, join as join132 } from "node:path";
+import { dirname as dirname100, join as join132 } from "node:path";
 function folderAccessMemoryPath() {
   return join132(olympusDataDir(), "local-files", "folder-access.json");
 }
@@ -179325,7 +180356,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync61(dirname99(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync62(dirname100(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -179334,9 +180365,9 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync96(this.memoryPath)) {
+    if (this.memoryPath && existsSync97(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync88(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync89(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -188743,7 +189774,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync97 } from "node:fs";
+import { existsSync as existsSync98 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -188789,7 +189820,7 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync97(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync98(path)))
       return true;
     try {
       return state.list().some((record8) => record8.family === family);
@@ -188806,7 +189837,7 @@ function createArchiveImportRuntime(options = {}) {
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync97(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync98(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -189158,7 +190189,7 @@ var init_agent = __esm(() => {
 });
 
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync98 } from "node:fs";
+import { existsSync as existsSync99 } from "node:fs";
 import { join as join133 } from "node:path";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record8) => {
@@ -189193,7 +190224,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync98(path))
+  if (path !== ":memory:" && !existsSync99(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -191023,7 +192054,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash98 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
-import { existsSync as existsSync99, lstatSync as lstatSync50, readFileSync as readFileSync89, readdirSync as readdirSync29, realpathSync as realpathSync27 } from "node:fs";
+import { existsSync as existsSync100, lstatSync as lstatSync50, readFileSync as readFileSync90, readdirSync as readdirSync29, realpathSync as realpathSync27 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 
 class VolumeResolver {
@@ -191193,7 +192224,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform3) {
   if (platform3 === "darwin")
     return execFileSync6("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync89("/proc/self/mountinfo", "utf8");
+  return readFileSync90("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -191210,7 +192241,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync99(dir))
+    if (!existsSync100(dir))
       return result;
     for (const name of readdirSync29(dir)) {
       try {
@@ -191576,7 +192607,7 @@ var init_source_scope_browser = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn13 } from "node:child_process";
-import { existsSync as existsSync100 } from "node:fs";
+import { existsSync as existsSync101 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
 import { join as join134 } from "node:path";
 function helperAppPathForHome(home2 = homedir47()) {
@@ -191587,7 +192618,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn13(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync100)(helper))
+  if ((deps.exists ?? existsSync101)(helper))
     run2("/usr/bin/open", ["-R", helper]);
   run2("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -192722,7 +193753,7 @@ var init_gmail_status_scope = __esm(() => {
 });
 
 // src/workers/evernote/runtime.ts
-import { existsSync as existsSync101 } from "node:fs";
+import { existsSync as existsSync102 } from "node:fs";
 function createEvernoteRuntime(options) {
   const env = options.env ?? process.env;
   let lane;
@@ -192740,7 +193771,7 @@ function createEvernoteRuntime(options) {
   const existingLane = () => {
     if (lane)
       return lane;
-    if (!existsSync101(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
+    if (!existsSync102(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
       return;
     const opened = openLane();
     for (const leg of [opened.secure, opened.internal])
@@ -193197,8 +194228,8 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync62, readdirSync as readdirSync31, realpathSync as realpathSync29, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync42, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename20, dirname as dirname100, isAbsolute as isAbsolute37, join as join136, relative as relative17, resolve as resolve29, sep as sep21 } from "node:path";
+import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync63, readdirSync as readdirSync31, realpathSync as realpathSync29, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync42, unlinkSync as unlinkSync4 } from "node:fs";
+import { basename as basename20, dirname as dirname101, isAbsolute as isAbsolute37, join as join136, relative as relative17, resolve as resolve29, sep as sep21 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value2 === "" || MIGRATION_ON.includes(value2);
@@ -193225,8 +194256,8 @@ function candidates(sourceId, slot, env) {
     }
   }
   if (sourceId === TELEGRAM_SOURCE_ID) {
-    const legacyDir = dirname100(legacyTelegramSessionBase(env));
-    const folderDir = dirname100(accountSessionPath(account, env));
+    const legacyDir = dirname101(legacyTelegramSessionBase(env));
+    const folderDir = dirname101(accountSessionPath(account, env));
     const own3 = basename20(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames2(legacyDir))
@@ -193297,12 +194328,12 @@ function absPath(ctx, rel) {
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
     renameSync21(from, to);
-    syncFolder(dirname100(to));
-    syncFolder(dirname100(from));
+    syncFolder(dirname101(to));
+    syncFolder(dirname101(from));
     return;
   }
   (__accountMigrationTestHooks.link ?? linkSync5)(from, to);
-  syncFolder(dirname100(to));
+  syncFolder(dirname101(to));
   unlinkSync4(from);
 }
 function errorCode2(error2) {
@@ -193342,7 +194373,7 @@ function nearRealPath(path) {
   let near = resolve29(path);
   for (;; ) {
     rest.unshift(basename20(near));
-    const up = dirname100(near);
+    const up = dirname101(near);
     if (up === near)
       return resolve29(path);
     near = up;
@@ -193352,7 +194383,7 @@ function nearRealPath(path) {
   }
 }
 function destinationIsOurs(ctx, destination) {
-  const parent = dirname100(destination);
+  const parent = dirname101(destination);
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
@@ -193365,7 +194396,7 @@ function nearestExisting(path) {
       statSync42(near);
       return near;
     } catch {
-      const up = dirname100(near);
+      const up = dirname101(near);
       if (up === near)
         return near;
       near = up;
@@ -193539,7 +194570,7 @@ function makeFolders(ctx, moves) {
     const real = realpathSync29(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
-      const destination = dirname100(absPath(ctx, move.to));
+      const destination = dirname101(absPath(ctx, move.to));
       if (!destinationIsOurs(ctx, absPath(ctx, move.to)))
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
@@ -193551,7 +194582,7 @@ function makeFolders(ctx, moves) {
           continue;
         if (found.kind !== "absent")
           throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
-        mkdirSync62(current2, { mode: 448 });
+        mkdirSync63(current2, { mode: 448 });
       }
     }
     syncFolderChains(ctx, [...destinations]);
@@ -193564,8 +194595,8 @@ function makeFolders(ctx, moves) {
 function syncMoveFolders(ctx, moves) {
   const folders = new Set;
   for (const move of moves) {
-    folders.add(dirname100(absPath(ctx, move.from)));
-    folders.add(dirname100(absPath(ctx, move.to)));
+    folders.add(dirname101(absPath(ctx, move.from)));
+    folders.add(dirname101(absPath(ctx, move.to)));
   }
   try {
     for (const folder of folders) {
@@ -193580,7 +194611,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname100(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep21}`); folder = dirname100(folder)) {
+    for (let folder = dirname101(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep21}`); folder = dirname101(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
@@ -193607,7 +194638,7 @@ function moveOne(ctx, move, direction) {
       return "there";
     if (move.kind === "file" && source.kind === "file" && target.kind === "file" && source.dev === target.dev && source.ino === target.ino && (move.ino === "" || String(source.ino) === move.ino)) {
       try {
-        syncFolder(dirname100(to));
+        syncFolder(dirname101(to));
         unlinkSync4(from);
       } catch (error2) {
         throw new MoveFault("failed", "move_failed", `${name} could not be moved (${errorCode2(error2)}).`);
@@ -193717,7 +194748,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   }
   checkpoint("revert");
   try {
-    syncFolderChains(ctx, moves.map((move) => dirname100(absPath(ctx, move.from))));
+    syncFolderChains(ctx, moves.map((move) => dirname101(absPath(ctx, move.from))));
   } catch (error2) {
     if (error2 instanceof AccountMigrationKilled)
       throw error2;
@@ -193876,7 +194907,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve29(dirname100(candidate.from));
+      const folder = resolve29(dirname101(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -193888,7 +194919,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
       continue;
     try {
       rmdirSync8(folder);
-      syncFolder(dirname100(folder));
+      syncFolder(dirname101(folder));
     } catch {}
   }
 }
@@ -194200,7 +195231,7 @@ var init_export_zone = __esm(() => {
 
 // src/workers/whatsapp/archive-input.ts
 import { createHash as createHash99 } from "node:crypto";
-import { existsSync as existsSync102 } from "node:fs";
+import { existsSync as existsSync103 } from "node:fs";
 import { posix as posix7 } from "node:path";
 function hash2(value2) {
   return createHash99("sha256").update(value2).digest("hex").slice(0, 24);
@@ -194290,7 +195321,7 @@ function createWhatsAppExportInput(options) {
     records(listing = {}) {
       return async function* () {
         const decoded2 = decodeCursor3(listing.cursor);
-        if (existsSync102(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+        if (existsSync103(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
           yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
           return;
         }
@@ -195051,12 +196082,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname101, join as join137 } from "node:path";
+import { dirname as dirname102, join as join137 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join137(dirname101(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join137(dirname102(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -195822,8 +196853,8 @@ var init_installed_tier_classification = __esm(() => {
 
 // src/workers/classification/sniffer-resolver.ts
 import { createHash as createHash101 } from "node:crypto";
-import { mkdirSync as mkdirSync63, readFileSync as readFileSync90 } from "node:fs";
-import { dirname as dirname102 } from "node:path";
+import { mkdirSync as mkdirSync64, readFileSync as readFileSync91 } from "node:fs";
+import { dirname as dirname103 } from "node:path";
 
 class SnifferCallBudget {
   maxCallsPerDay;
@@ -195839,7 +196870,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync90(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync91(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -195860,7 +196891,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync63(dirname102(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync64(dirname103(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -196349,7 +197380,7 @@ var init_sniffer_resolver = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database25 } from "bun:sqlite";
-import { existsSync as existsSync103 } from "node:fs";
+import { existsSync as existsSync104 } from "node:fs";
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
@@ -196544,7 +197575,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync103(path);
+      const hasQueue = existsSync104(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -196892,14 +197923,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync103(bound)) {
+        if (bound && bound !== ":memory:" && existsSync104(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync103(own3))
+      if (existsSync104(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -197370,9 +198401,9 @@ class TierSnifferService {
         }
       } catch {}
       try {
-        const judged = applyMediaJudgments({ set: set2, autoMoves: this.autoMovesFor(set2) });
-        if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
-          this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
+        const judged2 = applyMediaJudgments({ set: set2, autoMoves: this.autoMovesFor(set2) });
+        if (judged2.movesQueued > 0 || judged2.updated > 0 || judged2.asked > 0) {
+          this.options.log?.(`Olympus photos: ${judged2.applied} photo judgment(s) applied (${judged2.movesQueued} move(s) out of Private queued, ` + `${judged2.updated} kept where they were, ${judged2.asked} asked about).`);
         }
       } catch {}
       try {
@@ -213981,7 +215012,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { existsSync as existsSync104 } from "node:fs";
+import { existsSync as existsSync105 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -214157,7 +215188,7 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync104(dbPath))
+    if (!options.create && !existsSync105(dbPath))
       return;
     store = open7(dbPath);
     return store;
@@ -217660,7 +218691,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { readFileSync as readFileSync91 } from "node:fs";
+import { readFileSync as readFileSync92 } from "node:fs";
 import { createHash as createHash104 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
@@ -217691,7 +218722,7 @@ function privacyRevision(profile) {
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
   const privacySettings = () => {
-    const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync91(options.sovereignty.path, "utf8"))) : policy;
+    const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync92(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
     const policyRevision = createHash104("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
@@ -217920,8 +218951,8 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync37, lstatSync as lstatSync54, mkdirSync as mkdirSync64, statSync as statSync44 } from "node:fs";
-import { dirname as dirname103, isAbsolute as isAbsolute38 } from "node:path";
+import { chmodSync as chmodSync37, lstatSync as lstatSync54, mkdirSync as mkdirSync65, statSync as statSync44 } from "node:fs";
+import { dirname as dirname104, isAbsolute as isAbsolute38 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -217949,7 +218980,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname103(path));
+  const custody = ensureSettingsDirectory(dirname104(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -218006,12 +219037,12 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync44(dirname103(directory));
+      statSync44(dirname104(directory));
     } catch {
       return "home_missing";
     }
     try {
-      mkdirSync64(directory, { mode: 448 });
+      mkdirSync65(directory, { mode: 448 });
       chmodSync37(directory, 448);
     } catch {
       return "directory_unavailable";
@@ -218049,7 +219080,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
-import { delimiter as delimiter9, dirname as dirname104 } from "node:path";
+import { delimiter as delimiter9, dirname as dirname105 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -218098,7 +219129,7 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname104(system)) ? system : undefined;
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname105(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
@@ -219358,8 +220389,8 @@ __export(exports_server2, {
 });
 import { release as release2, totalmem as totalmem4 } from "node:os";
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync105 } from "node:fs";
-import { dirname as dirname105, isAbsolute as isAbsolute39, join as join138 } from "node:path";
+import { existsSync as existsSync106 } from "node:fs";
+import { dirname as dirname106, isAbsolute as isAbsolute39, join as join138 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -219837,7 +220868,7 @@ function openIngestionDispositionsRuntime(env = process.env, options = {}) {
     try {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync105(store.dbPath));
+      const present = stores.filter((store) => existsSync106(store.dbPath));
       let openedAll = false;
       const openStores = () => {
         if (openedAll)
@@ -220847,7 +221878,7 @@ async function main() {
   };
   const sourceHasStores = (sourceId) => ["internal", "secure_local", "public_safe"].some((domain) => {
     const path = resolvedStorePath(sourceId, domain, process.env);
-    return existsSync105(path) || existsSync105(tieredStoreSetLedgerPath(path)) || existsSync105(secretLocationsPathForStore(path));
+    return existsSync106(path) || existsSync106(tieredStoreSetLedgerPath(path)) || existsSync106(secretLocationsPathForStore(path));
   });
   const tierLanes = [];
   const tierLegsOpenedEarly = [];
@@ -223153,6 +224184,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     env: process.env,
     fileEnv: () => readWorkerSetupEnv()
   });
+  const ownerTierItemsEngine = createOwnerTierItems();
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
     ...process.platform === "linux" ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {},
@@ -223172,7 +224204,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...sourceAnswer ? { sourceAnswer } : {},
     sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
     archiveImportAgent: archiveImportDashboard.agent,
-    ownerTierItems: createOwnerTierItems(),
+    ownerTierItems: ownerTierItemsEngine,
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
       connectionId: anonymousInboxConnectionId(caller),
@@ -224216,7 +225249,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join138(dirname105(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join138(dirname106(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
@@ -224726,7 +225759,7 @@ function createConnectorStoreMountDiscovery(raw, options) {
     const absent = [];
     for (const declaration of pending) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
-      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync105(declaration.dbPath)))
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync106(declaration.dbPath)))
         ready.push(declaration);
       else
         absent.push(declaration);
@@ -224798,7 +225831,7 @@ function mountConnectorStoreDeclarations(declarations, options) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
-      if (options.existingOnly && !collidingStore && !existsSync105(declaration.dbPath))
+      if (options.existingOnly && !collidingStore && !existsSync106(declaration.dbPath))
         continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -224907,6 +225940,7 @@ var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUS
 var init_server5 = __esm(async () => {
   init_judge_setup();
   init_tier_owner_items();
+  init_judge_check();
   init_judge_spending();
   init_sniffer_decision();
   init_engine_service();
@@ -225562,7 +226596,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes33 } from "node:crypto";
-import { existsSync as existsSync106, readFileSync as readFileSync92, openSync as openSync32, closeSync as closeSync33, writeSync as writeSync9 } from "node:fs";
+import { existsSync as existsSync107, readFileSync as readFileSync93, openSync as openSync32, closeSync as closeSync33, writeSync as writeSync9 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve30 } from "node:path";
@@ -228734,7 +229768,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync92("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync93("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -229089,7 +230123,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync92(resolve30(input2), "utf8");
+    raw = readFileSync93(resolve30(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -229432,7 +230466,7 @@ function parseXReconcileRecoveryArgs(args) {
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? resolvedRawPath("x.bookmarks", "x-reconcile.sqlite");
-  if (stateDbPath !== ":memory:" && !existsSync106(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync107(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");
@@ -229641,7 +230675,7 @@ function engineRunsWorkerHere(options) {
   if (platform3 !== "darwin" && platform3 !== "linux")
     return false;
   const env = options.homeDir ? { HOME: options.homeDir } : process.env;
-  return existsSync106(engineServicePaths({ env, platform: platform3 }).plistPath);
+  return existsSync107(engineServicePaths({ env, platform: platform3 }).plistPath);
 }
 function linuxDesktopOpenHandler(action, options) {
   if ((options.platform ?? process.platform) !== "linux")

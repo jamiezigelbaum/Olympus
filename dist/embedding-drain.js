@@ -14168,10 +14168,13 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25) {
-    const rows = this.db.query(`
+  recentDecisions(limit = 25, contentTier) {
+    const capped = Math.max(1, Math.min(limit, 200));
+    const rows = contentTier === undefined ? this.db.query(`
       SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 200)));
+    `).all(capped) : this.db.query(`
+      SELECT * FROM tier_items WHERE content_tier = ? ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(contentTier, capped);
     return rows.map(recordFromRow);
   }
   listClearedOverrideRows(limit = 100) {
@@ -69603,6 +69606,10 @@ init_tier_classifier();
 init_tier_ledger();
 init_tier_rules();
 
+// src/workers/classification/judge-check.ts
+init_atomic_file();
+init_owner_config_read();
+
 // src/workers/email-source/server.ts
 init_judge_spending();
 
@@ -70992,6 +70999,11 @@ var CODEX_SNIPPET = [
 init_vocabulary();
 // src/workers/dashboard/pages/private-answers.ts
 init_vocabulary();
+
+// src/workers/dashboard/pages/judge-check.ts
+init_vocabulary();
+
+// src/workers/dashboard/pages/private-answers.ts
 var DASHBOARD_SETTINGS_ZKAPI_ID = "zkapi";
 
 // src/workers/dashboard/pages/local.ts
@@ -71035,6 +71047,9 @@ ${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .set
 .setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 @media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
 `;
+
+// src/workers/dashboard/pages/privacy-items.ts
+init_vocabulary();
 
 // src/workers/dashboard/index.ts
 init_vocabulary();
