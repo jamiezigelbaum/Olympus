@@ -29365,6 +29365,7 @@ function releasedItemFromEvidence(evidence, source, title) {
   const shownTitle = boundedString(title, TITLE_MAX);
   const corpusId = boundedString(evidence.corpus_id, ID_MAX);
   const provider = boundedString(evidence.provider, ID_MAX);
+  const accountScope = boundedString(evidence.account_scope, ID_MAX);
   const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
   const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
   const locator = boundedString(evidence.uri, ID_MAX);
@@ -29374,6 +29375,7 @@ function releasedItemFromEvidence(evidence, source, title) {
     tier: releasedTierOf(evidence.trust_domain),
     ...corpusId ? { corpusId } : {},
     ...provider ? { provider } : {},
+    ...accountScope ? { accountScope } : {},
     ...providerItemId ? { providerItemId } : {},
     ...providerConversationId ? { providerConversationId } : {},
     ...locator ? { locator } : {}
@@ -30415,13 +30417,13 @@ function openAppReleaseLog(dbPath, options = {}) {
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         const secret2 = db.query(`SELECT 1 FROM app_release_secret_items
           WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
         record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
           const named = !(item.provider && item.providerItemId && secret2.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
-          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
         });
       })();
       expire();
@@ -30480,13 +30482,15 @@ function openAppReleaseLog(dbPath, options = {}) {
     markAnsweredPrivately(privateQuestionKey2) {
       return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey2).changes;
     },
-    forgetCorpora(corpusIds, dryRun) {
-      if (corpusIds.length === 0)
+    forgetCorpora(corpusIds, dryRun, accountScopes) {
+      if (corpusIds.length === 0 || accountScopes?.length === 0)
         return 0;
-      const marks = corpusIds.map(() => "?").join(", ");
+      const marks = (values) => values.map(() => "?").join(", ");
+      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
+      const params = [...corpusIds, ...accountScopes ?? []];
       if (dryRun)
-        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds).n;
-      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
+      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
     },
     forgetSecretItem(item, options2 = {}) {
       const conversation = item.providerConversationId ?? "";
@@ -30525,7 +30529,7 @@ function forgetAppReleaseItems(dbPath, selector, options = {}) {
     return 0;
   const store = openAppReleaseLog(dbPath);
   try {
-    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+    return store.forgetCorpora(selector.corpusIds, options.dryRun === true, selector.accountScopes);
   } finally {
     store.close();
   }
@@ -30603,6 +30607,15 @@ function migrations2() {
         CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
       `);
     }
+  }, {
+    version: 3,
+    name: "app_release_items_account_scope",
+    up(db) {
+      db.exec(`
+        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
+        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
+      `);
+    }
   }];
 }
 function hardenPrivatePath2(dbPath) {
@@ -30623,7 +30636,7 @@ function hardenPrivatePath2(dbPath) {
       throw new Error("The AI apps log must be a regular file, not a symlink.");
   }
 }
-var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 2, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
+var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 3, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
 var init_app_release_log = __esm(() => {
   init_olympus_layout();
   init_remote_connections();
@@ -73982,6 +73995,7 @@ function evidenceFromCitations(citations, detail) {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
@@ -74046,6 +74060,7 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
@@ -74205,6 +74220,7 @@ async function searchReleasedEvidence(input) {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
       ...cite?.title ? { title: cite.title } : {},
@@ -104065,6 +104081,10 @@ var init_source_forget_registry = __esm(() => {
       forget(account, context2, { dryRun }) {
         const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context2.env));
         return line(path, "titles shared with apps", forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
+      },
+      forgetAccountScopes(account, accountScopes, context2, { dryRun }) {
+        const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context2.env));
+        return line(path, "titles shared with apps", forgetAppReleaseItems(path, { corpusIds: account.corpus_ids, accountScopes }, { dryRun }));
       }
     },
     {
@@ -193905,6 +193925,7 @@ async function runArchiveRemoval(options) {
   lane.ledger.deleteSetCursor(archiveTierSetId(lane.family), connectorId);
   counts.secret_locations_removed += lane.secretLocations?.removeAccountScope(provider, accountScope) ?? 0;
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
+  forgetAppReleaseItems(appReleaseLogDbPath(resolveRemoteConnectionsDbPath(lane.env)), { corpusIds, accountScopes: [accountScope] });
   options.state.delete(record8.archive_id);
   return { kind: "removed", counts };
 }
@@ -193913,6 +193934,8 @@ var init_removal = __esm(() => {
   init_atomic_file();
   init_classification_ledger();
   init_source_forget_registry();
+  init_app_release_log();
+  init_remote_connections();
   init_source_storage();
   init_tier_ledger_path();
   init_continuation_cache();
