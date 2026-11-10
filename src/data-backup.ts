@@ -151,6 +151,9 @@ function encodeHeader(header: BackupHeader): Buffer {
 
 // ---- tar (ustar) ------------------------------------------------------------
 
+/** The largest size an ustar header's 12-byte size field holds (8^11 - 1 bytes). */
+export const USTAR_MAX_SIZE = 0o77777777777;
+
 function octal(value: number, width: number): string {
   return value.toString(8).padStart(width - 1, '0') + '\0';
 }
@@ -279,12 +282,17 @@ export async function writeBackupFile(options: {
       key_check: backupKeyCheck(options.key.key),
     } : {}),
   });
+  // ustar keeps a size in 11 octal digits: refuse a file it can't describe
+  // before anything is written, so no backup is published that can't be read.
+  const entries = exportEntries(options.exportDir);
+  const tooLarge = entries.find((entry) => entry.size > USTAR_MAX_SIZE);
+  if (tooLarge) throw new OperationError('source_index_error', `A file in the export is too large to back up (64 GiB or more): ${tooLarge.rel}`);
   const handle = await openAsync(staging, 'wx', 0o600);
   try {
     await handle.write(header);
     const body = new BodyWriter(handle, header, options.key?.key, nonce);
     const buffer = Buffer.alloc(CHUNK);
-    for (const entry of exportEntries(options.exportDir)) {
+    for (const entry of entries) {
       await body.write(tarHeader(entry.rel, entry.size, entry.type === 'dir' ? '5' : '0', entry.mtime));
       if (entry.type === 'dir') continue;
       const source = await openAsync(join(options.exportDir, entry.rel), 'r');

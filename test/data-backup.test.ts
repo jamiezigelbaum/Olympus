@@ -2,7 +2,7 @@
 // restores onto a fresh install; a wrong passphrase or a changed byte
 // restores nothing; a backup folder keeps the newest seven.
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -19,6 +19,7 @@ import {
   readBackupHeader,
   restoreOlympusBackup,
   writeBackupFile,
+  USTAR_MAX_SIZE,
 } from '../src/data-backup.ts';
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
@@ -171,6 +172,17 @@ describe('data backup', () => {
     writeFileSync(join(exportDir, 'manifest.json'), '{}');
     const key = fastKey('correct horse battery');
     await expect(writeBackupFile({ exportDir, folder, key: { ...key, kdf: { ...key.kdf, N: 0 } } })).rejects.toThrow('key setting');
+    expect(existsSync(folder) ? readdirSync(folder) : []).toEqual([]);
+  }));
+
+  test('a file too large for the archive format is refused before any backup is written', withHomes(async (dir, _homeA, _homeB, folder) => {
+    const exportDir = join(dir, 'export');
+    mkdirSync(join(exportDir, 'stores'), { recursive: true });
+    writeFileSync(join(exportDir, 'manifest.json'), '{}');
+    // A sparse file: its size is 64 GiB, but no disk space is used.
+    writeFileSync(join(exportDir, 'stores', 'big.sqlite'), '');
+    truncateSync(join(exportDir, 'stores', 'big.sqlite'), USTAR_MAX_SIZE + 1);
+    await expect(writeBackupFile({ exportDir, folder })).rejects.toThrow('too large to back up');
     expect(existsSync(folder) ? readdirSync(folder) : []).toEqual([]);
   }));
 
