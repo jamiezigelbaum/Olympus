@@ -3365,7 +3365,9 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   goToModels: 'Review below',
   privatePath: "Local model",
   anonymousPath: "zkAPI model",
-  sent: "What was sent to zkAPI",
+  // #1045: the sent text sits under the answer in the muted meta area, and only when it differs from the question.
+  sentAsWritten: "Sent to zkAPI as you wrote it.",
+  sentRewritten: "Sent to zkAPI (rewritten)",
   askLabel: 'Your question',
   askPlaceholder: "Ask anything, including about your Private items…",
   ask: 'Ask',

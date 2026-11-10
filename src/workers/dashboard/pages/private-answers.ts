@@ -30,7 +30,7 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pasection > .sect { margin: 0 0 12px; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
-.pa .pasent { white-space: pre-wrap; }
+.pa .pameta .pasent { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--t2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -319,7 +319,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       venicePath: W.veniceName,
       destinationBusy: W.destinationBusy,
       emptyQuestion: W.emptyQuestion,
-      sent: W.sent,
+      sentAsWritten: W.sentAsWritten,
+      sentRewritten: W.sentRewritten,
       privatePath: W.privatePath,
       anonymousPath: W.anonymousPath,
       open: W.open,
@@ -397,9 +398,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   function panel(out, question) {
     out.textContent = '';
     var card = el('div', 'pacard');
-    var heading = el('p', 'paquestion');
-    heading.appendChild(el('strong', '', question));
-    card.appendChild(heading);
+    // An inbox row already shows its question as the row title (#1045); only the Ask result repeats it.
+    if (question && !out.closest('[data-pa-question]')) {
+      var heading = el('p', 'paquestion');
+      heading.appendChild(el('strong', '', question));
+      card.appendChild(heading);
+    }
     out.appendChild(card);
     return card;
   }
@@ -454,8 +458,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
-      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      // What left for zkAPI, in the muted meta area (#1045): one line when it is the question as written, the text only when it was rewritten.
+      if (typeof result.sent === 'string') {
+        if (result.sent.trim() === String(question || '').trim()) meta.appendChild(el('p', 'palabel', config.copy.sentAsWritten));
+        else { meta.appendChild(el('div', 'palabel', config.copy.sentRewritten)); meta.appendChild(el('p', 'pasent', result.sent)); }
+      }
       renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {

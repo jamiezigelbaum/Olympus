@@ -1487,6 +1487,23 @@ describe('the Private answers page', () => {
     }
   });
 
+  test('an opened zkAPI answer says it went as written, and shows only rewritten text, muted under the answer (#1045)', async () => {
+    for (const [sent, expected] of [['Where is the lease?', 'Sent to zkAPI as you wrote it.'], ['Where do leases usually say the term ends?', 'Sent to zkAPI (rewritten)']] as const) {
+      const page = renderAndRun((body) => (body.action === 'read'
+        ? { status: 200, body: { ok: true, status: 'answered', generation: 1, answer: 'In the lease.', sent, citations: [] } }
+        : { status: 200, body: { ok: true, status: 'seen' } }));
+      const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+      (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+      await page.settle();
+      const card = row.querySelector('[data-pa-out] .pacard')!;
+      expect(card.querySelector('.paquestion')).toBeNull();
+      const meta = card.querySelector('.pameta')!;
+      expect(meta.querySelector('.palabel')!.textContent).toBe(expected);
+      expect(meta.querySelector('.pasent')?.textContent ?? null).toBe(sent === 'Where is the lease?' ? null : sent);
+      expect(card.textContent!.split('Where is the lease?').length - 1).toBe(0);
+    }
+  });
+
   test('clicking an unread row reads the full answer, marks its generation seen and opens sources only with tokens', async () => {
     const page = renderAndRun((body) => (body.action === 'read'
       ? { status: 200, body: { ok: true, status: 'answered', generation: 2, answer: '**May**. <img src=x onerror=alert(1)>', citations: [{ title: 'Lease', source: 'Dropbox', url: 'https://www.dropbox.com/preview/lease.pdf', open: 'A'.repeat(32) }, { title: 'Scan', open: 'B'.repeat(32) }], unanswered: ['End date'], left_out: ['Gmail'] } }
@@ -1503,7 +1520,8 @@ describe('the Private answers page', () => {
     const out = row.querySelector('[data-pa-out]')!;
     expect(out.querySelector('.paanswer strong')!.textContent).toBe('May');
     expect(out.querySelector('img, a')).toBeNull();
-    expect(out.querySelector('.pacard .paquestion strong')!.textContent).toBe('Where is the lease?');
+    // The row title already shows the question; the opened card does not repeat it (#1045).
+    expect(out.querySelector('.pacard .paquestion')).toBeNull();
     expect(out.textContent).toContain('Left out: Gmail.');
     expect(out.textContent).toContain('Not found here: End date.');
     expect(row.classList.contains('unread')).toBe(false);
