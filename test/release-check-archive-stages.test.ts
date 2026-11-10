@@ -160,7 +160,7 @@ class FakeMachine implements ArchiveHost {
         return super.probe(frame, call);
       }
       override async go(path?: string): Promise<void> {
-        if (world.goFails && path === '/dashboard') { world.goFails -= 1; throw new Error('navigation timed out'); }
+        if (world.goFails && path?.startsWith('/dashboard')) { world.goFails -= 1; throw new Error('navigation timed out'); }
         return super.go(path);
       }
     }
