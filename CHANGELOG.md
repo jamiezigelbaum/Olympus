@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.4 - 2026-11-10
+
+- **On a Mac, only the account that runs Olympus gets the owner controls.** Another standard account on the same Mac could open the dashboard as the owner. Olympus now checks that a local dashboard session comes from the account that runs it, and refuses any other (#1153, #1179).
+- **A forwarded owner socket no longer unlocks the dashboard on its own.** On Linux, `olympus remote open` forwards the owner socket to another computer; unlocking the local owner controls now also needs the owner's signed dashboard session, as on the Mac. Each normal way of opening the dashboard already carries one (#1188, #1196).
+- **Approving an AI app's connection needs the owner.** The Connect button on Olympus's own approval page now works only from the browser holding the owner's dashboard session, or over the Linux owner socket, so another account on the same computer can't approve a connection (#1186, #1197).
+
 ## 1.4.3 - 2026-11-10
 
 - **Ask answers while Olympus is busy judging.** On a large install that was judging privacy, an Ask could freeze the dashboard for over a minute and then say every source was left out. Search no longer rebuilds each store's hidden copies on every question, a source isn't dropped just because the engine was busy when its time ran out, and the dashboard status no longer rebuilds them on each refresh either (#1079, #1091, #1056).
