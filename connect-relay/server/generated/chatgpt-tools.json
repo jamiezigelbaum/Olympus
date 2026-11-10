@@ -843,7 +843,8 @@
                   "enum": [
                     "folder",
                     "label",
-                    "sender"
+                    "sender",
+                    "chat"
                   ]
                 },
                 "source_id": {
@@ -853,7 +854,9 @@
                     "google_drive.docs",
                     "dropbox.files",
                     "local.files",
-                    "evernote.notes"
+                    "evernote.notes",
+                    "telegram.messages",
+                    "whatsapp.personal.messages"
                   ]
                 },
                 "key": {
