@@ -50,10 +50,12 @@ function release(version: string, key = keyPair(), name = 'install.sh') {
 }
 
 describe('the signed release manifest', () => {
-  test('ships a clearly marked placeholder, not a key: no release key is configured yet', () => {
-    expect(RELEASE_SIGNING_PUBLIC_KEY).toBeUndefined();
-    expect(readFileSync('src/core/release-signing.ts', 'utf8')).toContain('PLACEHOLDER: no release signing key exists yet.');
-    expect(releasePublicKey()).toBeUndefined();
+  test('ships the release key: an Ed25519 public key, the one on the release runner, never a placeholder', () => {
+    // A release built without it would refuse every Update now, and a new key would refuse the signatures users already trust.
+    // Rotating the key changes this value on purpose, in a release users run before anything is signed with the new key.
+    expect(RELEASE_SIGNING_PUBLIC_KEY).toBeDefined();
+    expect(releasePublicKey()?.asymmetricKeyType).toBe('ed25519');
+    expect(RELEASE_SIGNING_PUBLIC_KEY!.replace(/\s+/g, '')).toBe('-----BEGINPUBLICKEY-----MCowBQYDK2VwAyEAmdoxHVa13VJXq8lzxpbPs0E4RhMPNdlmMsbU8zi0dyA=-----ENDPUBLICKEY-----');
   });
 
   test('a manifest signed with the release key verifies; another key, or no key, does not', () => {

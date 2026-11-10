@@ -63,7 +63,9 @@ export function publicKeyPem(privateKey: KeyObject): string {
 }
 
 /** The signed envelope for one rendered installer. */
-export function signInstaller(installerPath: string, privateKey: KeyObject, shippedPublicKey: string | undefined = RELEASE_SIGNING_PUBLIC_KEY): string {
+export function signInstaller(installerPath: string, privateKey: KeyObject, ...given: [shippedPublicKey?: string | undefined]): string {
+  // An explicit undefined means no key (tests, a caller with none); only an omitted argument means the shipped key.
+  const shippedPublicKey = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   const shipped = releasePublicKey(shippedPublicKey);
   if (!shipped) throw new Error('The engine ships no release public key yet (src/core/release-signing.ts RELEASE_SIGNING_PUBLIC_KEY). Put the output of --public-key there first, in a release the users already run.');
   if (publicKeyPem(privateKey) !== shipped.export({ type: 'spki', format: 'pem' }).toString()) {
@@ -82,14 +84,18 @@ export function signInstaller(installerPath: string, privateKey: KeyObject, ship
 }
 
 /** A problem with a signed manifest for this installer, or undefined when it verifies. */
-export function checkSigned(installerPath: string, envelope: string, shippedPublicKey: string | undefined = RELEASE_SIGNING_PUBLIC_KEY): string | undefined {
+export function checkSigned(installerPath: string, envelope: string, ...given: [shippedPublicKey?: string | undefined]): string | undefined {
+  // An explicit undefined means no key (tests, a caller with none); only an omitted argument means the shipped key.
+  const shippedPublicKey = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   const signed = verifySignedReleaseManifest(envelope, shippedPublicKey);
   if (!signed.ok) return `${manifestPath(installerPath)}: ${signed.reason === 'bad_signature' ? 'the signature does not verify' : signed.reason === 'no_key' ? 'no release key' : 'malformed'}.`;
   const checked = checkInstallerAgainstManifest(signed.manifest, readFileSync(installerPath), platformOf(installerPath));
   return checked.ok ? undefined : `${manifestPath(installerPath)} does not match ${installerPath} (${checked.reason}).`;
 }
 
-export function checkSite(root: string, shippedPublicKey: string | undefined = RELEASE_SIGNING_PUBLIC_KEY): string[] {
+export function checkSite(root: string, ...given: [shippedPublicKey?: string | undefined]): string[] {
+  // An explicit undefined means no key (tests, a caller with none); only an omitted argument means the shipped key.
+  const shippedPublicKey = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   if (!releasePublicKey(shippedPublicKey)) return [];
   const problems: string[] = [];
   for (const name of Object.keys(SIGNED_INSTALLERS)) {
