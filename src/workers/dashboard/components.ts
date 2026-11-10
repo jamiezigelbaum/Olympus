@@ -956,6 +956,7 @@ export function standaloneDashboardControllerScript(
         if (action === 'disconnect_source') return ['/dashboard/disconnect', withoutAction(params)];
         if (action === 'delete_source_data') return ['/dashboard/delete-source-data', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
+        if (action === 'set_go_easy') return ['/dashboard/engine/go-easy', withoutAction(params)];
         if (action === 'apply_settings_proposal') return ['/dashboard/settings/proposal/apply', withoutAction(params)];
         if (action === 'discard_settings_proposal') return ['/dashboard/settings/proposal/discard', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];

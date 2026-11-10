@@ -85,6 +85,7 @@ import {
   CredentialBrokerError,
   isCredentialRefreshBusyError,
 } from './credential-broker/index.ts';
+import { GO_EASY_TRICKLE_EMBED_ITEMS } from './local-pacing.ts';
 
 export type SourceSchedulerTaskKind = 'sync' | 'extract' | 'embed' | 'watch';
 export type SourceSchedulerCadence = 'manual' | 'continuous';
@@ -1896,14 +1897,25 @@ const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 export function withEmbeddingSweep(
   sources: readonly SourceSchedulerSource[],
   targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
-  options: { storeDeadlineMs?: number } = {},
+  options: {
+    storeDeadlineMs?: number;
+    /**
+     * Go easy on this computer (#922, local-pacing.ts): true for a target
+     * whose embedding runs on this computer while the owner is using it. Such
+     * a store embeds `GO_EASY_TRICKLE_EMBED_ITEMS` per pass and does not
+     * continue soon. A cloud or remote embedder is never asked.
+     */
+    trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean;
+    /** Called after a target embedded at least one chunk (the power assertion, local-pacing.ts). */
+    onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
+  } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source, sourceIndex) => {
     const targets = targetsFor(source);
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -1920,8 +1932,13 @@ function embeddingSweepTask(
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
   deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS,
   sourceIndex = 0,
+  trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean,
+  onProgress?: (target: ConnectorStoreEmbeddingTarget) => void,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
+  const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
+    try { return trickle?.(target) === true; } catch { return false; }
+  };
   return {
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
@@ -1937,7 +1954,10 @@ function embeddingSweepTask(
     run: async (context?: SourceSchedulerTaskRunContext) => {
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
+      let trickled = false;
       for (const target of passTargets) {
+        const paced = tricklingTarget(target);
+        trickled ||= paced;
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
         // The pass stops starting batches at half the deadline, so a store
@@ -1947,13 +1967,16 @@ function embeddingSweepTask(
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems, stopAtMs, diagnostics: true }),
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
           // The abandoned call of an earlier overrun still holds the store's
           // lease, so this pass answers busy: the store's outage stands until
           // an embedding pass answers (embedPendingChunks clears it then).
+          if (result.some((run) => run.chunksEmbedded > 0)) {
+            try { onProgress?.(target); } catch { /* best effort */ }
+          }
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
@@ -1994,7 +2017,7 @@ function embeddingSweepTask(
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
-        const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
+        const more = !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
           && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
         if (counts.items_failed === 0) return { status, counts, embeddingSweep, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried. A backlog still drains pass
