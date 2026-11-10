@@ -142,6 +142,12 @@ export interface MailSourceScopeApprovalSnapshot {
   mailScope?: MailScopeSelection;
   ownerTierRules?: MailScopeOwnerTierRule[];
   reason?: 'not_connected' | 'missing' | 'malformed' | 'account_changed';
+  /**
+   * While no scope is approved: the owner's "always Private" senders a
+   * restore brought back (carryMailOwnerRules), for the picker to open with.
+   * Nothing syncs before an approval, which then holds them.
+   */
+  carriedAlwaysPrivateSenders?: string[];
 }
 
 interface PersistedMailSourceScopeApproval {
@@ -164,6 +170,13 @@ interface PersistedMailSourceScopeApproval {
 interface PersistedMailSourceScopeState {
   version: 1;
   approvals: PersistedMailSourceScopeApproval[];
+  /**
+   * The owner's "always Private" senders, without an approval: what a restore
+   * brings back from another computer, where the approval was bound to a
+   * grant this one never holds. Kept exactly as the owner set them until a
+   * scope is approved here, which takes them over.
+   */
+  carried_owner_rules?: { source_id: MailSourceScopeId; always_private_senders: string[] };
 }
 
 export function defaultMailSourceScopeStatePath(handleRegistryPath: string): string {
@@ -182,8 +195,10 @@ export function forgetMailSourceScopeApproval(
   options: { dryRun?: boolean } = {},
 ): number {
   if (!existsSync(statePath)) return 0;
-  const dropped = (state: PersistedMailSourceScopeState) =>
-    state.approvals.filter((approval) => sourceIds.includes(approval.source_id));
+  const dropped = (state: PersistedMailSourceScopeState) => [
+    ...state.approvals.filter((approval) => sourceIds.includes(approval.source_id)),
+    ...(state.carried_owner_rules && sourceIds.includes(state.carried_owner_rules.source_id) ? [state.carried_owner_rules] : []),
+  ];
   const first = readState(statePath);
   const found = first.kind === 'valid' ? dropped(first.state).length : 0;
   // Nothing to forget, or only asked how much: no lease, so no lock file.
@@ -193,9 +208,11 @@ export function forgetMailSourceScopeApproval(
     if (read.kind !== 'valid') return 0;
     const count = dropped(read.state).length;
     if (count === 0) return 0;
+    const carried = read.state.carried_owner_rules;
     const state: PersistedMailSourceScopeState = {
       version: 1,
       approvals: read.state.approvals.filter((approval) => !sourceIds.includes(approval.source_id)),
+      ...(carried && !sourceIds.includes(carried.source_id) ? { carried_owner_rules: carried } : {}),
     };
     lease.commit(() => writePrivateFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}\n`));
     return count;
@@ -226,14 +243,19 @@ export function readMailSourceScopeApproval(input: {
   pinnedHandle?: string;
 }): MailSourceScopeApprovalSnapshot {
   const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
-  if (!account) return pendingSnapshot('not-connected', undefined, 'not_connected');
   const read = readState(input.statePath);
-  if (read.kind === 'missing') return pendingSnapshot(`missing:${account.generation}`, account.generation, 'missing');
-  if (read.kind === 'malformed') return pendingSnapshot(`malformed:${read.digest}`, account.generation, 'malformed');
+  const carried = read.kind === 'valid' ? read.state.carried_owner_rules?.always_private_senders : undefined;
+  const pending = (revision: string, reason: NonNullable<MailSourceScopeApprovalSnapshot['reason']>): MailSourceScopeApprovalSnapshot => ({
+    ...pendingSnapshot(revision, account?.generation, reason),
+    ...(carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}),
+  });
+  if (!account) return pending('not-connected', 'not_connected');
+  if (read.kind === 'missing') return pending(`missing:${account.generation}`, 'missing');
+  if (read.kind === 'malformed') return pending(`malformed:${read.digest}`, 'malformed');
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
-  if (!approval) return pendingSnapshot(`missing:${account.generation}`, account.generation, 'missing');
+  if (!approval) return pending(`missing:${account.generation}`, 'missing');
   if (approval.account_generation !== account.generation) {
-    return pendingSnapshot(`stale:${approval.revision}:${account.generation}`, account.generation, 'account_changed');
+    return pending(`stale:${approval.revision}:${account.generation}`, 'account_changed');
   }
   return {
     sourceId: MAIL_SOURCE_SCOPE_ID,
@@ -298,6 +320,8 @@ export function approveMailSourceScope(input: {
       owner_tier_rules: ownerTierRules,
       approved_at: now.toISOString(),
     });
+    // The approval now holds the owner's choice, carried senders included as
+    // the picker showed them, so a carried list has done its job.
     const state: PersistedMailSourceScopeState = { version: 1, approvals };
     lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}\n`));
     return {
@@ -527,6 +551,70 @@ function nonNegativeInteger(value: number): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/**
+ * The owner's "always Private" senders, for an export: the approved scope's,
+ * else a carried list. Only the owner's rule list: never the approval, whose
+ * account generation names a grant. Undefined when there are none, or the
+ * file cannot be read.
+ */
+export function mailOwnerRulesForExport(statePath: string): MailOwnerRulesExport | undefined {
+  const read = readState(statePath);
+  if (read.kind !== 'valid') return undefined;
+  const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
+  const senders = approval ? approval.mail_scope.always_private_senders : read.state.carried_owner_rules?.always_private_senders;
+  return senders && senders.length > 0
+    ? { schema_version: 1, source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: [...senders] }
+    : undefined;
+}
+
+/** The exported "always Private" list (`config/mail-always-private.json` in an export). */
+export interface MailOwnerRulesExport {
+  schema_version: 1;
+  source_id: MailSourceScopeId;
+  always_private_senders: string[];
+}
+
+/**
+ * Bring an exported "always Private" list back onto this computer, exactly as
+ * the owner set it, for the picker to open with: nothing syncs Gmail before a
+ * scope is approved, and the approval then holds them. An approval this
+ * computer already has is the owner's choice here and is left as it is
+ * (`kept_approval`). A file nothing can read is refused, never written over.
+ */
+/**
+ * Throws, writing nothing, when the mail scope file at `statePath` is there but
+ * cannot be read: `carryMailOwnerRules` would refuse it. A restore asks before
+ * it writes anything, so it never stops half way over this file.
+ */
+export function assertMailOwnerRulesCarriable(statePath: string): void {
+  if (readState(statePath).kind === 'malformed') throw unreadableMailScope(statePath);
+}
+
+function unreadableMailScope(statePath: string): OperationError {
+  return new OperationError(
+    'invalid_params',
+    `The mail scope file at ${statePath} is unreadable, so the backup's mail privacy rules were not restored.`,
+    'Repair or remove that file (Olympus asks for the mail scope again), then restore.',
+  );
+}
+
+export function carryMailOwnerRules(statePath: string, alwaysPrivateSenders: unknown): 'carried' | 'kept_approval' {
+  const senders = normalizeSenders(alwaysPrivateSenders, 'always Private');
+  return withFileLeaseSync(statePath, (lease) => {
+    const read = readState(statePath);
+    if (read.kind === 'malformed') throw unreadableMailScope(statePath);
+    const approvals = read.kind === 'valid' ? read.state.approvals : [];
+    if (approvals.some((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID)) return 'kept_approval';
+    const state: PersistedMailSourceScopeState = {
+      version: 1,
+      approvals,
+      carried_owner_rules: { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: senders },
+    };
+    lease.commit(() => writePrivateFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}\n`));
+    return 'carried';
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Picker drafts (the dashboard's wire shape)
 // ---------------------------------------------------------------------------
@@ -715,10 +803,18 @@ function readState(path: string): StateRead {
     if (record.version !== 1 || !Array.isArray(record.approvals)) throw new Error('version');
     const approvals = record.approvals.map(parseApproval);
     if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length) throw new Error('duplicate');
-    return { kind: 'valid', state: { version: 1, approvals } };
+    const carried = record.carried_owner_rules === undefined ? undefined : parseCarriedOwnerRules(record.carried_owner_rules);
+    return { kind: 'valid', state: { version: 1, approvals, ...(carried ? { carried_owner_rules: carried } : {}) } };
   } catch {
     return { kind: 'malformed', digest };
   }
+}
+
+function parseCarriedOwnerRules(value: unknown): NonNullable<PersistedMailSourceScopeState['carried_owner_rules']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('carried');
+  const record = value as Record<string, unknown>;
+  if (record.source_id !== MAIL_SOURCE_SCOPE_ID) throw new Error('carried');
+  return { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: normalizeSenders(record.always_private_senders, 'always Private') };
 }
 
 function parseApproval(value: unknown): PersistedMailSourceScopeApproval {
