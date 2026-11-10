@@ -5361,6 +5361,9 @@ var init_directory_tools = __esm(() => {
   DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
 });
 
+// connect-relay/shared/mcp-app-client.ts
+var init_mcp_app_client = () => {};
+
 // src/core/remote-public-url.ts
 function parseRemotePublicBaseUrl(value, installId) {
   const raw = value?.trim();
@@ -5402,6 +5405,7 @@ function parseRemotePublicBaseUrl(value, installId) {
 var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
 var init_remote_public_url = __esm(() => {
   init_directory_tools();
+  init_mcp_app_client();
   LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 

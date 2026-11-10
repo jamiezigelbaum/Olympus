@@ -18472,10 +18472,14 @@ var init_directory_tools = __esm(() => {
   DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
 });
 
+// connect-relay/shared/mcp-app-client.ts
+var init_mcp_app_client = () => {};
+
 // src/core/remote-public-url.ts
 var LOOPBACK_HOSTNAMES;
 var init_remote_public_url = __esm(() => {
   init_directory_tools();
+  init_mcp_app_client();
   LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
@@ -53965,9 +53969,6 @@ var init_selected_item_safety = __esm(() => {
     "text"
   ]);
 });
-// connect-relay/shared/mcp-app-client.ts
-var init_mcp_app_client = () => {};
-
 // src/workers/chatgpt/dashboard-resource.ts
 import { createHash as createHash27 } from "node:crypto";
 function versionedResourceUri(base, html2) {

@@ -6642,8 +6642,7 @@ export async function main(): Promise<void> {
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
-  const { resolveRemotePublicUrls, currentRemotePublicUrls } = await import('../../core/remote-public-url.ts');
-  const { claudeAppDomain } = await import('../../../connect-relay/shared/mcp-app-client.ts');
+  const { resolveRemotePublicUrls, currentRemotePublicUrls, claudeAppOrigin } = await import('../../core/remote-public-url.ts');
   const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { withRequestPeer } = await import('../../core/request-peer.ts');
   const { createRelaySurfacesHandler, withRelaySurfacesRoute } = await import('../relay-surfaces.ts');
@@ -7576,7 +7575,7 @@ export async function main(): Promise<void> {
       extraOrigins: () => {
         const urls = currentRemotePublicUrls(remotePublicUrls);
         return [DASHBOARD_UI_DOMAIN, ...(olympusConfig.remote?.claudeAppEnabled === true && urls
-          ? [`https://${claudeAppDomain(urls.resource)}`] : [])];
+          ? [claudeAppOrigin(urls)] : [])];
       },
     }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
