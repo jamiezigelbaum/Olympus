@@ -135,6 +135,10 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     // The value was in the pack and in the prompt, and the Analyst missed it.
     expect(evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.'), ['Evidence 1: total is 4182 dollars']).expected[0])
       .toEqual({ inPack: true, inPackAsSubstring: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false });
+    // A value present only inside a longer token: the token's shape, never its text.
+    const glued = evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, answer('The total is 4182USD.'), answer('The total is 4182USD.')).expected[0]!;
+    expect(glued).toMatchObject({ inAnalystAnswer: false, answerTokenShape: '9999aaa' });
+    expect(glued.packTokenShape).toBeUndefined();
   });
 
   test('a value only in a locator, a fact or a table counts as in the pack (#1239 review)', async () => {
