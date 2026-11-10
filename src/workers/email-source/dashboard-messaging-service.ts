@@ -145,6 +145,7 @@ export function createDashboardMessagingService(options: {
   const packageRoot = olympusPackageRoot();
   const available = new Map<MessagingSource, { fingerprint: string; chats: PairingChat[] }>();
   const selecting = new Set<MessagingSource>();
+  const held = new Map<MessagingSource, number>();
   const initialGrants = new Map<MessagingSource, string>();
   const grantSnapshot = (source: MessagingSource) => {
     const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
@@ -257,16 +258,31 @@ export function createDashboardMessagingService(options: {
     available.set(source, { fingerprint: current.fingerprint, chats });
     return { ok: true, state: 'paired', chats, wholeAccount: rawScope === '*', chatScopes: selected, ...(source === 'whatsapp' ? { coverage: 'contacts_and_joined_groups' } : {}) };
   };
+  /**
+   * A re-pair that ended without saving leaves the earlier grant suspended
+   * (`pairingPending`): capture stays paused until a pairing succeeds. The
+   * card says so from this fact on disk, never from what it assumes (#706).
+   */
+  const withCaptureFact = <S extends { state: string }>(source: MessagingSource, status: S): S & { capturePaused?: true } => {
+    if (status.state !== 'failed' && status.state !== 'cancelled') return status;
+    try {
+      const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      return read.kind === 'valid' && read.grant.source === source && read.grant.pairingPending ? { ...status, capturePaused: true } : status;
+    } catch { return status; }
+  };
   return {
     async handle(operation: Operation, record: Record<string, unknown>) {
       const source = sourceOf(record.source);
       if (operation === 'start') {
         if (selecting.has(source)) throw new Error('Finish choosing chats first.');
+        if (held.get(source)) throw new Error('Disconnect is running. Pair again after it finishes.');
         // Pressing Pair while a pairing runs (the card lost track of it during
         // a slow first build) shows that pairing instead of an error.
         if (manager.busy(source)) return manager.status(source);
         return options.withGrantMutation(async () => {
           if (manager.busy(source)) throw new Error('Pairing is already running.');
+          // A Disconnect may have begun while this start waited for the lock.
+          if (held.get(source)) throw new Error('Disconnect is running. Pair again after it finishes.');
           // Persist the stop before the helper can mutate the session. Failure, cancel,
           // and process restart must never reactivate this grant against that session.
           grantSnapshot(source);
@@ -281,12 +297,12 @@ export function createDashboardMessagingService(options: {
       }
       if (operation === 'status') {
         const status = manager.status(source);
-        if (status.state !== 'idle') return status;
+        if (status.state !== 'idle') return withCaptureFact(source, status);
         const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
         return read.kind === 'valid' && read.grant.source === source && !read.grant.pairingPending
           ? { ok: true, state: 'paired' } : status;
       }
-      if (operation === 'cancel') return manager.cancel(source);
+      if (operation === 'cancel') return withCaptureFact(source, manager.cancel(source));
       if (operation === 'respond') {
         if (typeof record.field !== 'string' || typeof record.value !== 'string') throw new Error('Invalid response.');
         const value = record.value;
@@ -328,6 +344,21 @@ export function createDashboardMessagingService(options: {
       } finally { selecting.delete(source); }
     },
     cancelAndWait: (source: MessagingSource) => manager.cancelAndWait(source),
+    /**
+     * Disconnect, Unpair and Delete indexed data (#689): no pairing may start
+     * from the moment they stop the running one until they finish, so none can
+     * register after them without a later, explicit start.
+     */
+    async withPairingHeld<T>(source: MessagingSource, operation: () => Promise<T>): Promise<T> {
+      held.set(source, (held.get(source) ?? 0) + 1);
+      try {
+        await manager.cancelAndWait(source);
+        return await operation();
+      } finally {
+        const left = (held.get(source) ?? 1) - 1;
+        if (left > 0) held.set(source, left); else held.delete(source);
+      }
+    },
     close: () => manager.close(),
   };
 }
