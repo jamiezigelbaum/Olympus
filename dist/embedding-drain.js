@@ -11200,6 +11200,7 @@ var init_venice_models = __esm(() => {
   });
   VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
     "kimi-k3": "private",
+    "deepseek-v4-flash-0731": "private",
     inkling: "private",
     "e2ee-glm-5-2-p": "e2ee",
     "zai-org-glm-5-2": "private",

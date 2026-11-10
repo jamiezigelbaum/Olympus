@@ -553,3 +553,10 @@ test('an owner\'s Venice opt-in carries to the new default judge, but never past
   await approveClassifier(e.path + '.ledger', { ...old, profileId: 'someone-else' }, promptVersion, 'Owner opted in.');
   expect(await carryCloudJudgeApproval(e.budget, cloud, e.path + '.ledger', promptVersion)).toBe(false);
 });
+
+test('the default Venice judge is in the offline privacy snapshot, so a catalog outage still lets it judge (#1252)', async () => {
+  const { venicePrivacyCategoryForModel, isVenicePrivacyCategoryApprovedForSecureLocal } = await import('../src/core/venice-models.ts');
+  const category = venicePrivacyCategoryForModel(DEFAULT_VENICE_JUDGE_MODEL);
+  expect(category).toBeDefined();
+  expect(isVenicePrivacyCategoryApprovedForSecureLocal(category!)).toBe(true);
+});
