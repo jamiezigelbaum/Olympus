@@ -164515,9 +164515,11 @@ function renderSettingsProposal(state) {
   const proposal = state?.current;
   if (proposal) {
     const who = proposal.from ? escapeHtml2(proposal.from) : "An agent on this computer";
+    const judge3 = proposal.input.privacy_judge;
+    const veniceJudge = judge3?.choice === "venice" ? `$${judge3.spending_limit_dollars}` : undefined;
     const rows2 = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.current)}</td><td><b>${escapeHtml2(row.proposed)}</b></td></tr>`).join("");
     const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml2(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
-    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows2}</tbody></table>` + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
+    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows2}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml2(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
   }
   const applied = state?.lastApplied;
   if (!applied)
@@ -164608,6 +164610,7 @@ var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a c
 .proptable { width: 100%; border-collapse: collapse; margin: 8px 0; }
 .proptable th, .proptable td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
 .proptable thead th { border-top: 0; color: var(--t2); font-weight: 500; }
+.propnote { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
 .propcard .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }

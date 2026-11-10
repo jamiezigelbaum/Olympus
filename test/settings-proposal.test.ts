@@ -155,6 +155,18 @@ describe('the Settings page card', () => {
     expect(html).toContain('data-settings-proposal="discard"');
     expect(html).toContain(`value="${proposal.id}"`);
     expect(html).toContain('Always the strongest');
+    expect(html).not.toContain('Before you apply');
+  });
+
+  test('a proposal that turns on Venice judging says Venice reads Private items before Apply', async () => {
+    const { targets: t } = targets();
+    const holder = createSettingsProposalHolder(t);
+    await holder.propose({ privacy_judge: { choice: 'venice', spending_limit_dollars: 5 } });
+    const html = renderDashboardSettingsPage({ settingsProposal: { current: holder.current(), lastApplied: undefined } });
+    const note = html.indexOf('Venice will read each item it sorts, including items it marks Private');
+    expect(note).toBeGreaterThan(-1);
+    expect(html).toContain('up to the $5 limit');
+    expect(note).toBeLessThan(html.indexOf('data-settings-proposal="apply"'));
   });
 
   test('says what was applied after Apply, and shows nothing when there is nothing', async () => {
