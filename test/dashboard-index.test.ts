@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   DASHBOARD_HTML_PATH,
   DASHBOARD_LEGACY_QUERY_PARAMS,
+  dashboardConnectorRedirect,
   dashboardHtmlRoutePage,
   dashboardLegacyRedirect,
   dashboardReadToken,
@@ -39,6 +40,11 @@ describe('which page a /dashboard address names', () => {
     expect(dashboardHtmlRoutePage(dashboardUrl('?outside-help'))).toBe('outside_help_moved');
     expect(dashboardHtmlRoutePage(dashboardUrl('?connector'))).toBe('connector');
     expect(dashboardHtmlRoutePage(dashboardUrl('?panel-read'))).toBe('panel_read');
+  });
+
+  test('Build a connector\'s old address opens Sources with its dialog, keeping a reader\'s token (#1087)', () => {
+    expect(dashboardConnectorRedirect(dashboardUrl('?connector'))).toBe('/dashboard?connect#build-connector');
+    expect(dashboardConnectorRedirect(dashboardUrl('?connector&token=dash_abc'))).toBe('/dashboard?connect&token=dash_abc#build-connector');
   });
 
   test('every replaced page\'s address is legacy, and legacy wins over any other flag', () => {
