@@ -157988,6 +157988,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const entry = models.transcription;
     if (!entry || typeof entry !== "object")
       return false;
+    if (entry.state === "not_needed")
+      return false;
     return !!entry.download || entry.state === "failed" || entry.state === "load_failed" || entry.state === "interrupted";
   }
   function renderHome(page2, data2) {
