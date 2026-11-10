@@ -551,7 +551,7 @@ import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
-import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
+import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
@@ -6300,6 +6300,7 @@ export async function main(): Promise<void> {
       ? {
           sourceWatch: {
             store: sourceWatchStore,
+            recordId: forwardedRecordId,
           },
         }
       : {}),
@@ -7638,8 +7639,10 @@ export async function main(): Promise<void> {
     };
     // A forwarded owner action runs as the route that served it before, behind
     // the front's authorization: the route's handler checks the body itself.
-    const runForwarded = async (request: EngineForwardedRequest) =>
-      responseToForwarded(await worker.fetch(forwardedRequestToRequest('http://olympus-worker.internal', request)));
+    const runForwarded = async (request: EngineForwardedRequest, commandId?: string) => {
+      const built = forwardedRequestToRequest('http://olympus-worker.internal', request);
+      return responseToForwarded(await worker.fetch(commandId ? tagForwardedRequest(built, commandId) : built));
+    };
     let deleteFromFront: number | undefined;
     // Sync now runs the front asked for, published in the snapshot (front-scheduler.ts follows them).
     const manualSyncRuns = new Map<string, EngineManualSyncRun>();
@@ -7724,7 +7727,8 @@ export async function main(): Promise<void> {
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
         embed_chunks: ({ request }) => runForwarded(request),
-        source_watch: ({ request }) => runForwarded(request),
+        // A create writes under an id made from the command id, so a resubmission finds it.
+        source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.

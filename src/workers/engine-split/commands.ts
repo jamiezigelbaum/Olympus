@@ -181,6 +181,24 @@ export function forwardedRequestToRequest(origin: string, forwarded: EngineForwa
   return new Request(origin + forwarded.path, { method: 'POST', headers: forwarded.headers, body: forwarded.body });
 }
 
+/**
+ * The id a forwarded create writes under, made from the command id: a retry
+ * or a resubmission after a background restart carries the same command id,
+ * so it lands on the record the first attempt wrote instead of a second one.
+ * Only the background attaches it, to the Request object it built; nothing a
+ * client sends can set it.
+ */
+const forwardedRecordIds = new WeakMap<Request, string>();
+
+export function tagForwardedRequest(request: Request, commandId: string): Request {
+  forwardedRecordIds.set(request, `engine-${commandId}`);
+  return request;
+}
+
+export function forwardedRecordId(request: Request): string | undefined {
+  return forwardedRecordIds.get(request);
+}
+
 /** Headers that belong to the hop, not to the request. */
 const HOP_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'upgrade']);
 
@@ -304,8 +322,13 @@ function orderKey(command: EngineCommand): string {
   return 'source' in command ? `source:${command.source}` : `kind:${command.kind}`;
 }
 
+/** What a handler knows besides the command: its id, the same on every retry and resubmission. */
+export interface EngineCommandContext {
+  id: string;
+}
+
 export type EngineCommandHandlers = {
-  [K in EngineCommandKind]?: (command: Extract<EngineCommand, { kind: K }>) => Promise<unknown> | unknown;
+  [K in EngineCommandKind]?: (command: Extract<EngineCommand, { kind: K }>, context: EngineCommandContext) => Promise<unknown> | unknown;
 };
 
 interface LedgerEntry {
@@ -379,10 +402,10 @@ export class EngineCommandLedger {
   }
 
   private async apply(entry: LedgerEntry, command: EngineCommand): Promise<void> {
-    const handler = this.options.handlers[command.kind] as ((value: EngineCommand) => unknown) | undefined;
+    const handler = this.options.handlers[command.kind] as ((value: EngineCommand, context: EngineCommandContext) => unknown) | undefined;
     try {
       if (!handler) throw new Error(`${command.kind} is not handled by this background.`);
-      const result = await handler(command);
+      const result = await handler(command, { id: entry.receipt.id });
       entry.receipt.state = 'done';
       if (result !== undefined) entry.receipt.result = result;
     } catch (error) {

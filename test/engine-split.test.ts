@@ -30,7 +30,7 @@ import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
 import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
-import { LocalSourceWatchStore } from '../src/core/source-watch.ts';
+import { createTrustedSourceWatchOwnerContext, LocalSourceWatchStore } from '../src/core/source-watch.ts';
 import { LocalPeopleIndex } from '../src/core/people-index.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import {
@@ -40,8 +40,10 @@ import {
   waitForProcessExit,
 } from '../src/workers/engine-split/runtime.ts';
 import {
+  forwardedRecordId,
   forwardedRequestToRequest,
   requestToForwarded,
+  tagForwardedRequest,
   responseToForwarded,
   type EngineCommandReceipt,
   type EngineForwardedRequest,
@@ -445,6 +447,43 @@ describe('owner actions the background runs, forwarded from the front', () => {
     void waitForProcessExit(4243, { now: clock.now, sleep: clock.sleep, alive: () => true, timeoutMs: 60_000 }).then((value) => { gaveUp = value; });
     await clock.advance(61_000);
     expect(gaveUp).toBe(false);
+  });
+});
+
+describe('a forwarded create is idempotent across a background restart', () => {
+  test('the command id reaches the handler, and a watch created twice under it is one watch', async () => {
+    const ids: string[] = [];
+    const ledger = new EngineCommandLedger({ instanceId: 'background-1', handlers: { source_watch: (_command, { id }) => { ids.push(id); } } });
+    const forwarded = { path: '/v1/source/watch/create', headers: {}, body: '{}' };
+    ledger.submit({ id: 'command-0090', command: { kind: 'source_watch', request: forwarded } });
+    // A second background (after a restart) gets the same id again.
+    new EngineCommandLedger({ instanceId: 'background-2', handlers: { source_watch: (_command, { id }) => { ids.push(id); } } })
+      .submit({ id: 'command-0090', command: { kind: 'source_watch', request: forwarded } });
+    await flushMicrotasks();
+    expect(ids).toEqual(['command-0090', 'command-0090']);
+
+    // Only the background's own Request carries an id; a client cannot set one.
+    const tagged = tagForwardedRequest(forwardedRequestToRequest('http://olympus-worker.internal', forwarded), 'command-0090');
+    const untagged = forwardedRequestToRequest('http://olympus-worker.internal', forwarded);
+    expect(forwardedRecordId(untagged)).toBeUndefined();
+    const watchId = forwardedRecordId(tagged)!;
+    expect(watchId).toBe('engine-command-0090');
+    const again = forwardedRecordId(tagForwardedRequest(forwardedRequestToRequest('http://olympus-worker.internal', forwarded), 'command-0090'));
+    expect(again).toBe(watchId);
+
+    const store = new LocalSourceWatchStore(join(tempRoot(), 'watches.sqlite'));
+    const owner = createTrustedSourceWatchOwnerContext({ ownerId: 'owner-a', routeKind: 'openclaw_task', routeTargetId: '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f' });
+    const input = { corpusId: 'internal.telegram.messages', queryText: 'the lease renewal', mode: 'continuous' as const };
+    store.createWatch({ ...input, watchId }, owner);
+    store.createWatch({ ...input, watchId: again! }, owner);
+    expect(store.listWatches(owner).items.map((watch) => watch.watchId)).toEqual([watchId]);
+    store.close();
+
+    const index = readFileSync(join(import.meta.dir, '../src/workers/email-source/index.ts'), 'utf8');
+    expect(index).toMatch(/const recordId = sourceWatch\.recordId\?\.\(request\);/);
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/recordId: forwardedRecordId,/);
+    expect(server).toMatch(/source_watch: \(\{ request \}, \{ id \}\) => runForwarded\(request, id\)/);
   });
 });
 
