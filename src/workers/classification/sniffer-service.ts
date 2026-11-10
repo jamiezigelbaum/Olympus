@@ -385,7 +385,7 @@ export class TierSnifferService {
   private waitingReason: string | undefined;
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
-  private lowerMovesCache: { count: number; atMs: number } | undefined;
+  private lowerMovesCache: { count: number; atMs: number; pendingItems: number } | undefined;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -529,20 +529,31 @@ export class TierSnifferService {
   backlog(): TierClassificationBacklog {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.status()))];
-    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(), summary: [backlog.summary, ...messages].join(' ') };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(' ') };
   }
 
   /**
    * Queued lowering moves that automatic moves will carry out (see
    * `lowerMovesQueued`). Counted at most once per BACKLOG_REFRESH_MS: every
    * search, remote result and status read asks, and none may pay for a count.
+   * A cached zero is not served once fewer items are pending than when it was
+   * counted: those items may now wait in Private for a lowering, and a stale
+   * zero would drop the privacy-backlog note just as pending reaches 0
+   * (#1121). Queuing moves also clears the cache (`forgetLowerMoves`).
    */
-  private lowerMovesQueued(): number {
+  private lowerMovesQueued(pendingItems: number): number {
     const now = this.clockMs();
-    if (this.lowerMovesCache && now - this.lowerMovesCache.atMs < BACKLOG_REFRESH_MS) return this.lowerMovesCache.count;
+    const cached = this.lowerMovesCache;
+    if (cached && now - cached.atMs < BACKLOG_REFRESH_MS
+      && (cached.count > 0 || pendingItems >= cached.pendingItems)) return cached.count;
     const count = this.countLowerMovesQueued();
-    this.lowerMovesCache = { count, atMs: now };
+    this.lowerMovesCache = { count, atMs: now, pendingItems };
     return count;
+  }
+
+  /** Moves were queued: the next backlog read counts lowerings again (bounded). */
+  private forgetLowerMoves(): void {
+    this.lowerMovesCache = undefined;
   }
 
   private countLowerMovesQueued(): number {
@@ -1312,6 +1323,7 @@ export class TierSnifferService {
       signal,
     });
     phase('pass');
+    if (report.verdictsApplied > 0) this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase('moves');
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
@@ -1582,6 +1594,7 @@ export class TierSnifferService {
         // The photo judge's verdicts: an ordinary photo leaves the Private
         // store (a queued move), a sensitive one stays.
         const judged = applyMediaJudgments({ set, autoMoves: this.autoMovesFor(set) });
+        if (judged.movesQueued > 0) this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(
             `Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, `
@@ -1664,6 +1677,7 @@ export class TierSnifferService {
         if (next) this.rejudgeCursors.set(ledgerPath, next);
         else this.rejudgeCursors.delete(ledgerPath);
         for (const key of Object.keys(total) as Array<keyof TierRejudgeReport>) total[key] += report[key];
+        if (report.movesQueued > 0) this.forgetLowerMoves();
       } catch {
         // A set that cannot be read keeps its recorded decisions this tick.
       }

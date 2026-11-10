@@ -11,6 +11,7 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import type { EmbeddingPrefilter } from '../src/workers/classification/embedding-prefilter.ts';
 import { flushTierMoveNotes, moveTieredItem, moveTieredItemsLowering, type TierMoveOptions } from '../src/workers/connector-store/tier-move.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
@@ -664,4 +665,26 @@ test('reads within a minute reuse the lowering count instead of counting again',
   expect(service.backlog().lowerMovesQueued).toBe(3);
   clock += 2_000;
   expect(service.backlog().lowerMovesQueued).toBe(0);
+});
+
+test('a cached zero lowering count is not reused once a pending item is queued to lower (#1121)', async () => {
+  const f = await fixture(1, true);
+  for (const move of f.moves()) await moveTieredItem(move);
+  const id = identityOf(f.specs[0]!.id);
+  // Back in Private and waiting on the judge: nothing is queued to lower yet.
+  await moveTieredItem({ set: f.f.set, identity: id, target: high });
+  const pending = { ...high, contentPending: true, state: 'pending' as const };
+  f.f.ledger.recordRoutedPlacement(id, pending, f.f.set.placementFor(pending));
+  const clock = createTestClock();
+  const { service } = serviceFor(f.f, {}, [], { now: () => clock.date() });
+  expect(service.backlog()).toMatchObject({ pendingItems: 1, lowerMovesQueued: 0 });
+  // Judged Personal inside the cache window: pending reaches 0 and the
+  // item waits in Private for its move. The note must not drop.
+  await clock.advance(5_000);
+  f.f.ledger.recordRoutedPlacement(id, lower, f.f.set.placementFor(lower));
+  expect(f.f.ledger.getCurrent(id)).toMatchObject({ state: 'moving' });
+  expect(service.backlog()).toMatchObject({ pendingItems: 0, lowerMovesQueued: 1 });
+  // Once counted, reads in the window reuse that count again.
+  for (const move of f.moves()) await moveTieredItem(move);
+  expect(service.backlog().lowerMovesQueued).toBe(1);
 });

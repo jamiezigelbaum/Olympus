@@ -76761,15 +76761,19 @@ class TierSnifferService {
   backlog() {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
-    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(), summary: [backlog.summary, ...messages].join(" ") };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(" ") };
   }
-  lowerMovesQueued() {
+  lowerMovesQueued(pendingItems) {
     const now = this.clockMs();
-    if (this.lowerMovesCache && now - this.lowerMovesCache.atMs < BACKLOG_REFRESH_MS)
-      return this.lowerMovesCache.count;
+    const cached3 = this.lowerMovesCache;
+    if (cached3 && now - cached3.atMs < BACKLOG_REFRESH_MS && (cached3.count > 0 || pendingItems >= cached3.pendingItems))
+      return cached3.count;
     const count = this.countLowerMovesQueued();
-    this.lowerMovesCache = { count, atMs: now };
+    this.lowerMovesCache = { count, atMs: now, pendingItems };
     return count;
+  }
+  forgetLowerMoves() {
+    this.lowerMovesCache = undefined;
   }
   countLowerMovesQueued() {
     const autoMoves = this.options.autoMoves;
@@ -77477,6 +77481,8 @@ class TierSnifferService {
       signal
     });
     phase("pass");
+    if (report.verdictsApplied > 0)
+      this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
@@ -77689,6 +77695,8 @@ class TierSnifferService {
       } catch {}
       try {
         const judged = applyMediaJudgments({ set: set2, autoMoves: this.autoMovesFor(set2) });
+        if (judged.movesQueued > 0)
+          this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
         }
@@ -77749,6 +77757,8 @@ class TierSnifferService {
           this.rejudgeCursors.delete(ledgerPath);
         for (const key2 of Object.keys(total))
           total[key2] += report[key2];
+        if (report.movesQueued > 0)
+          this.forgetLowerMoves();
       } catch {}
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
