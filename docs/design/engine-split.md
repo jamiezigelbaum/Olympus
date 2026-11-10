@@ -1,7 +1,9 @@
 # Engine split: one writer in the background, a read-only front (#1064)
 
 Status: design, 2026-11-10. Lane 1 of the 1.5 plan. Code baseline: main
-`b649295`. Needs an independent Critical review before the build.
+`b649295`. Independent Critical review (Astra, olympus-ops cloud job
+42815695294, 2026-11-10) requested changes; they are folded in below and
+listed under "Review findings and how they are handled".
 
 ## The problem in one paragraph
 
@@ -20,8 +22,10 @@ search (`searchItemsDetailed`) and the hidden-copy set rebuilt from
 ## What was measured
 
 `scripts/engine-split-bench.ts` builds a synthetic, disposable tiered
-store set (never a live store) and imports into it at full speed while a
-request runs every 250 ms. A request is what the search adapter does per
+store set (never a live store) and imports into it at full speed while
+requests run one after another with a 250 ms pause between them (a
+closed loop: a slower layout is offered fewer requests, which hides
+queueing). A request is what the search adapter does per
 store on each Ask query: `hasEmbeddings` (which rebuilds the hidden set)
 plus `searchItemsDetailed`. A 50 ms heartbeat on the requesting thread
 records freezes. Three layouts, 60 s each, on a 500,000-item store with
@@ -88,7 +92,10 @@ the front.** Not "stay as is", and not worker threads alone.
   loop never runs one. Lane timers then fire on time.
 
 Why a process and not a Worker thread for the writer: latency was the
-same in both (table above), and a process can be restarted on its own.
+same in both here, so the measurement does not choose between them; a
+process can be restarted on its own, which a thread cannot do without
+the dashboard. The choice is re-measured after parts 1 and 2 under equal
+offered load before part 3 is switched on anywhere.
 That makes #957 (memory growing during long judging runs) a supervised
 restart instead of a leak hunt under deadline, and #803 (a restart counted
 as a task failure) stops touching the dashboard at all. A crash or out of
@@ -108,58 +115,82 @@ first; they are also the fallback if part 3 is not proven by the freeze.
 
 ### Part 1: visibility in SQLite (#858 option 1)
 
-The writer keeps each store's visibility in a real table inside the store
-file (`tier_visibility`, one row per hidden or held item pk and flag, and
-the hidden children), maintained by the same incremental refresh it runs
-today, and stamped with the ledger and store feed cursors it covers. The
-store's change feed (`item_visibility_changes`) becomes a real table
-written by the writer's triggers, so other connections can read it, like
-the ledger's `tier_visibility_changes`
-(`src/workers/classification/tier-ledger.ts:3555`).
+**The rule that keeps this safe: the SQL table is a pre-filter, never
+the authority.** Every row a read returns is still checked against the
+current tier ledger and the parent standings across the tier set, after
+the store query, as the copy filter and child filter do today
+(`withoutChildrenOfHiddenParents`, `child-visibility.ts`). A table that
+is a moment stale can then cost recall or make a count briefly off; it
+cannot serve a copy that was just raised. This answers the race the
+review named: a raise that commits between a reader's cursor check and
+its query is caught by the per-row check that runs after the query.
 
-A reader (the front, or today's process) never rebuilds from scratch. It
-reads the table and applies only the feed entries past its cursors,
-which are few. **Fail closed:** if a feed has dropped entries past the
-reader's cursor (retention gap), the reader serves nothing from that
-store and reports the lane as busy until the writer's next refresh
-catches up. It never serves a set it cannot prove current. Searches,
-counts and the embedding check filter with `NOT EXISTS` against the
-table in SQL. Measured cost of the filter: none; of the upkeep: about
-1 ms per write.
+The writer keeps each store's pre-filter in a real table inside the
+store file (`tier_visibility`, item pk and flag), written in one
+transaction with the cursors it covers, so no reader sees a half-applied
+update. The store's change feed becomes a real table with triggers that
+cover every column visibility depends on (today's update trigger leaves
+out `trust_tier` and `parent_local_item_id`, `local-index.ts:3275`, which
+a persistent feed must not). Children stay a per-row check against
+parents in every store of the set, transitively, keeping the rule that a
+present Secret parent's location establishes presence
+(`child-visibility.ts:19-35`).
 
-This removes the per-query rebuild behind #1079 and #858 and the
-JavaScript copy of the set. Guards: the privacy-per-item and architecture
-guards stay green, plus a test that a hidden, held, names-only and
-pending-move copy and the child of a hidden parent are excluded from
-search, counts and the embedding check through the table, including
-across two connections.
+What each operation may see does not change. Held content stays
+available to keyword search and Private answers and is kept out of
+vector search; names-only items stay findable by name while their
+content is not served (`docs/V0_4_RELEASE.md:48`; `local-index.ts`
+around `:10285`, `:11993`, `:14997`). The PR carries an
+operation-by-layer table and tests for both sides: what must stay out
+and what must stay in, with a second connection reading while the
+writer commits.
+
+Measured cost of an SQL filter against a 250,000-row table on the
+synthetic store: within noise of no filter on the keyword query, and
+about 1 ms per incremental write. This removes the per-query rebuild
+behind #1079 and #858 and the JavaScript copy of the set.
 
 ### Part 2: store queries off the request thread (rest of #1079)
 
 `searchItemsDetailed`, status counts and the vector scan run on a read
 pool (default 2 threads; one connection per store per thread, opened
-read-only). The request thread builds the query and merges results. Each
-lane's 10 s timer can then fire, and one slow store cannot starve the
-others. "Busy, try again" replaces "cannot search on this computer" for
+read-only). The request thread builds the query, merges results and runs
+the per-row visibility check. Admission is bounded and fair across
+stores; a job past its lane's deadline is dropped from the queue, and a
+thread still running one is replaced rather than waited for. The Ask and
+answer path never falls back to running the query on the request thread
+(today's `off-thread-reads.ts` does, after 120 s); the lane is reported
+busy instead. Each read transaction lasts one query, so readers cannot
+hold back WAL checkpoints; WAL size and checkpoint progress are measured
+under sustained load. "Busy, try again" replaces "cannot search on this computer" for
 a lane that timed out (the 1.4.3 patch owns the wording; this part owns
 the cause).
 
 ### Part 3: the split (behind `worker.engineSplit`)
 
-- **Background entry.** The same worker wiring with a role: the
-  background mounts lanes writable and runs scheduler, sniffer, captures,
-  extraction and embedding; the front mounts the same stores read-only
-  and runs none of them. The host starts both (engine host on Mac and
-  Linux, the native service in OpenClaw hosting).
+- **Background entry.** The worker wiring with a role. Boot work that
+  needs exclusive ownership (the data-owner lock, deleting marked
+  accounts, storage migration; `server.ts:2447-2467`) runs in the
+  background only, and the front starts serving stores only after the
+  background reports it ready and the schema current. The background
+  holds the data-owner lock across its own restarts' handover; the front
+  takes no lock and opens ledgers read-only too (today a bound ledger is
+  opened writable from read paths, `local-index.ts:3048`). The host
+  starts both, with the readiness order, socket ownership and shutdown
+  written down for the engine host (`engine-host.ts:95`) and OpenClaw
+  hosting (`native-plugin.ts:302-330`), where captures wait for worker
+  readiness.
 - **Commands from front to background.** Owner actions that write a
   background-owned store become commands on a private unix socket (the
   worker transport already used for the worker socket,
   `src/core/worker-transport.ts`), authenticated as the worker is today.
-  A command returns when the background has committed it, so the
-  dashboard can show the result. The background answers its socket from
-  a thread that does no store work, so a busy import cannot delay a
-  command's acknowledgement; the write itself queues behind at most one
-  write transaction.
+  The socket acknowledges receipt at once; the command's result comes
+  back when the background has committed it, so the dashboard can show
+  "saving" and then the real outcome. Commands carry an id so a retry is
+  not applied twice, run in arrival order per source, and keep every
+  authorization check they have today. The background's import and
+  judging work is cut into bounded transactions so a command waits for
+  at most one.
 - **State from background to front.** Counts and progress the front
   shows (import progress, judging rate and backlog, capture and scheduler
   status) are published by the background as a small snapshot, written
@@ -170,7 +201,9 @@ the cause).
   sessions, settings files. Nothing else writes them.
 - **Restart.** The host restarts the background on exit and, with the
   switch on, when its RSS passes a threshold between batches (#957). An
-  interrupted pass is not a failure (#803, PR #1096).
+  interrupted pass is not a failure (#803, PR #1096). The owner-busy
+  state for the shared model is re-sent by the front when the background
+  comes back.
 
 The writes the front still needs are listed in the next section; each is
 either kept front-owned or becomes one command.
@@ -211,15 +244,28 @@ synchronous answer.**
 | Approve and start (`server.ts:5919`, `:5986`) | `start_approved {source}` | `ingestion_started` or why not |
 | Scope approval invalidating extraction jobs (`server.ts:6016`) | part of `reload scope` | done |
 | `POST /dashboard/disconnect`, `/unpair` (`index.ts:2526`, `:2780`) | registry write stays front; then `sources_changed`, and `capture_stop` for messaging | lanes parked |
-| `POST /dashboard/delete-source-data` (`index.ts:2714` → `:4051`) | `delete_source_data {source}`: the background, which holds the files, deletes them | `removed_count` |
-| `olympus tier set` via `/cli` (`index.ts:1189` → `tier-cli.ts:321`, `ledger.setOverride`) | `tier_override {item, tier}` | applied |
+| `POST /dashboard/delete-source-data` (`index.ts:2714` → `:4051`) | `delete_source_data {source}`, in the order below | `removed_count` |
+| `olympus tier set` via `/cli` (`index.ts:1189` → `tier-cli.ts:97-359`) | `tier_override {item, tier}` runs the whole command in the background: the override, hiding less private copies at once, scrubbing side stores for Secret, queueing or retargeting moves, `clear` and `not-secret` | the same outcome the command reports today |
+| `/source/index/embed` (`index.ts:3841`, `embedChunks` at `:3881`; used by the embedding drain, `scripts/source-embedding-drain.ts:221`) | moves to the background with the rest of embedding | as today |
+| Pairing placement and account commands (`cli-operations.ts:64-88`) | `storage_registry_*` | as today |
 | Archive `remove`, `stop`, `approveRemoval` (`archive-import/dashboard.ts:925`, `:1060`, `:1076`) | state write stays front; `archive_changed` | accepted |
 | Messaging capture start, respond, cancel, scope (`dashboard-messaging-service.ts`) | `capture_*` | the capture's status |
 
-A command is acknowledged once the background has committed it, so the
-dashboard keeps showing a real result. Delete-source-data stops doing a
-front-side delete of background-owned files, which today relies on
-checking that no read is running (`index.ts:4061`).
+Deleting a source's data. Today the worker marks the account `deleting`
+and restarts, and boot removes the files before anything mounts
+(`index.ts:4126`, `server.ts:2462-2467`), because open stores must not
+outlive the deletion. With two processes: the front stops admitting
+reads for that account and drops any results in flight, closes every
+connection to its stores on every read thread, and tells the background;
+the background marks the account, closes its own handles, deletes, and
+reports. The front reopens nothing for that account until a new store
+generation appears. A crash at any step resumes from the `deleting` mark
+at the next boot, as today.
+
+Some background work also writes shared state that has leases today
+(archive findings and state, `archive-import/sync.ts:498,611`; judge
+spending reservations, `judge-spending.ts:104-150`). Those stay as they
+are; they are listed so nobody assumes the front is their only writer.
 
 **D. In-process signals that become cross-process.** The owner's own
 answers preempt the judge (`localModelActivity.onBusy → tierSniffer.preempt()`,
@@ -253,17 +299,51 @@ When part 3 is proven on Sparta: `ControlPathHeadroom` and every
 `ingestionTurn()` call that exists only to let requests in, the
 `runStepsInTurns` variants of the visibility builds, the status-counts
 memo age (`STATUS_COUNTS_MAX_AGE_MS`), and the sniffer's yield-to-answers
-machinery that only protected the request path (#1030, #1031). Each
-deletion is its own PR after the 48-hour proof.
+machinery that existed only to let requests in. **Not deleted:** the
+judge's preemption by the owner's own answers on a shared local model
+(`server.ts:7331-7351`, #1030, #1031). That arbitrates a model server,
+not a JavaScript thread, and stays, carried across the split as
+`owner_busy` and `owner_idle`. Each deletion is its own PR after the
+48-hour proof.
 
 ## Memory on an 8 GB laptop
 
-The second process costs a Bun runtime plus its own SQLite page cache:
-79 MB peak for the writer in the measurement above, before models (the
-built-in model already runs as its own llama-server process). The front
-loses the JavaScript hidden sets, which were most of its RSS here. Net
-expected change on a laptop: under 150 MB more, to be confirmed on the
-first real install.
+Not yet known. The writer process peaked at 79 MB in the measurement
+above, but that number was sampled from a thread that was itself frozen
+at times, and the read pool (one connection and page cache per store per
+thread) was not built. Removing the JavaScript hidden sets helps by an
+amount the benchmark did not isolate. Before part 3 is switched on by
+default, peak memory of host, background, front, read threads and model
+processes is sampled from outside on a real 8 GB machine with many
+stores mounted. A second process isolates a writer crash; it does not
+keep the dashboard alive if the whole machine runs out of memory.
+
+## Review findings and how they are handled
+
+The Critical review (10 findings, frequency x severity 40 to 60) found no
+leak in shipped code; all are about the design. Where they landed:
+
+1. Part 1 had no atomic publication or consistent read (60): the SQL
+   table is now a pre-filter only, and a per-row check against the
+   current ledger after the query stays the authority. Part 1 PR tests
+   a raise committed mid-read.
+2. Children depend on sibling stores and the triggers missed columns
+   (50): children stay a per-row check across the set; trigger coverage
+   fixed.
+3. Held and names-only copies are not simply excluded (56): the
+   operation-by-layer table and two-sided tests.
+4. Deleting data with readers open (40): the deletion order above.
+5. Inventory gaps and tier override semantics (56): added above; the
+   override runs whole in the background.
+6. Boot, lock and acknowledgement semantics (40): background entry and
+   commands above.
+7. Read pool fairness and WAL growth (49): Part 2 above.
+8. Benchmark limits (54): stated above; layouts are re-measured after
+   parts 1 and 2 with equal offered load, children, vectors and repeated
+   runs before part 3 is switched on.
+9. Memory on 8 GB unproven (48): measured on a real machine before
+   default-on.
+10. Owner preemption is not event-loop yielding (49): kept.
 
 ## Done when (measured on Sparta during a large import)
 
