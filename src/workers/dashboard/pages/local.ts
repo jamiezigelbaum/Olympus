@@ -107,6 +107,8 @@ export interface DashboardPageOptions {
   agentConnectHost?: AgentConnectHost;
   /** The saved Private-answer mode, for Privacy settings: its id and its label. */
   answerMode?: { id: string; label: string };
+  /** Go easy on this computer (#922): whether local sorting trickles while the owner works. */
+  goEasy?: boolean;
   /** The Outside help card's facts, for that page only, with the control session. */
   outsideHelp?: DashboardOutsideHelpStatus | undefined;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
@@ -840,8 +842,8 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ''}"${capAttrs}></label>`
     + `<p class="pnote">${escapeHtml(spent)}</p>${judgeChoiceUsesVenice(status.choice) ? `<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button>` : ''}</div>`;
   // Box 3 of the approved mock (#922, "Go easy on this computer"): the idle-mode
-  // checkbox goes here, between the choices and the spending limit.
-  const idleModeSlot = '';
+  // checkbox, between the choices and the spending limit.
+  const idleModeSlot = options?.goEasy === undefined ? '' : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? ' checked' : ''}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`;
   const reply = '<span data-action-message role="status"></span>';
   const dialog = (pick: JudgeChoice, title: string, body: string, button: string) =>
     `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>`
