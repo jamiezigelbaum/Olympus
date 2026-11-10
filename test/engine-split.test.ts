@@ -26,7 +26,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -925,6 +925,22 @@ describe('state the front shows from the snapshot', () => {
     } finally {
       front.stop();
     }
+  });
+
+  test('capture on the dashboard comes from a current snapshot; otherwise only the grants the front reads', () => {
+    const background = { 'telegram.messages': { supervisor: { state: 'running' }, scope: { chats: 3 } } };
+    const grantsOnly = { 'telegram.messages': { scope: { chats: 3 } } };
+    const snapshot = snapshotWith({ captures: background });
+    const captures = frontCaptureRuntime(() => grantsOnly, snapshot.read);
+    expect(captures()).toEqual(background);
+    // A stale snapshot claims no running capture.
+    snapshot.setStale(true);
+    expect(captures()).toEqual(grantsOnly);
+    snapshot.setStale(false);
+    snapshot.set(undefined);
+    expect(captures()).toEqual(grantsOnly);
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/captureRuntime: engineFront \? frontCaptureRuntime\(dashboardCaptureRuntime, \(\) => engineFront!\.status\(\)\) : dashboardCaptureRuntime,/);
   });
 
   test('judge backlog, unreadable counts and the archive views come from the snapshot', () => {

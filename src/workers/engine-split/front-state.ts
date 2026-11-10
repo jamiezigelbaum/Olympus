@@ -155,3 +155,19 @@ export function frontModelReload<R>(options: {
     return true;
   };
 }
+
+/**
+ * Messaging capture on the dashboard. The background runs the capture
+ * supervisors, so its snapshot says how capture stands. Without a current
+ * snapshot (none yet, or stale) the front shows only what it can read itself,
+ * the grants (`local`: its supervisors are empty, so no running state is
+ * claimed).
+ */
+export function frontCaptureRuntime<T>(local: () => Readonly<Record<string, T>>, snapshot: Snapshot): () => Readonly<Record<string, T>> {
+  return () => {
+    const captures = current(snapshot)?.snapshot.captures;
+    return captures && typeof captures === 'object' && !Array.isArray(captures)
+      ? captures as Readonly<Record<string, T>>
+      : local();
+  };
+}

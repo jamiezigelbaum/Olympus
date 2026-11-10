@@ -562,7 +562,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -6548,7 +6548,8 @@ export async function main(): Promise<void> {
             stopMessagingCapture,
             unlinkWhatsAppDevice,
             withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
-            captureRuntime: dashboardCaptureRuntime,
+            // In the split the background runs capture: the dashboard shows its snapshot (#1224).
+            captureRuntime: engineFront ? frontCaptureRuntime(dashboardCaptureRuntime, () => engineFront!.status()) : dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can
             // check it before deleting anything.
