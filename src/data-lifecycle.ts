@@ -84,6 +84,8 @@ import {
   type SourceRegistryAccount,
 } from './core/source-registry.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
+import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import {
   olympusDataRoots,
   pairingOwnedRoots,
@@ -148,8 +150,17 @@ export interface DataExportResult {
 
 export interface DataExportArtifact {
   sourceId: string;
-  role: 'legacy_store' | 'connector_store' | 'sanitized_config';
+  role: 'legacy_store' | 'connector_store' | 'tier_sidecar' | 'sanitized_config' | 'owner_rules';
   relativePath: string;
+  /**
+   * Version 3: a connector store's place in its account's store list, and
+   * for a tier sidecar, which one it is. A restore puts each file back where
+   * this install keeps that store, so privacy judgments come back with it (#1065).
+   */
+  storeIndex?: number;
+  sidecar?: 'tier_ledger' | 'tier_sniffer' | 'secret_locations';
+  /** `owner_rules`: which owner file this is. */
+  ownerFile?: 'tier_rules' | 'ingestion_exclusions';
   bytes: number;
   sha256: string;
   sqlite?: {
@@ -340,7 +351,8 @@ export function exportOlympusData(options: {
         artifacts,
       });
     }
-    for (const storePath of source.files.stores) {
+    source.files.stores.forEach((storePath, storeIndex) => {
+      const before = artifacts.length;
       exportSqliteStore({
         sqlitePath: storePath,
         destinationRoot: sourceRoot,
@@ -352,7 +364,22 @@ export function exportOlympusData(options: {
         skipped,
         artifacts,
       });
-    }
+      if (artifacts.length === before) return;
+      artifacts[before]!.storeIndex = storeIndex;
+      // The store's privacy judgments, its sniffer queue and its secret
+      // locations sit beside it. Without them a restore judges every item
+      // again, which on a laptop takes nights (#1065).
+      for (const [sidecar, path, storeId] of [
+        ['tier_ledger', tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
+        ['tier_sniffer', tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
+        ['secret_locations', secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID],
+      ] as const) {
+        if (!existsSync(path)) continue;
+        const at = artifacts.length;
+        exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: 'tier_sidecar', expectedStoreId: storeId, files, skipped, artifacts });
+        if (artifacts.length > at) Object.assign(artifacts[at]!, { storeIndex, sidecar });
+      }
+    });
     for (const policyPath of source.files.settings) {
       const destinationPath = join(sourceRoot, basename(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
@@ -416,13 +443,27 @@ export function exportOlympusData(options: {
       artifacts.push(fileArtifact(destination, destinationPath, 'olympus.config', 'sanitized_config'));
     }
   }
+  // The owner's own privacy rules and exclusions: what a restore must bring
+  // back for the new install to keep the owner's decisions (#1065).
+  if (options.sourceId === undefined) {
+    const env = envForContext(options);
+    for (const [ownerFile, sourcePath, name] of [
+      ['tier_rules', resolveTierRulesPath({ env }), 'tier-rules.json'],
+      ['ingestion_exclusions', resolveSourceIngestionExclusionsPath(env), 'ingestion-exclusions.json'],
+    ] as const) {
+      const destinationPath = join(configRoot, name);
+      if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
+        artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile });
+      }
+    }
+  }
   // The manifest is the export's commit record, so it is published LAST and
   // atomically. A manifest that reaches the disk before the data it describes
   // is what turns "export, then delete" into silent loss: the owner reads a
   // success they do not have.
   writePrivateFileAtomicSync(join(destination, 'manifest.json'), JSON.stringify({
     kind: 'olympus_data_export',
-    version: 2,
+    version: 3,
     exported_at: new Date().toISOString(),
     source_ids: selected.map((source) => source.sourceId),
     // Where each account's files were (additive: a verifier of this version ignores it).
@@ -445,7 +486,7 @@ export function verifyOlympusDataExport(options: { destination: string }): DataE
     version?: unknown;
     artifacts?: unknown;
   };
-  if (parsed.kind !== 'olympus_data_export' || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
+  if (parsed.kind !== 'olympus_data_export' || (parsed.version !== 2 && parsed.version !== 3) || !Array.isArray(parsed.artifacts)) {
     throw new OperationError('source_index_error', 'Olympus data export manifest is unsupported or incomplete.');
   }
   const verified: Array<{ relativePath: string; bytes: number; sha256: string }> = [];
@@ -1618,7 +1659,7 @@ function exportSqliteStore(options: {
   destinationRoot: string;
   exportRoot: string;
   sourceId: string;
-  role: 'legacy_store' | 'connector_store';
+  role: 'legacy_store' | 'connector_store' | 'tier_sidecar';
   expectedStoreId: string;
   files: string[];
   skipped: string[];
@@ -2276,6 +2317,11 @@ function envForHome(homeDir: string | undefined): Record<string, string | undefi
     XDG_DATA_HOME: join(homeDir, '.local', 'share'),
     XDG_STATE_HOME: join(homeDir, '.local', 'state'),
   };
+}
+
+/** The environment the lifecycle resolves paths in for this context. */
+export function lifecycleEnv(context: LifecyclePathContext | undefined): Record<string, string | undefined> {
+  return envForContext(context);
 }
 
 function envForContext(context: LifecyclePathContext | undefined): Record<string, string | undefined> {

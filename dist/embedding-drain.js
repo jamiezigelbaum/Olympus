@@ -50734,6 +50734,19 @@ var init_http = __esm(() => {
   REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 });
 
+// src/core/source-disposition-tree.ts
+var init_source_disposition_tree = __esm(() => {
+  init_source_ingestion_exclusions();
+});
+
+// src/workers/source-dispositions.ts
+var init_source_dispositions = __esm(() => {
+  init_atomic_file();
+  init_source_disposition_tree();
+  init_operation_error();
+  init_source_ingestion_exclusions();
+});
+
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
 var init_gmail_live_control = __esm(() => {
@@ -51146,6 +51159,8 @@ var init_data_lifecycle = __esm(() => {
   init_source_forget_registry();
   init_source_registry();
   init_sovereignty();
+  init_tier_rules();
+  init_source_dispositions();
   init_pairing_session_paths();
   init_unpaired_sources();
   init_source_corpus_registry();
@@ -70907,18 +70922,7 @@ var REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
 // src/workers/email-source/index.ts
 init_source_dashboard();
 init_credential_health();
-
-// src/workers/source-dispositions.ts
-init_atomic_file();
-
-// src/core/source-disposition-tree.ts
-init_source_ingestion_exclusions();
-
-// src/workers/source-dispositions.ts
-init_operation_error();
-init_source_ingestion_exclusions();
-
-// src/workers/email-source/index.ts
+init_source_dispositions();
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();

@@ -1,0 +1,87 @@
+// `olympus data restore` (#1065): an export from one computer goes back onto
+// a fresh install with its stores, its privacy judgments and the owner's
+// rules, and never over data that is already there.
+import { lifecycleViews } from './helpers/lifecycle-view.ts';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { Database } from 'bun:sqlite';
+import { describe, expect, test } from 'bun:test';
+import { exportOlympusData, lifecycleEnv } from '../src/data-lifecycle.ts';
+import { restoreOlympusData } from '../src/data-restore.ts';
+import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { resolveTierRulesPath } from '../src/workers/classification/tier-rules.ts';
+
+function seed(path: string, table: string, value: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path, { create: true });
+  db.exec(`CREATE TABLE ${table} (id INTEGER PRIMARY KEY, value TEXT NOT NULL);`);
+  db.query(`INSERT INTO ${table} (value) VALUES (?)`).run(value);
+  db.close();
+}
+
+function rows(path: string, table: string): unknown[] {
+  const db = new Database(path, { readonly: true });
+  try { return db.query(`SELECT value FROM ${table}`).all(); } finally { db.close(); }
+}
+
+const storeOf = (homeDir: string) => lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({ homeDir })[0]!;
+
+describe('data restore', () => {
+  test('brings stores, judgments and owner rules back onto a fresh install, then refuses a second time', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      const storeA = storeOf(homeA);
+      seed(storeA, 'rows', 'a bookmark');
+      seed(tierLedgerPathForStore(storeA), 'judgments', 'Private');
+      const rulesA = resolveTierRulesPath({ env: lifecycleEnv({ homeDir: homeA }) });
+      mkdirSync(dirname(rulesA), { recursive: true });
+      writeFileSync(rulesA, JSON.stringify({ schema_version: 1, rules: [{ id: 'r1', tier: 'private', match: { sender: 'x@example.com' } }] }));
+
+      const exported = exportOlympusData({ destination: backup, homeDir: homeA });
+      const manifest = JSON.parse(readFileSync(join(backup, 'manifest.json'), 'utf8'));
+      expect(manifest.version).toBe(3);
+      expect(exported.artifacts.some((artifact) => artifact.role === 'tier_sidecar' && artifact.sidecar === 'tier_ledger')).toBe(true);
+      expect(exported.artifacts.some((artifact) => artifact.role === 'owner_rules' && artifact.ownerFile === 'tier_rules')).toBe(true);
+
+      const dry = restoreOlympusData({ input: backup, homeDir: homeB, dryRun: true });
+      expect(dry.dryRun).toBe(true);
+      expect(existsSync(storeOf(homeB))).toBe(false);
+
+      const restored = restoreOlympusData({ input: backup, homeDir: homeB });
+      const storeB = storeOf(homeB);
+      expect(rows(storeB, 'rows')).toEqual([{ value: 'a bookmark' }]);
+      expect(rows(tierLedgerPathForStore(storeB), 'judgments')).toEqual([{ value: 'Private' }]);
+      const rulesB = resolveTierRulesPath({ env: lifecycleEnv({ homeDir: homeB }) });
+      expect(JSON.parse(readFileSync(rulesB, 'utf8')).rules[0].id).toBe('r1');
+      expect(restored.signInAgain).toContain('x.bookmarks');
+      expect(restored.notes.join(' ')).not.toContain('judges the restored items again');
+      // Nothing in a backup is a sign-in.
+      expect(readFileSync(join(backup, 'manifest.json'), 'utf8')).toContain('"secrets_excluded": true');
+
+      expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('already holds Olympus data for x.bookmarks');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses a backup whose files fail verification, and writes nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-tamper-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      seed(storeOf(homeA), 'rows', 'a bookmark');
+      const exported = exportOlympusData({ destination: backup, homeDir: homeA });
+      const store = exported.artifacts.find((artifact) => artifact.role === 'connector_store')!;
+      writeFileSync(join(backup, store.relativePath), 'tampered');
+      expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('failed verification');
+      expect(existsSync(storeOf(homeB))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
