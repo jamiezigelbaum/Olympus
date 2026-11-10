@@ -147763,11 +147763,12 @@ function createJudgeCheck(options) {
       if (again)
         pool.push(again);
     }
-    const rest = [...pool];
+    const fresh2 = [...unseen];
     const picked = [];
-    while (picked.length < JUDGE_CHECK_RANDOM_PICKS && rest.length > 0) {
-      picked.push({ item: rest.splice(Math.floor(random() * rest.length), 1)[0], random: true });
+    while (picked.length < JUDGE_CHECK_RANDOM_PICKS && fresh2.length > 0) {
+      picked.push({ item: fresh2.splice(Math.floor(random() * fresh2.length), 1)[0], random: true });
     }
+    const rest = pool.filter((item) => !picked.some((entry) => entry.item === item));
     const byDoubt = rest.sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
     for (const item of byDoubt.slice(0, JUDGE_CHECK_ROUND_SIZE - picked.length))
       picked.push({ item, random: false });

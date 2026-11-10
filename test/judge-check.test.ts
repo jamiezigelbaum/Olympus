@@ -226,6 +226,17 @@ describe('a round', () => {
       .toEqual(['oti_10', 'oti_4', 'oti_5', 'oti_6', 'oti_7', 'oti_8', 'oti_9']);
   });
 
+  test('an item asked about again never counts twice toward the accuracy range', () => {
+    const { check } = fixture([item(1)]);
+    let view = check.start();
+    for (let round = 0; round < 40; round += 1) {
+      while (view.current) view = check.answer(view.current.item_id, 'Private');
+      if (round < 39) view = check.start();
+    }
+    expect(view.random?.compared).toBe(1);
+    expect(view.range).toBeUndefined();
+  });
+
   test('putting it away keeps the answers, and it picks up where it stopped', () => {
     const { check, path } = fixture(pool());
     let view = check.start();

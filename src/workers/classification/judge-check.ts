@@ -275,13 +275,15 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
       const again = askedBefore.get(id);
       if (again) pool.push(again);
     }
-    // The random picks first, from the whole pool, so the least sure items can be
-    // among them and the accuracy estimate is a fair sample; then the least sure.
-    const rest = [...pool];
+    // The random picks first, from every item no round has asked about, so the least
+    // sure can be among them and the accuracy estimate is a fair sample of distinct
+    // verdicts (an item asked again never counts twice); then the least sure.
+    const fresh = [...unseen];
     const picked: Array<{ item: OwnerTierItem & { tier: JudgeLabel }; random: boolean }> = [];
-    while (picked.length < JUDGE_CHECK_RANDOM_PICKS && rest.length > 0) {
-      picked.push({ item: rest.splice(Math.floor(random() * rest.length), 1)[0]!, random: true });
+    while (picked.length < JUDGE_CHECK_RANDOM_PICKS && fresh.length > 0) {
+      picked.push({ item: fresh.splice(Math.floor(random() * fresh.length), 1)[0]!, random: true });
     }
+    const rest = pool.filter((item) => !picked.some((entry) => entry.item === item));
     const byDoubt = rest.sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
     for (const item of byDoubt.slice(0, JUDGE_CHECK_ROUND_SIZE - picked.length)) picked.push({ item, random: false });
     // Shuffled, so the least sure do not all come first.
