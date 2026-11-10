@@ -319,10 +319,7 @@ async function chatCompletion(
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        messages: [
-          { role: 'system', content: request.system },
-          { role: 'user', content: request.prompt },
-        ],
+        messages: builtInMessages(request, spec.contextTokens),
         temperature: 0,
         max_tokens: maxTokensForChars(request.maxOutputChars),
         // Every Analyst-seam prompt asks for one JSON object; a grammar keeps
@@ -372,6 +369,49 @@ async function chatCompletion(
   return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...(usage ? { usage } : {}) };
 }
 
+// A deliberately low estimate of UTF-8 bytes per token (English prose runs
+// about 4, dense identifiers and escapes nearer 2), so a continuation is only
+// sent when it surely fits the context.
+const MIN_BYTES_PER_TOKEN = 2;
+// The chat template's role markers and turn separators, in tokens.
+const TEMPLATE_TOKEN_ALLOWANCE = 64;
+
+/**
+ * The chat messages for one call. A second call over the same evidence (the
+ * audit, `request.continues`) is sent as a continuation of the first:
+ * the first call's system and user turns verbatim, its reply, then the
+ * follow-up. llama-server keeps the single slot's prompt (`cache_prompt` is on
+ * by default; `--parallel 1`), so the audit reuses the draft's prefill of the
+ * evidence instead of reading it again. On a hybrid model the slot restores a
+ * context checkpoint taken just before the end of the draft's prompt
+ * (llama.cpp b11320 `server-context.cpp`). When the continuation might not fit
+ * the context, the call is sent standalone as before.
+ */
+export function builtInMessages(
+  request: AnalystModelRequest,
+  contextTokens: number,
+): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+  const turn = request.continues;
+  if (turn) {
+    const bytes = utf8Bytes(turn.system) + utf8Bytes(turn.prompt) + utf8Bytes(turn.reply) + utf8Bytes(turn.followUp);
+    const worstCase = Math.ceil(bytes / MIN_BYTES_PER_TOKEN) + TEMPLATE_TOKEN_ALLOWANCE + maxTokensForChars(request.maxOutputChars);
+    if (worstCase <= contextTokens) {
+      return [
+        { role: 'system', content: turn.system },
+        { role: 'user', content: turn.prompt },
+        { role: 'assistant', content: turn.reply },
+        { role: 'user', content: turn.followUp },
+      ];
+    }
+  }
+  return [
+    { role: 'system', content: request.system },
+    { role: 'user', content: request.prompt },
+  ];
+}
+
+const utf8Bytes = (text: string): number => utf8.encode(text).length;
+
 /** llama-server's per-request `timings` (counts and milliseconds only). */
 function llamaUsage(timings: Record<string, unknown> | undefined): AnalystModelUsage | undefined {
   if (!timings) return undefined;
@@ -381,10 +421,12 @@ function llamaUsage(timings: Record<string, unknown> | undefined): AnalystModelU
   const promptMs = count(timings.prompt_ms);
   const outputTokens = count(timings.predicted_n);
   const outputMs = count(timings.predicted_ms);
+  const cachedPromptTokens = count(timings.cache_n);
   if (promptTokens !== undefined) usage.promptTokens = promptTokens;
   if (promptMs !== undefined) usage.promptMs = promptMs;
   if (outputTokens !== undefined) usage.outputTokens = outputTokens;
   if (outputMs !== undefined) usage.outputMs = outputMs;
+  if (cachedPromptTokens !== undefined) usage.cachedPromptTokens = cachedPromptTokens;
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 

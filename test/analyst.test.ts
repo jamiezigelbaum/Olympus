@@ -901,6 +901,34 @@ describe('Analyst capability', () => {
     expect(calls[1]!.prompt).not.toContain('local_private_provenance:');
   });
 
+  test("the audit carries the draft's exact exchange, so a caching transport can continue it", async () => {
+    const draft = JSON.stringify({ answer: 'Report A gives 7.2 m/s.', citations: [{ evidence: 1, claim: '7.2 m/s' }], unanswered: [], sufficient: true });
+    const { model, calls } = fakeModel(() => draft);
+    const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+    await analyst.analyze(
+      pack('What are the two calibration values?', [
+        candidate('doc-a', ['Calibration threshold: 7.2 m/s.'], { title: 'Report A' }),
+        candidate('doc-b', ['Magnetic field calibration: 0.64 G.'], { title: 'Report B' }),
+      ]),
+      { localOnly: false },
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.continues).toBeUndefined();
+    const turn = calls[1]!.continues!;
+    // Verbatim: a transport sends these as the first turns, so they must match the draft call byte for byte.
+    expect(turn.system).toBe(calls[0]!.system);
+    expect(turn.prompt).toBe(calls[0]!.prompt);
+    expect(turn.reply).toBe(draft);
+    // The follow-up carries the audit's rules and no evidence of its own (the evidence is the turn above).
+    expect(turn.followUp).toContain('Now audit the JSON answer draft you just wrote');
+    expect(turn.followUp).toContain('never cite a fact the answer leaves out');
+    expect(turn.followUp).not.toContain('7.2 m/s');
+    expect(turn.followUp).not.toContain('Report B');
+    // A transport that ignores the continuation still gets the standalone audit.
+    expect(calls[1]!.system).toContain('auditing an evidence-grounded answer draft');
+    expect(calls[1]!.prompt).toContain('Draft JSON:');
+  });
+
   test('audits suspicious multi-candidate drafts when explicitly enabled', async () => {
     const { model, calls } = fakeModel((request) => {
       if (request.system.includes('auditing an evidence-grounded answer draft')) {
