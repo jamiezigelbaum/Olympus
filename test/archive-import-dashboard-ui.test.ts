@@ -847,6 +847,19 @@ describe('Reflect, Roam and Evernote: import-only sources with cards of their ow
     expect(other.querySelector('li.archive')).toBeNull();
   });
 
+  test('on a plain Home load (no landing), a Reflect import still running keeps the Reflect row, with its progress and Remove (#1163 review)', async () => {
+    const answer = split('archives-notes-reflect');
+    const meta = answer._meta[COMPUTER_META_KEY];
+    const cards = meta.archiveCards.map((card: any) => card.sourceId === 'reflect.archive'
+      ? { ...card, archives: card.archives.map((entry: any) => ({ ...entry, status: 'importing', percent: 42 })) }
+      : card);
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => ({ ...answer, _meta: { ...answer._meta, [COMPUTER_META_KEY]: { ...meta, archiveCards: cards } } }) }, { host: COMPUTER });
+    const reflect = cardRow(page, 'Reflect');
+    expect(reflect.querySelector('li.archive .archive-name')?.textContent).toBe('Reflect export.zip');
+    expect(reflect.querySelector('li.archive [role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('42');
+    expect(Array.from(reflect.querySelectorAll('li.archive button')).map((node) => node.textContent)).toContain(A.remove);
+  });
+
   test('a card with nothing imported offers Import an archive, which opens the drop zone for its exports and names it on approval', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => split('archives-none'),

@@ -45599,7 +45599,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    return archiveGroups().some((meta) => !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking"));
+    return archiveGroups().some(archiveMoving);
+  }
+  function archiveMoving(meta) {
+    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking");
   }
   function startArchivePick(key2, sourceId) {
     supersede();
@@ -46839,7 +46842,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         return true;
       const archives2 = archivesMeta(id);
       const joined = sourceImportsMeta(id);
-      if (!!archives2 && archiveNeeds(archives2) || !!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))
+      if (!!archives2 && (archiveNeeds(archives2) || archiveMoving(archives2)) || !!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))
         state.open["home-focus:" + id] = true;
       return !!state.open["home-focus:" + id];
     });

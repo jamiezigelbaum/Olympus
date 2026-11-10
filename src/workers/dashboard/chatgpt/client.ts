@@ -1455,10 +1455,13 @@ export function chatgptDashboardClient(
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group: Any) => !!group && !archiveSetting(group) && Array.isArray(group.imports)
       && group.imports.some((entry: Any) => !!entry && entry.status === 'importing'))) return true;
-    // Imports this computer's settings keep from running are not moving.
-    return archiveGroups().some((meta: Any) =>
-      (!archiveSetting(meta) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
-      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
+    return archiveGroups().some(archiveMoving);
+  }
+
+  /** One list of imports at work: an archive read or removed (unless this computer's settings keep it from running), or a request checked. */
+  function archiveMoving(meta: Any): boolean {
+    return (!archiveSetting(meta) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
+      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking');
   }
 
   /**
@@ -2905,9 +2908,9 @@ export function chatgptDashboardClient(
       if (state.open['home-focus:' + id]) return true;
       const archives = archivesMeta(id);
       const joined = sourceImportsMeta(id);
-      // Shown once for an archive that needs the owner, or an import that joined it and is still moving (its
-      // progress and Stop), it stays for the visit, so its result is seen too.
-      if ((!!archives && archiveNeeds(archives)) || (!!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))) state.open['home-focus:' + id] = true;
+      // Shown once for an archive that needs the owner or is still moving (Reflect, Roam, Evernote: their progress
+      // and Stop), or an import that joined it and is still moving, it stays for the visit, so its result is seen too.
+      if ((!!archives && (archiveNeeds(archives) || archiveMoving(archives))) || (!!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))) state.open['home-focus:' + id] = true;
       return !!state.open['home-focus:' + id];
     });
     if (!shown.length && !archivesMoving()) return null;
