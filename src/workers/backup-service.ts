@@ -27,6 +27,7 @@ import {
   backupKeyCheck,
   backupOlympusData,
   backupStagingDir,
+  checkKdf,
   deriveBackupKey,
   listBackups,
   openBackupFile,
@@ -35,6 +36,9 @@ import {
   type BackupKey,
 } from '../data-backup.ts';
 import { restoreOlympusData } from '../data-restore.ts';
+import { realPathOfScopePath } from './local-files/locations.ts';
+import { normalizeScopePath } from './local-files/paths.ts';
+import { VolumeResolver } from './local-files/volume-identity.ts';
 
 export type BackupSchedule = 'manual' | 'nightly' | 'weekly';
 export const BACKUP_SCHEDULES: readonly BackupSchedule[] = ['manual', 'nightly', 'weekly'];
@@ -50,6 +54,12 @@ const RESTORE_RESULT = 'restore-result.json';
 export interface BackupSettingsFile {
   schema: typeof SETTINGS_SCHEMA;
   folder?: string;
+  /**
+   * The folder as the picker named it: bound to its disk's identity, so a
+   * backup is written only when that same disk is connected, wherever it is
+   * mounted, and never onto another disk now mounted at the same place.
+   */
+  folder_key?: string;
   schedule: BackupSchedule;
   /** The last finished backup. */
   last?: { at: string; file: string; bytes: number; encrypted: boolean };
@@ -116,12 +126,16 @@ export function readBackupSettings(path: string): BackupSettingsFile {
   return {
     schema: SETTINGS_SCHEMA,
     ...(typeof raw.folder === 'string' && raw.folder.startsWith('/') ? { folder: raw.folder } : {}),
+    ...(typeof raw.folder_key === 'string' && raw.folder_key.startsWith('/') ? { folder_key: raw.folder_key } : {}),
     schedule: BACKUP_SCHEDULES.includes(raw.schedule as BackupSchedule) ? raw.schedule as BackupSchedule : 'manual',
     ...(raw.last && typeof raw.last.at === 'string' ? { last: raw.last } : {}),
     ...(typeof raw.last_attempt_at === 'string' ? { last_attempt_at: raw.last_attempt_at } : {}),
     ...(raw.last_error && typeof raw.last_error.at === 'string' ? { last_error: raw.last_error } : {}),
   };
 }
+
+/** Said when the backup folder's disk is missing or another disk is in its place: nothing is written or removed. */
+export const BACKUP_DISK_ABSENT = 'The disk with your backup folder isn\'t connected (or another disk is in its place), so no backup was made and no older backup was removed. Connect it, or choose the folder again.';
 
 /** Said when a passphrase was set but its key can't be used: no backup is made without it. */
 export const BACKUP_KEY_INVALID = 'The key kept for your passphrase can\'t be read, so no backup was made. Set the passphrase again (or choose to back up without one).';
@@ -144,6 +158,8 @@ export function readStoredBackupKeyState(path: string): { state: 'absent' } | { 
     if (!raw || raw.schema !== KEY_SCHEMA || !raw.kdf || typeof raw.kdf.salt !== 'string' || typeof raw.key !== 'string' || typeof raw.key_check !== 'string') return { state: 'invalid' };
     const key = Buffer.from(raw.key, 'base64');
     if (key.length !== 32 || backupKeyCheck(key) !== raw.key_check) return { state: 'invalid' };
+    // Its key setting too: backups written under a setting no restore accepts could never be opened.
+    checkKdf(raw.kdf);
     return { state: 'ok', key: { key, kdf: raw.kdf } };
   } catch {
     return { state: 'invalid' };
@@ -187,11 +203,13 @@ export interface BackupServiceOptions {
   env: Record<string, string | undefined>;
   now?: () => Date;
   keep?: number;
+  /** Where a folder key points now; undefined when its disk is not connected. Default: the disks mounted now. */
+  resolveFolderKey?: (key: string) => string | undefined;
 }
 
 export interface BackupService {
   status(): BackupStatus;
-  saveSettings(input: { folder?: string; schedule?: BackupSchedule }): BackupStatus;
+  saveSettings(input: { folder?: string; folderKey?: string; schedule?: BackupSchedule }): BackupStatus;
   setPassphrase(passphrase: string | null): BackupStatus;
   /** Start a backup now; resolves when it has finished (callers may not wait). */
   runNow(): Promise<BackupStatus>;
@@ -206,6 +224,14 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
   let running: Promise<BackupStatus> | undefined;
   let restoreState: BackupRestoreState | undefined;
   const settings = () => readBackupSettings(options.paths.settings);
+  const resolveFolderKey = options.resolveFolderKey ?? ((key: string) => {
+    try { return realPathOfScopePath(new VolumeResolver(), normalizeScopePath(key)); } catch { return undefined; }
+  });
+  /** The folder backups go to now: the chosen disk's folder, or undefined when that disk is not connected. */
+  const folderNow = (current: BackupSettingsFile): string | undefined => {
+    if (!current.folder) return undefined;
+    return current.folder_key ? resolveFolderKey(current.folder_key) : current.folder;
+  };
   const save = (next: BackupSettingsFile) => writePrivateJson(options.paths.settings, next);
 
   const status = (): BackupStatus => {
@@ -223,7 +249,7 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
       ...(current.last ? { last: current.last } : {}),
       ...(current.last_error && current.last_error.at >= (current.last?.at ?? '') ? { lastError: current.last_error } : {}),
       running: running !== undefined,
-      backups: current.folder ? listBackups(current.folder) : [],
+      backups: (() => { const folder = folderNow(current); return folder ? listBackups(folder) : []; })(),
       ...(restore ? { restore } : {}),
       restoreAvailable: options.canRestart(),
     };
@@ -239,8 +265,14 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
       // Fail closed: a passphrase was set, so never write this backup unencrypted.
       if (stored.state === 'invalid') throw new OperationError('invalid_params', BACKUP_KEY_INVALID);
       const key = stored.state === 'ok' ? stored.key : undefined;
+      // The chosen disk, asked again before writing and again before older backups are removed.
+      const folder = folderNow(current);
+      if (!folder) throw new OperationError('invalid_params', BACKUP_DISK_ABSENT);
       const result = await backupOlympusData({
-        folder: current.folder,
+        folder,
+        beforePrune: () => {
+          if (folderNow(settings()) !== folder) throw new OperationError('invalid_params', BACKUP_DISK_ABSENT);
+        },
         ...(key ? { key } : {}),
         now: startedAt,
         keep: options.keep ?? BACKUP_KEEP,
@@ -272,6 +304,8 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
       const next: BackupSettingsFile = { ...current };
       if (input.folder !== undefined) {
         next.folder = input.folder;
+        if (input.folderKey !== undefined) next.folder_key = input.folderKey;
+        else delete next.folder_key;
         // A folder chosen for the first time backs up every night unless the owner says otherwise.
         if (!current.folder && input.schedule === undefined) next.schedule = 'nightly';
       }

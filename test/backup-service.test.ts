@@ -33,11 +33,13 @@ function seed(path: string, value: string): void {
 }
 const storeOf = (homeDir: string) => lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({ homeDir })[0]!;
 
-function install(home: string, now: () => Date, restarts: { count: number } = { count: 0 }) {
+function install(home: string, now: () => Date, restarts: { count: number } = { count: 0 }, resolveFolderKey?: (key: string) => string | undefined, keep?: number) {
   const env = lifecycleEnv({ homeDir: home });
   const paths: BackupServicePaths = { settings: join(home, 'cfg', 'backup.json'), key: join(home, 'cfg', 'backup-key.json'), staging: sharedDataPath('backup-staging', env) };
   const service = createBackupService({
     paths, env, now,
+    ...(resolveFolderKey ? { resolveFolderKey } : {}),
+    ...(keep !== undefined ? { keep } : {}),
     exportInto: (destination) => exportOlympusData({ destination, homeDir: home }),
     canRestart: () => true,
     requestRestart: () => { restarts.count += 1; return true; },
@@ -119,6 +121,10 @@ describe('backup service', () => {
       ['malformed', () => writeFileSync(paths.key, '{"schema": "olympus.backup.key.v1", "key": ')],
       ['wrong check', () => writeFileSync(paths.key, JSON.stringify({ ...good, key_check: Buffer.alloc(16).toString('base64') }))],
       ['wrong key', () => writeFileSync(paths.key, JSON.stringify({ ...good, key: Buffer.alloc(32, 7).toString('base64') }))],
+      // A key that checks out but names a key setting no backup could be opened with.
+      ['kdf without N', () => { const { N: _n, ...kdf } = good.kdf; writeFileSync(paths.key, JSON.stringify({ ...good, kdf })); }],
+      ['kdf N 0', () => writeFileSync(paths.key, JSON.stringify({ ...good, kdf: { ...good.kdf, N: 0 } }))],
+      ['kdf short salt', () => writeFileSync(paths.key, JSON.stringify({ ...good, kdf: { ...good.kdf, salt: 'AAAA' } }))],
       // Unreadable: a folder where the file should be (root ignores chmod 000).
       ['unreadable', () => { rmSync(paths.key, { force: true }); mkdirSync(paths.key); }],
     ];
@@ -240,10 +246,10 @@ describe('backup routes', () => {
     const names = Array.from({ length: 130 }, (_, i) => `Folder ${String(i).padStart(3, '0')}`);
     for (const name of names) mkdirSync(join(parent, name), { recursive: true });
     const volumes = new VolumeResolver();
-    const saved: Array<{ folder?: string }> = [];
+    const saved: Array<{ folder?: string; folderKey?: string }> = [];
     const backup = {
       status: () => ({ schedule: 'manual' as const, passphraseSet: false, running: false, backups: [], restoreAvailable: true }),
-      saveSettings: (input: { folder?: string }) => { saved.push(input); return backup.status(); },
+      saveSettings: (input: { folder?: string; folderKey?: string }) => { saved.push(input); return backup.status(); },
       setPassphrase: () => backup.status(),
       runNow: async () => backup.status(),
       tick: async () => false,
@@ -265,7 +271,8 @@ describe('backup routes', () => {
     expect(last.selectable).toBe(true);
     const chosen = await handleDashboardBackupRoute('/dashboard/backup/settings', { folder_key: last.key }, deps);
     expect(chosen.status).toBe(200);
-    expect(saved).toEqual([{ folder: realpathSync(join(parent, 'Folder 129')) }]);
+    // The folder's key is kept with it: it names the disk, so a missing or replaced disk is caught.
+    expect(saved).toEqual([{ folder: realpathSync(join(parent, 'Folder 129')), folderKey: scopePathOfRealPath(volumes, realpathSync(join(parent, 'Folder 129'))) }]);
     // A cursor is the listing's own and bound to its folder: another folder's, a forged or a non-string one is refused.
     for (const body of [{ parent_key: scopePathOfRealPath(volumes, dir), cursor: first.body.next_cursor }, { parent_key: parentKey, cursor: 'forged' }, { parent_key: parentKey, cursor: 100 }]) {
       const refused = await handleDashboardBackupRoute('/dashboard/backup/browse', body, deps);
@@ -297,6 +304,42 @@ describe('backup routes', () => {
     expect((listed.body.files as Array<{ name: string }>).map((file) => file.name).sort()).toEqual(
       [made!.name, `${made!.name.replace('.olympusbackup', '')} (1).olympusbackup`, 'renamed.olympusbackup'].sort(),
     );
+  });
+
+  test('a backup disk that is not connected, or was replaced, gets no backup and loses none', async () => {
+    const dir = tempDir();
+    const home = join(dir, 'a');
+    seed(storeOf(home), 'a bookmark');
+    const folder = join(dir, 'Backups');
+    mkdirSync(folder);
+    // The chosen disk's key; what it resolves to changes as the disk comes and goes.
+    let mounted: string | undefined = folder;
+    let resolutions = 0;
+    let unmountAfter = Number.POSITIVE_INFINITY;
+    const { service, paths } = install(home, () => new Date(2026, 10, 1, 4, 0), { count: 0 }, (key) => {
+      expect(key).toBe('/@vol:backup-disk/Backups');
+      resolutions += 1;
+      return resolutions > unmountAfter ? undefined : mounted;
+    }, 1);
+    service.saveSettings({ folder, folderKey: '/@vol:backup-disk/Backups' });
+    expect(JSON.parse(readFileSync(paths.settings, 'utf8')).folder_key).toBe('/@vol:backup-disk/Backups');
+    const first = await service.runNow();
+    expect(first.lastError).toBeUndefined();
+    const [kept] = readdirSync(folder);
+
+    // Gone: nothing is written anywhere, nothing is pruned, and the page says why.
+    mounted = undefined;
+    const absent = await service.runNow();
+    expect(absent.lastError?.message).toContain('isn\'t connected');
+    expect(readdirSync(folder)).toEqual([kept!]);
+
+    // Gone between the backup and the clean-up: the new backup stays, nothing is pruned.
+    mounted = folder;
+    resolutions = 0;
+    unmountAfter = 1;
+    const midway = await service.runNow();
+    expect(midway.lastError?.message).toContain('isn\'t connected');
+    expect(readdirSync(folder).filter((name) => name.endsWith('.olympusbackup'))).toHaveLength(2);
   });
 
   test('a scheduled backup that fails is reported, and nothing half-written is left', async () => {

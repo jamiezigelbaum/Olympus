@@ -98,7 +98,13 @@ function normalizePassphrase(passphrase: string): string {
   return value;
 }
 
-function checkKdf(kdf: BackupKdf): void {
+/**
+ * Throws unless `kdf` is a key setting Olympus derives and opens backups with:
+ * what a backup's header, a key kept for scheduled backups and a backup about
+ * to be written must all name.
+ */
+export function checkKdf(kdf: BackupKdf): void {
+  if (!kdf || typeof kdf !== 'object') throw new OperationError('invalid_params', 'This backup names a key setting Olympus does not accept.');
   const powerOfTwo = (n: number) => Number.isInteger(n) && n > 1 && (n & (n - 1)) === 0;
   if (kdf.name !== 'scrypt' || !powerOfTwo(kdf.N) || kdf.N < MIN_SCRYPT_N || kdf.N > MAX_SCRYPT_N
     || !Number.isInteger(kdf.r) || kdf.r < 1 || kdf.r > 32 || !Number.isInteger(kdf.p) || kdf.p < 1 || kdf.p > 16
@@ -252,6 +258,8 @@ export async function writeBackupFile(options: {
   now?: Date;
 }): Promise<BackupFileInfo> {
   const now = options.now ?? new Date();
+  // A backup no restore could open is never written: its key setting is checked first.
+  if (options.key) checkKdf(options.key.kdf);
   const folder = resolve(options.folder);
   mkdirSync(folder, { recursive: true });
   let name = backupFileName(now);
@@ -625,6 +633,8 @@ export async function backupOlympusData(options: {
   now?: Date;
   /** Keep only this many backups in the folder afterwards. */
   keep?: number;
+  /** Throws to keep every older backup: asked after the new one is written, before any is removed. */
+  beforePrune?: () => void;
   exportInto: (destination: string) => unknown | Promise<unknown>;
 } & LifecyclePathContext): Promise<DataBackupResult> {
   const folder = resolve(options.folder);
@@ -634,6 +644,7 @@ export async function backupOlympusData(options: {
     const exportDir = join(staging, 'export');
     await options.exportInto(exportDir);
     const written = await writeBackupFile({ exportDir, folder, ...(options.key ? { key: options.key } : {}), ...(options.now ? { now: options.now } : {}) });
+    if (options.keep) options.beforePrune?.();
     const removed = options.keep ? pruneBackups(folder, options.keep) : [];
     return { ok: true, file: written.path, bytes: written.bytes, encrypted: written.encrypted, createdAt: written.createdAt, removed };
   } finally {

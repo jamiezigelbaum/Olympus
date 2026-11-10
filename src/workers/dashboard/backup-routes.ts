@@ -72,7 +72,7 @@ export async function handleDashboardBackupRoute(
       case '/dashboard/backup/status':
         return ok(deps.backup.status());
       case '/dashboard/backup/settings': {
-        const input: { folder?: string; schedule?: BackupSchedule } = {};
+        const input: { folder?: string; folderKey?: string; schedule?: BackupSchedule } = {};
         const folderKey = text(body.folder_key);
         if (folderKey) {
           const folder = await realOf(folderKey, 'folder');
@@ -81,6 +81,8 @@ export async function handleDashboardBackupRoute(
             throw new OperationError('invalid_params', 'Choose a folder outside Olympus\'s own folders, ideally on another disk.');
           }
           input.folder = folder;
+          // Kept with its disk's identity, so a backup never lands on another disk mounted in its place.
+          input.folderKey = scopePathOfRealPath(volumes, folder);
         }
         if (body.schedule !== undefined) {
           if (!BACKUP_SCHEDULES.includes(body.schedule as BackupSchedule)) throw new OperationError('invalid_params', 'Choose when to back up.');

@@ -125841,6 +125841,8 @@ function normalizePassphrase(passphrase) {
   return value2;
 }
 function checkKdf(kdf) {
+  if (!kdf || typeof kdf !== "object")
+    throw new OperationError("invalid_params", "This backup names a key setting Olympus does not accept.");
   const powerOfTwo = (n) => Number.isInteger(n) && n > 1 && (n & n - 1) === 0;
   if (kdf.name !== "scrypt" || !powerOfTwo(kdf.N) || kdf.N < MIN_SCRYPT_N || kdf.N > MAX_SCRYPT_N || !Number.isInteger(kdf.r) || kdf.r < 1 || kdf.r > 32 || !Number.isInteger(kdf.p) || kdf.p < 1 || kdf.p > 16 || typeof kdf.salt !== "string" || Buffer.from(kdf.salt, "base64").length < 16) {
     throw new OperationError("invalid_params", "This backup names a key setting Olympus does not accept.");
@@ -125971,6 +125973,8 @@ class BodyWriter {
 }
 async function writeBackupFile(options) {
   const now = options.now ?? new Date;
+  if (options.key)
+    checkKdf(options.key.kdf);
   const folder = resolve23(options.folder);
   mkdirSync51(folder, { recursive: true });
   let name = backupFileName(now);
@@ -126336,6 +126340,8 @@ async function backupOlympusData(options) {
     const exportDir = join115(staging, "export");
     await options.exportInto(exportDir);
     const written = await writeBackupFile({ exportDir, folder, ...options.key ? { key: options.key } : {}, ...options.now ? { now: options.now } : {} });
+    if (options.keep)
+      options.beforePrune?.();
     const removed = options.keep ? pruneBackups(folder, options.keep) : [];
     return { ok: true, file: written.path, bytes: written.bytes, encrypted: written.encrypted, createdAt: written.createdAt, removed };
   } finally {
@@ -168667,8 +168673,316 @@ var init_chat_scope_filter = __esm(() => {
   ]);
 });
 
+// src/workers/local-files/locations.ts
+function realPathOfScopePath(volumes, scopePath) {
+  const { volumeId, path } = splitScopePath(scopePath);
+  if (!volumeId)
+    return path;
+  const volume = volumes.mountedVolume(volumeId);
+  if (!volume)
+    return;
+  return path === "/" ? volume.mountPoint : `${volume.mountPoint === "/" ? "" : volume.mountPoint}${path}`;
+}
+function scopePathOfRealPath(volumes, realPath) {
+  const volume = volumes.volumeOf(realPath);
+  if (volume.primary)
+    return scopePathFor(realPath);
+  const inside = realPath === volume.mountPoint ? "/" : realPath.slice(volume.mountPoint.length) || "/";
+  return scopePathFor(inside, volume.id);
+}
+var init_locations = __esm(() => {
+  init_paths();
+});
+
+// src/workers/local-files/volume-identity.ts
+import { createHash as createHash91 } from "node:crypto";
+import { execFileSync as execFileSync6 } from "node:child_process";
+import { existsSync as existsSync97, lstatSync as lstatSync50, readFileSync as readFileSync87, readdirSync as readdirSync29, realpathSync as realpathSync22 } from "node:fs";
+import { homedir as homedir43 } from "node:os";
+
+class VolumeResolver {
+  deps;
+  cache;
+  caseByVolume = new Map;
+  constructor(deps = {}) {
+    this.deps = {
+      ...deps,
+      platform: deps.platform ?? process.platform,
+      home: deps.home ?? homedir43(),
+      now: deps.now ?? Date.now
+    };
+  }
+  volumes() {
+    const now = this.deps.now();
+    if (this.cache && now - this.cache.at < CACHE_TTL_MS)
+      return this.cache.volumes;
+    const volumes = this.scan();
+    this.cache = { at: now, volumes };
+    return volumes;
+  }
+  refresh() {
+    this.cache = undefined;
+  }
+  ignoresCase(volumeId, path) {
+    const home2 = this.deps.home;
+    const volume = volumeId === undefined ? this.volumeOf(path ?? home2) : this.mountedVolume(volumeId);
+    if (!volume)
+      return;
+    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
+    if (this.caseByVolume.has(cacheKey))
+      return this.caseByVolume.get(cacheKey);
+    const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
+    const homeHere = volume.primary && isWithinScopePath(home2, volume.mountPoint) && this.volumeOf(home2).mountPoint === volume.mountPoint;
+    const places = homeHere ? [home2, volume.mountPoint] : [volume.mountPoint];
+    let answer;
+    for (const place of places) {
+      answer = probe(place);
+      if (answer !== undefined)
+        break;
+    }
+    if (answer !== undefined)
+      this.caseByVolume.set(cacheKey, answer);
+    return answer;
+  }
+  volumeOf(realPath) {
+    let best;
+    for (const volume of this.volumes()) {
+      if (!isWithinScopePath(realPath, volume.mountPoint))
+        continue;
+      if (!best || volume.mountPoint.length > best.mountPoint.length)
+        best = volume;
+    }
+    return best ?? this.primaryFallback();
+  }
+  mountedVolume(id) {
+    return this.volumes().find((volume) => volume.id === id);
+  }
+  locations() {
+    return this.volumes().filter((volume) => !volume.primary);
+  }
+  primaryFallback() {
+    return { id: "primary", mountPoint: "/", label: "Macintosh HD", kind: "internal", primary: true };
+  }
+  scan() {
+    let raw = [];
+    try {
+      const text4 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
+      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text4) : parseLinuxMountinfo(text4);
+    } catch {
+      raw = [];
+    }
+    const uuids = this.deps.platform === "linux" ? (this.deps.uuidsByDevice ?? defaultUuidsByDevice)() : undefined;
+    const homeMount = this.homeMountPoint(raw);
+    const volumes = [];
+    for (const mount of raw) {
+      if (IGNORED_FS_TYPES.has(mount.fsType) && mount.mountPoint !== "/")
+        continue;
+      if (mount.mountPoint !== "/" && /^\/(proc|sys|dev|run|snap|boot)(\/|$)/.test(mount.mountPoint))
+        continue;
+      if (this.deps.platform === "darwin" && /^\/System\/Volumes\/(?!Data$)/.test(mount.mountPoint))
+        continue;
+      if (this.deps.platform === "darwin" && mount.mountPoint.startsWith("/private/var/"))
+        continue;
+      const network = NETWORK_FS_TYPES.has(mount.fsType);
+      const primary = mount.mountPoint === "/" || mount.mountPoint === "/System/Volumes/Data" || mount.mountPoint === homeMount;
+      const id = primary ? "primary" : this.idFor(mount, network, uuids);
+      if (!id)
+        continue;
+      volumes.push({
+        id,
+        mountPoint: mount.mountPoint,
+        label: labelFor2(mount.mountPoint),
+        kind: network ? "network" : primary ? "internal" : "removable",
+        primary
+      });
+    }
+    if (!volumes.some((volume) => volume.mountPoint === "/"))
+      volumes.push(this.primaryFallback());
+    return volumes;
+  }
+  homeMountPoint(mounts) {
+    let best;
+    for (const mount of mounts) {
+      if (!isWithinScopePath(this.deps.home, mount.mountPoint))
+        continue;
+      if (!best || mount.mountPoint.length > best.mountPoint.length)
+        best = mount;
+    }
+    return best?.mountPoint;
+  }
+  idFor(mount, network, uuids) {
+    if (network)
+      return `net-${shortHash(normalizeNetworkSource(mount.source))}`;
+    if (this.deps.platform === "darwin") {
+      const plist = (this.deps.diskutilPlist ?? defaultDiskutilPlist)(mount.mountPoint);
+      const uuid3 = plist ? plistString(plist, "VolumeUUID") : undefined;
+      if (uuid3)
+        return `mac-${uuid3.toLowerCase()}`;
+      return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+    }
+    const uuid2 = uuids?.get(mount.source);
+    if (uuid2)
+      return `lin-${uuid2.toLowerCase()}`;
+    return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+  }
+}
+function probeIgnoresCaseIn(dir) {
+  let names;
+  try {
+    names = readdirSync29(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const swapped = name.replace(/[a-zA-Z]/g, (letter) => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
+    if (swapped === name)
+      continue;
+    try {
+      const own3 = lstatSync50(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
+      try {
+        const other = lstatSync50(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
+        return other.ino === own3.ino && other.dev === own3.dev;
+      } catch (error2) {
+        if (error2.code === "ENOENT")
+          return false;
+        return;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return;
+}
+function labelFor2(mountPoint) {
+  if (mountPoint === "/")
+    return "Macintosh HD";
+  return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
+}
+function shortHash(value2) {
+  return createHash91("sha256").update(value2).digest("hex").slice(0, 16);
+}
+function normalizeNetworkSource(source) {
+  return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
+}
+function defaultReadMounts(platform3) {
+  if (platform3 === "darwin")
+    return execFileSync6("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
+  return readFileSync87("/proc/self/mountinfo", "utf8");
+}
+function defaultDiskutilPlist(mountPoint) {
+  try {
+    return execFileSync6("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
+      encoding: "utf8",
+      timeout: 8000,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+  } catch {
+    return;
+  }
+}
+function defaultUuidsByDevice() {
+  const result = new Map;
+  const dir = "/dev/disk/by-uuid";
+  try {
+    if (!existsSync97(dir))
+      return result;
+    for (const name of readdirSync29(dir)) {
+      try {
+        result.set(realpathSync22(`${dir}/${name}`), name);
+      } catch {}
+    }
+  } catch {}
+  return result;
+}
+function parseDarwinMounts(text4) {
+  const mounts = [];
+  for (const line2 of text4.split(`
+`)) {
+    const match = /^(.+?) on (\/.*?) \(([^,)]+)/.exec(line2);
+    if (!match)
+      continue;
+    mounts.push({ source: match[1], mountPoint: match[2], fsType: match[3].trim() });
+  }
+  return mounts;
+}
+function parseLinuxMountinfo(text4) {
+  const mounts = [];
+  for (const line2 of text4.split(`
+`)) {
+    const separator = line2.indexOf(" - ");
+    if (separator < 0)
+      continue;
+    const head = line2.slice(0, separator).split(" ");
+    const tail = line2.slice(separator + 3).split(" ");
+    if (head.length < 6 || tail.length < 2)
+      continue;
+    mounts.push({
+      mountPoint: unescapeMountinfo(head[4]),
+      fsType: tail[0],
+      source: unescapeMountinfo(tail[1])
+    });
+  }
+  return mounts;
+}
+function unescapeMountinfo(value2) {
+  return value2.replace(/\\([0-7]{3})/g, (_, octal3) => String.fromCharCode(parseInt(octal3, 8)));
+}
+function plistString(plist, key2) {
+  const match = new RegExp(`<key>${key2}</key>\\s*<string>([^<]+)</string>`).exec(plist);
+  return match?.[1]?.trim();
+}
+var NETWORK_FS_TYPES, IGNORED_FS_TYPES, CACHE_TTL_MS = 15000;
+var init_volume_identity = __esm(() => {
+  init_paths();
+  NETWORK_FS_TYPES = new Set([
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smbfs",
+    "smb3",
+    "afpfs",
+    "webdav",
+    "fuse.sshfs",
+    "sshfs",
+    "ceph",
+    "glusterfs",
+    "9p",
+    "davfs"
+  ]);
+  IGNORED_FS_TYPES = new Set([
+    "autofs",
+    "devfs",
+    "devtmpfs",
+    "proc",
+    "sysfs",
+    "tmpfs",
+    "cgroup",
+    "cgroup2",
+    "overlay",
+    "squashfs",
+    "fdescfs",
+    "securityfs",
+    "debugfs",
+    "tracefs",
+    "pstore",
+    "bpf",
+    "configfs",
+    "fusectl",
+    "mqueue",
+    "hugetlbfs",
+    "binfmt_misc",
+    "ramfs",
+    "rpc_pipefs",
+    "nsfs",
+    "efivarfs",
+    "autofs",
+    "fuse.portal",
+    "fuse.gvfsd-fuse"
+  ]);
+});
+
 // src/workers/backup-service.ts
-import { existsSync as existsSync97, mkdirSync as mkdirSync61, readFileSync as readFileSync87, readdirSync as readdirSync29, rmSync as rmSync41, statSync as statSync43 } from "node:fs";
+import { existsSync as existsSync98, mkdirSync as mkdirSync61, readFileSync as readFileSync88, readdirSync as readdirSync30, rmSync as rmSync41, statSync as statSync43 } from "node:fs";
 import { dirname as dirname98, join as join131 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -168679,7 +168993,7 @@ function defaultBackupServicePaths(env = process.env) {
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync87(path, "utf8"));
+    return JSON.parse(readFileSync88(path, "utf8"));
   } catch {
     return;
   }
@@ -168696,6 +169010,7 @@ function readBackupSettings(path) {
   return {
     schema: SETTINGS_SCHEMA,
     ...typeof raw.folder === "string" && raw.folder.startsWith("/") ? { folder: raw.folder } : {},
+    ...typeof raw.folder_key === "string" && raw.folder_key.startsWith("/") ? { folder_key: raw.folder_key } : {},
     schedule: BACKUP_SCHEDULES.includes(raw.schedule) ? raw.schedule : "manual",
     ...raw.last && typeof raw.last.at === "string" ? { last: raw.last } : {},
     ...typeof raw.last_attempt_at === "string" ? { last_attempt_at: raw.last_attempt_at } : {},
@@ -168705,7 +169020,7 @@ function readBackupSettings(path) {
 function readStoredBackupKeyState(path) {
   let text4;
   try {
-    text4 = readFileSync87(path, "utf8");
+    text4 = readFileSync88(path, "utf8");
   } catch (error2) {
     return error2.code === "ENOENT" ? { state: "absent" } : { state: "invalid" };
   }
@@ -168716,6 +169031,7 @@ function readStoredBackupKeyState(path) {
     const key2 = Buffer.from(raw.key, "base64");
     if (key2.length !== 32 || backupKeyCheck(key2) !== raw.key_check)
       return { state: "invalid" };
+    checkKdf(raw.kdf);
     return { state: "ok", key: { key: key2, kdf: raw.kdf } };
   } catch {
     return { state: "invalid" };
@@ -168748,6 +169064,18 @@ function createBackupService(options) {
   let running;
   let restoreState;
   const settings = () => readBackupSettings(options.paths.settings);
+  const resolveFolderKey = options.resolveFolderKey ?? ((key2) => {
+    try {
+      return realPathOfScopePath(new VolumeResolver, normalizeScopePath(key2));
+    } catch {
+      return;
+    }
+  });
+  const folderNow = (current2) => {
+    if (!current2.folder)
+      return;
+    return current2.folder_key ? resolveFolderKey(current2.folder_key) : current2.folder;
+  };
   const save = (next) => writePrivateJson2(options.paths.settings, next);
   const status = () => {
     const current2 = settings();
@@ -168763,7 +169091,10 @@ function createBackupService(options) {
       ...current2.last ? { last: current2.last } : {},
       ...current2.last_error && current2.last_error.at >= (current2.last?.at ?? "") ? { lastError: current2.last_error } : {},
       running: running !== undefined,
-      backups: current2.folder ? listBackups(current2.folder) : [],
+      backups: (() => {
+        const folder = folderNow(current2);
+        return folder ? listBackups(folder) : [];
+      })(),
       ...restore ? { restore } : {},
       restoreAvailable: options.canRestart()
     };
@@ -168779,8 +169110,15 @@ function createBackupService(options) {
       if (stored.state === "invalid")
         throw new OperationError("invalid_params", BACKUP_KEY_INVALID);
       const key2 = stored.state === "ok" ? stored.key : undefined;
+      const folder = folderNow(current2);
+      if (!folder)
+        throw new OperationError("invalid_params", BACKUP_DISK_ABSENT);
       const result = await backupOlympusData({
-        folder: current2.folder,
+        folder,
+        beforePrune: () => {
+          if (folderNow(settings()) !== folder)
+            throw new OperationError("invalid_params", BACKUP_DISK_ABSENT);
+        },
         ...key2 ? { key: key2 } : {},
         now: startedAt,
         keep: options.keep ?? BACKUP_KEEP,
@@ -168813,6 +169151,10 @@ function createBackupService(options) {
       const next = { ...current2 };
       if (input.folder !== undefined) {
         next.folder = input.folder;
+        if (input.folderKey !== undefined)
+          next.folder_key = input.folderKey;
+        else
+          delete next.folder_key;
         if (!current2.folder && input.schedule === undefined)
           next.schedule = "nightly";
       }
@@ -168854,7 +169196,7 @@ function createBackupService(options) {
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
       }
-      if (existsSync97(join131(options.paths.staging, PENDING_RESTORE)))
+      if (existsSync98(join131(options.paths.staging, PENDING_RESTORE)))
         return status();
       const staging = backupStagingDir(options.env);
       try {
@@ -168901,7 +169243,7 @@ function applyPendingRestoreAtBoot(paths, env, at = () => new Date) {
     removeFileDurablySync(pendingPath);
   }
   try {
-    for (const name of readdirSync29(paths.staging)) {
+    for (const name of readdirSync30(paths.staging)) {
       if (name === RESTORE_RESULT)
         continue;
       rmSync41(join131(paths.staging, name), { recursive: true, force: true });
@@ -168909,7 +169251,7 @@ function applyPendingRestoreAtBoot(paths, env, at = () => new Date) {
   } catch {}
   return result;
 }
-var BACKUP_SCHEDULES, BACKUP_HOUR = 3, RETRY_AFTER_FAILURE_MS2, SETTINGS_SCHEMA = "olympus.backup.settings.v1", KEY_SCHEMA = "olympus.backup.key.v1", PENDING_RESTORE = "pending-restore.json", RESTORE_RESULT = "restore-result.json", BACKUP_KEY_INVALID = "The key kept for your passphrase can't be read, so no backup was made. Set the passphrase again (or choose to back up without one).";
+var BACKUP_SCHEDULES, BACKUP_HOUR = 3, RETRY_AFTER_FAILURE_MS2, SETTINGS_SCHEMA = "olympus.backup.settings.v1", KEY_SCHEMA = "olympus.backup.key.v1", PENDING_RESTORE = "pending-restore.json", RESTORE_RESULT = "restore-result.json", BACKUP_DISK_ABSENT = "The disk with your backup folder isn't connected (or another disk is in its place), so no backup was made and no older backup was removed. Connect it, or choose the folder again.", BACKUP_KEY_INVALID = "The key kept for your passphrase can't be read, so no backup was made. Set the passphrase again (or choose to back up without one).";
 var init_backup_service = __esm(() => {
   init_atomic_file();
   init_operation_error();
@@ -168917,6 +169259,9 @@ var init_backup_service = __esm(() => {
   init_olympus_layout();
   init_data_backup();
   init_data_restore();
+  init_locations();
+  init_paths();
+  init_volume_identity();
   BACKUP_SCHEDULES = ["manual", "nightly", "weekly"];
   RETRY_AFTER_FAILURE_MS2 = 60 * 60 * 1000;
 });
@@ -169188,29 +169533,8 @@ var init_source_scope_browser = __esm(() => {
   builtInBrowserIds = new Set(browserFactories.keys());
 });
 
-// src/workers/local-files/locations.ts
-function realPathOfScopePath(volumes, scopePath) {
-  const { volumeId, path } = splitScopePath(scopePath);
-  if (!volumeId)
-    return path;
-  const volume = volumes.mountedVolume(volumeId);
-  if (!volume)
-    return;
-  return path === "/" ? volume.mountPoint : `${volume.mountPoint === "/" ? "" : volume.mountPoint}${path}`;
-}
-function scopePathOfRealPath(volumes, realPath) {
-  const volume = volumes.volumeOf(realPath);
-  if (volume.primary)
-    return scopePathFor(realPath);
-  const inside = realPath === volume.mountPoint ? "/" : realPath.slice(volume.mountPoint.length) || "/";
-  return scopePathFor(inside, volume.id);
-}
-var init_locations = __esm(() => {
-  init_paths();
-});
-
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync98, mkdirSync as mkdirSync62, opendirSync, readFileSync as readFileSync88 } from "node:fs";
+import { existsSync as existsSync99, mkdirSync as mkdirSync62, opendirSync, readFileSync as readFileSync89 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname99, join as join132 } from "node:path";
 function folderAccessMemoryPath() {
@@ -169437,9 +169761,9 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync98(this.memoryPath)) {
+    if (this.memoryPath && existsSync99(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync88(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync89(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -169485,293 +169809,6 @@ var init_mac_permissions = __esm(() => {
     unreadable: "Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.",
     unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
   };
-});
-
-// src/workers/local-files/volume-identity.ts
-import { createHash as createHash91 } from "node:crypto";
-import { execFileSync as execFileSync6 } from "node:child_process";
-import { existsSync as existsSync99, lstatSync as lstatSync50, readFileSync as readFileSync89, readdirSync as readdirSync30, realpathSync as realpathSync22 } from "node:fs";
-import { homedir as homedir43 } from "node:os";
-
-class VolumeResolver {
-  deps;
-  cache;
-  caseByVolume = new Map;
-  constructor(deps = {}) {
-    this.deps = {
-      ...deps,
-      platform: deps.platform ?? process.platform,
-      home: deps.home ?? homedir43(),
-      now: deps.now ?? Date.now
-    };
-  }
-  volumes() {
-    const now = this.deps.now();
-    if (this.cache && now - this.cache.at < CACHE_TTL_MS)
-      return this.cache.volumes;
-    const volumes = this.scan();
-    this.cache = { at: now, volumes };
-    return volumes;
-  }
-  refresh() {
-    this.cache = undefined;
-  }
-  ignoresCase(volumeId, path) {
-    const home2 = this.deps.home;
-    const volume = volumeId === undefined ? this.volumeOf(path ?? home2) : this.mountedVolume(volumeId);
-    if (!volume)
-      return;
-    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
-    if (this.caseByVolume.has(cacheKey))
-      return this.caseByVolume.get(cacheKey);
-    const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
-    const homeHere = volume.primary && isWithinScopePath(home2, volume.mountPoint) && this.volumeOf(home2).mountPoint === volume.mountPoint;
-    const places = homeHere ? [home2, volume.mountPoint] : [volume.mountPoint];
-    let answer;
-    for (const place of places) {
-      answer = probe(place);
-      if (answer !== undefined)
-        break;
-    }
-    if (answer !== undefined)
-      this.caseByVolume.set(cacheKey, answer);
-    return answer;
-  }
-  volumeOf(realPath) {
-    let best;
-    for (const volume of this.volumes()) {
-      if (!isWithinScopePath(realPath, volume.mountPoint))
-        continue;
-      if (!best || volume.mountPoint.length > best.mountPoint.length)
-        best = volume;
-    }
-    return best ?? this.primaryFallback();
-  }
-  mountedVolume(id) {
-    return this.volumes().find((volume) => volume.id === id);
-  }
-  locations() {
-    return this.volumes().filter((volume) => !volume.primary);
-  }
-  primaryFallback() {
-    return { id: "primary", mountPoint: "/", label: "Macintosh HD", kind: "internal", primary: true };
-  }
-  scan() {
-    let raw = [];
-    try {
-      const text4 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
-      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text4) : parseLinuxMountinfo(text4);
-    } catch {
-      raw = [];
-    }
-    const uuids = this.deps.platform === "linux" ? (this.deps.uuidsByDevice ?? defaultUuidsByDevice)() : undefined;
-    const homeMount = this.homeMountPoint(raw);
-    const volumes = [];
-    for (const mount of raw) {
-      if (IGNORED_FS_TYPES.has(mount.fsType) && mount.mountPoint !== "/")
-        continue;
-      if (mount.mountPoint !== "/" && /^\/(proc|sys|dev|run|snap|boot)(\/|$)/.test(mount.mountPoint))
-        continue;
-      if (this.deps.platform === "darwin" && /^\/System\/Volumes\/(?!Data$)/.test(mount.mountPoint))
-        continue;
-      if (this.deps.platform === "darwin" && mount.mountPoint.startsWith("/private/var/"))
-        continue;
-      const network = NETWORK_FS_TYPES.has(mount.fsType);
-      const primary = mount.mountPoint === "/" || mount.mountPoint === "/System/Volumes/Data" || mount.mountPoint === homeMount;
-      const id = primary ? "primary" : this.idFor(mount, network, uuids);
-      if (!id)
-        continue;
-      volumes.push({
-        id,
-        mountPoint: mount.mountPoint,
-        label: labelFor2(mount.mountPoint),
-        kind: network ? "network" : primary ? "internal" : "removable",
-        primary
-      });
-    }
-    if (!volumes.some((volume) => volume.mountPoint === "/"))
-      volumes.push(this.primaryFallback());
-    return volumes;
-  }
-  homeMountPoint(mounts) {
-    let best;
-    for (const mount of mounts) {
-      if (!isWithinScopePath(this.deps.home, mount.mountPoint))
-        continue;
-      if (!best || mount.mountPoint.length > best.mountPoint.length)
-        best = mount;
-    }
-    return best?.mountPoint;
-  }
-  idFor(mount, network, uuids) {
-    if (network)
-      return `net-${shortHash(normalizeNetworkSource(mount.source))}`;
-    if (this.deps.platform === "darwin") {
-      const plist = (this.deps.diskutilPlist ?? defaultDiskutilPlist)(mount.mountPoint);
-      const uuid3 = plist ? plistString(plist, "VolumeUUID") : undefined;
-      if (uuid3)
-        return `mac-${uuid3.toLowerCase()}`;
-      return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
-    }
-    const uuid2 = uuids?.get(mount.source);
-    if (uuid2)
-      return `lin-${uuid2.toLowerCase()}`;
-    return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
-  }
-}
-function probeIgnoresCaseIn(dir) {
-  let names;
-  try {
-    names = readdirSync30(dir);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    const swapped = name.replace(/[a-zA-Z]/g, (letter) => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
-    if (swapped === name)
-      continue;
-    try {
-      const own3 = lstatSync50(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
-      try {
-        const other = lstatSync50(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
-        return other.ino === own3.ino && other.dev === own3.dev;
-      } catch (error2) {
-        if (error2.code === "ENOENT")
-          return false;
-        return;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return;
-}
-function labelFor2(mountPoint) {
-  if (mountPoint === "/")
-    return "Macintosh HD";
-  return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
-}
-function shortHash(value2) {
-  return createHash91("sha256").update(value2).digest("hex").slice(0, 16);
-}
-function normalizeNetworkSource(source) {
-  return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
-}
-function defaultReadMounts(platform3) {
-  if (platform3 === "darwin")
-    return execFileSync6("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync89("/proc/self/mountinfo", "utf8");
-}
-function defaultDiskutilPlist(mountPoint) {
-  try {
-    return execFileSync6("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
-      encoding: "utf8",
-      timeout: 8000,
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-  } catch {
-    return;
-  }
-}
-function defaultUuidsByDevice() {
-  const result = new Map;
-  const dir = "/dev/disk/by-uuid";
-  try {
-    if (!existsSync99(dir))
-      return result;
-    for (const name of readdirSync30(dir)) {
-      try {
-        result.set(realpathSync22(`${dir}/${name}`), name);
-      } catch {}
-    }
-  } catch {}
-  return result;
-}
-function parseDarwinMounts(text4) {
-  const mounts = [];
-  for (const line2 of text4.split(`
-`)) {
-    const match = /^(.+?) on (\/.*?) \(([^,)]+)/.exec(line2);
-    if (!match)
-      continue;
-    mounts.push({ source: match[1], mountPoint: match[2], fsType: match[3].trim() });
-  }
-  return mounts;
-}
-function parseLinuxMountinfo(text4) {
-  const mounts = [];
-  for (const line2 of text4.split(`
-`)) {
-    const separator = line2.indexOf(" - ");
-    if (separator < 0)
-      continue;
-    const head = line2.slice(0, separator).split(" ");
-    const tail = line2.slice(separator + 3).split(" ");
-    if (head.length < 6 || tail.length < 2)
-      continue;
-    mounts.push({
-      mountPoint: unescapeMountinfo(head[4]),
-      fsType: tail[0],
-      source: unescapeMountinfo(tail[1])
-    });
-  }
-  return mounts;
-}
-function unescapeMountinfo(value2) {
-  return value2.replace(/\\([0-7]{3})/g, (_, octal3) => String.fromCharCode(parseInt(octal3, 8)));
-}
-function plistString(plist, key2) {
-  const match = new RegExp(`<key>${key2}</key>\\s*<string>([^<]+)</string>`).exec(plist);
-  return match?.[1]?.trim();
-}
-var NETWORK_FS_TYPES, IGNORED_FS_TYPES, CACHE_TTL_MS = 15000;
-var init_volume_identity = __esm(() => {
-  init_paths();
-  NETWORK_FS_TYPES = new Set([
-    "nfs",
-    "nfs4",
-    "cifs",
-    "smbfs",
-    "smb3",
-    "afpfs",
-    "webdav",
-    "fuse.sshfs",
-    "sshfs",
-    "ceph",
-    "glusterfs",
-    "9p",
-    "davfs"
-  ]);
-  IGNORED_FS_TYPES = new Set([
-    "autofs",
-    "devfs",
-    "devtmpfs",
-    "proc",
-    "sysfs",
-    "tmpfs",
-    "cgroup",
-    "cgroup2",
-    "overlay",
-    "squashfs",
-    "fdescfs",
-    "securityfs",
-    "debugfs",
-    "tracefs",
-    "pstore",
-    "bpf",
-    "configfs",
-    "fusectl",
-    "mqueue",
-    "hugetlbfs",
-    "binfmt_misc",
-    "ramfs",
-    "rpc_pipefs",
-    "nsfs",
-    "efivarfs",
-    "autofs",
-    "fuse.portal",
-    "fuse.gvfsd-fuse"
-  ]);
 });
 
 // src/workers/local-files/mac-settings.ts
@@ -170115,6 +170152,7 @@ async function handleDashboardBackupRoute(path, body, deps) {
             throw new OperationError("invalid_params", "Choose a folder outside Olympus's own folders, ideally on another disk.");
           }
           input.folder = folder;
+          input.folderKey = scopePathOfRealPath(volumes, folder);
         }
         if (body.schedule !== undefined) {
           if (!BACKUP_SCHEDULES.includes(body.schedule))

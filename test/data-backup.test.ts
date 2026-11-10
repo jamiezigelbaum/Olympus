@@ -165,6 +165,15 @@ describe('data backup', () => {
     expect(existsSync(join(folder, 'olympus-backup-2026-11-10-0310 (1).olympusbackup'))).toBe(true);
   }));
 
+  test('a backup is never written with a key setting no restore could open', withHomes(async (dir, _homeA, _homeB, folder) => {
+    const exportDir = join(dir, 'export');
+    mkdirSync(exportDir, { recursive: true });
+    writeFileSync(join(exportDir, 'manifest.json'), '{}');
+    const key = fastKey('correct horse battery');
+    await expect(writeBackupFile({ exportDir, folder, key: { ...key, kdf: { ...key.kdf, N: 0 } } })).rejects.toThrow('key setting');
+    expect(existsSync(folder) ? readdirSync(folder) : []).toEqual([]);
+  }));
+
   test('a second backup in the same minute gets its own name', withHomes(async (dir, _homeA, _homeB, folder) => {
     const exportDir = join(dir, 'export');
     mkdirSync(exportDir, { recursive: true });
