@@ -311,8 +311,9 @@ function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: 
     // lives on the row a disconnect leaves behind.
   } else if (MESSAGING_SOURCES.has(source.source_id)) {
     const dialogId = `pairing-${id}`;
-    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-label="${label} pairing"><div class="adddialoghead"><h3>${label}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`
-      + renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: true }) + '</dialog>');
+    // The card is the dialog: its header carries the name, the ⋯ menu (Check connection, Pair again) and ✕ (#1086).
+    dialogs.push(`<dialog class="adddialog msgdialog" id="${dialogId}" data-closable aria-label="${label} pairing">`
+      + renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: true }, { closable: true }) + '</dialog>');
     items.push(`<button class="menuitem" type="button" data-dialog-open="${dialogId}"${off}>Pairing and chats</button>`);
   } else if (source.connection.disconnect) {
     items.push('<hr>' + confirm('disconnect_source', `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, 'Disconnect', false));

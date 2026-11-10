@@ -71583,15 +71583,6 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 [data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
-/* The native disclosure shares the choice row; its list spans both columns. */
-.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start; gap: 12px; }
-.messagingchoices > details, .messagingchoices > details::details-content { display: contents; }
-.messagingchoices > details > summary { grid-column: 1; grid-row: 1; margin: 0; box-sizing: border-box; }
-.messagingchoices > form { grid-column: 2; grid-row: 1; margin: 0 !important; }
-.messagingchoices > form > .btn { margin: 0; }
-.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3); margin: 0; }
-.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3; margin: 0; }
-.messagingchoices > details:not([open]) > form { display: none; }
 .actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
 .setupactions > .primary { margin-left: auto; }
@@ -71624,7 +71615,51 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
 .messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
-.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }
+/* Messaging source card and dialog (#1075, #1086): one header with the ⋯ menu,
+   one primary action per state, and a chooser by kind that fits a phone. */
+dialog.adddialog.msgdialog { padding: 0; }
+dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; }
+.msghead { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.msgtitle { flex: 1 1 auto; min-width: 0; }
+.msgtitle h3 { margin: 0; }
+.messaging-card .msgtitle p { margin: 2px 0 0; color: var(--t3); overflow-wrap: anywhere; }
+.messaging-card .msghead details { margin: 0; }
+.msghead .iconbtn, .msghead .rowmenu > summary { flex: none; min-width: 36px; text-align: center; }
+.messaging-card .msgactions { flex-wrap: wrap; }
+.messaging-card .msgactions > .btn, .messaging-card .msgactions > form { flex: 1 1 100%; max-width: 100%; }
+.messaging-card .msgactions > .btn, .messaging-card .msgactions > form > .btn { width: 100%; }
+.messaging-card .btn.busy { opacity: .75; cursor: progress; }
+.messaging-card .btn.busy::before { content: ''; display: inline-block; width: .9em; height: .9em; margin-right: .5em; vertical-align: -.1em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: msgspin .8s linear infinite; }
+@keyframes msgspin { to { transform: rotate(360deg); } }
+.kindpicker { display: grid; gap: 10px; margin: 12px 0 0 !important; }
+.kindrow { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.kindgroup { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.kindgroup > .kindrow { border: 0; background: none; }
+.kindtext { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; text-align: left; }
+.kindtext small { color: var(--t2); font-size: var(--fs-body); }
+.kindtext .kindcount { color: var(--t3); font-weight: 400; }
+.kindnote.partial { color: var(--warn); }
+.kindopen { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; padding: 0; border: 0; background: none; color: var(--t1); font: inherit; cursor: pointer; }
+.kindchev { color: var(--t3); transition: transform .15s; }
+.kindopen[aria-expanded="true"] .kindchev { transform: rotate(90deg); }
+.messaging-card .kindcap { margin: 4px 0 0; color: var(--t3); }
+.kindlist { padding: 0 14px 12px; display: grid; gap: 6px; }
+.kindlist[hidden] { display: none; }
+.kindsearch { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--t1); font: inherit; }
+.kindlines { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; }
+.kindlines[disabled] { opacity: .55; }
+.chatline { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.chatline[hidden] { display: none; }
+.chatline .chatname { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.chatline .chatwhen { flex: none; color: var(--t3); font-size: var(--fs-caption); }
+.switch { appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 44px; height: 26px; margin: 0; border-radius: 13px; background: var(--line); cursor: pointer; transition: background .15s; }
+.switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch:checked { background: var(--accent-fill); }
+.switch:checked::after { transform: translateX(18px); }
+.switch:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.messaging-card .kindsave { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.messaging-card .kindsave .hint { color: var(--t3); }
+.messaging-card .kindsave .btn { margin-left: auto; }
 .messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
 .messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
