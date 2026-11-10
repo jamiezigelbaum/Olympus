@@ -420,7 +420,7 @@ describe('the notice on Home and Settings', () => {
     const calls: { url: string; csrf: string | null }[] = [];
     let healthReads = 0;
     const open = (html: string, resume?: string) => {
-      const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+      const window = new Window({ url: resume ? 'http://localhost/dashboard#olympus-update-now' : 'http://localhost/dashboard', settings: { enableJavaScriptEvaluation: true } });
       let reloads = 0;
       Object.defineProperty(window.location, 'reload', { value: () => { reloads++; } });
       Object.defineProperty(window, 'setInterval', { value: () => 1 });
@@ -431,7 +431,6 @@ describe('the notice on Home and Settings', () => {
         if (url === DASHBOARD_LOCAL_CONTROL_SESSION_PATH) return new window.Response(JSON.stringify({ csrf_token: 'local-c' }));
         return new window.Response(JSON.stringify({ ok: true, update: { state: 'running', step: 1, from: '1.5.0', to: '1.5.1' } }));
       } });
-      if (resume !== undefined) window.sessionStorage.setItem('olympus-update-now', resume);
       window.document.write(html); window.document.close();
       return { window, reloads: () => reloads };
     };
@@ -440,7 +439,9 @@ describe('the notice on Home and Settings', () => {
       (before.window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
       await waitFor(() => before.reloads() === 1, { description: 'reload after the new session' });
       expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: null }]);
-      expect(before.window.sessionStorage.getItem('olympus-update-now')).toBe('1');
+      // The one-shot mark rides on the address's fragment, never in browser storage.
+      expect(before.window.location.hash).toBe('#olympus-update-now');
+      expect(before.window.sessionStorage.length).toBe(0);
     } finally { await before.window.happyDOM.close(); }
     // The reloaded page holds the local session everywhere and carries on.
     calls.length = 0;
@@ -448,7 +449,8 @@ describe('the notice on Home and Settings', () => {
     try {
       await waitFor(() => calls.length === 1, { description: 'update started after the reload' });
       expect(calls).toEqual([{ url: DASHBOARD_SELF_UPDATE_PATHS.start, csrf: 'local-c' }]);
-      expect(after.window.sessionStorage.getItem('olympus-update-now')).toBeNull();
+      expect(after.window.location.hash).toBe('');
+      expect(after.window.location.pathname).toBe('/dashboard');
       expect(after.reloads()).toBe(0);
     } finally { await after.window.happyDOM.close(); }
     // A later visit with no click behind it starts nothing.
@@ -480,7 +482,7 @@ describe('the notice on Home and Settings', () => {
       expect(window.document.querySelector('[data-update-notice]')!.getAttribute('data-update-version')).toBe('1.5.1');
       button.click();
       await waitFor(() => reloads === 1, { description: 'reload after the new session' });
-      expect(window.sessionStorage.getItem('olympus-update-now')).toBe('1');
+      expect(window.location.hash).toBe('#olympus-update-now');
     } finally { await window.happyDOM.close(); }
   });
 

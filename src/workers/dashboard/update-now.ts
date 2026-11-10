@@ -260,14 +260,21 @@ function updateNoticeProgram(config: {
   // A newly minted session replaces this page's control cookie, so every other
   // control here (Home's tools, Settings) would still send the old session's
   // CSRF token and be refused. The page reloads to take the new session, and
-  // these one-shot marks carry on what it was doing after the reload.
+  // these one-shot marks carry on what it was doing after the reload. A mark
+  // is the page address's fragment, never browser storage, and is taken off
+  // the address as soon as the reloaded page reads it.
   const resumeKey = 'olympus-update-now';
   const followKey = 'olympus-update-follow';
+  const here = () => window.location.pathname + window.location.search;
   function take(key: string): string {
-    try { const value = window.sessionStorage.getItem(key) || ''; window.sessionStorage.removeItem(key); return value; } catch { return ''; }
+    try {
+      if (window.location.hash !== '#' + key) return '';
+      window.history.replaceState(window.history.state, '', here());
+      return '1';
+    } catch { return ''; }
   }
-  function keep(key: string, value: string): boolean {
-    try { window.sessionStorage.setItem(key, value); return true; } catch { return false; }
+  function keep(key: string, _value: string): boolean {
+    try { window.history.replaceState(window.history.state, '', here() + '#' + key); return true; } catch { return false; }
   }
   const resume = take(resumeKey);
   const followed = take(followKey);

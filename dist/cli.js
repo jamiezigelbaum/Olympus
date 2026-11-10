@@ -163965,18 +163965,20 @@ function updateNoticeProgram(config2) {
   const button = q("[data-update-now]");
   const resumeKey = "olympus-update-now";
   const followKey = "olympus-update-follow";
+  const here = () => window.location.pathname + window.location.search;
   function take(key2) {
     try {
-      const value2 = window.sessionStorage.getItem(key2) || "";
-      window.sessionStorage.removeItem(key2);
-      return value2;
+      if (window.location.hash !== "#" + key2)
+        return "";
+      window.history.replaceState(window.history.state, "", here());
+      return "1";
     } catch {
       return "";
     }
   }
-  function keep(key2, value2) {
+  function keep(key2, _value) {
     try {
-      window.sessionStorage.setItem(key2, value2);
+      window.history.replaceState(window.history.state, "", here() + "#" + key2);
       return true;
     } catch {
       return false;
