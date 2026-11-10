@@ -232,7 +232,9 @@ describe('dashboard launch worker routes', () => {
     }));
     expect(minted.status).toBe(200);
     const payload = await minted.json() as Record<string, unknown>;
-    expect(Object.keys(payload).sort()).toEqual(['expires_in_seconds', 'ok', 'policy', 'ticket']);
+    expect(Object.keys(payload).sort()).toEqual(['expires_in_seconds', 'ok', 'origin', 'policy', 'ticket']);
+    // The origin the ticket is bound to (#1186): here the request's own.
+    expect(payload.origin).toBe(ORIGIN);
     expect(JSON.stringify(payload)).not.toContain(WORKER_TOKEN);
     expect(JSON.stringify(payload)).not.toContain('dash_');
     expect(minted.headers.get('Set-Cookie')).toBeNull();

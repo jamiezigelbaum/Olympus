@@ -111,6 +111,7 @@ import {
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
+  workerOwnLoopbackOrigin,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
 import {
@@ -7304,7 +7305,7 @@ export async function main(): Promise<void> {
           },
         })),
         // The brief route must pass both bearer and owner-socket authorization.
-        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
+        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret, ownLoopbackOrigin: workerOwnLoopbackOrigin(hostname, port) }),
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };

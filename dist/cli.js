@@ -43583,16 +43583,17 @@ function olympusCommandHint(input = {}) {
     return own3;
   return OLYMPUS_PLUGIN_BIN_HINT;
 }
-function loopbackCanonicalOrigin(origin) {
+function linkOrigin(base, bound) {
+  if (typeof bound !== "string" || bound === base)
+    return base;
   try {
-    const url = new URL(origin);
-    if (url.protocol !== "http:" || url.hostname !== "localhost")
-      return origin;
-    url.hostname = "127.0.0.1";
-    return url.origin;
-  } catch {
-    return origin;
-  }
+    const configured = new URL(base);
+    const named = new URL(bound);
+    const samePort = (configured.port || "80") === (named.port || "80");
+    if (configured.protocol === "http:" && configured.hostname === "localhost" && named.protocol === "http:" && named.hostname === "127.0.0.1" && samePort && named.origin === bound)
+      return bound;
+  } catch {}
+  return base;
 }
 function workerRootBaseUrl(baseUrl) {
   let url;
@@ -43619,25 +43620,14 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
     throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${hint} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   const fetchImpl = dependencies.fetchImpl ?? workerFetch;
-  const mint = (origin) => fetchImpl(`${origin}/dashboard/control/launch${dependencies.remote === true ? "?purpose=remote" : ""}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, Origin: origin },
-    redirect: "error",
-    signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
-  });
   let response;
   try {
-    const canonical = loopbackCanonicalOrigin(base);
-    if (canonical !== base) {
-      try {
-        response = await mint(canonical);
-        base = canonical;
-      } catch {
-        response = await mint(base);
-      }
-    } else {
-      response = await mint(base);
-    }
+    response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? "?purpose=remote" : ""}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: "error",
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
+    });
   } catch {
     throw new OperationError("email_unreachable", `The Olympus worker at ${base} did not answer the opening request.`, `Start the worker (${hint} worker status) and run this again.`);
   }
@@ -43645,8 +43635,9 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
     throw new OperationError("email_unreachable", `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
   }
   let ticket;
+  let boundOrigin;
   try {
-    ticket = (await response.json()).ticket;
+    ({ ticket, origin: boundOrigin } = await response.json());
   } catch {
     ticket = undefined;
   }
@@ -43654,7 +43645,7 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
     throw new OperationError("email_unreachable", "The configured Olympus worker answered the opening request without a ticket.", "This worker predates the standalone opening handoff; upgrade it, then run this again.");
   }
   const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
-  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}` + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : "");
+  return `${linkOrigin(base, boundOrigin)}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}` + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : "");
 }
 var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus", DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 1e4;
 var init_dashboard_opening = __esm(() => {
@@ -167946,6 +167937,22 @@ var init_dashboard_resource = __esm(() => {
 
 // src/workers/http.ts
 import { createHmac as createHmac5, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+function workerOwnLoopbackOrigin(bindHost, port) {
+  const ownsIpv4Loopback = bindHost === "127.0.0.1" || bindHost === "0.0.0.0";
+  return (origin) => {
+    if (!ownsIpv4Loopback)
+      return;
+    let url2;
+    try {
+      url2 = new URL(origin);
+    } catch {
+      return;
+    }
+    if (url2.protocol !== "http:" || url2.hostname !== "localhost" || Number(url2.port || "80") !== port)
+      return;
+    return `http://127.0.0.1:${port}`;
+  };
+}
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -167998,7 +168005,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
       if (!origin)
         return dashboardControlForbiddenResponse("origin_mismatch");
       const remote = new URL(request.url).searchParams.get("purpose") === DASHBOARD_LAUNCH_REMOTE_PURPOSE;
-      return dashboardLaunchMintedResponse(launchTickets.mint(origin, { remote }));
+      const bound = !requestFromOwnerSocket(request) && options.ownLoopbackOrigin?.(origin) || origin;
+      return dashboardLaunchMintedResponse(launchTickets.mint(bound, { remote }), bound);
     }
     if (isDashboardLaunchRedeemRequest(request)) {
       const origin = sameRequestOrigin(request);
@@ -168173,10 +168181,11 @@ async function dashboardLaunchTicketFromBody(request) {
     return;
   }
 }
-function dashboardLaunchMintedResponse(ticket) {
+function dashboardLaunchMintedResponse(ticket, origin) {
   return new Response(JSON.stringify({
     ok: true,
     ticket,
+    origin,
     expires_in_seconds: DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
     policy: {
       single_use: true,
@@ -227438,7 +227447,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         readOnlyFor: isDemoGrant2,
         ...chatgptSurface
       }
-    })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker2 }), !!socketPath)
+    })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret, ownLoopbackOrigin: workerOwnLoopbackOrigin(hostname2, port) }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker2 }), !!socketPath)
   };
   await localFilesInitialCleanup;
   const startServer = () => socketPath ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server2) {

@@ -24,7 +24,7 @@ import { mintDashboardOpeningUrl } from '../src/core/dashboard-opening.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { parseRemotePublicBaseUrl } from '../src/core/remote-public-url.ts';
 import { withRequestPeer } from '../src/core/request-peer.ts';
-import { dashboardOwnerSessionCheck, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { dashboardOwnerSessionCheck, withWorkerBearerAuth, workerOwnLoopbackOrigin } from '../src/workers/http.ts';
 import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { createRemoteOAuthHandler, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
 
@@ -41,7 +41,7 @@ let server: ReturnType<typeof Bun.serve>;
 let base: string;
 let handle: (request: Request, ownerSocket: boolean) => Promise<Response>;
 
-function assemble(platform: NodeJS.Platform = 'darwin', sessionSecret = SESSION_SECRET): void {
+function assemble(platform: NodeJS.Platform = 'darwin', sessionSecret = SESSION_SECRET, bindHost = '127.0.0.1'): void {
   const resolved = parseRemotePublicBaseUrl(RELAY_ORIGIN, INSTALL_ID);
   if (!resolved.enabled) throw new Error('relay urls');
   const oauth = createRemoteOAuthHandler({
@@ -53,6 +53,8 @@ function assemble(platform: NodeJS.Platform = 'darwin', sessionSecret = SESSION_
   });
   const rest = withWorkerBearerAuth(async () => Response.json({ ok: true }), {
     authToken: TOKEN, sessionSecret, launchTickets: new DashboardLaunchTickets(),
+    // As email-source/server.ts wires it, for the port this test's server holds.
+    ownLoopbackOrigin: (origin) => workerOwnLoopbackOrigin(bindHost, server.port as number)(origin),
   });
   const routed = withRemoteOAuthRoutes(oauth, rest);
   handle = async (request, ownerSocket) => withRequestPeer(routed, ownerSocket)(request, { requestIP: () => (ownerSocket ? null : { address: '127.0.0.1', family: 'IPv4', port: 1 }) } as never);
@@ -254,37 +256,104 @@ describe('relay mode with no owner socket (a Mac, or a server reached through a 
 });
 
 describe('a configured localhost worker URL (#1186 review)', () => {
-  test('the dashboard opening lands on 127.0.0.1, where the approval page is, so "open the dashboard first" recovers', async () => {
+  /** The CLI's transport, with `localhost` resolving to the worker in this test's process (as the configured URL reaches it). */
+  const toWorker = (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(String(input), init), false);
+
+  test('a worker listening on 127.0.0.1 binds a localhost opening to 127.0.0.1, so "open the dashboard first" recovers', async () => {
     const browser = new Jar();
     // The relay bridge always sends the browser to http://127.0.0.1:<port>.
     const page = await openPage(browser, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
-    const first = await clickConnect(browser, page);
-    expect(first.status).toBe(403);
-    // `olympus dashboard` (and olympus://open/dashboard) with OLYMPUS_EMAIL_BASE_URL=http://localhost:<port>.
-    const configured = `http://localhost:${server.port}`;
-    const link = new URL(await mintDashboardOpeningUrl(configured, TOKEN, { fetchImpl: fetch }));
+    expect((await clickConnect(browser, page)).status).toBe(403);
+    // `olympus dashboard` with OLYMPUS_EMAIL_BASE_URL=http://localhost:<port>: the bearer goes to the configured address only.
+    const asked: string[] = [];
+    const link = new URL(await mintDashboardOpeningUrl(`http://localhost:${server.port}`, TOKEN, {
+      fetchImpl: async (input, init) => { asked.push(new URL(String(input)).origin); return toWorker(input, init); },
+    }));
+    expect(asked).toEqual([`http://localhost:${server.port}`]);
     expect(link.origin).toBe(base);
     const ticket = new URLSearchParams(link.hash.slice(1)).get('olympus_launch_ticket')!;
     const redeemed = await browse(browser, DASHBOARD_LAUNCH_REDEEM_PATH, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Origin: link.origin }, body: JSON.stringify({ ticket }),
     });
     expect(redeemed.status).toBe(200);
-    const again = await clickConnect(browser, page);
-    expect(again.status).toBe(303);
+    expect((await clickConnect(browser, page)).status).toBe(303);
   });
 
-  test('a worker that does not answer on 127.0.0.1 keeps the configured name', async () => {
-    const asked: string[] = [];
-    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input));
-      asked.push(url.origin);
-      if (url.hostname === '127.0.0.1') throw new TypeError('connection refused');
-      expect(new Headers(init?.headers).get('Origin')).toBe(url.origin);
-      return Response.json({ ticket: 'a'.repeat(43) });
-    };
-    const link = await mintDashboardOpeningUrl('http://localhost:8010', TOKEN, { fetchImpl });
-    expect(asked).toEqual(['http://127.0.0.1:8010', 'http://localhost:8010']);
-    expect(new URL(link).origin).toBe('http://localhost:8010');
+  /**
+   * Another account holds 127.0.0.1:<port> while the real worker listens on
+   * ::1 (configured as `localhost`). Neither the bearer nor a ticket may reach
+   * that listener. `localhost` resolves to the worker; 127.0.0.1 is a real
+   * socket the impostor holds and records.
+   */
+  async function impostorCase(reachWorker: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>, port: number, impostor: { seen: string[] }) {
+    const fetchImpl = (input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).hostname === 'localhost' ? reachWorker(input, init) : fetch(input, init);
+    const link = new URL(await mintDashboardOpeningUrl(`http://localhost:${port}`, TOKEN, { fetchImpl }));
+    // The link opens where the configured address does, never on 127.0.0.1.
+    expect(link.origin).toBe(`http://localhost:${port}`);
+    // And its ticket is good only there: presented on 127.0.0.1 it is refused.
+    const ticket = new URLSearchParams(link.hash.slice(1)).get('olympus_launch_ticket')!;
+    expect(impostor.seen).toEqual([]);
+    expect(link.href).not.toContain('127.0.0.1');
+    const elsewhere = await reachWorker(`http://localhost:${port}${DASHBOARD_LAUNCH_REDEEM_PATH}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` }, body: JSON.stringify({ ticket }),
+    });
+    expect(elsewhere.status).toBe(403);
+  }
+
+  function listenImpostor(port: number) {
+    const impostor = { seen: [] as string[] };
+    const listener = Bun.serve({
+      hostname: '127.0.0.1', port,
+      fetch: (request) => { impostor.seen.push(`${request.method} ${new URL(request.url).pathname} ${request.headers.get('authorization') ?? ''}`); return Response.json({ ticket: 'i'.repeat(43), origin: `http://127.0.0.1:${port}` }); },
+    });
+    return { impostor, listener };
+  }
+
+  test('a worker that does not listen on 127.0.0.1: the bearer and the ticket never reach whoever does', async () => {
+    // The impostor takes 127.0.0.1 on a free port; the worker answers `localhost` on the same port, bound to ::1.
+    const { impostor, listener } = listenImpostor(0);
+    try {
+      const port = listener.port as number;
+      const routed = withWorkerBearerAuth(async () => Response.json({ ok: true }), {
+        authToken: TOKEN, sessionSecret: SESSION_SECRET, launchTickets: new DashboardLaunchTickets(),
+        ownLoopbackOrigin: workerOwnLoopbackOrigin('::1', port),
+      });
+      const worker = (input: RequestInfo | URL, init?: RequestInit) =>
+        withRequestPeer(routed)(new Request(String(input), init), { requestIP: () => ({ address: '::1', family: 'IPv6', port: 1 }) } as never) as Promise<Response>;
+      await impostorCase(worker, port, impostor);
+    } finally {
+      listener.stop(true);
+    }
+  });
+
+  // The same with two real listeners, where this machine has IPv6 loopback.
+  const ipv6 = (() => {
+    try {
+      Bun.serve({ hostname: '::1', port: 0, fetch: () => new Response() }).stop(true);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  test.skipIf(!ipv6)('two real listeners: the worker on ::1, an impostor on 127.0.0.1, same port', async () => {
+    const { impostor, listener } = listenImpostor(0);
+    const port = listener.port as number;
+    const routed = withWorkerBearerAuth(async () => Response.json({ ok: true }), {
+      authToken: TOKEN, sessionSecret: SESSION_SECRET, launchTickets: new DashboardLaunchTickets(),
+      ownLoopbackOrigin: workerOwnLoopbackOrigin('::1', port),
+    });
+    // The worker's listener sees the name the client used (`localhost`), as a server does from Host.
+    const real = Bun.serve({
+      hostname: '::1', port,
+      fetch: (request, srv) => withRequestPeer(routed)(new Request(request.url.replace(/^http:\/\/[^/]+/, `http://localhost:${port}`), request), srv),
+    });
+    try {
+      await impostorCase((input, init) => fetch(String(input).replace('//localhost:', '//[::1]:'), init), port, impostor);
+    } finally {
+      real.stop(true);
+      listener.stop(true);
+    }
   });
 });
 

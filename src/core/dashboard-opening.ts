@@ -64,16 +64,25 @@ export function olympusCommandHint(input: { env?: Record<string, string | undefi
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
 
-/** `http://localhost:<port>` as `http://127.0.0.1:<port>`; any other origin unchanged. */
-export function loopbackCanonicalOrigin(origin: string): string {
+/**
+ * Where the link opens: the origin the worker bound the ticket to, when that
+ * is the one rewrite a worker makes (#1186: `http://localhost:<port>` to
+ * `http://127.0.0.1:<port>`, only when the worker itself listens there,
+ * workers/http.ts workerOwnLoopbackOrigin), else the configured origin. The
+ * CLI never asks another address: the bearer goes only where it always went.
+ */
+function linkOrigin(base: string, bound: unknown): string {
+  if (typeof bound !== 'string' || bound === base) return base;
   try {
-    const url = new URL(origin);
-    if (url.protocol !== 'http:' || url.hostname !== 'localhost') return origin;
-    url.hostname = '127.0.0.1';
-    return url.origin;
+    const configured = new URL(base);
+    const named = new URL(bound);
+    const samePort = (configured.port || '80') === (named.port || '80');
+    if (configured.protocol === 'http:' && configured.hostname === 'localhost' && named.protocol === 'http:'
+      && named.hostname === '127.0.0.1' && samePort && named.origin === bound) return bound;
   } catch {
-    return origin;
+    // Not a URL: the configured origin.
   }
+  return base;
 }
 
 /** The worker ROOT: the configured base without its /v1 API suffix. */
@@ -132,31 +141,14 @@ export async function mintDashboardOpeningUrl(
     );
   }
   const fetchImpl = dependencies.fetchImpl ?? workerFetch;
-  const mint = (origin: string): Promise<Response> => fetchImpl(`${origin}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, Origin: origin },
-    redirect: 'error',
-    signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
-  });
   let response: Response;
   try {
-    // The session the link opens is bound to its origin, and the approval
-    // page for connecting an app is always at http://127.0.0.1:<port>
-    // (connect-relay/server/authorize-bridge.ts). A configured `localhost`
-    // would open the dashboard on an origin whose session that page never
-    // sees (#1186), so the same port on 127.0.0.1 is asked first; only a
-    // worker that does not answer there keeps the configured name.
-    const canonical = loopbackCanonicalOrigin(base);
-    if (canonical !== base) {
-      try {
-        response = await mint(canonical);
-        base = canonical;
-      } catch {
-        response = await mint(base);
-      }
-    } else {
-      response = await mint(base);
-    }
+    response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: 'error',
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
+    });
   } catch {
     throw new OperationError(
       'email_unreachable',
@@ -172,8 +164,9 @@ export async function mintDashboardOpeningUrl(
     );
   }
   let ticket: unknown;
+  let boundOrigin: unknown;
   try {
-    ticket = (await response.json() as { ticket?: unknown }).ticket;
+    ({ ticket, origin: boundOrigin } = await response.json() as { ticket?: unknown; origin?: unknown });
   } catch {
     ticket = undefined;
   }
@@ -185,6 +178,6 @@ export async function mintDashboardOpeningUrl(
     );
   }
   const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
-  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
+  return `${linkOrigin(base, boundOrigin)}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
     + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : '');
 }
