@@ -82,6 +82,10 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     expect(found.corpusTimings.map((timing) => timing.corpusId).sort())
       .toEqual([DROPBOX_TIER_CORPUS_IDS.internal!, DROPBOX_TIER_CORPUS_IDS.secure_local!].sort());
     expect(found.corpusTimings.every((timing) => timing.outcome === 'success' && timing.elapsedMs >= 0)).toBe(true);
+    // Which store each pack candidate came from, in pack order: the Personal
+    // answer is in the pack, and is said to come from the Personal store.
+    expect(found.packCandidateSources).toHaveLength(found.packCandidates);
+    expect(found.packCandidateSources[0]).toEqual({ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, trustDomain: 'internal' });
 
     const empty = evalRetrievalAudit(await buildEvalPack({
       question: 'zebra quartz harmonica', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
