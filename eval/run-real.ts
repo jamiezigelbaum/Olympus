@@ -357,7 +357,11 @@ export interface EvalDropboxStores {
  * the set ledger judges what it serves by that ledger itself; the ledger
  * opened here feeds the same visibility gate live Ask applies over the hits.
  */
-export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropboxStores {
+export function openEvalDropboxStores(
+  paths: EvalDropboxStorePaths,
+  /** Filled with each open's milliseconds, keyed by corpus id or 'ledger' (store probe). */
+  openMs?: Record<string, number>,
+): EvalDropboxStores {
   const files: Array<[SourceTrustDomain, string | undefined]> = [
     ['secure_local', paths.secure],
     ['internal', paths.personal],
@@ -367,6 +371,7 @@ export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropbox
   for (const [trustDomain, dbPath] of files) {
     const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
     if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
+    const startedAt = performance.now();
     stores.push(new LocalConnectorStore({
       dbPath,
       corpusId,
@@ -374,9 +379,12 @@ export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropbox
       trustDomain,
       readOnly: true,
     }));
+    if (openMs) openMs[corpusId] = Math.round(performance.now() - startedAt);
   }
   const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
+  const ledgerStartedAt = performance.now();
   const ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
+  if (openMs && ledger) openMs.ledger = Math.round(performance.now() - ledgerStartedAt);
   return {
     stores,
     ...(ledger ? { ledger } : {}),
