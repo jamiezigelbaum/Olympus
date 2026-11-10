@@ -240411,6 +240411,7 @@ init_engine_split();
 init_descendant_groups();
 init_native_process_service();
 init_native_worker_service();
+init_worker_auth();
 init_worker_shutdown();
 import { randomUUID as randomUUID10 } from "node:crypto";
 var STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5000;
@@ -240431,6 +240432,14 @@ async function superviseWorkerServiceSplit(input) {
   prepareEngineBackgroundSocketDirectory(socketPath);
   const startupTimeoutMs = input.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
   const args = ["--no-env-file", input.executablePath, "__worker-service-run"];
+  const startFile = readWorkerSetupEnv({ env: input.env }) ?? {};
+  const launchEnv = () => {
+    const env = { ...input.env };
+    for (const [key2, value] of Object.entries(startFile))
+      if (env[key2] === value)
+        delete env[key2];
+    return { ...env, ...readWorkerSetupEnv({ env: input.env }) ?? {} };
+  };
   const shared = {
     reload: { configPrefixes: [] },
     initialConfig: undefined,
@@ -240448,10 +240457,11 @@ async function superviseWorkerServiceSplit(input) {
     descendantGroupsPath: descendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
     prepareStart: async () => {
       const instanceId = randomUUID10();
+      const env = launchEnv();
       return engineBackgroundLaunch({
-        env: { ...input.env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
+        env: { ...env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
         socketPath,
-        authToken: input.authToken,
+        authToken: env.OLYMPUS_WORKER_AUTH_TOKEN?.trim() || input.authToken,
         instanceId,
         command: input.runtimePath,
         args,
@@ -240468,7 +240478,7 @@ async function superviseWorkerServiceSplit(input) {
     prepareStart: async () => ({
       command: input.runtimePath,
       args,
-      env: { ...input.env, [ENGINE_ROLE_ENV]: "front", [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
+      env: { ...launchEnv(), [ENGINE_ROLE_ENV]: "front", [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
       startupTimeoutMs,
       endpointOccupied: false,
       readinessProbe: async (child) => child.exitCode === null && child.signalCode === null

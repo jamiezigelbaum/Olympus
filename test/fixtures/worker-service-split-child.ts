@@ -23,6 +23,7 @@ note('start', {
   argv: process.argv.slice(2),
   socket: process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET ?? null,
   managed: process.env.OLYMPUS_MANAGED_WORKER ?? null,
+  probe: process.env.SPLIT_PROBE_KEY ?? null,
 });
 if (process.env.SAY) {
   console.log(`hello from the ${role} on stdout`);

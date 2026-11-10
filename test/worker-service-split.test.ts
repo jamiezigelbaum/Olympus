@@ -7,13 +7,14 @@
 // records what it was started as), so this file is in the deploy lane.
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as childProcess from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runWorkerForeground } from '../src/cli.ts';
 import { engineBackgroundSocketPath } from '../src/core/engine-split.ts';
 import { superviseWorkerServiceSplit, workerServiceSplitApplies } from '../src/core/worker-service-split.ts';
 import { installWorkerService } from '../src/core/worker-service.ts';
+import { workerSetupEnvPath } from '../src/core/worker-auth.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
 const CHILD = join(import.meta.dir, 'fixtures', 'worker-service-split-child.ts');
@@ -22,7 +23,7 @@ const TOKEN = 'worker-service-split-test-token';
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-interface ChildEvent { role: string; event: 'start' | 'stop'; pid: number; argv?: string[]; socket?: string | null; managed?: string | null; signal?: string }
+interface ChildEvent { role: string; event: 'start' | 'stop'; pid: number; argv?: string[]; socket?: string | null; managed?: string | null; probe?: string | null; signal?: string }
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -120,6 +121,25 @@ describe('the worker service runs the engine split itself', () => {
     expect(again.filter((e) => e.role === 'background' && e.event === 'start').at(-1)!.pid).not.toBe(background.pid);
     expect(alive(front.pid)).toBe(true);
     expect(again.filter((e) => e.role === 'front' && e.event === 'start')).toHaveLength(1);
+  }, 30_000);
+
+  // Under the unit, an exit 75 used to restart the whole unit, which read
+  // worker.env again (EnvironmentFile=). A child restarted by the supervisor
+  // must see a credential saved there since, too.
+  test('a restarted child gets worker.env as it is now, not as it was when the unit started', async () => {
+    const context = setup();
+    const envFile = workerSetupEnvPath({ env: context.env });
+    mkdirSync(join(envFile, '..'), { recursive: true });
+    writeFileSync(envFile, 'SPLIT_PROBE_KEY=old\n', { mode: 0o600 });
+    // The unit's EnvironmentFile= put the file's value in the supervisor's environment.
+    context.env.SPLIT_PROBE_KEY = 'old';
+    await supervise(context);
+    const started = await waitFor(() => context.read().filter((e) => e.event === 'start').length >= 2 ? context.read() : undefined);
+    expect(started.find((e) => e.role === 'background')!.probe).toBe('old');
+    writeFileSync(envFile, 'SPLIT_PROBE_KEY=new\n', { mode: 0o600 });
+    process.kill(started.find((e) => e.role === 'background')!.pid, 'SIGKILL');
+    const again = await waitFor(() => context.read().filter((e) => e.role === 'background' && e.event === 'start').at(1));
+    expect(again.probe).toBe('new');
   }, 30_000);
 
   test('a stop of the unit\'s process alone stops both children, then exits', async () => {

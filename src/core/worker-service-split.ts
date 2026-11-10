@@ -31,6 +31,7 @@ import { ENGINE_BACKGROUND_INSTANCE_ENV, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_RO
 import { descendantGroupsPath } from './descendant-groups.ts';
 import { createNativeProcessService, setNativeProcessChildStdio, type NativeProcessChildStdio, type NativeProcessServiceContext } from './native-process-service.ts';
 import { ENGINE_BACKGROUND_SERVICE_ID, engineBackgroundLaunch } from './native-worker-service.ts';
+import { readWorkerSetupEnv } from './worker-auth.ts';
 import { WORKER_SHUTDOWN_DEADLINE_MS } from './worker-shutdown.ts';
 
 /** Each child gets its own shutdown deadline and a margin before the forced kill. */
@@ -81,6 +82,17 @@ export async function superviseWorkerServiceSplit(input: {
   prepareEngineBackgroundSocketDirectory(socketPath);
   const startupTimeoutMs = input.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
   const args = ['--no-env-file', input.executablePath, '__worker-service-run'];
+  // Each launch reads worker.env again, as the unit's EnvironmentFile= did
+  // when an exit 75 restarted the whole unit: a credential saved there since
+  // (a rotated model key, then its reload) reaches the restarted child. A
+  // value the environment holds only because the file held it at the start
+  // gives way to the file as it is now, or goes with it.
+  const startFile = readWorkerSetupEnv({ env: input.env }) ?? {};
+  const launchEnv = (): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = { ...input.env };
+    for (const [key, value] of Object.entries(startFile)) if (env[key] === value) delete env[key];
+    return { ...env, ...(readWorkerSetupEnv({ env: input.env }) ?? {}) };
+  };
   const shared = {
     reload: { configPrefixes: [] },
     initialConfig: undefined,
@@ -100,10 +112,12 @@ export async function superviseWorkerServiceSplit(input: {
     descendantGroupsPath: descendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
     prepareStart: async () => {
       const instanceId = randomUUID();
+      const env = launchEnv();
       return engineBackgroundLaunch({
-        env: { ...input.env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
+        env: { ...env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
         socketPath,
-        authToken: input.authToken,
+        // The token this background will answer to: a rotated one in worker.env too.
+        authToken: env.OLYMPUS_WORKER_AUTH_TOKEN?.trim() || input.authToken,
         instanceId,
         command: input.runtimePath,
         args,
@@ -120,7 +134,7 @@ export async function superviseWorkerServiceSplit(input: {
     prepareStart: async () => ({
       command: input.runtimePath,
       args,
-      env: { ...input.env, [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
+      env: { ...launchEnv(), [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
       startupTimeoutMs,
       endpointOccupied: false,
       // The front waits for the background itself before it serves; running is enough here.
