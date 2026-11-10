@@ -450,6 +450,8 @@ export function createEvalDropboxLanes(input: {
  */
 export interface EvalRetrievalAudit {
   packCandidates: number;
+  /** The store and trust domain of each pack candidate, in pack order: which store won each seat. */
+  packCandidateSources: Array<{ corpusId: string; trustDomain: string }>;
   lanes: Array<{
     laneName: string;
     laneType: string;
@@ -475,6 +477,10 @@ export interface EvalRetrievalAudit {
 export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetrievalAudit {
   return {
     packCandidates: detail.pack.candidates.length,
+    packCandidateSources: detail.pack.candidates.map((candidate, index) => ({
+      corpusId: detail.candidateCorpusIds[index] ?? 'unknown',
+      trustDomain: candidate.trustDomain,
+    })),
     lanes: detail.laneAudits.map((lane) => ({
       laneName: lane.laneName,
       laneType: lane.laneType,
