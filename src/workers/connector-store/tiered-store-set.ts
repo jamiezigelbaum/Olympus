@@ -126,6 +126,7 @@ import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
 import { sweepImageContentToPrivate } from './tier-image-content-sweep.ts';
 import { applyMediaJudgments } from './tier-media-judgment-sweep.ts';
+import { sweepSecretsFloor } from './tier-secrets-floor-sweep.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -839,7 +840,8 @@ export class TieredStoreSet {
    * are Private by their own stored tier but sit in a Personal or Public
    * store are queued and moved to the Private store (tier-row-rehome.ts).
    * Per-item owner overrides apply to items already stored in both
-   * directions (tier-override-settle.ts). Never fails the sync.
+   * directions (tier-override-settle.ts). A secret pattern added since items
+   * were stored reaches them (tier-secrets-floor-sweep.ts). Never fails the sync.
    */
   private async settleStoredItems(): Promise<void> {
     void this.repairLowerContent();
@@ -874,6 +876,13 @@ export class TieredStoreSet {
     }
     try {
       await rehomePrivateTierRows({ set: this });
+    } catch {
+      // The next run tries again.
+    }
+    try {
+      // A secret pattern added since items were stored: their text meets the
+      // floor alone, once per pattern version, with no model asked.
+      await sweepSecretsFloor({ set: this, turn: ingestionTurn });
     } catch {
       // The next run tries again.
     }

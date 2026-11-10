@@ -212,6 +212,11 @@ const RECOVERY_CODES: Array<[string, string]> = [
     '9. 8870 3324   10. 6412 9958',
   ].join('\n')],
   ['recovery_codes key', 'recovery_codes = 39fk2-ma81q'],
+  ['quoted recovery code', 'Recovery code: "ABCD-EFGH-1234"'],
+  ['backticked recovery code', 'Recovery code: `ABCD-EFGH-1234`'],
+  ['masked first code, live codes after', 'Backup codes: XXXX-XXXX, 4829 1735'],
+  ['masked first line, live codes below', 'Backup codes:\nXXXX-XXXX\n4829 1735\n6610 2948'],
+  ['prose on the label line, codes below', 'Backup codes: keep these offline\n4829 1735\n6610 2948'],
 ];
 
 const NEGATIVES: Array<[string, string]> = [

@@ -65,6 +65,7 @@ import { defaultStoreTrustTier } from '../src/workers/connector-store/tier-place
 import { settleNamesOnlyItems } from '../src/workers/connector-store/tier-names-only-settle.ts';
 import { rejudgeStoredContent, emptyTierRejudgeReport } from '../src/workers/connector-store/tier-rejudge.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { sweepSecretsFloor } from '../src/workers/connector-store/tier-secrets-floor-sweep.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -478,6 +479,60 @@ describe('4. a re-judge that finds a secret in stored text', () => {
     const everything = await olympusSearch(install, 'orchard irrigation');
     expect(everything).not.toContain(FAKE_AWS_KEY);
     expect(everything).not.toContain('irrigation controller');
+  });
+});
+
+describe('4b. a new secret pattern reaches items already stored (#880)', () => {
+  // Text stored before the recovery-code pattern existed: the item is Personal
+  // and its row is current, so nothing would ever read it again.
+  async function personalWithRecoveryCode() {
+    const settled = await gardenSettledPersonal();
+    rewriteInternalText(settled.install, 'id:garden', 'Orchard account\nRecovery code: ABCD-EFGH-1234');
+    expect(settled.install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
+    // The floor this install last met was an older one.
+    settled.install.lane.ledger.writeMeta('secrets_floor_sweep', JSON.stringify({ done: '2026-10-13' }));
+    return settled;
+  }
+
+  test('the floor alone makes it Secrets: every copy hidden, the location recorded, no model asked', async () => {
+    const { install, prompts } = await personalWithRecoveryCode();
+    const asked = prompts.length;
+    const report = await sweepSecretsFloor({ set: install.lane.set });
+    expect(report).toMatchObject({ secrets: 1, failed: 0, complete: true });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ contentTier: 'secrets', decidedBy: 'secret_detector' });
+    expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:secret:credential_assignment');
+    expect(install.lane.ledger.copies(garden)).toEqual([]);
+    expect(install.lane.internal.current()!.exportItemCopy(garden)).toBeUndefined();
+    expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden' });
+    expect(prompts.length).toBe(asked);
+    expect(await olympusSearch(install, 'orchard account recovery')).not.toContain('ABCD-EFGH-1234');
+    // The other stored item has no secret and keeps its decision.
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))!.contentTier).not.toBe('secrets');
+    // Once per floor version: the next call reads nothing.
+    expect(await sweepSecretsFloor({ set: install.lane.set })).toMatchObject({ scanned: 0, secrets: 0 });
+  });
+
+  test('the next sync runs it, before its listing', async () => {
+    const { install } = await personalWithRecoveryCode();
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    // Settled before the listing ran (which then lists the file again, to be read afresh).
+    expect(install.secrets.get(garden)).toMatchObject({ findingKinds: ['credential_assignment'] });
+    expect(JSON.stringify(install.lane.internal.current()?.exportItemCopy(garden) ?? null)).not.toContain('ABCD-EFGH-1234');
+    expect(JSON.stringify(install.secure.exportItemCopy(garden) ?? null)).not.toContain('ABCD-EFGH-1234');
+  });
+
+  test('a bounded page per call, resumed where it stopped', async () => {
+    const { install } = await personalWithRecoveryCode();
+    const first = await sweepSecretsFloor({ set: install.lane.set, limit: 1 });
+    expect(first).toMatchObject({ scanned: 1, complete: false });
+    let report = first;
+    let calls = 1;
+    while (!report.complete && calls < 10) {
+      report = await sweepSecretsFloor({ set: install.lane.set, limit: 1 });
+      calls += 1;
+    }
+    expect(report.complete).toBe(true);
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ contentTier: 'secrets' });
   });
 });
 

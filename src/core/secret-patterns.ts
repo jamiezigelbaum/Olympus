@@ -35,6 +35,14 @@ import { decodeHTMLStrict } from 'entities';
 //     as one plain run and tested in `accept`, and the same test file runs the
 //     floor over adversarial 200 KB inputs.
 
+/**
+ * The version of the patterns below. Change it whenever a pattern starts
+ * catching something it did not: items stored before are then read once more
+ * against the floor alone (src/workers/connector-store/tier-secrets-floor-sweep.ts),
+ * with no model call. 2026-11-10: labelled recovery and backup codes (#880).
+ */
+export const SECRETS_FLOOR_VERSION = '2026-11-10.recovery-codes';
+
 export type SecretFindingType =
   | 'private_key_material'
   | 'aws_access_key_id'
@@ -638,8 +646,8 @@ const AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/g
  * phrase such as "recovery code of conduct" never matches; `accept` then
  * requires the value to look like a code. Short-lived login and verification
  * codes, postal, area and source codes carry no recovery or backup label and
- * stay ordinary items. `rest` is bounded, and a label with nothing after it
- * reads a bounded window of the following lines.
+ * stay ordinary items. `rest` is bounded, and the lines below the label are
+ * read in a bounded window.
  */
 const RECOVERY_CODE_LABEL = new RegExp(
   String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`,
@@ -647,14 +655,16 @@ const RECOVERY_CODE_LABEL = new RegExp(
 );
 const RECOVERY_CODE_LIST_WINDOW = 600;
 const RECOVERY_CODE_LIST_LINES = 12;
-/** A code at the start of a value: hyphenated groups, or digit groups split by single spaces (`4829 1735`). */
-const RECOVERY_CODE_VALUE = /^(?:\d{3,5}(?: \d{3,5}){1,3}|[A-Za-z0-9]{2,40}(?:-[A-Za-z0-9]{2,40}){0,7})(?=$|[\s,;.)\]])/;
+/** A code at the start of an entry: digit groups split by single spaces (`4829 1735`), or hyphenated groups. */
+const RECOVERY_CODE_VALUE = /^(?:\d{3,5}(?: \d{3,5}){1,3}|[A-Za-z0-9]{2,40}(?:-[A-Za-z0-9]{2,40}){0,7})(?=$|[\s,;.)\]"'\x60*_])/;
 /** A list bullet or number in front of a code: `- `, `* `, `1. `, `10) `. */
 const LIST_MARKER = /^[ \t]*(?:[-*•]|\d{1,2}[.)])[ \t]+/;
+/** Where one entry of a list ends: a comma, a semicolon, or a column gap. */
+const ENTRY_BREAK = /[,;]|[ \t]{2,}/;
 
-/** Whether `value` starts with something shaped like a recovery code, not a word or a mask. */
-function startsWithRecoveryCode(value: string): boolean {
-  const code = RECOVERY_CODE_VALUE.exec(value.replace(LIST_MARKER, '').replace(/^["'\x60]/, ''))?.[0];
+/** Whether one entry is shaped like a recovery code, not a word or a mask. */
+function isRecoveryCodeEntry(entry: string): boolean {
+  const code = RECOVERY_CODE_VALUE.exec(entry.trim().replace(LIST_MARKER, '').replace(/^[*_]{0,2}["'\x60]?/, ''))?.[0];
   if (!code || !/[0-9]/.test(code)) return false;
   if (code.replace(/[^A-Za-z0-9]/g, '').length < 6) return false;
   // `2fa-enabled` is a word with a digit; a code group is digits, mixed, upper
@@ -662,15 +672,31 @@ function startsWithRecoveryCode(value: string): boolean {
   return code.split(/[- ]/).every(group => !(/^[a-z]+$/.test(group) && /[g-z]/.test(group)) && !/^(.)\1+$/.test(group));
 }
 
+/**
+ * Whether any entry on a line is a code. Every entry counts: a masked or used
+ * first code (`XXXX-XXXX, 4829 1735`) must not hide the live ones after it.
+ */
+function lineHasRecoveryCode(line: string): boolean {
+  return line.split(ENTRY_BREAK).some(isRecoveryCodeEntry);
+}
+
 function recoveryCodeAccepted(match: RegExpMatchArray): boolean {
-  const rest = (match.groups?.rest ?? '').trim();
-  if (rest) return startsWithRecoveryCode(rest);
-  // `Backup codes:` alone on its line: the codes are the next non-blank line.
+  if (lineHasRecoveryCode(match.groups?.rest ?? '')) return true;
+  // The codes on the lines below the label: the first block of non-blank
+  // lines, within a bounded window.
   const input = match.input ?? '';
   const end = (match.index ?? 0) + match[0].length;
   const lines = input.slice(end, end + RECOVERY_CODE_LIST_WINDOW).split(/\r?\n|\r/, RECOVERY_CODE_LIST_LINES + 1).slice(1);
-  const next = lines.find(line => line.trim() !== '');
-  return next !== undefined && startsWithRecoveryCode(next.trim());
+  let started = false;
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (started) break;
+      continue;
+    }
+    started = true;
+    if (lineHasRecoveryCode(line)) return true;
+  }
+  return false;
 }
 
 /**
