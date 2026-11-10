@@ -36,7 +36,7 @@
  * reader is entitled to know the difference.
  */
 import { sharedDataPath } from '../core/olympus-layout.ts';
-import { chmod, mkdir, open, readFile, stat } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, stat, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
 
@@ -174,9 +174,10 @@ export async function appendEmbeddingLedgerEntry(
 async function appendEmbeddingLedgerEntries(path: string, entries: readonly EmbeddingLedgerEntry[]): Promise<void> {
   const line = entries.map(entry => `${JSON.stringify(entry)}\n`).join('');
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const handle = await open(path, 'a', 0o600);
+  const handle = await open(path, 'a+', 0o600);
   try {
     await handle.chmod(0o600);
+    await restoreLineBoundary(handle);
     await handle.appendFile(line, 'utf8');
     // fsync: this is a record of decisions, not telemetry. Losing the tail of
     // it to a crash would recreate the exact hole the ledger exists to close.
@@ -184,6 +185,31 @@ async function appendEmbeddingLedgerEntries(path: string, entries: readonly Embe
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Make the file end on a line boundary before appending to it (#1012, #1014).
+ *
+ * An append interrupted after a partial line (ENOSPC, a crash before fsync)
+ * leaves an incomplete tail. Appending straight after it would weld the next
+ * entry onto that fragment as one unreadable line, and the caller would then
+ * acknowledge an entry nobody can read. So a missing final newline is written
+ * first: the fragment becomes its own line, which readers skip and count, and
+ * the caller, still holding that entry, writes it again whole. A complete last
+ * entry that only lacked its newline stays readable the same way.
+ *
+ * Terminate, never truncate: two writers (the worker and the drain process)
+ * can see the same torn tail, and a truncation computed by one could cut away
+ * an entry the other has already fsynced and acknowledged. Racing terminators
+ * only leave a blank line, which readers ignore. The check costs one fstat and
+ * a one-byte read.
+ */
+async function restoreLineBoundary(handle: FileHandle): Promise<void> {
+  const { size } = await handle.stat();
+  if (size === 0) return;
+  const last = Buffer.alloc(1);
+  await handle.read(last, 0, 1, size - 1);
+  if (last[0] !== 0x0a) await handle.appendFile('\n', 'utf8');
 }
 
 /**
@@ -211,6 +237,11 @@ export async function appendEmbeddingLedgerEntriesOnce(
   path: string, entries: readonly EmbeddingLedgerEntry[],
 ): Promise<number> {
   if (!entries.length) return 0;
+  // Nothing to deduplicate: append without stating or parsing the ledger (#1011).
+  if (!entries.some(entry => entry.entry_id?.trim())) {
+    await appendEmbeddingLedgerEntries(path, entries);
+    return entries.length;
+  }
   const known = await recordedEntryIds(path);
   const pendingIds = new Set<string>();
   const pending = entries.filter(entry => {

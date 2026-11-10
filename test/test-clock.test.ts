@@ -36,6 +36,18 @@ describe('shared test clock', () => {
   });
 });
 
+test('an interval repeats on fake time until cleared, even from its own callback', async () => {
+  const clock = createTestClock(0);
+  const ticks: number[] = [];
+  const interval = clock.setInterval(() => {
+    ticks.push(clock.now());
+    if (ticks.length === 3) clock.clearInterval(interval);
+  }, 1_000);
+  await clock.advance(10_000);
+  expect(ticks).toEqual([1_000, 2_000, 3_000]);
+  expect(clock.pendingTimers()).toBe(0);
+});
+
 describe('waitFor', () => {
   test('returns the first truthy value without a fixed sleep', async () => {
     let checks = 0;
@@ -47,5 +59,10 @@ describe('waitFor', () => {
   test('fails with the description and the last error once the ceiling passes', async () => {
     await expect(waitFor(() => { throw new Error('still reading'); }, { timeoutMs: 20, intervalMs: 5, description: 'the questions step' }))
       .rejects.toThrow('waitFor: the questions step did not hold within 20 ms (last error: still reading)');
+  });
+
+  test('a check that never settles still fails at the ceiling', async () => {
+    await expect(waitFor(() => new Promise<boolean>(() => {}), { timeoutMs: 20, description: 'a reply that never comes' }))
+      .rejects.toThrow('waitFor: a reply that never comes did not hold within 20 ms (the last check was still running)');
   });
 });

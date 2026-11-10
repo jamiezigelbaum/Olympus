@@ -699,7 +699,11 @@ on, so deposit the smallest amount the service accepts.
 - The expiry date is an **estimate** from the funding date you confirm; the
   real expiry is set on-chain by the deposit block. Doctor and status show the
   estimated date, days left, and a notice at 10, 5 and 2 days. A recorded note
-  past its estimated expiry refuses consults.
+  past its estimated expiry refuses consults. After a new deposit, record its
+  date with `olympus zkapi funding-date <YYYY-MM-DD>` (or the Anonymous
+  answers card). The command changes only `zkapi.fundingDate`, under the same
+  file lease as every other policy write, and the running worker uses the new
+  date from its next check without a restart.
 - **No limit unless you set one.** Before each send Olympus records the
   request at the per-request allowance the daemon's live model list states
   for the chosen model (`oa_request_limit_micro_usd`, $1 to $6 by the model's
