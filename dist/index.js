@@ -24322,6 +24322,19 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/classification-ledger.ts
+var init_classification_ledger = __esm(() => {
+  init_tier_ledger_path();
+});
+
+// src/workers/classification/judge-second-round.ts
+var init_judge_second_round = __esm(() => {
+  init_atomic_file();
+  init_classification_ledger();
+  init_tier_rejudge();
+  init_sniffer();
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -24348,6 +24361,7 @@ var init_source_forget_registry = __esm(() => {
   init_job_names();
   init_spool();
   init_olympus_layout();
+  init_judge_second_round();
   init_source_placement();
   init_olympus_layout();
   init_live_control2();
@@ -35529,7 +35543,8 @@ function judgeStep(facts) {
   if (!fact.chosen) {
     return { id: "privacy_judge", title: "Choose your privacy judge", status: "open", detail: "Not chosen yet: on this computer for free, or Venice.", forward };
   }
-  const detail = fact.choice === "venice" ? typeof fact.limitDollars === "number" ? `Venice, up to ${dollars(fact.limitDollars)}` : "Venice, no spending limit set" : "On this computer, free";
+  const limit = typeof fact.limitDollars === "number" ? `up to ${dollars(fact.limitDollars)}` : "no spending limit set";
+  const detail = fact.choice === "venice" ? `Venice, ${limit}` : fact.choice === "local-then-venice" ? `This computer, then Venice double-checks, ${limit}` : "On this computer, free";
   return { id: "privacy_judge", title: "Privacy judge", status: "done", detail, forward };
 }
 function sourcesStep(facts) {
