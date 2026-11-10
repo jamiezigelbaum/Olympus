@@ -126557,7 +126557,7 @@ var exports_prefilter_train_offline = {};
 __export(exports_prefilter_train_offline, {
   prefilterTrainOfflineMain: () => prefilterTrainOfflineMain
 });
-import { closeSync as closeSync31, fsyncSync as fsyncSync9, openSync as openSync30, realpathSync as realpathSync20, rmSync as rmSync35, writeFileSync as writeFileSync20 } from "node:fs";
+import { closeSync as closeSync32, fsyncSync as fsyncSync10, openSync as openSync31, realpathSync as realpathSync20, rmSync as rmSync35, writeFileSync as writeFileSync20 } from "node:fs";
 import { dirname as dirname90, relative as relative16, resolve as resolve25, sep as sep19 } from "node:path";
 import { randomUUID as randomUUID31 } from "node:crypto";
 function prefilterTrainOfflineMain(args) {
@@ -126623,15 +126623,15 @@ function prefilterTrainOfflineMain(args) {
     if (scan.errors)
       throw new Error;
     if (saved) {
-      const fd2 = openSync30(output, "wx", 384);
+      const fd2 = openSync31(output, "wx", 384);
       try {
         writeFileSync20(fd2, JSON.stringify(saved));
-        fsyncSync9(fd2);
+        fsyncSync10(fd2);
       } catch (error) {
         rmSync35(output, { force: true });
         throw error;
       } finally {
-        closeSync31(fd2);
+        closeSync32(fd2);
       }
       report.outcome = "trained";
     }
@@ -148983,7 +148983,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 
 // src/workers/email-source/dashboard-messaging-service.ts
 import { spawn as spawn12 } from "node:child_process";
-import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readFileSync as readFileSync82 } from "node:fs";
+import { closeSync as closeSync33, constants as constants17, fstatSync as fstatSync8, openSync as openSync32, readFileSync as readFileSync82 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename19, join as join125 } from "node:path";
 function sourceOf(value2) {
@@ -149025,7 +149025,7 @@ function retainApprovedCaptureScope(source, env) {
 function readQr(path) {
   if (basename19(path) !== "qr.png")
     throw new Error("Invalid QR artifact.");
-  const fd2 = openSync31(path, constants17.O_RDONLY | (constants17.O_NOFOLLOW ?? 0));
+  const fd2 = openSync32(path, constants17.O_RDONLY | (constants17.O_NOFOLLOW ?? 0));
   try {
     const stat6 = fstatSync8(fd2);
     if (!stat6.isFile() || stat6.size > 1024 * 1024 || (stat6.mode & 63) !== 0 || typeof process.getuid === "function" && stat6.uid !== process.getuid())
@@ -149035,7 +149035,7 @@ function readQr(path) {
       throw new Error("Invalid QR artifact.");
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } finally {
-    closeSync32(fd2);
+    closeSync33(fd2);
   }
 }
 async function unlinkHelper(command, env) {
@@ -225047,7 +225047,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes33 } from "node:crypto";
-import { existsSync as existsSync107, readFileSync as readFileSync93, openSync as openSync32, closeSync as closeSync33, writeSync as writeSync9 } from "node:fs";
+import { existsSync as existsSync107, readFileSync as readFileSync93, openSync as openSync33, closeSync as closeSync34, writeSync as writeSync9 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve31 } from "node:path";
@@ -226669,7 +226669,9 @@ init_tier_ledger_path();
 init_tier_rules();
 init_source_dispositions();
 init_local_index();
-import { copyFileSync as copyFileSync3, existsSync as existsSync84, mkdirSync as mkdirSync51, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
+init_tier_ledger();
+init_tier_ledger_path();
+import { closeSync as closeSync31, copyFileSync as copyFileSync3, existsSync as existsSync84, fsyncSync as fsyncSync9, mkdirSync as mkdirSync51, openSync as openSync30, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
 import { dirname as dirname87, join as join113, resolve as resolve22 } from "node:path";
 import { randomUUID as randomUUID29 } from "node:crypto";
 import { Database as Database24 } from "bun:sqlite";
@@ -226749,7 +226751,7 @@ function restoreOlympusData(options) {
         throw new OperationError("invalid_params", `The backup holds a file this version of Olympus does not know: ${from}.`);
     }
   }
-  const ledgerSources = new Set(plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(".tier-ledger.sqlite")).map((entry) => entry.sourceId));
+  const ledgerSources = new Set(plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => entry.sourceId));
   const unbound = plan.filter((entry) => entry.kind === "store" && !ledgerSources.has(entry.sourceId) && storeIsTierBound(join113(input, entry.from)));
   if (unbound.length > 0) {
     throw new OperationError("invalid_params", `This backup holds ${[...new Set(unbound.map((entry) => entry.sourceId))].join(", ")} items that were judged into Private or Secret stores, but not the judgments themselves, so they could not be opened after a restore. Nothing was restored.`, "Make a new backup with this version of Olympus (olympus data export), then restore that one.");
@@ -226775,10 +226777,12 @@ function restoreOlympusData(options) {
   }
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === "store").map((entry) => entry.sourceId))];
   if (!options.dryRun) {
+    const ledgers = plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join113(input, entry.from)) }));
     for (const entry of plan) {
       if (entry.keptAs)
         copyPrivate(entry.to, entry.keptAs);
-      copyPrivate(join113(input, entry.from), entry.to);
+      const prepare = entry.kind === "store" ? (staged) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to) : undefined;
+      copyPrivate(join113(input, entry.from), entry.to, prepare);
     }
   }
   return {
@@ -226792,12 +226796,19 @@ function restoreOlympusData(options) {
     notes
   };
 }
-function copyPrivate(from, to) {
+function copyPrivate(from, to, prepare) {
   mkdirSync51(dirname87(to), { recursive: true, mode: 448 });
   const staging = `${to}.${randomUUID29()}.restoring`;
   try {
     copyFileSync3(from, staging);
     chmodSync34(staging, 384);
+    prepare?.(staging);
+    const descriptor = openSync30(staging, "r");
+    try {
+      fsyncSync9(descriptor);
+    } finally {
+      closeSync31(descriptor);
+    }
     renameSync18(staging, to);
   } catch (error) {
     rmSync32(staging, { force: true });
@@ -226826,6 +226837,23 @@ function storeIsTierBound(path) {
       return false;
     const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
     return Boolean(row?.cursor);
+  } finally {
+    db.close();
+  }
+}
+function repointLedgerHint(storePath, ledgerFor) {
+  if (!storeIsTierBound(storePath))
+    return;
+  const db = new Database24(storePath, { readwrite: true, create: false });
+  try {
+    const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+    const binding = JSON.parse(row.cursor);
+    if (typeof binding.ledgerId !== "string")
+      return;
+    const ledgerPath = ledgerFor(binding.ledgerId);
+    if (!ledgerPath || ledgerPath === binding.ledgerPath)
+      return;
+    db.query("UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?").run(JSON.stringify({ ...binding, ledgerPath }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
   } finally {
     db.close();
   }
@@ -229848,7 +229876,7 @@ function formatMessagingPairingResult(source, result) {
 async function runMessagingPairing(source, secretStore, registryPath) {
   let terminal;
   try {
-    terminal = openSync32("/dev/tty", "r+");
+    terminal = openSync33("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
@@ -229875,7 +229903,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = restartCaptureWorker();
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally {
-    closeSync33(terminal);
+    closeSync34(terminal);
   }
 }
 function parseConnectOptions(args) {

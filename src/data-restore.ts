@@ -13,7 +13,7 @@
  * them, and judgments travel in the tier ledgers beside them, so an install
  * running the same models neither embeds nor judges again.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -36,6 +36,8 @@ import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import { Database } from 'bun:sqlite';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from './workers/connector-store/local-index.ts';
+import { TierLedger } from './workers/classification/tier-ledger.ts';
+import { TIER_LEDGER_FILE_SUFFIX } from './workers/classification/tier-ledger-path.ts';
 
 export interface DataRestorePlanEntry {
   /** The file in the export, relative to it. */
@@ -159,7 +161,7 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
   // judged them, and opens only beside that ledger. A backup that has such a
   // store without its ledger (version 2 exported none) cannot be judged again
   // into a new one, so it is refused before anything is written.
-  const ledgerSources = new Set(plan.filter((entry) => entry.kind === 'judgments' && entry.to.endsWith('.tier-ledger.sqlite')).map((entry) => entry.sourceId));
+  const ledgerSources = new Set(plan.filter((entry) => entry.kind === 'judgments' && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => entry.sourceId));
   const unbound = plan.filter((entry) => entry.kind === 'store' && !ledgerSources.has(entry.sourceId) && storeIsTierBound(join(input, entry.from)));
   if (unbound.length > 0) {
     throw new OperationError(
@@ -199,9 +201,19 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
 
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === 'store').map((entry) => entry.sourceId))];
   if (!options.dryRun) {
+    // A bound store records where its ledger was on the computer that made
+    // the backup. That path is only a hint (the ledger's identity binds), but
+    // on this computer the ledger may sit under another name, so the hint is
+    // pointed at where the restore puts it.
+    const ledgers = plan
+      .filter((entry) => entry.kind === 'judgments' && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX))
+      .map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join(input, entry.from)) }));
     for (const entry of plan) {
       if (entry.keptAs) copyPrivate(entry.to, entry.keptAs);
-      copyPrivate(join(input, entry.from), entry.to);
+      const prepare = entry.kind === 'store'
+        ? (staged: string) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to)
+        : undefined;
+      copyPrivate(join(input, entry.from), entry.to, prepare);
     }
   }
   return {
@@ -217,12 +229,20 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
 }
 
 /** Copy owner-only and durably: a temporary file beside the target, then rename. */
-function copyPrivate(from: string, to: string): void {
+function copyPrivate(from: string, to: string, prepare?: (staged: string) => void): void {
   mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
   const staging = `${to}.${randomUUID()}.restoring`;
   try {
     copyFileSync(from, staging);
     chmodSync(staging, 0o600);
+    prepare?.(staging);
+    // The contents reach the disk before the name does.
+    const descriptor = openSync(staging, 'r');
+    try {
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
     renameSync(staging, to);
   } catch (error) {
     rmSync(staging, { force: true });
@@ -253,6 +273,23 @@ function storeIsTierBound(path: string): boolean {
     if (!table) return false;
     const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
     return Boolean(row?.cursor);
+  } finally {
+    db.close();
+  }
+}
+
+/** Point a bound store's ledger hint at where this computer keeps that ledger; the identity is unchanged. */
+function repointLedgerHint(storePath: string, ledgerFor: (ledgerId: string) => string | undefined): void {
+  if (!storeIsTierBound(storePath)) return;
+  const db = new Database(storePath, { readwrite: true, create: false });
+  try {
+    const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string };
+    const binding = JSON.parse(row.cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
+    if (typeof binding.ledgerId !== 'string') return;
+    const ledgerPath = ledgerFor(binding.ledgerId);
+    if (!ledgerPath || ledgerPath === binding.ledgerPath) return;
+    db.query('UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?')
+      .run(JSON.stringify({ ...binding, ledgerPath }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
   } finally {
     db.close();
   }
