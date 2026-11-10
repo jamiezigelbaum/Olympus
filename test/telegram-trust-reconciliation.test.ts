@@ -13,6 +13,7 @@ import {
   createTelegramConnectorStoreSyncHandler,
   type TelegramConnectorStores,
 } from '../src/workers/telegram-messages/index.ts';
+import { AMPLE_DISK_SPACE } from './helpers/disk-space.ts';
 import {
   parseTelegramTrustReconcileCliArgs,
   runTelegramTrustReconcile,
@@ -166,6 +167,7 @@ function createFixture(): Fixture {
       return createTelegramConnectorStoreSyncHandler({
         stores,
         spoolDir: liveSpoolDir,
+        diskSpace: AMPLE_DISK_SPACE,
       });
     },
     closeStores() {
