@@ -75,6 +75,8 @@ export const SHARED_DATA_FILES = {
   // Beside the remote connections, where the relay's private questions wait.
   'waiting-private-questions': 'waiting-private-questions.sqlite',
   'tier-migration': 'tier-migration',
+  // One person across sources (#1076): Private, on this computer only.
+  'people-index': 'people-index.sqlite',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
   'built-in-reasoning': 'models/built-in-reasoning',

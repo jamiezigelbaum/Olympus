@@ -41,9 +41,38 @@ describe('settingsForCli', () => {
 });
 
 describe('runSettingsCommand', () => {
-  test('only `show` is a settings command', async () => {
+  test('there is no direct apply: only show, schema and propose', async () => {
     await expect(runSettingsCommand(['apply', 'x.json'])).rejects.toBeInstanceOf(OperationError);
-    await expect(runSettingsCommand([])).rejects.toThrow('Usage: olympus settings show');
+    await expect(runSettingsCommand([])).rejects.toThrow('Usage: olympus settings show | schema | propose');
+  });
+
+  test('schema names every settable key', async () => {
+    const schema = await runSettingsCommand(['schema']);
+    expect(Object.keys(schema.keys as object).sort()).toEqual(['computer_use', 'models', 'privacy_judge', 'private_answer_mode']);
+  });
+
+  test('propose checks the file before reaching Olympus', async () => {
+    const env = { HOME: '/nonexistent-olympus-home', OLYMPUS_WORKER_AUTH_TOKEN: 'token' };
+    const never: typeof fetch = Object.assign(async () => { throw new Error('must not be called'); }, { preconnect: () => {} });
+    await expect(runSettingsCommand(['propose', '-'], env, { fetchImpl: never, readStdin: () => '{"remote_access": true}' })).rejects.toThrow('cannot set remote_access');
+    await expect(runSettingsCommand(['propose', '-'], env, { fetchImpl: never, readStdin: () => 'not json' })).rejects.toThrow('not valid JSON');
+    await expect(runSettingsCommand(['propose'], env, { fetchImpl: never })).rejects.toThrow('Usage');
+  });
+
+  test('propose sends the proposal and the agent name to the running Olympus', async () => {
+    const env = { HOME: '/nonexistent-olympus-home', OLYMPUS_WORKER_AUTH_TOKEN: 'token' };
+    const sent: unknown[] = [];
+    const worker: typeof fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/health')) return new Response('ok');
+      sent.push({ url, body: JSON.parse(String(init?.body)) });
+      return Response.json({ kind: 'olympus_settings_proposal', id: 'p1', changes: [] });
+    }, { preconnect: () => {} });
+    const result = await runSettingsCommand(['propose', '-', '--from', 'Claude Code'], env, { fetchImpl: worker, readStdin: () => '{"models":{"venice":"strongest"}}' });
+    expect(result).toMatchObject({ kind: 'olympus_settings_proposal', id: 'p1' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ body: { proposal: { models: { venice: 'strongest' } }, from: 'Claude Code' } });
+    expect((sent[0] as { url: string }).url).toEndWith('/cli/settings-propose');
   });
 
   test('says to start Olympus when no worker answers', async () => {
