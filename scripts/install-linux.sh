@@ -30,7 +30,17 @@ sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 check_digest() {
   [ -f "$1" ] && [ ! -L "$1" ] && [ "$(wc -c < "$1" | tr -d ' ')" = "$2" ] && [ "$(sha256_of "$1")" = "$3" ]
 }
-fetch() { curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "$2" "$1"; }
+# fetch <url> <file>: HTTPS only, TLS 1.2 or later. Retries a dropped
+# connection or a 5xx answer six times, five seconds apart (#1038), and leaves
+# the last HTTP status in FETCH_STATUS for download_hint.
+fetch() { FETCH_STATUS=$(curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-delay 5 -w '%{http_code}' -o "$2" "$1"); }
+download_hint() {
+  case "${FETCH_STATUS:-000}" in
+    5??) printf 'the download server returned an error (HTTP %s); try again in a few minutes.' "$FETCH_STATUS" ;;
+    000|'') printf 'check HTTPS connectivity and CA certificates.' ;;
+    *) printf 'the download server answered HTTP %s.' "$FETCH_STATUS" ;;
+  esac
+}
 
 usage() {
   say 'Usage: install-linux.sh [--tarball PATH] [--bun-archive PATH] [--whatsapp-bridge PATH]'
@@ -192,7 +202,7 @@ main() {
   if [ -n "$LOCAL_BUN_ARCHIVE" ]; then
     copy_local_archive "$LOCAL_BUN_ARCHIVE" "$WORK/bun.zip" 'Local Bun archive'
   else
-    fetch "$BUN_URL" "$WORK/bun.zip" || die 'Bun download failed; check HTTPS connectivity and CA certificates.'
+    fetch "$BUN_URL" "$WORK/bun.zip" || die "Bun download failed; $(download_hint)"
   fi
   check_digest "$WORK/bun.zip" "$BUN_BYTES" "$BUN_SHA256" || die 'Bun archive checksum/size mismatch; nothing was executed.'
   # Read one entry to a fixed path. ZIP paths/links are never extracted.
@@ -202,14 +212,14 @@ main() {
   if [ -n "$LOCAL_TARBALL" ]; then
     copy_local_archive "$LOCAL_TARBALL" "$WORK/release.tgz" 'Local Olympus tarball'
   else
-    fetch "$RELEASE_BASE/$OLYMPUS_VERSION/olympus-$OLYMPUS_VERSION.tgz" "$WORK/release.tgz" || die 'Release download failed.'
+    fetch "$RELEASE_BASE/$OLYMPUS_VERSION/olympus-$OLYMPUS_VERSION.tgz" "$WORK/release.tgz" || die "Release download failed; $(download_hint)"
   fi
   check_digest "$WORK/release.tgz" "$OLYMPUS_BYTES" "$OLYMPUS_SHA256" || die 'Release checksum/size mismatch; nothing was executed.'
   if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
     if [ -n "$LOCAL_BRIDGE" ]; then
       copy_local_archive "$LOCAL_BRIDGE" "$WORK/whatsapp-bridge" 'Local WhatsApp bridge'
     else
-      fetch "$RELEASE_BASE/$OLYMPUS_VERSION/$WHATSAPP_BRIDGE_NAME-linux-x64" "$WORK/whatsapp-bridge" || die 'WhatsApp bridge download failed.'
+      fetch "$RELEASE_BASE/$OLYMPUS_VERSION/$WHATSAPP_BRIDGE_NAME-linux-x64" "$WORK/whatsapp-bridge" || die "WhatsApp bridge download failed; $(download_hint)"
     fi
     check_digest "$WORK/whatsapp-bridge" "$WHATSAPP_BRIDGE_BYTES" "$WHATSAPP_BRIDGE_SHA256" || die 'WhatsApp bridge checksum/size mismatch; nothing was executed.'
   fi
