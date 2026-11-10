@@ -224256,7 +224256,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     policy: { config: sovereigntyEngine.config, ...sovereigntyEngine.source === "file" && sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {} },
     ...sourceIndexReadEnabled ? { judge: judgeSpending } : {},
     connections: () => dashboardAgentStore?.(),
-    ...process.env.OLYMPUS_ENGINE_HOST === "1" ? {} : { hostAgent: "OpenClaw" }
+    ...process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === "openclaw" ? { hostAgent: "OpenClaw" } : {}
   });
   setupStatusNow = async () => {
     const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json"));

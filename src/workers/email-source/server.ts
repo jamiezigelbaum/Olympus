@@ -7138,7 +7138,10 @@ export async function main(): Promise<void> {
     policy: { config: sovereigntyEngine.config, ...(sovereigntyEngine.source === 'file' && sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}) },
     ...(sourceIndexReadEnabled ? { judge: judgeSpending } : {}),
     connections: () => dashboardAgentStore?.(),
-    ...(process.env.OLYMPUS_ENGINE_HOST === '1' ? {} : { hostAgent: 'OpenClaw' }),
+    // Only positive evidence counts: the OpenClaw Gateway supervising this
+    // worker as its native service (as `remote` above). A hand-run worker or
+    // the standalone engine host has no AI app until one is connected.
+    ...(process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw' ? { hostAgent: 'OpenClaw' } : {}),
   });
   setupStatusNow = async () => {
     const response = await worker.fetch(new Request('http://olympus-worker.internal/dashboard.json'));
