@@ -49,7 +49,11 @@ export const ENGINE_FORWARDED_ROUTES = {
   delete_source_data: ['/dashboard/delete-source-data', '/v1/cli/data-delete'],
   // Every per-item override: the CLI's tier set, and the one-item privacy change
   // from the dashboard and from an agent (tier-owner-items.ts). Finding items stays a read.
-  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise'],
+  // Check the judge (judge-check.ts) records the owner's answer and, where it
+  // differs, the same per-item override, so it runs with the ledgers (#1224).
+  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise', '/dashboard/privacy/judge-check'],
+  // People's corrections write the people index the background rebuilds (#1224).
+  people: ['/dashboard/people'],
   storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
   // Pairing state lives with the background's capture service: every pairing route goes there.
   capture: [
@@ -353,6 +357,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'embed_chunks':
     case 'source_watch':
     case 'extraction_queue':
+    case 'people':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');

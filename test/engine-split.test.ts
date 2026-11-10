@@ -376,6 +376,11 @@ describe('owner actions the background runs, forwarded from the front', () => {
       const response = await routes(post(path, { args: ['explain', 'm7'] }));
       expect(await response!.json(), path).toEqual({ ran: 'tier_override' });
     }
+    // Check the judge's correction and People's corrections write background-owned data too (#1224).
+    for (const [path, kind] of [['/dashboard/privacy/judge-check', 'tier_override'], ['/dashboard/people', 'people']] as const) {
+      const response = await routes(post(path, { action: 'answer' }));
+      expect(await response!.json(), path).toEqual({ ran: kind });
+    }
     expect(routes(post('/dashboard/privacy/items/find', {}))).toBeUndefined();
     expect(routes(post('/v1/privacy-item/find', {}))).toBeUndefined();
     // Not a forwarded route, or not a POST: the front's own handler serves it.

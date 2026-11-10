@@ -7905,6 +7905,7 @@ export async function main(): Promise<void> {
         // A create writes under an id made from the command id, so a resubmission finds it.
         source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
+        people: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
         judge_boost: ({ identities }) => {
