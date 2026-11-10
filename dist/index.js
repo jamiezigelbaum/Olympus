@@ -19270,7 +19270,7 @@ class MutablePkList {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_job_names();
   init_keyword_context();
@@ -19278,6 +19278,7 @@ var init_local_index = __esm(() => {
   init_keyword_expansion();
   init_control_path_headroom();
   init_off_thread_reads();
+  init_provider_account_identity();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -19345,7 +19346,7 @@ var init_local_index = __esm(() => {
   `
   };
   STATUS_COUNTS_MAX_AGE_MS = 5 * 60000;
-  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
+  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",
@@ -24327,6 +24328,19 @@ var init_judge_check = __esm(() => {
   init_owner_config_read();
 });
 
+// src/workers/classification-ledger.ts
+var init_classification_ledger = __esm(() => {
+  init_tier_ledger_path();
+});
+
+// src/workers/classification/judge-second-round.ts
+var init_judge_second_round = __esm(() => {
+  init_atomic_file();
+  init_classification_ledger();
+  init_tier_rejudge();
+  init_sniffer();
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -24354,10 +24368,32 @@ var init_source_forget_registry = __esm(() => {
   init_spool();
   init_judge_check();
   init_olympus_layout();
+  init_judge_second_round();
   init_source_placement();
   init_olympus_layout();
   init_live_control2();
   init_tier_migration_reports();
+});
+
+// src/workers/classification/tier-rules.ts
+var init_tier_rules = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_classifier();
+});
+
+// src/core/source-disposition-tree.ts
+var init_source_disposition_tree = __esm(() => {
+  init_source_ingestion_exclusions();
+});
+
+// src/workers/source-dispositions.ts
+var init_source_dispositions = __esm(() => {
+  init_atomic_file();
+  init_source_disposition_tree();
+  init_operation_error();
+  init_source_ingestion_exclusions();
 });
 
 // src/data-lifecycle.ts
@@ -24381,6 +24417,8 @@ var init_data_lifecycle = __esm(() => {
   init_source_forget_registry();
   init_source_registry();
   init_sovereignty();
+  init_tier_rules();
+  init_source_dispositions();
   init_pairing_session_paths();
   init_unpaired_sources();
   init_source_corpus_registry();
@@ -24388,6 +24426,8 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  init_mail_source_scope();
+  init_source_account_binding();
   backgroundTrashRemovals = new Set;
 });
 
@@ -25881,7 +25921,7 @@ function remoteOpenInstructions(input) {
   };
 }
 var REMOTE_TUNNEL_SECONDS = 1800;
-var OPENING_LINK_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
+var OPENING_LINK_PATTERN = /^http:\/\/127\.0\.0\.1(?::\d{1,5})?\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
 function isOpeningLinkForCommandLine(value) {
   return typeof value === "string" && OPENING_LINK_PATTERN.test(value);
 }
@@ -25981,13 +26021,22 @@ async function openRemote(ctx, params, deps = {}) {
   if (baseUrl.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(baseUrl.hostname) || !isValidPort(port)) {
     throw new OperationError("config_error", "The Olympus engine is not on this server's own loopback address, so a tunnel cannot reach it.", "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.");
   }
+  const socketPath = workerSocketPath({ env, ...deps.platform ? { platform: deps.platform } : {} });
+  const tunnelOrigin = new URL(`http://127.0.0.1:${port}`).origin;
+  let mintOrigin;
+  if (socketPath) {
+    mintOrigin = tunnelOrigin;
+  } else if (base === tunnelOrigin) {
+    mintOrigin = base;
+  } else {
+    throw new OperationError("config_error", "The Olympus engine address is a name, not 127.0.0.1, so the opening link would not be tied to the tunnel.", "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.");
+  }
   const token = (deps.token ?? workerAuthTokenProvider(ctx.config))();
-  const link = await mintDashboardOpeningUrl(base, token, { target, remote: true, ...deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {} });
-  if (!isOpeningLinkForCommandLine(link)) {
+  const link = await mintDashboardOpeningUrl(mintOrigin, token, { target, remote: true, ...deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {} });
+  if (!isOpeningLinkForCommandLine(link) || new URL(link).origin !== tunnelOrigin) {
     throw new OperationError("email_error", "The Olympus engine returned an opening link in an unexpected shape.", "Update Olympus, then try again.");
   }
   const sshTarget = mode.sshTarget ?? null;
-  const socketPath = workerSocketPath({ env, ...deps.platform ? { platform: deps.platform } : {} });
   const byHand = remoteOpenInstructions({ port, ...socketPath ? { socketPath } : {}, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, target });
   const commands = remoteOpenNodeCommands({ port, ...socketPath ? { socketPath } : {}, sshTarget: sshTarget ?? SSH_TARGET_PLACEHOLDER, link })[computer];
   return {
@@ -35510,7 +35559,8 @@ function judgeStep(facts) {
   if (!fact.chosen) {
     return { id: "privacy_judge", title: "Choose your privacy judge", status: "open", detail: "Not chosen yet: on this computer for free, or Venice.", forward };
   }
-  const detail = fact.choice === "venice" ? typeof fact.limitDollars === "number" ? `Venice, up to ${dollars(fact.limitDollars)}` : "Venice, no spending limit set" : "On this computer, free";
+  const limit = typeof fact.limitDollars === "number" ? `up to ${dollars(fact.limitDollars)}` : "no spending limit set";
+  const detail = fact.choice === "venice" ? `Venice, ${limit}` : fact.choice === "local-then-venice" ? `This computer, then Venice double-checks, ${limit}` : "On this computer, free";
   return { id: "privacy_judge", title: "Privacy judge", status: "done", detail, forward };
 }
 function sourcesStep(facts) {

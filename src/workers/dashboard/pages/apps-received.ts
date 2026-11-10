@@ -92,7 +92,7 @@ function renderBody(options: DashboardPageOptions | undefined): string {
     return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(A.unlock)}</button><span class="hint">${escapeHtml(A.unlockIntro)}</span>`
       + `<span class="armsg" data-ar-msg role="status"></span></form></div>`
-      + `<script>${clientScript('', true)}</script>`;
+      + `<script>${clientScript(csrfToken, true)}</script>`;
   }
   if (options?.appsReceivedAvailable !== true) {
     return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml(A.unavailable)}</p></div>`;
@@ -123,7 +123,7 @@ function clientScript(csrfToken: string, unlockOnly: boolean): string {
     event.preventDefault();
     var button = unlock.querySelector('button');
     if (button) button.disabled = true;
-    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
       if (response.ok) { window.location.reload(); return; }
       say(copy.failed, true); if (button) button.disabled = false;
     }, function () { say(copy.unreachable, true); if (button) button.disabled = false; });

@@ -40,7 +40,8 @@ import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '.
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
 import { forgetJudgeCheckItems, judgeCheckPath } from '../workers/classification/judge-check.ts';
-import { accountExtractionSpoolRoot, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
+import { accountExtractionSpoolRoot, accountFolder, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
+import { forgetSecondRoundCursors, judgeSecondRoundStatePath } from '../workers/classification/judge-second-round.ts';
 import { placedAccount } from './source-placement.ts';
 import { xBookmarksApiUsageDbPath } from './olympus-layout.ts';
 import { forgetXBookmarksSyncState } from '../workers/x-bookmarks/live-control.ts';
@@ -78,6 +79,8 @@ export interface ForgetContext {
    * source gets new ids, so the old claims could never be retired again.
    */
   tierLedgerIds?: readonly string[] | undefined;
+  /** The paths of the source's tier ledgers: positions kept by ledger path (the Venice double-check's) go with them. */
+  tierLedgerPaths?: readonly string[] | undefined;
   /**
    * The (provider, account scope) pairs the source's tier ledgers hold items
    * under, read with the ledger ids: the item ids the dashboard gave out for
@@ -378,6 +381,20 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     },
   },
   {
+    // The Venice double-check's sweep positions name items (account scope, conversation, item id).
+    id: 'judge-second-round-cursors',
+    file: 'judge-second-round.json',
+    modules: [],
+    // A sweep between awaits can write its old positions back after the first forget.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = judgeSecondRoundStatePath(context.env);
+      const placed = placedAccount(account.source_id, context.env, account.slot);
+      const folder = placed.layout === 'folder' ? accountFolder(placed, context.env) : undefined;
+      return line(path, 'sweep positions', forgetSecondRoundCursors(path, { ledgerPaths: context.tierLedgerPaths ?? [], accountFolder: folder }, { dryRun }));
+    },
+  },
+  {
     // The X usage ledger is the quota ledger and stays; only the deleted account's sync positions go.
     id: 'x-bookmarks-sync-state',
     file: 'x-usage',
@@ -467,6 +484,11 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
     file: 'judge-spending.json',
     modules: [],
     reason: 'The global cloud-judge choice, dollar cap, spend/reservations and terminal stop, with no source or item data. It must survive source deletion and reconnects so they cannot reset the spending limit.',
+  },
+  {
+    file: 'judge-second-round.sqlite',
+    modules: ['src/workers/classification/judge-second-round.ts'],
+    reason: 'One-way SHA-256 digests of the questions Venice already kept Private, so a resumed double-check never pays for them twice. No source, account, item id or text; a digest only stops a repeat Venice call, and the item stays Private.',
   },
   {
     file: 'tier-sniffer-budget.json',

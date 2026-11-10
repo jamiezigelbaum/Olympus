@@ -181,6 +181,7 @@ import {
 import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
 import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
+import { restoreOlympusData } from './data-restore.ts';
 import { parseProposalFrom, parseSettingsProposalInput, SETTINGS_PROPOSAL_SCHEMA, SettingsProposalError } from './core/settings-proposal.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
 import {
@@ -1544,6 +1545,7 @@ function printHelp(): void {
   console.log('  olympus connections status');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
+  console.log('  olympus data restore --input <dir> [--dry-run]');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
@@ -1600,6 +1602,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
+  'data restore': 'olympus data restore --input <dir> [--dry-run]',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
   'zkapi install-tools': 'olympus zkapi install-tools',
@@ -1703,6 +1706,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     '  olympus data export --output <dir> [--source <id>]',
     '  olympus data verify --input <dir>',
+    '  olympus data restore --input <dir> [--dry-run]',
     '  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]',
   ],
   tier: [
@@ -2963,6 +2967,16 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     const options = parseDataOptions(args.slice(1));
     return verifyOlympusDataExport({ destination: options.input });
   }
+  if (command === 'restore') {
+    const options = parseDataOptions(args.slice(1));
+    if (!options.input.trim()) throw new OperationError('invalid_params', '--input must be provided.');
+    // Only with Olympus stopped: it writes the stores the worker would hold
+    // open. A held owner lock is refused as busy, never restored around (#1065).
+    return runLocallyOrThroughWorker(
+      () => restoreOlympusData({ input: resolve(options.input.trim()), dryRun: options.dryRun }),
+      undefined,
+    );
+  }
   if (command === 'delete') {
     const options = parseDataOptions(args.slice(1));
     if (options.all && !options.yesIAMSure && options.dryRun !== true) {
@@ -3026,7 +3040,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     });
   }
   if (command === '--help' || command === '-h') {
-    console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
+    console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data restore --input <dir> [--dry-run]\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
     process.exit(0);
   }
   throw new OperationError('invalid_params', `Unknown data command: ${command ?? ''}`.trim());
@@ -3067,7 +3081,7 @@ function parseDataOptions(args: string[]): {
     } else if (arg === '--yes-i-am-sure') {
       yesIAMSure = true;
     } else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
+      console.log('Usage: olympus data export --output <dir> [--source <id>]\n       olympus data verify --input <dir>\n       olympus data restore --input <dir> [--dry-run]\n       olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
       process.exit(0);
     } else {
       throw new OperationError('invalid_params', `Unknown data option: ${arg}`);
@@ -3403,8 +3417,18 @@ export async function runDashboardCommand(
     if (result.state !== 'headless') throw new OperationError('email_unreachable', 'Worker did not provide an owner-proven desktop route.');
     desktopUnavailable = true;
   }
-  const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
-  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  // A socket that fails its checks still lets the mint run first, so the
+  // error names the worker that refused, as before; the socket error follows.
+  let socketPath: string | undefined;
+  let socketError: unknown;
+  try { socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {}); } catch (error) { socketError = error; }
+  // Behind the owner socket the link is opened through an SSH forward that
+  // listens on 127.0.0.1 only, so it names that literal origin: a configured
+  // name such as localhost may resolve to another listener on the owner's
+  // computer (#1211). The socket carries the request whatever host it names.
+  const mintBase = socketPath ? new URL(`http://127.0.0.1:${new URL(base).port || '80'}`).origin : base;
+  const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint() });
+  if (socketError !== undefined) throw socketError;
   const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {

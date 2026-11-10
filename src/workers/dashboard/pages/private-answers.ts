@@ -154,12 +154,12 @@ export const PRIVACY_TABS_CSS = `
 .ptabs .ptab { padding: 8px 14px; color: var(--t2); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .ptabs .ptab.on { color: var(--t1); border-bottom-color: var(--link); font-weight: 600; }
 .ptabs .ptab:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.judgeopts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+.judgeopts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 10px 0; }
 .judgeopt { display: block; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; }
 .judgeopt:has(input:checked) { border-color: var(--link); }
 .judgeopt:has(input:disabled) { cursor: default; opacity: .6; }
 .judgehead { display: flex; align-items: center; gap: 6px; }
-.judgenow { font-size: var(--fs-caption); padding: 0 8px; border-radius: 10px; border: 1px solid var(--link); color: var(--link); }
+.judgenow { white-space: nowrap; flex-shrink: 0; font-size: var(--fs-caption); padding: 0 8px; border-radius: 10px; border: 1px solid var(--link); color: var(--link); }
 .judgelead { display: block; margin: 4px 0 0; color: var(--t2); }
 .judgerows { display: grid; grid-template-columns: 64px 1fr; gap: 4px 10px; margin: 10px 0 0; }
 .judgeterm { color: var(--t2); }
@@ -171,6 +171,13 @@ export const PRIVACY_TABS_CSS = `
 .judgedialog p { margin: 0 0 12px; }
 .judgedialogbar { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .judgecap { display: block; margin: 8px 0 4px; }
+.judgenote { color: var(--t2); font-size: var(--fs-caption); }
+.judgecapbox { display: none; margin: 12px 0; }
+.judgecapbox .pnote { margin: 0 0 8px; }
+form[data-judge-choice]:has(input[name="choice"][value="venice"]:checked) .judgecapbox,
+form[data-judge-choice]:has(input[name="choice"][value="local-then-venice"]:checked) .judgecapbox { display: block; }
+.judgecapbox input[type="number"] { width: 110px; }
+.judgeorder { margin: 12px 0; }
 .judgehow { margin: 10px 0 0; color: var(--t2); }
 @media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
 @media (max-width: 480px) { .ptabs .ptab { padding: 8px 10px; } }
@@ -199,7 +206,7 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     notes.push(`<form class="paunlock" data-pa-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
-    script = `<script>${privateAnswersClientScript({ csrfToken: '', unlockOnly: true })}</script>`;
+    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
@@ -373,7 +380,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       event.preventDefault();
       var button = unlock.querySelector('button');
       if (button) button.disabled = true;
-      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
         if (response.ok) { window.location.reload(); return; }
         var msg = unlock.querySelector('[data-pa-msg]');
         if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }

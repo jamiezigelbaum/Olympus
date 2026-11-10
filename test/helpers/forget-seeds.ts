@@ -35,7 +35,8 @@ import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '..
 import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
 import { LocalPeopleIndex, peopleIndexPath } from '../../src/core/people-index.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
-import { xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
+import { accountFolder, xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
+import { judgeSecondRoundStatePath } from '../../src/workers/classification/judge-second-round.ts';
 import { judgeCheckPath } from '../../src/workers/classification/judge-check.ts';
 import { LocalXBookmarksApiUsageStore } from '../../src/workers/x-bookmarks/live-control.ts';
 
@@ -73,7 +74,7 @@ export const tierLedgerIdOf = (source: SeededSource): string => `ledger-of-${sou
 
 /** A context for forgetting `source` (the first seeded source by default): its tier ledger's id is known. */
 export const contextOf = (layout: ForgetLayout, source: SeededSource = MINE): ForgetContext =>
-  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)], tierItemScopes: [tierItemScopeOf(source)] });
+  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)], tierLedgerPaths: [sweptLedgerOf(layout, source)], tierItemScopes: [tierItemScopeOf(source)] });
 
 /** The (provider, account scope) the seeds file a source's tier ledger items under. */
 export const tierItemScopeOf = (source: SeededSource): [string, string] => [source.ledger_id, `${source.source_id}-account`];
@@ -81,6 +82,10 @@ export const tierItemScopeOf = (source: SeededSource): [string, string] => [sour
 /** An item id as the dashboard gives one out (tier-owner-items.ts ownerTierItemId). */
 export const ownerItemIdOf = (source: SeededSource, n: number): string =>
   `oti_${Buffer.from(JSON.stringify([...tierItemScopeOf(source), '', `item-${n}`])).toString('base64url')}`;
+
+/** Where the Venice double-check's sweep position for `source` is keyed. */
+export const sweptLedgerOf = (layout: ForgetLayout, source: SeededSource): string =>
+  join(accountFolder({ source_id: source.source_id, slot: '1' }, layout.env), 'tier.ledger');
 
 /**
  * The tier ledger beside a connector store, with the id the seeded redaction
@@ -565,6 +570,26 @@ export const SEEDED_FILES: readonly SeededFile[] = [
       if (!existsSync(path)) return 0;
       const text = readFileSync(path, 'utf8');
       return [1, 2, 3, 4].filter((n) => text.includes(ownerItemIdOf(source, n))).length;
+    },
+  },
+  {
+    // The Venice double-check's sweep positions: the deleted source's in-progress position names an item.
+    stepId: 'judge-second-round-cursors',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => judgeSecondRoundStatePath(layout.env),
+    seed(layout) {
+      const ledgerOf = (source: SeededSource) => sweptLedgerOf(layout, source);
+      writeJson(judgeSecondRoundStatePath(layout.env), { v: 1, cursors: {
+        [ledgerOf(MINE)]: { account_scope: 'acct', conversation_key: 'chat-mine', item_id: 'item-mine' },
+        [ledgerOf(OTHER)]: { account_scope: 'acct', conversation_key: 'chat-other', item_id: 'item-other' },
+      } });
+    },
+    left(layout, source) {
+      const path = judgeSecondRoundStatePath(layout.env);
+      if (!existsSync(path)) return 0;
+      const { cursors } = JSON.parse(readFileSync(path, 'utf8')) as { cursors: Record<string, unknown> };
+      return Object.keys(cursors).filter((key) => key === sweptLedgerOf(layout, source)).length;
     },
   },
   {

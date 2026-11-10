@@ -5,12 +5,13 @@ import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-o
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
-import { snifferPromptVersions } from '../classification/sniffer.ts';
+import { snifferDecisionBar, snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
@@ -323,6 +324,7 @@ import type { ConnectorStoreStatusScope } from '../connector-store/local-index.t
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
+  TIER_DOMAIN_ORDER,
   onDemandTierStore,
   tieredStoreSetLedgerPath,
   rehomeChatLaneOverrides,
@@ -404,6 +406,7 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
+import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
@@ -475,6 +478,7 @@ import {
   fileSourceScopeMetadataEnabled,
   fileSourceScopeMetadataFilters,
   isMailSourceScopePolicyRef,
+  rebindRestoredFileScope,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
@@ -530,7 +534,7 @@ import { compareProviderAccounts, dropboxOwnRootFolderIds, dropboxOwnsOneOfFolde
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
-import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
+import { MAIL_SCOPE_WINDOW_LABELS, defaultMailScopeSelection, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
 import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
 import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';
@@ -554,6 +558,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -2575,6 +2580,15 @@ export async function main(): Promise<void> {
   // with registerBuiltInPrivateModel before this point); without any,
   // flagged items stay pending and unflagged items are Personal at once.
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
+  // Go easy on this computer (#922): local judging and embedding trickle
+  // while the owner works; full speed when away or plugged in overnight.
+  let localWorkPending: () => boolean = () => false;
+  const localPacer = new LocalWorkPacer({
+    probe: systemIdlePowerProbe(),
+    settingPath: join(dirname(resolveClassificationLedgerPath(process.env)), 'go-easy.json'),
+    pendingLocalWork: () => localWorkPending(),
+    log: (line) => console.log(line),
+  });
   const judgeRuntimeInput = {
     engine: sovereigntyEngine,
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
@@ -2583,6 +2597,8 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  // The local judge's own speed and held share on this install, for the setup estimates (#891).
+  const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
@@ -5774,6 +5790,9 @@ export async function main(): Promise<void> {
         providerFor: (trustDomain) => trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider,
       });
       return couldEmbed || targets().length > 0 ? targets : undefined;
+    }, {
+      trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
+      onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -5884,7 +5903,11 @@ export async function main(): Promise<void> {
       scope_revision: snapshot.revision,
       // Approved mail always reads something (at least the window's metadata).
       ingestion_enabled: snapshot.status === 'approved',
-      mail_scope: mailScopeDraftView(snapshot.mailScope),
+      // No approved scope yet: the picker opens with the owner's "always
+      // Private" senders a restore carried back, as they set them.
+      mail_scope: mailScopeDraftView(snapshot.mailScope ?? (snapshot.carriedAlwaysPrivateSenders
+        ? { ...defaultMailScopeSelection(), alwaysPrivateSenders: snapshot.carriedAlwaysPrivateSenders }
+        : undefined)),
       ...(snapshot.mailScope?.contentAfter ? { content_after: snapshot.mailScope.contentAfter } : {}),
       ...(snapshot.reason === 'malformed'
         ? { error: 'Saved mail scope is unreadable. Review and save the scope again.' }
@@ -6120,6 +6143,25 @@ export async function main(): Promise<void> {
         // Best effort: the choice is saved either way.
         try { await browser.afterApproval({ wholeAccount: input.wholeAccount }); } catch { /* nothing to undo */ }
       }
+      if (approval.replayed !== true) {
+        // A source restored from a backup: its items are carried over to this
+        // approval, under its folders, when it is for the account they came
+        // from. Best effort: they are listed again by the run started below.
+        try {
+          const sets = fileExtractionTierSets();
+          rebindRestoredFileScope({
+            approval,
+            providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
+            sets: [...new Set(definition.corpusIdsToInvalidate.flatMap((corpusId) => sets.get(corpusId) ?? []))].map((set) => {
+              const secretLocations = set.secrets();
+              return {
+                stores: TIER_DOMAIN_ORDER.flatMap((domain) => set.store(domain) ?? []),
+                ...(secretLocations ? { secretLocations } : {}),
+              };
+            }),
+          });
+        } catch { /* the run lists them again */ }
+      }
       let invalidatedJobs = 0;
       // A replayed save (the same request delivered twice) changed nothing:
       // re-invalidating would cancel the jobs its first delivery just queued.
@@ -6285,12 +6327,15 @@ export async function main(): Promise<void> {
               logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
             }),
             modelChoices,
+            goEasy: { on: () => localPacer.goEasy(), save: (on: boolean) => localPacer.save(on) },
             judgeSetup: createJudgeSetup({
               spending: judgeSpending, cloud: cloudJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
               credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
               requestReload: () => requestModelReload(),
+              observed: () => judgeObservations.observed(),
+              secondRoundStatePath: judgeSecondRoundStatePath(process.env),
             }),
             modelSetup: getModelSetup,
             setupStatus: async () => {
@@ -7486,25 +7531,59 @@ export async function main(): Promise<void> {
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const snifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
+  const rawSnifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+  // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
+  const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
+  const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
+  // This computer, then Venice double-checks (#891): the local judge sorts everything, and
+  // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
+  const judgeChoice = judgeSpending.status();
+  const secondRoundVenice = snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
+    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
+      lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
+      promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
+    })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    : undefined;
+  if (judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
+    console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
+  }
+  const secondRoundSweep = secondRoundVenice ? new SecondRoundSweep({
+    statePath: judgeSecondRoundStatePath(process.env),
+    setFor: tierSetForLedger,
+    unanswered: (ledgerPath, id) => installedTierClassification.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered,
+  }) : undefined;
+  const secondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
+  let lastSecondRoundLog = '';
+  const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
+  const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
-        model: snifferResource ? {
+        model: withSecondRound(snifferResource ? {
           ...snifferModel,
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
           // The completion says how long it waited for the model slot (#893).
           complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
-        } : snifferModel,
+        } : snifferModel),
+        ...(secondRoundSweep ? { secondRound: async (ledgerPaths, autoMovesFor) => {
+          const reopened = await secondRoundSweep.run(ledgerPaths, autoMovesFor, ingestionTurn);
+          const counts = JSON.stringify(secondRoundCounts);
+          if (reopened > 0 || counts !== lastSecondRoundLog) {
+            lastSecondRoundLog = counts;
+            console.log(`Olympus privacy judge: Venice double-check: ${reopened} held item(s) re-opened this tick; ${secondRoundCounts.asked} asked, ${secondRoundCounts.released} released to Personal, ${secondRoundCounts.kept} kept Private, ${secondRoundCounts.failed} failed and ${secondRoundCounts.stopped} stopped (kept Private).`);
+          }
+        } } : {}),
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         ...(snifferRuntime.source === 'built_in'
@@ -7528,6 +7607,8 @@ export async function main(): Promise<void> {
         ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+        // The service applies it to the built-in judge only, never Venice or a remote judge.
+        pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved
@@ -7551,6 +7632,9 @@ export async function main(): Promise<void> {
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
+  localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
+    || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
+  localPacer.start();
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -7574,6 +7658,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopCpuSampleLog?.();
     tierSniffer?.stop();
+    localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);

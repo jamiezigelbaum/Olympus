@@ -405,7 +405,8 @@ describe('the computer\'s host page', () => {
     await settle();
     expect(page.fetched.map(({ url, csrf, tool, authorization }) => ({ url, csrf, tool, authorization }))).toEqual([
       { url: '/dashboard/tools/call', csrf: 'bearer-csrf', tool: DASHBOARD_TOOL_NAME, authorization: undefined },
-      { url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: undefined, tool: undefined, authorization: undefined },
+      // The mint carries the page's CSRF token: the cookie alone mints nothing (#1187).
+      { url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: 'bearer-csrf', tool: undefined, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_UPLOAD_START_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_APPROVE_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_REMOVE_TOOL_NAME, authorization: undefined },
@@ -422,7 +423,7 @@ describe('the computer\'s host page', () => {
     refused.send({ id: 1, method: 'tools/call', params: { name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST_ID } } });
     await settle();
     expect(refused.fetched.map((entry) => [entry.url, entry.csrf])).toEqual([
-      [DASHBOARD_LOCAL_CONTROL_SESSION_PATH, undefined],
+      [DASHBOARD_LOCAL_CONTROL_SESSION_PATH, 'bearer-csrf'],
       ['/dashboard/tools/call', 'bearer-csrf'],
     ]);
   });
