@@ -25,7 +25,7 @@ import {
   defineConnectorCorpus,
   LocalConnectorStore,
 } from '../src/workers/connector-store/index.ts';
-import { sweepOwnerRuleRaises, sweepLabelRuleRaises, LabelPageRejectedError } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { sweepOwnerRuleRaises, sweepLabelRuleRaises, LabelPageRejectedError, reopenLabelRuleSweep } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -245,6 +245,20 @@ describe('a Gmail label saved as always Private after the mail was stored', () =
     await lane.handler.pull({ max_items: 50 });
     await lane.handler.pull({ max_items: 50 });
     expect(client.labelListings).toHaveLength(1);
+  });
+
+  test('an owner undo makes the rule pending again, so Gmail is asked about the label instead of a match being assumed', async () => {
+    const { client, lane } = await ingestTwo();
+    saveLabelRule();
+    await lane.handler.pull({ max_items: 50 });
+    expect(client.labelListings).toHaveLength(1);
+    // What clearing an owner override does when a label rule could apply (tier-override-settle.ts).
+    reopenLabelRuleSweep(lane.tierSet.ledger, 'gmail', ACCOUNT);
+    await lane.handler.pull({ max_items: 50 });
+    expect(client.labelListings).toHaveLength(2);
+    // Answered again: applied, so later runs ask nothing further.
+    await lane.handler.pull({ max_items: 50 });
+    expect(client.labelListings).toHaveLength(2);
   });
 
   test('the stored-names pass never records a label rule as done', async () => {
