@@ -22,7 +22,8 @@ function htmlFiles(dir: string): string[] {
 function inlineScriptHashes(): Map<string, string> {
   const hashes = new Map<string, string>();
   for (const file of htmlFiles(join(ROOT, 'site'))) {
-    for (const m of readFileSync(file, 'utf8').matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    // JSON-LD blocks are data, not scripts: browsers never run them, so script-src does not apply to them.
+    for (const m of readFileSync(file, 'utf8').matchAll(/<script(?![^>]*\bsrc=)(?![^>]*\btype="application\/ld\+json")[^>]*>([\s\S]*?)<\/script>/g)) {
       hashes.set(`'sha256-${createHash('sha256').update(m[1] ?? '').digest('base64')}'`, file.slice(ROOT.length + 1));
     }
   }

@@ -3,18 +3,64 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Olympus: your privacy and the best AI</title>
-  <meta name="description" content="Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees.">
+  <title>Olympus: use ChatGPT, Claude and any AI while your private data stays private</title>
+  <meta name="description" content="Olympus keeps your email, files and messages on your own computer, judges each item Personal, Private or Secret, and works with ChatGPT, Claude, Grok and any MCP app. You decide what each model sees. Free and open source.">
+  <link rel="canonical" href="https://olympusplugin.ai/">
   <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
   <meta property="og:title" content="Olympus: your privacy and the best AI">
-  <meta property="og:description" content="A private second brain that lives on your computer and works with any AI.">
+  <meta property="og:description" content="Your private data stays private, whichever AI you use. Olympus lives on your computer and works with ChatGPT, Claude and any AI.">
   <meta property="og:image" content="https://olympusplugin.ai/assets/img/banner-1200.jpg">
   <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
   <link rel="stylesheet" href="/assets/home.css?v=1.0.1">
   <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://olympusplugin.ai/#organization",
+        "name": "Open Coordination Unlimited, Inc.",
+        "url": "https://olympusplugin.ai/",
+        "email": "support@olympusplugin.ai",
+        "address": {
+          "@type": "PostalAddress",
+          "streetAddress": "30 N Gould St Ste R",
+          "addressLocality": "Sheridan",
+          "addressRegion": "WY",
+          "postalCode": "82801-6317",
+          "addressCountry": "US"
+        },
+        "sameAs": ["https://github.com/jamiezigelbaum/Olympus"]
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://olympusplugin.ai/#website",
+        "url": "https://olympusplugin.ai/",
+        "name": "Olympus",
+        "publisher": { "@id": "https://olympusplugin.ai/#organization" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://olympusplugin.ai/#software",
+        "name": "Olympus",
+        "url": "https://olympusplugin.ai/",
+        "description": "Olympus keeps your email, files and messages on your own computer, judges each item Personal, Private or Secret, and lets ChatGPT, Claude, Grok and any MCP app use what you allow. There is no hosted copy of your things and no account.",
+        "applicationCategory": "SecurityApplication",
+        "operatingSystem": "macOS 13 or later (Apple silicon); Omarchy; Ubuntu 24.04 LTS (x86_64)",
+        "license": "https://opensource.org/licenses/MIT",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "codeRepository": "https://github.com/jamiezigelbaum/Olympus",
+        "downloadUrl": "https://olympusplugin.ai/install/",
+        "publisher": { "@id": "https://olympusplugin.ai/#organization" }
+      }
+    ]
+  }
+  </script>
   <script>if (window.matchMedia && !matchMedia("(prefers-reduced-motion: reduce)").matches && !/[?&]still\b/.test(location.search)) document.documentElement.classList.add("motion");</script>
   <script src="/assets/home.js?v=1.0.3" defer></script>
 </head>
@@ -45,7 +91,7 @@
 
     <section class="scene" aria-labelledby="s01-open-title" data-scene id="intro">
       <div class="visually-hidden">
-        <h1 id="s01-open-title">Introducing Olympus.</h1>
+        <h1 id="s01-open-title">Introducing Olympus: your private data stays private, whichever AI you use.</h1>
         <p>A private second brain that lives on your computer and works with your AI.</p>
       </div>
       <div class="stage" data-film-scene="s01-open" aria-hidden="true"></div>
@@ -148,7 +194,7 @@
   <footer class="site-foot">
     <ul>
       <li><a href="/install/">Install</a></li>
-      <li><a href="/help/mac-offline/">Help</a></li>
+      <li><a href="/help/">Help</a></li>
       <li><a href="/support/">Support</a></li>
       <li><a href="/privacy/">Privacy</a></li>
       <li><a href="/terms/">Terms</a></li>
