@@ -224275,30 +224275,37 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
   return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
 }
 function createConnectorStoreMountDiscovery(raw, options) {
-  const reported = new Set;
+  const retryBaseMs = 5000;
+  const retryMaxMs = 600000;
+  const reported = new Map;
   const reportFailure = (message2) => {
     const label = message2.split(" skipped:")[0];
-    if (reported.has(label))
+    if (reported.get(label) === message2)
       return;
-    reported.add(label);
+    reported.set(label, message2);
     (options.reportFailure ?? console.error)(message2);
   };
+  const now = options.now ?? Date.now;
   const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
   const registeredCorpora = options.registeredCorpora();
   let previousStores;
   let pending = declarations;
+  const failed = new Map;
   return () => {
     const stores = options.stores();
     if (!previousStores || previousStores.length !== stores.length || stores.some((store, i2) => store !== previousStores[i2])) {
       pending = declarations;
       previousStores = [...stores];
     }
-    if (!pending.length)
+    const time3 = now();
+    const due = [...failed].filter(([declaration, failure3]) => failure3.retryAt <= time3 && !pending.includes(declaration));
+    const candidates2 = due.length ? [...pending, ...due.map(([declaration]) => declaration)] : pending;
+    if (!candidates2.length)
       return [];
     const byCorpus = new Map(stores.map((store) => [store.corpusId, store]));
     const ready = [];
     const absent = [];
-    for (const declaration of pending) {
+    for (const declaration of candidates2) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
       if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync105(declaration.dbPath)))
         ready.push(declaration);
@@ -224308,13 +224315,25 @@ function createConnectorStoreMountDiscovery(raw, options) {
     pending = absent;
     if (!ready.length)
       return [];
-    return mountConnectorStoreDeclarations(ready, {
+    const mounts = mountConnectorStoreDeclarations(ready, {
       existingOnly: true,
       collidingStores: stores,
       registeredCorpora: options.registeredCorpora(),
       storeOwner: options.storeOwner(),
       reportFailure
     });
+    const mounted = new Set(mounts.map((mount) => mount.store.corpusId));
+    for (const declaration of ready) {
+      if (mounted.has(declaration.corpusId)) {
+        failed.delete(declaration);
+        reported.delete(`Connector-store mount ${declaration.corpusId}`);
+        continue;
+      }
+      const attempts = (failed.get(declaration)?.attempts ?? 0) + 1;
+      const delay2 = Math.min(retryBaseMs * 2 ** Math.min(attempts - 1, 30), retryMaxMs);
+      failed.set(declaration, { attempts, retryAt: time3 + delay2 });
+    }
+    return mounts;
   };
 }
 function compileConnectorStoreMountDeclarations(raw, options) {
