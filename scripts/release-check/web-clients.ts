@@ -493,6 +493,22 @@ const FOCUS_SCRIPT = (composers: readonly string[]): string => `(() => {
   return true;
 })()`;
 
+/**
+ * ChatGPT: opens the Olympus app's panel under the current reply when ChatGPT shows it folded (#632), so its frame is on the page
+ * to be read. Only a collapsed control (aria-expanded="false") in the last assistant message that names Olympus is pressed; the
+ * reply's other controls and older turns are left alone. Returns how many were pressed.
+ */
+export const EXPAND_PANEL_SCRIPT = `(() => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const turns = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+  const last = turns[turns.length - 1];
+  if (!last) return 0;
+  const named = (el) => [el.getAttribute('aria-label'), el.innerText, el.textContent].filter(Boolean).join(' ');
+  const folded = [...last.querySelectorAll('[aria-expanded="false"]')].filter((el) => visible(el) && /\\bOlympus\\b/i.test(named(el)));
+  for (const el of folded) el.click();
+  return folded.length;
+})()`;
+
 const SEND_BUTTON_SCRIPT = `(() => {
   const button = [...document.querySelectorAll('button')].find((el) => /send/i.test(el.getAttribute('aria-label') || '') || el.getAttribute('data-testid') === 'send-button');
   if (!button || button.disabled) return false;
@@ -630,9 +646,12 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   const secretPanel = q.kind === 'secret' && !!panel && turnContains(last, REMOTE_SECRET_NOTE);
   if ((q.kind === 'private' || secretPanel) && panel && !(secretPanel ? panelSaysSecret(client, frames) : panelReady(frames))) {
     const deadline = Date.now() + t.panelMs;
-    while (!(secretPanel ? panelSaysSecret(client, frames) : panelReady(frames)) && Date.now() < deadline) {
-      await t.sleep(t.pollMs);
+    for (;;) {
+      // A folded panel is opened before each read: ChatGPT can fold it while the reply finishes, and its frame is read only once shown.
+      await tab.evaluate<number>(EXPAND_PANEL_SCRIPT).catch(() => 0);
       frames = await tab.framesText();
+      if ((secretPanel ? panelSaysSecret(client, frames) : panelReady(frames)) || Date.now() >= deadline) break;
+      await t.sleep(t.pollMs);
     }
   }
   // The turn is read again: a panel that arrived late can come with more reply text.

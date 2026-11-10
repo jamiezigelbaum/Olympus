@@ -10,7 +10,7 @@ import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
   askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, SECRET_ANSWER_LEAD, startBrowserScript, turnText,
-  PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState,
+  EXPAND_PANEL_SCRIPT, PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState,
 } from '../scripts/release-check/web-clients.ts';
 
 const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromEntries(checks.map((check) => [check.id, check.status]));
@@ -292,6 +292,41 @@ describe('web clients: what a turn is held to', () => {
     const obs = await askQuestion(tab, 'chatgpt', doctor, { pollMs: 0, loadMs: 1_000, answerMs: 1_000, settleMs: 0, panelMs: 5_000, macAnswerMs: 0, sleep: async () => {} });
     expect('frames' in obs && obs.frames).toContain('162');
     expect(frameReads).toBe(3);
+  });
+
+  test('ChatGPT\'s folded private panel is opened before it is read, and the panel is read only once shown (#632)', async () => {
+    let expanded = false;
+    const state: PageState = { url: 'https://chatgpt.com/c/1', title: 'ChatGPT', challenge: false, signedOut: false, composer: true, composerText: '', busy: false, text: `${doctor.prompt}\nOlympus is answering this privately on your computer.` };
+    const tab = {
+      evaluate: async (expression: string) => { if (expression === EXPAND_PANEL_SCRIPT) { expanded = true; return 1 as never; } return state as never; },
+      goto: async () => {}, type: async () => {}, enter: async () => {}, screenshot: async () => {}, close: async () => {},
+      // Folded, the panel's frame is not on the page at all.
+      framesText: async () => (expanded ? 'Private answer from your computer\nTotal cholesterol 162.' : ''),
+    };
+    const obs = await askQuestion(tab, 'chatgpt', doctor, { pollMs: 0, loadMs: 1_000, answerMs: 1_000, settleMs: 0, panelMs: 5_000, macAnswerMs: 0, sleep: async () => {} });
+    expect(expanded).toBe(true);
+    expect('frames' in obs && obs.frames).toContain('162');
+    expect(statusOf(evaluateTurn('chatgpt', doctor, obs))['web.chatgpt.doctor.private-panel-facts']).toBe('pass');
+  });
+
+  test('the expand script presses only a folded Olympus control in the last assistant message', () => {
+    const window = new Window({ url: 'https://chatgpt.com/c/1' });
+    try {
+      window.document.body.innerHTML = `<main>
+        <div data-message-author-role="assistant"><button id="old" aria-expanded="false">Olympus</button></div>
+        <div data-message-author-role="user">${doctor.prompt}</div>
+        <div data-message-author-role="assistant">
+          <button id="olympus" aria-expanded="false" aria-label="Show Olympus app">▸</button>
+          <button id="open" aria-expanded="true">Olympus</button>
+          <button id="other" aria-expanded="false">Sources</button>
+        </div></main>`;
+      for (const el of window.document.querySelectorAll('*')) el.getBoundingClientRect = () => new window.DOMRect(0, 0, 100, 20);
+      const pressed: string[] = [];
+      for (const el of window.document.querySelectorAll('button')) el.addEventListener('click', () => pressed.push(el.id));
+      const count = new Function('document', `return ${EXPAND_PANEL_SCRIPT}`)(window.document);
+      expect(count).toBe(1);
+      expect(pressed).toEqual(['olympus']);
+    } finally { window.happyDOM.abort(); }
   });
 
   test('a reply still streaming when the answer time runs out comes back unfinished', async () => {

@@ -27,7 +27,7 @@ import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from '
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AnalystModel } from '../../core/analyst.ts';
+import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
@@ -201,6 +201,8 @@ export interface SnifferPassReport {
   heldLowering: number;
   callMs: number;
   maxQueueWaitMs: number;
+  /** Where the pass's wall time went (#893). */
+  timing: SnifferPassTiming;
   /** Queued questions read this pass. */
   pendingSeen: number;
   calls: number;
@@ -231,6 +233,67 @@ export interface SnifferPassReport {
   estimatedInputTokens: number;
   estimatedOutputTokens: number;
   stoppedBy?: SnifferPassStop;
+}
+
+/**
+ * Where one pass's wall time went, in monotonic milliseconds (#893): live
+ * judging reached about half the verdicts a minute of a sequential replay on
+ * the same model server, and nothing said where the rest went. With one call
+ * in flight (decision mode always) setup, dispatch, slot wait and model add
+ * up to the pass; with several in flight the per-call parts overlap.
+ * Content-free numbers only.
+ */
+export interface SnifferPassTiming {
+  passMs: number;
+  /** Listing and screening the queue, cached answers and model preparation, before the first dispatch. */
+  setupMs: number;
+  /** Per-dispatch work outside the model call: choosing, re-checking and screening, then settling the answer. */
+  dispatchMs: number;
+  /** Time the calls waited for the shared model slot behind other work (part of callMs). */
+  slotWaitMs: number;
+  /** The model calls themselves: callMs less slotWaitMs. */
+  modelMs: number;
+  /** Dispatches whose pass (names or excerpt) differed from the dispatch before. */
+  passSwitches: number;
+}
+
+/** A completion's own report of how long it waited for the model slot. */
+export interface SnifferSlotTimed {
+  slotWaitMs?: number;
+}
+
+/**
+ * Runs `model` through a queue that holds each call until the shared model
+ * slot is free (`enqueue`), and says on the completion how long the call
+ * waited there, so the pass can tell waiting from model time (#893).
+ */
+export async function completeAfterSlot<M extends AnalystModel>(
+  model: M,
+  enqueue: (timed: M) => Promise<AnalystModelCompletion>,
+  now: () => number = () => performance.now(),
+): Promise<SnifferModelCompletion & SnifferSlotTimed> {
+  const queuedAt = now();
+  let startedAt: number | undefined;
+  const waited = () => Math.max(0, (startedAt ?? now()) - queuedAt);
+  const timed: M = { ...model, complete: (request: AnalystModelRequest) => { startedAt ??= now(); return model.complete(request); } };
+  let completion: SnifferModelCompletion;
+  try {
+    completion = await enqueue(timed) as SnifferModelCompletion;
+  } catch (error) {
+    // A call aborted or failed after its wait (preemption aborts it once it
+    // has the slot) still waited: the error carries that wait too.
+    if (typeof error === 'object' && error !== null) failedSlotWaits.set(error, waited());
+    throw error;
+  }
+  return { ...completion, slotWaitMs: waited() };
+}
+
+/** Slot waits of calls that failed, by their error; the error itself is never changed. */
+const failedSlotWaits = new WeakMap<object, number>();
+
+/** How long a failed call waited for the model slot before failing (0 when unknown). */
+export function slotWaitOf(error: unknown): number {
+  return typeof error === 'object' && error !== null ? failedSlotWaits.get(error) ?? 0 : 0;
 }
 
 interface WorkItem {
@@ -301,12 +364,14 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
 
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
-  const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
+  const passStarted = monotonicNow();
+  const deadline = passStarted + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report: SnifferPassReport = {
     clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} },
     heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
+    timing: { passMs: 0, setupMs: 0, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 },
     pendingSeen: 0,
     calls: 0,
     failedCalls: 0,
@@ -549,7 +614,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
     const stopped = await prepareSnifferModel(options);
-    if (stopped) { report.stoppedBy = stopped; return finish(report); }
+    if (stopped) { report.stoppedBy = stopped; return finish(report, monotonicNow, passStarted); }
     id = snifferId(options.lane, promptVersion);
   }
   // Pooled filters share one training budget, regardless of the number of sources.
@@ -594,146 +659,165 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
+  let lastPass: SnifferPass | undefined;
+  report.timing.setupMs = Math.max(0, monotonicNow() - passStarted);
   const ask = async (): Promise<void> => { while (pending.length > 0 && report.stoppedBy === undefined) {
-    // Reserve every fifth dispatch for an aged question, even across short passes.
-    // Paid cloud judging spends its calls on new items, never an aged backlog.
-    const aged = pending.filter(item => options.lane.kind !== 'venice' && dispatches % 5 === 4
-      && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60_000)
-      .sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    // Then an item a question just matched (#1062): the asker may ask again.
-    const raisedNext = aged.length === 0 ? pending.find(item => boosts.has(item.question)) : undefined;
-    // Otherwise take turns between stores (each target is one store's
-    // ledger, so one source's lane): newest first within a store, but a busy
-    // source's steady stream of new mail no longer keeps every other source
-    // waiting (Sparta, 2026-11-03: Dropbox questions never asked in 5 hours).
-    // Priority orders a store's own questions, never one store over another
-    // (#866: Dropbox at -1 waited behind all of Gmail at 0). A cloud lane
-    // takes turns too.
-    let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
-    // Within an item, names go first: a Private names verdict can settle both.
-    if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
-      && item.target === next.target
-      && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
-    pending.splice(pending.indexOf(next), 1);
-    const pass = next.question.pass;
-    if (!stillOpen(next.target, next.question)) {
-      if (!midMove(next.target, next.question)) {
-        next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
-        report.staleDropped += 1;
-      }
-      continue;
-    }
-    if (!screenQuestion(next.target, next.question)) continue;
-    const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === 'content'
-      ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash })
-      : undefined;
-    if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
-      apply(next, duplicate, true);
-      report.cacheHits += 1;
-      continue;
-    }
-    const group = [next];
-    for (let i = pending.length - 1; i >= 0; i--) {
-      const item = pending[i]!;
-      if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question)
-        && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
-        && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
-        && screenQuestion(item.target, item.question)) {
-        group.push(item); pending.splice(i, 1);
-      }
-    }
-    const batch = [group];
-    const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-    if (stop) {
-      report.stoppedBy = stop;
-      return;
-    }
-    // Re-checked at every dispatch: a policy that changed under a running
-    // worker still cannot route possibly-private names to a cloud model.
-    assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    const prompt = buildSnifferBatchPrompt(
-      pass,
-      batch.map((group, index) => ({ i: index + 1, material: snifferMaterialForModel(group[0]!.question.material) })),
-      options.ownerContext,
-    );
-    next.target.sniffer.recordDispatch();
-    dispatches += 1;
-    for (const item of group) report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs,
-      item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
-    const callStarted = monotonicNow();
-    report.calls += 1;
-    report.itemsAsked += batch.length;
-    const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-    report.promptChars += promptChars;
-    report.estimatedInputTokens += Math.ceil(promptChars / 4);
-    let text: string;
-    let decisionVerdict: SnifferModelCompletion['decisionVerdict'];
+    // Each turn of this loop is dispatch work, less the time inside its call.
+    const turnStarted = monotonicNow();
+    let turnCallMs = 0;
     try {
-      const completion = await completeSnifferQuestion(options.model, {
-        pass, material: next.question.material, ownerContext: options.ownerContext, signal: options.signal,
-      });
-      text = completion.text;
-      decisionVerdict = completion.decisionVerdict;
-    } catch (error) {
-      if (error instanceof JudgeCloudStopped) {
-        report.stoppedBy = 'cloud_stopped';
-        return;
-      }
-      if (options.signal?.aborted) {
-        // Preempted by an answer that needs the private pool: not a failure
-        // of anything, so nothing is counted against the items or the lane.
-        report.stoppedBy = 'preempted';
-        return;
-      }
-      // Transport failure: nothing about the items is known. They stay
-      // pending (held Private) and are asked again on a later pass.
-      report.failedCalls += 1;
-      consecutiveTransportFailures += 1;
-      if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
-        report.stoppedBy = 'transport_failures';
-        return;
-      }
-      continue;
-    } finally {
-      report.callMs += Math.max(0, monotonicNow() - callStarted);
-    }
-    if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return; }
-    consecutiveTransportFailures = 0;
-    report.responseChars += text.length;
-    const verdicts = parseSnifferBatchResponse(text, new Set(batch.map((_, index) => index + 1)));
-    for (const [index, group] of batch.entries()) {
-      const verdict = decisionVerdict ?? verdicts.get(index + 1);
-      const key = keyOf(group[0]!.question);
-      if (verdict) {
-        const stored = { ...verdict, failSafe: false };
-        group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
-        for (const item of group) {
-          if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
-          const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
-          if (audit) item.target.embeddingPrefilter?.observe(item.question, stored.tier === 'private');
-          apply(item, stored);
+      // Reserve every fifth dispatch for an aged question, even across short passes.
+      // Paid cloud judging spends its calls on new items, never an aged backlog.
+      const aged = pending.filter(item => options.lane.kind !== 'venice' && dispatches % 5 === 4
+        && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60_000)
+        .sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+      // Then an item a question just matched (#1062): the asker may ask again.
+      const raisedNext = aged.length === 0 ? pending.find(item => boosts.has(item.question)) : undefined;
+      // Otherwise take turns between stores (each target is one store's
+      // ledger, so one source's lane): newest first within a store, but a busy
+      // source's steady stream of new mail no longer keeps every other source
+      // waiting (Sparta, 2026-11-03: Dropbox questions never asked in 5 hours).
+      // Priority orders a store's own questions, never one store over another
+      // (#866: Dropbox at -1 waited behind all of Gmail at 0). A cloud lane
+      // takes turns too.
+      let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
+      // Within an item, names go first: a Private names verdict can settle both.
+      if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
+        && item.target === next.target
+        && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
+      pending.splice(pending.indexOf(next), 1);
+      const pass = next.question.pass;
+      if (!stillOpen(next.target, next.question)) {
+        if (!midMove(next.target, next.question)) {
+          next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
+          report.staleDropped += 1;
         }
         continue;
       }
-      // A malformed old answer must not spend the newer question's retry budget.
-      const currentGroup = group.filter(item => sameQuestion(item.target, item.question));
-      if (currentGroup.length === 0) { report.staleDropped += group.length; continue; }
-      // The model answered but not for this item: count the attempt, and
-      // after the last one resolve to Private and cache that.
-      const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
-      if (attempts >= SNIFFER_MAX_ATTEMPTS) {
-        const failSafe = { tier: 'private' as const, category: 'other', confidence: 0, failSafe: true };
-        for (const item of group) {
-          item.target.sniffer.putVerdict(key, failSafe);
-          apply(item, failSafe);
+      if (!screenQuestion(next.target, next.question)) continue;
+      const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === 'content'
+        ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash })
+        : undefined;
+      if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
+        apply(next, duplicate, true);
+        report.cacheHits += 1;
+        continue;
+      }
+      const group = [next];
+      for (let i = pending.length - 1; i >= 0; i--) {
+        const item = pending[i]!;
+        if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question)
+          && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
+          && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
+          && screenQuestion(item.target, item.question)) {
+          group.push(item); pending.splice(i, 1);
         }
       }
+      const batch = [group];
+      const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+      if (stop) {
+        report.stoppedBy = stop;
+        return;
+      }
+      // Re-checked at every dispatch: a policy that changed under a running
+      // worker still cannot route possibly-private names to a cloud model.
+      assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+      const prompt = buildSnifferBatchPrompt(
+        pass,
+        batch.map((group, index) => ({ i: index + 1, material: snifferMaterialForModel(group[0]!.question.material) })),
+        options.ownerContext,
+      );
+      next.target.sniffer.recordDispatch();
+      dispatches += 1;
+      if (lastPass !== undefined && lastPass !== pass) report.timing.passSwitches += 1;
+      lastPass = pass;
+      for (const item of group) report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs,
+        item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
+      const callStarted = monotonicNow();
+      report.calls += 1;
+      report.itemsAsked += batch.length;
+      const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+      report.promptChars += promptChars;
+      report.estimatedInputTokens += Math.ceil(promptChars / 4);
+      let text: string;
+      let decisionVerdict: SnifferModelCompletion['decisionVerdict'];
+      let slotWaitMs = 0;
+      try {
+        const completion: SnifferModelCompletion & SnifferSlotTimed = await completeSnifferQuestion(options.model, {
+          pass, material: next.question.material, ownerContext: options.ownerContext, signal: options.signal,
+        });
+        text = completion.text;
+        decisionVerdict = completion.decisionVerdict;
+        slotWaitMs = typeof completion.slotWaitMs === 'number' && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;
+      } catch (error) {
+        slotWaitMs = slotWaitOf(error);
+        if (error instanceof JudgeCloudStopped) {
+          report.stoppedBy = 'cloud_stopped';
+          return;
+        }
+        if (options.signal?.aborted) {
+          // Preempted by an answer that needs the private pool: not a failure
+          // of anything, so nothing is counted against the items or the lane.
+          report.stoppedBy = 'preempted';
+          return;
+        }
+        // Transport failure: nothing about the items is known. They stay
+        // pending (held Private) and are asked again on a later pass.
+        report.failedCalls += 1;
+        consecutiveTransportFailures += 1;
+        if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+          report.stoppedBy = 'transport_failures';
+          return;
+        }
+        continue;
+      } finally {
+        turnCallMs = Math.max(0, monotonicNow() - callStarted);
+        report.callMs += turnCallMs;
+        // A wait can never be longer than the call that reported it.
+        const waited = Math.min(slotWaitMs, turnCallMs);
+        report.timing.slotWaitMs += waited;
+        report.timing.modelMs += turnCallMs - waited;
+      }
+      if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return; }
+      consecutiveTransportFailures = 0;
+      report.responseChars += text.length;
+      const verdicts = parseSnifferBatchResponse(text, new Set(batch.map((_, index) => index + 1)));
+      for (const [index, group] of batch.entries()) {
+        const verdict = decisionVerdict ?? verdicts.get(index + 1);
+        const key = keyOf(group[0]!.question);
+        if (verdict) {
+          const stored = { ...verdict, failSafe: false };
+          group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
+          for (const item of group) {
+            if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
+            const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
+            if (audit) item.target.embeddingPrefilter?.observe(item.question, stored.tier === 'private');
+            apply(item, stored);
+          }
+          continue;
+        }
+        // A malformed old answer must not spend the newer question's retry budget.
+        const currentGroup = group.filter(item => sameQuestion(item.target, item.question));
+        if (currentGroup.length === 0) { report.staleDropped += group.length; continue; }
+        // The model answered but not for this item: count the attempt, and
+        // after the last one resolve to Private and cache that.
+        const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+        if (attempts >= SNIFFER_MAX_ATTEMPTS) {
+          const failSafe = { tier: 'private' as const, category: 'other', confidence: 0, failSafe: true };
+          for (const item of group) {
+            item.target.sniffer.putVerdict(key, failSafe);
+            apply(item, failSafe);
+          }
+        }
+      }
+    } finally {
+      report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
     }
   } };
   // Each call carries one item's material; several calls may be in flight at
   // once when the model serves them in parallel. None shares a prompt.
   await Promise.all(Array.from({ length: concurrency }, () => ask()));
-  return finish(report);
+  return finish(report, monotonicNow, passStarted);
 }
 
 /** The store turn a dispatch takes: ordinary slots only, so turns never line up with the aged slot. */
@@ -777,7 +861,10 @@ function stopReason(options: SnifferPassOptions, report: SnifferPassReport, maxC
   return undefined;
 }
 
-function finish(report: SnifferPassReport): SnifferPassReport {
+function finish(report: SnifferPassReport, monotonicNow: () => number, passStarted: number): SnifferPassReport {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
+  report.timing.passMs = Math.max(0, monotonicNow() - passStarted);
+  // A pass that stopped before dispatching anything spent all of it on setup.
+  if (report.calls === 0 && report.timing.dispatchMs === 0) report.timing.setupMs = report.timing.passMs;
   return report;
 }
