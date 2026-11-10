@@ -55,6 +55,8 @@ import {
   type DashboardImportedArchives,
   type SourceDashboardViewModel,
 } from '../src/workers/source-dashboard.ts';
+import type { SelfUpdateStatus } from '../src/core/self-update.ts';
+import { DASHBOARD_SELF_UPDATE_PATHS } from '../src/workers/http.ts';
 import {
   COMPUTER_HOST_PAGE_CSP,
   dashboardHtmlRoutePage,
@@ -2174,6 +2176,14 @@ if (import.meta.main) {
       const input = await request.json() as { source?: unknown };
       if (fixture && previewUnlocked) return Response.json(state.startsWith(`${input.source}-`) ? fixture : { ok: true, state: 'idle' });
     }
+    // Update now (?update=…): each status read moves one step, through a restart, to 1.5.1.
+    if (request.method === 'POST' && (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start || url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status)) {
+      if (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start) previewUpdateStep = 1;
+      else previewUpdateStep += 1;
+      if (previewUpdateStep === 4) return new Response(null, { status: 502 });
+      const update = previewUpdateStep > 4 ? { state: 'done', from: '1.5.0', version: '1.5.1' } : { state: 'running', step: previewUpdateStep, from: '1.5.0', to: '1.5.1' };
+      return Response.json({ ok: true, update });
+    }
     // Every other control POST needs a worker. Say so in the words the page
     // prints, instead of a bare "Request failed.".
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/')) {
@@ -2212,7 +2222,8 @@ if (import.meta.main) {
             return auto && at >= 0 ? `${panel.slice(0, at)}${pickerAutoScript(auto)}${panel.slice(at)}` : panel;
           })(),
           origin: url.origin,
-          ...(unlocked ? { csrfToken: 'preview-csrf-token' } : {}),
+          ...(unlocked ? { csrfToken: 'preview-csrf-token', localSession: true } : {}),
+          ...previewUpdateHost(url),
         }), COMPUTER_HOST_PAGE_CSP), cookies);
       }
       const pageView = view(pageState);
@@ -2234,6 +2245,7 @@ if (import.meta.main) {
           outsideHelpLocalSession: unlocked,
           appsReceivedAvailable: true,
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
+          ...previewUpdateSettings(url),
           privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount, pageState) } : {}) },
         },
       }) + setupPreviewScript(url.searchParams.get('sheet'), url.searchParams.get('step')), undefined, url.searchParams.get('theme')), cookies);
@@ -2283,4 +2295,26 @@ function previewAppsReceivedAction(body: Record<string, unknown>): Record<string
     }
     default: return { ok: false, error: { code: 'invalid_params', message: 'Unknown action.' } };
   }
+}
+
+/** Update now preview (#1063): ?update=available|running|rolled-back|done|failed on Home and Settings › Updates. */
+let previewUpdateStep = 0;
+function previewUpdateStatus(url: URL): SelfUpdateStatus | undefined {
+  const mode = url.searchParams.get('update');
+  if (mode === 'running') return { state: 'running', step: Number(url.searchParams.get('step') ?? 2) as 1 | 2 | 3 | 4, from: '1.5.0', to: '1.5.1' };
+  if (mode === 'rolled-back') return { state: 'rolled_back', from: '1.5.0', to: '1.5.1' };
+  if (mode === 'done') return { state: 'done', from: '1.5.0', version: '1.5.1' };
+  if (mode === 'failed') return { state: 'failed', from: '1.5.0', to: '1.5.1', reason: 'bad_signature' };
+  return undefined;
+}
+function previewUpdateHost(url: URL): Partial<Parameters<typeof renderComputerHostPage>[0]> {
+  if (!url.searchParams.has('update')) return {};
+  const done = url.searchParams.get('update') === 'done';
+  return { platform: 'darwin', selfUpdate: true, ...(done ? {} : { updateAvailable: { version: '1.5.1' } }), updateStatus: previewUpdateStatus(url) };
+}
+function previewUpdateSettings(url: URL): { settings?: { update?: { version: string; command: string }; updater: { command: string; selfUpdate: boolean; status?: SelfUpdateStatus } } } {
+  if (!url.searchParams.has('update')) return {};
+  const command = 'curl -fsSL https://olympusplugin.ai/install.sh | sh';
+  const status = previewUpdateStatus(url);
+  return { settings: { ...(url.searchParams.get('update') === 'done' ? {} : { update: { version: '1.5.1', command } }), updater: { command, selfUpdate: true, ...(status ? { status } : {}) } } };
 }

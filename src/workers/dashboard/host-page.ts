@@ -1,5 +1,7 @@
 import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
+import type { SelfUpdateStatus } from '../../core/self-update.ts';
+import { renderUpdateNotice, renderUpdateNoticeScript, UPDATE_NOTICE_CSS } from './update-now.ts';
 /**
  * /dashboard on the computer (phase 4, owner decision 2026-10-09): a small
  * host page around the one dashboard there is, the panel ChatGPT loads
@@ -118,6 +120,9 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
 export interface ComputerHostPageInput {
   computerIdentity?: string;
   updateAvailable?: UpdateAvailable | undefined;
+  /** Update now is offered (the standalone engine; core/self-update.ts), and its current record. */
+  selfUpdate?: boolean;
+  updateStatus?: SelfUpdateStatus | undefined;
   /** The running worker platform; unsupported installers never render or poll. */
   platform?: string;
   /** The panel HTML, exactly as ChatGPT loads it (dashboard-resource.ts dashboardResourceHtml). */
@@ -160,9 +165,7 @@ const HOST_CSS = `
 *{box-sizing:border-box}
 html,body{height:100%}
 body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:0.9375rem;line-height:1.45}
-.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
-.update p{margin:0 0 0.5rem}
-.update code{overflow-wrap:anywhere;white-space:pre-wrap}
+.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:0 auto}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
@@ -256,7 +259,7 @@ function hostProgram(input: {
   /** How large a piece of a file goes in one request (archive-import/staging.ts). */
   uploadChunkBytes: number;
   words: typeof DASHBOARD_HOST_GATE_COPY;
-  updateWords: { notice: string; copied: string; copyFailed: string };
+  updateWords: { notice: string };
   updateSupported: boolean;
   /**
    * "Set up with my agent" (#1077): the dashboard read's computer-meta key
@@ -641,6 +644,7 @@ function hostProgram(input: {
   }
   // Read only the local worker's cached result. A page opened before the
   // delayed check still learns about it; this never triggers a site request.
+  // An update that is running or just ended (update-now.ts) keeps its own words.
   if (input.updateSupported) {
     const refreshUpdate = async () => {
       try {
@@ -649,26 +653,31 @@ function hostProgram(input: {
         const health = await response.json();
         const version = health?.update_available?.version;
         const notice = document.querySelector<HTMLElement>('[data-update-notice]');
-        const sentence = document.querySelector<HTMLElement>('[data-update-text]');
+        const sentence = document.querySelector<HTMLElement>('[data-update-title]');
         if (!notice || !sentence) return;
+        const state = notice.getAttribute('data-update-state');
         const valid = typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
+        if (state === 'failed' || state === 'rolled_back') {
+          // Keep the outcome's words; a version found since (a worker just
+          // restarted has an empty update cache) brings the retry back.
+          if (valid) {
+            notice.setAttribute('data-update-version', version);
+            const retry = notice.querySelector<HTMLElement>('[data-update-now]');
+            if (retry) retry.hidden = false;
+          }
+          return;
+        }
+        if (state !== 'none' && state !== 'available') return;
         sentence.textContent = valid ? input.updateWords.notice.replace('{version}', version) : '';
+        notice.setAttribute('data-update-state', valid ? 'available' : 'none');
+        notice.setAttribute('data-update-version', valid ? version : '');
+        const button = notice.querySelector<HTMLElement>('[data-update-now]');
+        if (button) button.hidden = !valid;
         notice.hidden = !valid;
       } catch { /* A failed local read is silent. */ }
     };
     void refreshUpdate();
     window.setInterval(() => { void refreshUpdate(); }, 60_000);
-  }
-  const updateCopy = document.querySelector<HTMLButtonElement>('[data-update-copy]');
-  const updateCommand = document.getElementById('update-command');
-  const updateStatus = document.querySelector<HTMLElement>('[data-update-copy-status]');
-  if (updateCopy && updateCommand) {
-    updateCopy.addEventListener('click', () => {
-      const done = (words: string) => { if (updateStatus) updateStatus.textContent = words; };
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        navigator.clipboard.writeText(updateCommand.textContent || '').then(() => done(input.updateWords.copied), () => done(input.updateWords.copyFailed));
-      } else done(input.updateWords.copyFailed);
-    });
   }
   const form = document.querySelector<HTMLFormElement>('[data-gate-unlock]');
   if (form) {
@@ -730,6 +739,14 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
   const update = installer ? input.updateAvailable : undefined;
   const token = input.readToken;
   const locked = input.csrfToken === undefined;
+  const notice = installer ? {
+    command: installer.command,
+    available: update,
+    selfUpdate: input.selfUpdate === true,
+    status: input.selfUpdate ? input.updateStatus : undefined,
+    csrfToken: input.csrfToken,
+    localSession: input.localSession === true,
+  } : undefined;
   const links: Record<string, string> = {};
   for (const page of Object.keys(DASHBOARD_LOCAL_PAGES) as DashboardLocalPage[]) {
     links[page] = `${input.origin}${dashboardLocalPageHref(page, token)}`;
@@ -765,7 +782,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     uploadChunkBytes: ARCHIVE_UPLOAD_CHUNK_BYTES,
     words: DASHBOARD_HOST_GATE_COPY,
     updateSupported: installer !== undefined,
-    updateWords: { notice: DASHBOARD_UPDATE_COPY.notice('{version}'), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed },
+    updateWords: { notice: DASHBOARD_UPDATE_COPY.notice('{version}') },
     pairing: computerPairing(bridge.openTargets),
     setupAgent: { metaKey: COMPUTER_META_KEY, fragment: `#${DASHBOARD_SETUP_AGENT_ID}`, copied: DASHBOARD_SETUP_AGENT_COPY.copied, copyFailed: DASHBOARD_SETUP_AGENT_COPY.copyFailed },
   })}, ${dashboardHostBridge.toString()}, ${mountDashboardController.toString()});`.replaceAll('</script', '<\\/script');
@@ -776,7 +793,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Olympus</title>',
-    `<style>${HOST_CSS}${TOP_NAV_CSS}.topnav{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}</style>`,
+    `<style>${HOST_CSS}${UPDATE_NOTICE_CSS}${TOP_NAV_CSS}.topnav{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}</style>`,
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
     // The page's one landmark and level-one heading. The heading is visually hidden: the framed panel carries the visible title.
@@ -785,12 +802,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     // Home's script does not post controls, so the bar shows the lock state only.
     dashboardTopNav({ active: 'home', unlocked: !locked, lockable: false, ...(token ? { token } : {}) }),
     `<header class="computer-identity" data-computer-identity>${text(input.computerIdentity ?? dashboardComputerIdentity())}</header>`,
-    ...(installer ? [
-      `<section class="update" data-update-notice${update ? '' : ' hidden'}><p data-update-text>${update ? text(DASHBOARD_UPDATE_COPY.notice(update.version)) : ''}</p>`
-      + `<p><code id="update-command">${text(installer.command)}</code> `
-      + `<button class="btn" type="button" data-update-copy>${text(DASHBOARD_UPDATE_COPY.copy)}</button> `
-      + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`,
-    ] : []),
+    ...(notice ? [`<div class="update">${renderUpdateNotice({ ...notice, deferScript: true })}</div>`] : []),
     lockedGate(!locked),
     `<section class="gate" data-open-offer role="alert" hidden><p>${text(DASHBOARD_HOST_GATE_COPY.openBlocked)} `
     + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
@@ -802,6 +814,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     setupAgentDialog(),
     `<dialog class="pairing" data-pairing-dialog aria-label="${attribute(DASHBOARD_PAIRING_DIALOG_LABEL)}"><div class="bar"><button class="btn" type="button" data-pairing-close>Close</button></div><div data-pairing-root></div></dialog>`,
     `<script>${program}</script>`,
+    // The notice's own program, after the page's (update-now.ts).
+    ...(notice ? [renderUpdateNoticeScript(notice)] : []),
     '</body>',
     '</html>',
     '',

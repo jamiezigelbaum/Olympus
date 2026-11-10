@@ -13,6 +13,7 @@ import { agentAnswerReceipt, recordAgentAnswerReceipt, type AgentAnswerReceipt }
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
+import type { SelfUpdateStart, SelfUpdateStatus } from '../../core/self-update.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBindings } from '../../core/source-account-binding.ts';
 import { sourceStorageNotices, type SourceStorageNoticeKind } from '../../core/source-registry.ts';
@@ -197,7 +198,7 @@ import {
 import { dashboardResourceHtml } from '../chatgpt/dashboard-resource.ts';
 import { DASHBOARD_TOOL_NAME } from '../chatgpt/dashboard-contract.ts';
 import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard-panel-tools.ts';
-import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
+import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine, DASHBOARD_UPDATE_COPY } from '../dashboard/vocabulary.ts';
 import { sourceFailureKind, type SourceFailureKind } from '../dashboard/source-failure.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 import type { LocalPrivateAnswers } from './local-private-answers.ts';
@@ -217,6 +218,8 @@ import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   DASHBOARD_APPS_RECEIVED_ROUTE,
   DASHBOARD_PRIVATE_ANSWERS_PATH,
+  DASHBOARD_SELF_UPDATE_LOCAL_ONLY,
+  DASHBOARD_SELF_UPDATE_PATHS,
 } from '../http.ts';
 import {
   readEmbeddingRuntime,
@@ -445,6 +448,12 @@ export interface EmailSourceConnector {
 export interface EmailSourceWorkerOptions {
   /** Content-free, in-memory installer version; local surfaces only. */
   updateAvailable?: () => UpdateAvailable | undefined;
+  /**
+   * Update now (core/self-update.ts): the standalone engine updates itself.
+   * Reached only by a local-grade dashboard session (workers/http.ts), never
+   * by the bearer, a remote browser or an agent, and never as a tool.
+   */
+  selfUpdate?: { start(): SelfUpdateStart; status(): SelfUpdateStatus };
   platform?: string;
   /** Local Linux notices, outside the frozen ChatGPT panel bundle. */
   localModelReadiness?: () => readonly import('../../core/linux-model-readiness.ts').LocalModelReadiness[];
@@ -1616,6 +1625,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             return new Response(renderComputerHostPage({
               panelHtml: dashboardResourceHtml(),
               updateAvailable: options.updateAvailable?.(),
+              ...(options.selfUpdate ? { selfUpdate: true, updateStatus: options.selfUpdate.status() } : {}),
               platform: options.platform ?? process.platform,
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
@@ -1676,6 +1686,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     ...(options.localModelReadiness ? { readiness: options.localModelReadiness() } : {}),
                   }),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
+                  ...(installer ? { updater: { command: installer.command, selfUpdate: options.selfUpdate !== undefined, ...(options.selfUpdate ? { status: options.selfUpdate.status() } : {}) } } : {}),
                 },
               },
             }));
@@ -2406,6 +2417,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
           try { return json(await sourceDashboard.judgeSetup.save(input.choice, input.cap_dollars)); }
           catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
+        }
+
+        if (request.method === 'POST' && (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start || url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: DASHBOARD_SELF_UPDATE_LOCAL_ONLY } }, 403);
+          }
+          if (!options.selfUpdate) return json({ ok: false, error: { code: 'not_available', message: DASHBOARD_UPDATE_COPY.refusals.not_available } }, 409);
+          if (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status) return json({ ok: true, update: options.selfUpdate.status() });
+          const started = options.selfUpdate.start();
+          return started.ok
+            ? json({ ok: true, update: started.status })
+            : json({ ok: false, error: { code: started.refusal, message: DASHBOARD_UPDATE_COPY.refusals[started.refusal] } }, 409);
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/engine/computer-use') {
