@@ -144550,7 +144550,7 @@ function observedJudge(model, observations) {
 function secondRoundJudge(local, venice, counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed) {
   return { ...local, secondRound: counts, complete: async (request) => {
     const first = await local.complete(request);
-    if (completionTier(first) !== "held" || request.signal?.aborted)
+    if (completionTier(first) !== "held" || request.snifferItem?.pass !== "content" || request.signal?.aborted)
       return first;
     const digest4 = SecondRoundConfirmed.digest(request);
     if (confirmed?.has(digest4))

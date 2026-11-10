@@ -141,7 +141,8 @@ export interface SecondRoundCounts { asked: number; released: number; kept: numb
 export function secondRoundJudge<T extends SnifferModel>(local: T, venice: AnalystModel, counts: SecondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed?: Pick<SecondRoundConfirmed, 'has' | 'add'>): T & { secondRound: SecondRoundCounts } {
   return { ...local, secondRound: counts, complete: async (request: SnifferModelRequest) => {
     const first = await local.complete(request) as SnifferModelCompletion;
-    if (completionTier(first) !== 'held' || request.signal?.aborted) return first;
+    // Text questions only: an item held Private on its names alone never goes to Venice.
+    if (completionTier(first) !== 'held' || request.snifferItem?.pass !== 'content' || request.signal?.aborted) return first;
     const digest = SecondRoundConfirmed.digest(request);
     if (confirmed?.has(digest)) return first;
     counts.asked += 1;

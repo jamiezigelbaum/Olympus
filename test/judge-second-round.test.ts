@@ -166,7 +166,7 @@ test('a cap stop leaves held items for a raised limit to double-check, without p
 test('only a valid Venice Private verdict is remembered as confirmed (#1136 review)', async () => {
   const added: string[] = [];
   const confirmed = { has: (digest: string) => added.includes(digest), add: (digest: string) => { added.push(digest); } };
-  const request = { system: 's', prompt: 'Heldmarker', localOnly: true };
+  const request = { system: 's', prompt: 'Heldmarker', localOnly: true, snifferItem: { pass: 'content' as const, material: 'Heldmarker' } };
   for (const text of ['', 'not json at all', '{"verdicts":[]}']) {
     const counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
     const reply = await secondRoundJudge(localJudge(/Heldmarker/), { complete: async () => ({ text, modelId: 'synthetic-venice' }) }, counts, confirmed).complete(request);
@@ -176,6 +176,16 @@ test('only a valid Venice Private verdict is remembered as confirmed (#1136 revi
   expect(added).toEqual([]);
   await secondRoundJudge(localJudge(/Heldmarker/), veniceJudge([], 'private'), undefined, confirmed).complete(request);
   expect(added).toHaveLength(1);
+});
+
+test('a names question the local judge holds never reaches Venice (#1136 review)', async () => {
+  const sent: string[] = [];
+  const judge = secondRoundJudge(localJudge(/Heldmarker/), veniceJudge(sent));
+  const names = await judge.complete({ system: 's', prompt: 'Heldmarker names', localOnly: true, snifferItem: { pass: 'metadata', material: 'Heldmarker names' } } as AnalystModelRequest);
+  expect(names.text).toBe(verdict('private'));
+  expect(sent).toEqual([]);
+  await judge.complete({ system: 's', prompt: 'Heldmarker text', localOnly: true, snifferItem: { pass: 'content', material: 'Heldmarker text' } } as AnalystModelRequest);
+  expect(sent).toEqual(['Heldmarker text']);
 });
 
 test('the sweep waits while the judge already has enough open questions', async () => {
