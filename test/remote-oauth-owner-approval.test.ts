@@ -1,0 +1,263 @@
+/**
+ * Relay-mode approval needs the owner, not just this computer (#1186).
+ *
+ * A loopback peer is any account on the computer. Before this, a native
+ * program run by another local account could register a loopback client,
+ * fetch the approval page and its cookie, send browser-like Sec-Fetch
+ * headers, approve, and exchange the code for a grant, holding neither the
+ * worker token nor the owner's dashboard session. Approval now also needs
+ * the owner socket (Linux) or this browser's live dashboard control session,
+ * which only the owner's opening link or the worker token opens.
+ *
+ * Assembled the way the worker server assembles it (email-source/server.ts):
+ * the OAuth routes in front of the worker-bearer wrapper, one session secret
+ * for both, each request's peer recorded. A small cookie jar that honours
+ * each cookie's Path plays the browser, so the test fails if the dashboard
+ * cookie (Path=/dashboard) would not reach the approval POST.
+ */
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DashboardLaunchTickets, DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH } from '../src/core/dashboard-launch.ts';
+import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
+import { parseRemotePublicBaseUrl } from '../src/core/remote-public-url.ts';
+import { withRequestPeer } from '../src/core/request-peer.ts';
+import { dashboardOwnerSessionCheck, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { createRemoteOAuthHandler, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
+
+const TOKEN = 'owner-approval-worker-token-0123456789abcdef';
+const SESSION_SECRET = 'owner-approval-session-secret';
+const RELAY_ORIGIN = 'https://mcp.olympus.test';
+const INSTALL_ID = 'abcdefghijklmnopqrstuvwxyz234567';
+/** Browser-like headers a program can set on its own. */
+const NAVIGATION = { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', Origin: 'null' };
+
+let dir: string;
+let store: RemoteConnectionStore;
+let server: ReturnType<typeof Bun.serve>;
+let base: string;
+let handle: (request: Request, ownerSocket: boolean) => Promise<Response>;
+
+function assemble(platform: NodeJS.Platform = 'darwin', sessionSecret = SESSION_SECRET): void {
+  const resolved = parseRemotePublicBaseUrl(RELAY_ORIGIN, INSTALL_ID);
+  if (!resolved.enabled) throw new Error('relay urls');
+  const oauth = createRemoteOAuthHandler({
+    platform,
+    publicUrls: resolved.urls,
+    connections: () => store,
+    isRelayed: (request) => request.headers.has('x-olympus-relay'),
+    ownerSession: dashboardOwnerSessionCheck({ authToken: TOKEN, sessionSecret }),
+  });
+  const rest = withWorkerBearerAuth(async () => Response.json({ ok: true }), {
+    authToken: TOKEN, sessionSecret, launchTickets: new DashboardLaunchTickets(),
+  });
+  const routed = withRemoteOAuthRoutes(oauth, rest);
+  handle = async (request, ownerSocket) => withRequestPeer(routed, ownerSocket)(request, { requestIP: () => (ownerSocket ? null : { address: '127.0.0.1', family: 'IPv4', port: 1 }) } as never);
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'olympus-owner-approval-'));
+  store = openRemoteConnectionStore(join(dir, 'connections.sqlite'));
+  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => handle(request, false) });
+  base = `http://127.0.0.1:${server.port}`;
+  assemble();
+});
+
+afterEach(() => {
+  server.stop(true);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+/** A browser's cookies for this origin: each sent only to paths under its Path. */
+class Jar {
+  private cookies = new Map<string, { value: string; path: string }>();
+  take(response: Response): void {
+    for (const line of response.headers.getSetCookie()) {
+      const [pair, ...attributes] = line.split(';').map((part) => part.trim());
+      const [name, ...value] = pair!.split('=');
+      const path = attributes.find((a) => a.toLowerCase().startsWith('path='))?.slice(5) ?? '/';
+      const maxAge = attributes.find((a) => a.toLowerCase().startsWith('max-age='))?.slice(8);
+      if (maxAge === '0') this.cookies.delete(`${name}@${path}`);
+      else this.cookies.set(`${name}@${path}`, { value: `${name}=${value.join('=')}`, path });
+    }
+  }
+  header(path: string): string {
+    return [...this.cookies.values()]
+      .filter((cookie) => path === cookie.path || path.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`))
+      .map((cookie) => cookie.value).join('; ');
+  }
+}
+
+async function browse(jar: Jar, path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const cookie = jar.header(new URL(path, base).pathname);
+  if (cookie) headers.set('Cookie', cookie);
+  const response = await fetch(new URL(path, base), { ...init, headers, redirect: 'manual' });
+  jar.take(response);
+  return response;
+}
+
+/** What `olympus dashboard` does: the CLI mints with the token, the browser redeems the ticket. */
+async function openDashboard(jar: Jar, purpose?: 'remote'): Promise<void> {
+  const minted = await fetch(`${base}${DASHBOARD_LAUNCH_MINT_PATH}${purpose ? `?purpose=${purpose}` : ''}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, Origin: base },
+  });
+  const { ticket } = await minted.json() as { ticket: string };
+  const redeemed = await browse(jar, DASHBOARD_LAUNCH_REDEEM_PATH, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base }, body: JSON.stringify({ ticket }),
+  });
+  expect(redeemed.status).toBe(200);
+}
+
+const VERIFIER = 'v'.repeat(50);
+const CHALLENGE = new Bun.CryptoHasher('sha256').update(VERIFIER).digest('base64url');
+
+function authorizePath(clientId: string, redirectUri: string): string {
+  return `/connect/authorize?${new URLSearchParams({
+    response_type: 'code', client_id: clientId, redirect_uri: redirectUri,
+    code_challenge: CHALLENGE, code_challenge_method: 'S256', state: 's', resource: `${RELAY_ORIGIN}/mcp`,
+  })}`;
+}
+
+interface Page { action: string; requestId: string; csrf: string; html: string; status: number }
+
+async function openPage(jar: Jar, path: string): Promise<Page> {
+  const response = await browse(jar, path);
+  const html = await response.text();
+  return {
+    status: response.status,
+    html,
+    action: /<form method="post" action="([^"]+)"/.exec(html)?.[1] ?? '',
+    requestId: /name="request_id" value="([^"]+)"/.exec(html)?.[1] ?? '',
+    csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? '',
+  };
+}
+
+function clickConnect(jar: Jar, page: Page, action = page.action): Promise<Response> {
+  return browse(jar, action, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...NAVIGATION },
+    body: new URLSearchParams({ request_id: page.requestId, csrf: page.csrf, action: 'approve' }).toString(),
+  });
+}
+
+async function exchange(clientId: string, redirectUri: string, code: string): Promise<number> {
+  const response = await fetch(`${base}/connect/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', client_id: clientId, redirect_uri: redirectUri, code, code_verifier: VERIFIER }).toString(),
+  });
+  return response.status;
+}
+
+describe('relay mode with no owner socket (a Mac, or a server reached through a tunnel)', () => {
+  test('another local account, with no dashboard session and no token, cannot complete an approval', async () => {
+    const other = new Jar();
+    assemble('darwin', 'another-install-secret');
+    await openDashboard(other);
+    assemble();
+    const foreign = other.header('/dashboard/connect/authorize');
+    expect(foreign).toContain('olympus_dashboard_control=');
+    const program = new Jar();
+    const registered = await fetch(`${base}/connect/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Local tool', redirect_uris: ['http://127.0.0.1:43123/callback'] }),
+    });
+    expect(registered.status).toBe(201);
+    const { client_id: clientId } = await registered.json() as { client_id: string };
+    const page = await openPage(program, authorizePath(clientId, 'http://127.0.0.1:43123/callback'));
+    expect(page.status).toBe(200);
+    // The form's own action, and the page's own path, both refuse.
+    for (const action of [page.action, '/connect/authorize']) {
+      const refused = await clickConnect(program, page, action);
+      expect(refused.status, action).toBe(403);
+      expect(refused.headers.get('location'), action).toBeNull();
+    }
+    // A session cookie another install signed is no proof either.
+    const forged = await browse(program, page.action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...NAVIGATION, Cookie: `${program.header(page.action)}; ${foreign}` },
+      body: new URLSearchParams({ request_id: page.requestId, csrf: page.csrf, action: 'approve' }).toString(),
+    });
+    expect(forged.status).toBe(403);
+    expect(store.list()).toEqual([]);
+  });
+
+  test('the owner, with the dashboard open in this browser, approves in one click and the app connects', async () => {
+    const browser = new Jar();
+    await openDashboard(browser);
+    const page = await openPage(browser, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
+    expect(page.html).toContain('Connect ChatGPT to Olympus?');
+    // The form posts under /dashboard, so the dashboard cookie (Path=/dashboard) goes with it.
+    expect(page.action).toBe('/dashboard/connect/authorize');
+    expect(browser.header(page.action)).toContain('olympus_dashboard_control=');
+    const approved = await clickConnect(browser, page);
+    expect(approved.status).toBe(303);
+    const callback = new URL(approved.headers.get('location')!);
+    expect(callback.origin + callback.pathname).toBe(CHATGPT_REDIRECT_URI);
+    expect(await exchange(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, callback.searchParams.get('code')!)).toBe(200);
+    expect(store.list()).toMatchObject([{ kind: 'oauth', clientId: CHATGPT_CLIENT_ID }]);
+  });
+
+  test('the owner without the dashboard open is told to open it, and the same page then approves', async () => {
+    const browser = new Jar();
+    const page = await openPage(browser, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
+    const first = await clickConnect(browser, page);
+    expect(first.status).toBe(403);
+    const html = await first.text();
+    expect(html).toContain('Open the Olympus dashboard in this browser first, then click Connect again.');
+    expect(html).toContain('href="olympus://open/dashboard"');
+    expect(html).toContain('<button class="approve"');
+    await openDashboard(browser);
+    const again = await clickConnect(browser, page);
+    expect(again.status).toBe(303);
+    expect(new URL(again.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+
+  test('a server with nobody at its console: the owner\'s remote opening link, through a forward on the same port, opens the way', async () => {
+    assemble('linux');
+    const browser = new Jar();
+    await openDashboard(browser, 'remote');
+    const page = await openPage(browser, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
+    expect((await clickConnect(browser, page)).status).toBe(303);
+    // Without it, the Linux page says how to get the link.
+    const stranger = new Jar();
+    const strangerPage = await openPage(stranger, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
+    const refused = await clickConnect(stranger, strangerPage);
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain('Run <code>olympus dashboard</code> and open its link here.');
+  });
+
+  test('the approval path takes only the approval POST, and only in relay mode', async () => {
+    expect((await fetch(`${base}/dashboard/connect/authorize`)).status).toBe(405);
+    const resolved = parseRemotePublicBaseUrl(base);
+    if (!resolved.enabled) throw new Error('tunnel urls');
+    const tunnel = createRemoteOAuthHandler({ publicUrls: resolved.urls, connections: () => store });
+    expect((await tunnel(new Request(`${base}/dashboard/connect/authorize`, { method: 'POST' }))).status).toBe(404);
+  });
+});
+
+describe('relay mode over the Linux owner socket', () => {
+  test('the socket is the owner proof: the form posts to /connect/authorize and approves with no dashboard session', async () => {
+    assemble('linux');
+    const viaSocket = (path: string, init: RequestInit = {}) => handle(new Request(new URL(path, base), init), true);
+    const response = await viaSocket(authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
+    const html = await response.text();
+    expect(/<form method="post" action="([^"]+)"/.exec(html)?.[1]).toBe('/connect/authorize');
+    const cookie = response.headers.getSetCookie()[0]!;
+    expect(cookie).toContain('Path=/connect;');
+    const approved = await viaSocket('/connect/authorize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...NAVIGATION, Cookie: cookie.split(';')[0]! },
+      body: new URLSearchParams({
+        request_id: /name="request_id" value="([^"]+)"/.exec(html)![1]!,
+        csrf: /name="csrf" value="([^"]+)"/.exec(html)![1]!,
+        action: 'approve',
+      }).toString(),
+    });
+    expect(approved.status).toBe(303);
+  });
+});

@@ -70468,7 +70468,7 @@ function normalizeSearchRequest(request) {
     maxResults: Math.floor(request.maxResults)
   };
 }
-async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock2 = REAL_LANE_CLOCK) {
+async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock3 = REAL_LANE_CLOCK) {
   const startedAt = Date.now();
   const runValidated = async () => {
     const response = await run();
@@ -70503,12 +70503,12 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock2 = REAL
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const hardStopAtMs = clock2.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
+  const hardStopAtMs = clock3.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise((resolve14) => {
     const arm = (delayMs) => {
-      const dueAtMs = clock2.now() + delayMs;
-      timer = clock2.setTimeout(() => {
-        const now = clock2.now();
+      const dueAtMs = clock3.now() + delayMs;
+      timer = clock3.setTimeout(() => {
+        const now = clock3.now();
         if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
           arm(HELD_THREAD_GRACE_MS);
           return;
@@ -70558,7 +70558,7 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock2 = REAL
     return { kind: "response", response: settled.response, elapsedMs };
   } finally {
     if (timer !== undefined)
-      clock2.clearTimeout(timer);
+      clock3.clearTimeout(timer);
   }
 }
 function resolveLaneTimeoutMs(explicit) {
@@ -146734,11 +146734,11 @@ function builtInRerankerFromEnv(options = {}) {
     return;
   const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim() || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
-  const threads = positiveInteger7(env[SOURCE_RERANKER_THREADS_ENV]) ?? Math.max(1, Math.min(4, Math.floor(availableParallelism3() / 2)));
+  const threads2 = positiveInteger7(env[SOURCE_RERANKER_THREADS_ENV]) ?? Math.max(1, Math.min(4, Math.floor(availableParallelism3() / 2)));
   const poolSize = positiveInteger7(env[SOURCE_RERANKER_POOL_ENV]);
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? "model"}`,
-    session: () => runtime.createSession(modelPath, { threads }),
+    session: () => runtime.createSession(modelPath, { threads: threads2 }),
     tokenizer: new WordPieceTokenizer(readFileSync79(vocabularyPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {}
   });
@@ -148248,11 +148248,11 @@ async function answerOnThisComputer(input, options) {
       candidates: detail.pack.candidates.length
     });
   } catch {}
-  const { leftOut, busy } = leftOutSources([...detail.skippedCorpora, ...cutShortCorpora(detail.laneAudits)], lanes.excludedCorpusIds, lanes.unmountedCorpusIds, options.sourceName);
-  const busyField = busy.length > 0 ? { busy } : {};
+  const { leftOut, busy: busy2 } = leftOutSources([...detail.skippedCorpora, ...cutShortCorpora(detail.laneAudits)], lanes.excludedCorpusIds, lanes.unmountedCorpusIds, options.sourceName);
+  const busyField = busy2.length > 0 ? { busy: busy2 } : {};
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
-  const notFound = () => secrets ? { status: "answered", answer: secrets, citations: [], unanswered: [], leftOut, ...busyField, read: [], secretLocations } : searchedCorpora.length === 0 && leftOut.length + busy.length > 0 ? { status: "not_searched", leftOut, busy } : { status: "not_found", leftOut, ...busyField };
+  const notFound = () => secrets ? { status: "answered", answer: secrets, citations: [], unanswered: [], leftOut, ...busyField, read: [], secretLocations } : searchedCorpora.length === 0 && leftOut.length + busy2.length > 0 ? { status: "not_searched", leftOut, busy: busy2 } : { status: "not_found", leftOut, ...busyField };
   const skip = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []]);
   const candidates = detail.pack.candidates.flatMap((candidate, index) => {
     const corpusId = detail.candidateCorpusIds[index] ?? "";
@@ -148331,7 +148331,7 @@ function cutShortCorpora(audits) {
 }
 function leftOutSources(skipped2, excluded, unmounted, sourceName) {
   const leftOut = new Set;
-  const busy = new Set;
+  const busy2 = new Set;
   for (const skip of skipped2) {
     if (IN_SCOPE_SKIPS.has(skip.reason))
       continue;
@@ -148343,11 +148343,11 @@ function leftOutSources(skipped2, excluded, unmounted, sourceName) {
     } catch {
       name = undefined;
     }
-    (skip.reason === "lane_timeout" ? busy : leftOut).add(name ?? "One source");
+    (skip.reason === "lane_timeout" ? busy2 : leftOut).add(name ?? "One source");
   }
   for (const name of leftOut)
-    busy.delete(name);
-  return { leftOut: [...leftOut].sort(), busy: [...busy].sort() };
+    busy2.delete(name);
+  return { leftOut: [...leftOut].sort(), busy: [...busy2].sort() };
 }
 async function checkLocalEvidenceItems(input) {
   if (input.items.length === 0)
@@ -151723,6 +151723,9 @@ function renderLoopbackConsentPage(input) {
   const nonce = randomBytes26(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
+  const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
+<p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
+` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -151746,10 +151749,10 @@ ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${esca
 ${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="/connect/authorize">
+<form method="post" action="${escapeHtml(input.action ?? "/connect/authorize")}">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
-${TERMS_ASSENT}
+${ownerNeeded}${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
@@ -167444,7 +167447,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac5("sha256", options.sessionSecret?.trim() || randomBytes28(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes28(32).toString("base64url"), authToken ?? "");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -167910,19 +167913,41 @@ function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bear
     grade
   };
 }
-function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+function dashboardControlSigningKey(sessionSecret, authToken) {
+  return createHmac5("sha256", sessionSecret).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken).digest("base64url");
+}
+function dashboardOwnerSessionCheck(options) {
+  const authToken = normalizeWorkerAuthToken(options.authToken);
+  const configured = options.sessionSecret?.trim();
+  if (!authToken || !configured)
+    return () => false;
+  const sessionSecret = dashboardControlSigningKey(configured, authToken);
+  const now = options.now ?? Date.now;
+  return (request, origin) => {
+    const parts = liveDashboardControlSessionParts(request, sessionSecret, now());
+    return !!parts && constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin));
+  };
+}
+function liveDashboardControlSessionParts(request, sessionSecret, nowMs) {
   const cookie = cookieValue(request.headers.get("Cookie"), DASHBOARD_CONTROL_COOKIE);
   if (!cookie)
-    return { status: "missing" };
+    return;
   const parts = decodeDashboardControlSession(cookie);
   if (!parts)
-    return { status: "missing" };
+    return;
   const expected = dashboardControlSignature(sessionSecret, parts);
   if (!constantTimeStringEqual(parts.signature, expected))
-    return { status: "missing" };
+    return;
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
   if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60000)
+    return;
+  return parts;
+}
+function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+  const parts = liveDashboardControlSessionParts(request, sessionSecret, nowMs);
+  if (!parts)
     return { status: "missing" };
+  const expiresAtMs = dashboardControlExpiresAtMs(parts);
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined)
     return { status: "origin_mismatch" };
@@ -195597,14 +195622,14 @@ class JudgeBoosts {
   }
   live() {
     const now = this.now();
-    const live = [];
+    const live2 = [];
     for (const [key2, entry] of this.entries) {
       if (entry.expiresAt > now)
-        live.push(entry.identity);
+        live2.push(entry.identity);
       else
         this.entries.delete(key2);
     }
-    return live;
+    return live2;
   }
   drop(identity2) {
     this.entries.delete(tierLedgerIdentityKey(identity2));
@@ -217152,6 +217177,8 @@ function createRemoteOAuthHandler(options) {
     };
   };
   const directLoopback = (request) => !isRelayed(request) && loopbackHost(request) && (requestFromOwnerSocket(request) || !options.requireOwnerSocket && isLoopbackAddress(peerAddress(request)));
+  const ownerProof = (request) => requestFromOwnerSocket(request) || (options.ownerSession?.(request, new URL(request.url).origin) ?? false);
+  const approvalAction = (request) => requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.authorize : REMOTE_OAUTH_PATHS.ownerAuthorize;
   const linux = (options.platform ?? process.platform) === "linux";
   const notOnThisComputer = () => errorPage(403, linux ? "Approve on this computer through the owner's approval route. On a headless host, configure the owner-only SSH socket forward first." : "Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.");
   const authorizeGet = async (request, u, demo = false) => {
@@ -217205,7 +217232,7 @@ function createRemoteOAuthHandler(options) {
         if (entry2.demo || entry2.transaction !== transaction)
           continue;
         entry2.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
-        return consentPage(id, entry2, u);
+        return consentPage(id, entry2, u, undefined, true, approvalAction(request));
       }
     }
     admitPending();
@@ -217225,7 +217252,7 @@ function createRemoteOAuthHandler(options) {
       demo
     };
     pending.set(requestId, entry);
-    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u);
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request));
   };
   const demoPage = (requestId, entry, error2) => {
     const page2 = renderDemoSignInPage({
@@ -217313,9 +217340,11 @@ function createRemoteOAuthHandler(options) {
     }
     return issueCode(requestId, entry, u);
   };
-  const consentPage = (requestId, entry, u, error2, showAttempts = true) => {
+  const consentPage = (requestId, entry, u, error2, showAttempts = true, action = REMOTE_OAUTH_PATHS.authorize, ownerNeeded = false) => {
     const page2 = u.installId ? renderLoopbackConsentPage({
       platform: options.platform ?? process.platform,
+      action,
+      ownerNeeded,
       requestId,
       csrf: entry.csrf,
       clientName: entry.client.clientName,
@@ -217336,8 +217365,8 @@ function createRemoteOAuthHandler(options) {
       ...error2 && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}
     });
     const headers = new Headers(page2.headers);
-    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000));
-    return new Response(page2.body, { status: error2 ? 400 : 200, headers });
+    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000, consentCookiePath(action)));
+    return new Response(page2.body, { status: ownerNeeded ? 403 : error2 ? 400 : 200, headers });
   };
   const authorizePost = async (request, u) => {
     if ((u.installId || options.requireOwnerSocket) && !directLoopback(request))
@@ -217360,24 +217389,26 @@ function createRemoteOAuthHandler(options) {
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
       return errorPage(403, "This approval did not come from the Olympus page.");
     }
+    const path = new URL(request.url).pathname;
+    const clearCookie = (response) => {
+      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0, consentCookiePath(path)));
+      return response;
+    };
     const finish2 = (params) => {
       pending.delete(requestId);
-      const response = redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer });
-      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
-      return response;
+      return clearCookie(redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer }));
     };
     const action = form.get("action");
     if (action === "deny")
       return finish2({ error: "access_denied", error_description: "The owner denied the request." });
     if (action !== "approve")
       return errorPage(400, "The approval form was malformed.");
-    const approve = () => {
-      const response = issueCode(requestId, entry, u);
-      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
-      return response;
-    };
-    if (u.installId)
-      return approve();
+    const approve = () => clearCookie(issueCode(requestId, entry, u));
+    if (u.installId) {
+      if (ownerProof(request))
+        return approve();
+      return consentPage(requestId, entry, u, undefined, true, approvalAction(request), true);
+    }
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
@@ -217561,6 +217592,12 @@ function createRemoteOAuthHandler(options) {
           if (method === "POST")
             return await authorizePost(request, urls);
           return methodNotAllowed("GET, POST");
+        case REMOTE_OAUTH_PATHS.ownerAuthorize:
+          if (!urls.installId)
+            return jsonResponse2(404, { error: "not_found" });
+          if (method === "POST")
+            return await authorizePost(request, urls);
+          return methodNotAllowed("POST");
         case REMOTE_OAUTH_PATHS.demoAuthorize:
           if (method === "GET")
             return await authorizeGet(request, urls, true);
@@ -217697,8 +217734,11 @@ function readCookie(request, name) {
 function consentCookieName(requestId) {
   return `olympus_consent_${requestId}`;
 }
-function consentCookie(requestId, value2, secure, maxAgeSeconds) {
-  return `${consentCookieName(requestId)}=${value2}; Path=/connect; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+function consentCookiePath(action) {
+  return action === REMOTE_OAUTH_PATHS.ownerAuthorize ? "/dashboard/connect" : "/connect";
+}
+function consentCookie(requestId, value2, secure, maxAgeSeconds, path = "/connect") {
+  return `${consentCookieName(requestId)}=${value2}; Path=${path}; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
 }
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left);
@@ -217786,6 +217826,7 @@ var init_handler = __esm(() => {
     protectedResourceDirectoryMcp: `/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
     authorizationServer: "/.well-known/oauth-authorization-server",
     authorize: "/connect/authorize",
+    ownerAuthorize: "/dashboard/connect/authorize",
     demoAuthorize: "/connect/demo/authorize",
     token: "/connect/token",
     register: "/connect/register",
@@ -226793,6 +226834,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       publicUrls: remotePublicUrls,
       requireOwnerSocket: !!socketPath,
       isRelayed: carriesRelayMarker2,
+      ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
