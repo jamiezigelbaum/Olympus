@@ -28,6 +28,7 @@ describe('full-suite runner (bun run test, verify:full)', () => {
       'fast',
       'connect-relay',
       'exchange',
+      'calibration',
       ...Array.from({ length: DEPLOY_SHARDS }, (_, index) => `deploy ${index + 1}/${DEPLOY_SHARDS}`),
       'go',
     ]);
@@ -35,6 +36,7 @@ describe('full-suite runner (bun run test, verify:full)', () => {
     expect(commands).toContain('bun scripts/test-lane.ts fast');
     expect(commands).toContain('bun run test:connect-relay');
     expect(commands).toContain('bun run test:exchange');
+    expect(commands).toContain('bun run test:calibration');
     expect(commands).toContain('bun scripts/test-lane.ts go');
     for (const command of commands) {
       // CI shards the fast lane across jobs; one machine runs it whole through the per-file pool.

@@ -13,7 +13,7 @@
  *
  * Each step here is the command a CI job runs (.github/workflows/verify.yml):
  * the fast lane with one process per file (test-lane-pool.ts, TEST_LANE_WORKERS
- * at a time), connect-relay, exchange, the deploy lane as CI's four shards
+ * at a time), connect-relay, exchange, the eval/calibration tests, the deploy lane as CI's four shards
  * (each its own serial `bun test`, so files share a process only with the
  * files they share one with in CI), and the Go lane, whose test skips without
  * a Go toolchain unless OLYMPUS_REQUIRE_TOOLCHAINS=1 (test/helpers/
@@ -29,7 +29,7 @@ const ROOT = join(import.meta.dir, '..');
 /** CI's deploy matrix (verify.yml `shard: [1, 2, 3, 4]`); a test pins the match. */
 export const DEPLOY_SHARDS = 4;
 
-export const SUITE_LANES = ['fast', 'connect-relay', 'exchange', 'deploy', 'go'] as const;
+export const SUITE_LANES = ['fast', 'connect-relay', 'exchange', 'calibration', 'deploy', 'go'] as const;
 export type SuiteLane = (typeof SUITE_LANES)[number];
 
 export interface SuiteStep {
@@ -73,6 +73,8 @@ export function planSuite(lanes: readonly SuiteLane[] = SUITE_LANES): SuiteStep[
     if (lane === 'fast') steps.push({ lane, name: 'fast', command: ['bun', 'scripts/test-lane.ts', 'fast'] });
     if (lane === 'connect-relay') steps.push({ lane, name: 'connect-relay', command: ['bun', 'run', 'test:connect-relay'] });
     if (lane === 'exchange') steps.push({ lane, name: 'exchange', command: ['bun', 'run', 'test:exchange'] });
+    // eval/calibration holds the privacy-judge scoring tests; test-lane.ts only reads test/.
+    if (lane === 'calibration') steps.push({ lane, name: 'calibration', command: ['bun', 'run', 'test:calibration'] });
     if (lane === 'deploy') {
       for (let shard = 1; shard <= DEPLOY_SHARDS; shard += 1) {
         steps.push({
