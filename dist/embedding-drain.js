@@ -77397,17 +77397,26 @@ class TierSnifferService {
     }
   }
   newRaisesQueued() {
-    return this.ledgerPaths().some((path) => {
+    const paths = this.ledgerPaths();
+    let budget = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+    const offset = this.moveLedgerOffsets.raise % Math.max(1, paths.length);
+    for (const path of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0)
+        return false;
       try {
         const set2 = tierSetForLedger(path);
         if (!set2 || !setEmbedsWithBuiltInOnly(set2))
-          return false;
-        const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
-        return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
+          continue;
+        for (const record3 of set2.ledger.listMoving({ limit: budget, direction: "raise" }).filter(isAutoMoveCandidate)) {
+          budget--;
+          if (!this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`))
+            return true;
+        }
       } catch {
         return true;
       }
-    });
+    }
+    return false;
   }
   async drainMoves(direction = "raise") {
     try {
