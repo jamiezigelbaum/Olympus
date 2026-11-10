@@ -52,8 +52,14 @@ import {
 import { compareProviderAccounts, mergeProviderAccountIds } from './core/provider-account-identity.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './core/source-registry.ts';
 import { placeOwnedAccount, recordProviderAccount } from './core/source-storage.ts';
-import { carryMailOwnerRules, defaultMailSourceScopeStatePath, normalizeSenders } from './core/mail-source-scope.ts';
-import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from './workers/connector-store/local-index.ts';
+import { assertMailOwnerRulesCarriable, carryMailOwnerRules, defaultMailSourceScopeStatePath, normalizeSenders } from './core/mail-source-scope.ts';
+import {
+  RESTORED_SCOPE_CONNECTOR_ID,
+  RESTORED_SCOPE_RUN_ID,
+  TIER_SET_BINDING_CONNECTOR_ID,
+  TIER_SET_BINDING_RUN_ID,
+} from './workers/connector-store/local-index.ts';
+import { getFileScopeSource } from './core/file-scope-sources.ts';
 import { TierLedger } from './workers/classification/tier-ledger.ts';
 import { TIER_LEDGER_FILE_SUFFIX } from './workers/classification/tier-ledger-path.ts';
 
@@ -182,6 +188,9 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
           const to = defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath(context));
           // Checked before anything is written: a list the picker would refuse is refused here.
           normalizeSenders((JSON.parse(readFileSync(join(input, from), 'utf8')) as { always_private_senders?: unknown }).always_private_senders, 'always Private');
+          // And the file they go into: one this computer cannot read would
+          // refuse them only after the stores were in place.
+          assertMailOwnerRulesCarriable(to);
           plan.push({ from, to, sourceId: 'olympus.config', kind: 'owner_settings', merge: 'mail_always_private' });
           break;
         }
@@ -302,6 +311,7 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         ? (staged: string) => {
             repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to);
             held = repointMediaPaths(staged, (sha256) => pictures.get(sha256));
+            recordRestoredScope(staged, entry.sourceId, identities.find((identity) => identity.sourceId === entry.sourceId)?.boundAccount);
           }
         : undefined;
       copyPrivate(join(input, entry.from), entry.to, prepare);
@@ -515,6 +525,46 @@ function repointMediaPaths(storePath: string, pictureFor: (sha256: string) => st
       }
     })();
     return moved;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Record, in a restored store of a folder-scoped source, the scope generations
+ * its items were stamped with and the account they came from. A sign-in here
+ * mints a new generation even for the same account, so the items would be read
+ * again only once a traversal had listed them; with this record, the folder
+ * approval the owner gives for that same account carries them over
+ * (LocalConnectorStore.rebindRestoredSourceScope), under its folders. Without
+ * an account the backup recorded, nothing is recorded and nothing is carried.
+ */
+function recordRestoredScope(storePath: string, sourceId: string, providerAccountId: string | undefined): void {
+  const definition = getFileScopeSource(sourceId);
+  if (!definition || definition.account !== 'provider_account' || !providerAccountId) return;
+  const db = new Database(storePath, { readwrite: true, create: false });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('items', 'sync_runs')").all() as Array<{ name: string }>).map((row) => row.name));
+    if (!tables.has('items') || !tables.has('sync_runs')) return;
+    const columns = (db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name);
+    if (!columns.includes('source_scope_generation')) return;
+    const generations = (db.query('SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL')
+      .all(definition.provider) as Array<{ generation: string }>).map((row) => row.generation);
+    if (generations.length === 0) return;
+    const corpus = db.query('SELECT corpus_id FROM sync_runs LIMIT 1').get() as { corpus_id: string } | null;
+    // Like the set binding: completed at the epoch, so it is never the store's last run.
+    db.query(`
+      INSERT OR REPLACE INTO sync_runs (
+        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+        items_indexed, started_at, completed_at
+      ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+    `).run(
+      RESTORED_SCOPE_RUN_ID,
+      corpus?.corpus_id ?? '',
+      RESTORED_SCOPE_CONNECTOR_ID,
+      JSON.stringify({ provider: definition.provider, generations, providerAccountId }),
+    );
   } finally {
     closeSqliteStore(db);
   }

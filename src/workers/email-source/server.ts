@@ -315,6 +315,7 @@ import type { ConnectorStoreStatusScope } from '../connector-store/local-index.t
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
+  TIER_DOMAIN_ORDER,
   onDemandTierStore,
   tieredStoreSetLedgerPath,
   rehomeChatLaneOverrides,
@@ -466,6 +467,7 @@ import {
   fileSourceScopeMetadataEnabled,
   fileSourceScopeMetadataFilters,
   isMailSourceScopePolicyRef,
+  rebindRestoredFileScope,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
@@ -6046,6 +6048,22 @@ export async function main(): Promise<void> {
       if (approval.replayed !== true && browser.afterApproval) {
         // Best effort: the choice is saved either way.
         try { await browser.afterApproval({ wholeAccount: input.wholeAccount }); } catch { /* nothing to undo */ }
+      }
+      if (approval.replayed !== true) {
+        // A source restored from a backup: its items are carried over to this
+        // approval, under its folders, when it is for the account they came
+        // from. Best effort: they are listed again by the run started below.
+        try {
+          const sets = fileExtractionTierSets();
+          rebindRestoredFileScope({
+            approval,
+            providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
+            stores: definition.corpusIdsToInvalidate.flatMap((corpusId) => {
+              const set = sets.get(corpusId);
+              return set ? TIER_DOMAIN_ORDER.flatMap((domain) => set.store(domain) ?? []) : [];
+            }),
+          });
+        } catch { /* the run lists them again */ }
       }
       let invalidatedJobs = 0;
       // A replayed save (the same request delivered twice) changed nothing:

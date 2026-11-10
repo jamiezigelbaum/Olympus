@@ -329,3 +329,46 @@ test('the mail picker\'s "always Private" senders travel without the approval, a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A mail scope file on this computer that cannot be read refuses the backup's
+// "always Private" senders. That is found before anything is written (#1098
+// review), so a retry after repairing it is not refused as already restored.
+test('an unreadable mail scope file here refuses the restore before any store is written', async () => {
+  const { lifecycleHandleRegistryPath } = await import('../src/data-lifecycle.ts');
+  const mail = await import('../src/core/mail-source-scope.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-mail-preflight-'));
+  const homeA = join(dir, 'a');
+  const homeB = join(dir, 'b');
+  const backup = join(dir, 'backup');
+  const statePath = (home: string) => mail.defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath({ homeDir: home }));
+  try {
+    mkdirSync(dirname(statePath(homeA)), { recursive: true });
+    writeFileSync(statePath(homeA), JSON.stringify({
+      version: 1,
+      approvals: [{
+        source_id: 'gmail.email',
+        account_generation: 'a'.repeat(64),
+        revision: '0b0f8c6e-6c1f-4a43-9c3e-5d1f2a3b4c5d',
+        status: 'approved',
+        mail_scope: { window: 'all', skipped_categories: [], skipped_labels: [], always_private_senders: ['@clinic.example'], skip_senders: [] },
+        owner_tier_rules: [],
+        approved_at: '2026-11-01T00:00:00.000Z',
+      }],
+    }));
+    seed(storeOf(homeA), 'rows', 'a bookmark');
+    exportOlympusData({ destination: backup, homeDir: homeA });
+
+    mkdirSync(dirname(statePath(homeB)), { recursive: true });
+    writeFileSync(statePath(homeB), '{ not json');
+    expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('mail scope file');
+    expect(existsSync(storeOf(homeB))).toBe(false);
+
+    // Repaired: the retry restores everything.
+    rmSync(statePath(homeB));
+    restoreOlympusData({ input: backup, homeDir: homeB });
+    expect(rows(storeOf(homeB), 'rows')).toEqual([{ value: 'a bookmark' }]);
+    expect(mail.mailOwnerRulesForExport(statePath(homeB))?.always_private_senders).toEqual(['@clinic.example']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

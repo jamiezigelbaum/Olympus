@@ -1,6 +1,7 @@
 import {
   approveFileSourceScope,
   assertFileSourceScopeApproved,
+  connectedFileSourceAccountGeneration,
   defaultFileSourceScopeStatePath,
   fileSourceScopeAllowsContent,
   fileSourceScopeAllowsMetadata,
@@ -192,6 +193,21 @@ export class FileSourceScopeAuthority {
   }
 
   /**
+   * The provider account of the handle `approval` was given to, while that
+   * handle is still the connected one: what a restored store's items are
+   * carried over to it by (`rebindRestoredFileScope`).
+   */
+  approvedProviderAccount(approval: FileSourceScopeApprovalSnapshot): string | undefined {
+    if (approval.status !== 'approved' || !approval.accountGeneration) return undefined;
+    try {
+      const account = connectedFileSourceAccountGeneration(approval.sourceId, this.fileScopeRegistry());
+      return account?.generation === approval.accountGeneration ? account.handle.providerAccountId : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Throws unless the scope is still approved as `ref` says. A sync asks once
    * or more per listed item, and each ask read and parsed three files: on a
    * large Dropbox delta that was about 5% of Sparta's sampled freezes
@@ -237,6 +253,42 @@ export class FileSourceScopeAuthority {
       revision: snapshot.revision,
     };
   }
+}
+
+/** The one store call a restored store's carry-over needs (LocalConnectorStore). */
+export interface RestoredScopeStore {
+  rebindRestoredSourceScope(input: { provider: string; accountGeneration: string; revision: string; providerAccountId: string }): number;
+}
+
+/**
+ * Once the owner has approved folders for a source restored from a backup,
+ * carries the restored items over to that approval (each store's
+ * `rebindRestoredSourceScope`), so they are read without waiting for a
+ * traversal to list them again. Only for a source bound to a provider
+ * account, only for an approval of the account the backup's items came from
+ * (each store compares it with the one the restore recorded), and never
+ * around the folders: the approval's folder filters still apply to every
+ * read. Returns how many items were carried over.
+ */
+export function rebindRestoredFileScope(input: {
+  approval: FileSourceScopeApprovalSnapshot;
+  providerAccountId: string | undefined;
+  stores: Iterable<RestoredScopeStore>;
+}): number {
+  const { approval, providerAccountId } = input;
+  if (approval.status !== 'approved' || !approval.accountGeneration || !providerAccountId) return 0;
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition || definition.account !== 'provider_account') return 0;
+  let carried = 0;
+  for (const store of new Set(input.stores)) {
+    carried += store.rebindRestoredSourceScope({
+      provider: definition.provider,
+      accountGeneration: approval.accountGeneration,
+      revision: approval.revision,
+      providerAccountId,
+    });
+  }
+  return carried;
 }
 
 /**

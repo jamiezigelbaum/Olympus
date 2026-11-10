@@ -581,13 +581,28 @@ export interface MailOwnerRulesExport {
  * computer already has is the owner's choice here and is left as it is
  * (`kept_approval`). A file nothing can read is refused, never written over.
  */
+/**
+ * Throws, writing nothing, when the mail scope file at `statePath` is there but
+ * cannot be read: `carryMailOwnerRules` would refuse it. A restore asks before
+ * it writes anything, so it never stops half way over this file.
+ */
+export function assertMailOwnerRulesCarriable(statePath: string): void {
+  if (readState(statePath).kind === 'malformed') throw unreadableMailScope(statePath);
+}
+
+function unreadableMailScope(statePath: string): OperationError {
+  return new OperationError(
+    'invalid_params',
+    `The mail scope file at ${statePath} is unreadable, so the backup's mail privacy rules were not restored.`,
+    'Repair or remove that file (Olympus asks for the mail scope again), then restore.',
+  );
+}
+
 export function carryMailOwnerRules(statePath: string, alwaysPrivateSenders: unknown): 'carried' | 'kept_approval' {
   const senders = normalizeSenders(alwaysPrivateSenders, 'always Private');
   return withFileLeaseSync(statePath, (lease) => {
     const read = readState(statePath);
-    if (read.kind === 'malformed') {
-      throw new OperationError('invalid_params', `The mail scope file at ${statePath} is unreadable, so the backup's mail privacy rules were not restored.`);
-    }
+    if (read.kind === 'malformed') throw unreadableMailScope(statePath);
     const approvals = read.kind === 'valid' ? read.state.approvals : [];
     if (approvals.some((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID)) return 'kept_approval';
     const state: PersistedMailSourceScopeState = {
