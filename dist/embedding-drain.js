@@ -76436,6 +76436,15 @@ import { existsSync as existsSync33 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
+var GLOBAL_TIMERS = {
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (timer) => clearInterval(timer),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+function unrefTimer(timer) {
+  timer?.unref?.();
+}
 var MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 var DEFAULT_AUTO_MOVES_PER_PASS = 1000;
 var DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
@@ -76500,24 +76509,27 @@ class TierSnifferService {
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
   }
+  timers() {
+    return this.options.timers ?? GLOBAL_TIMERS;
+  }
   start() {
     if (this.timer)
       return;
-    this.timer = setInterval(() => {
+    this.timer = this.timers().setInterval(() => {
       this.drainMoves();
       this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
-    this.timer.unref?.();
+    unrefTimer(this.timer);
     this.wake();
   }
   wake() {
     if (this.stopped || this.continuation)
       return;
-    this.continuation = setTimeout(() => {
+    this.continuation = this.timers().setTimeout(() => {
       this.continuation = undefined;
       this.scheduledRun();
     }, 0);
-    this.continuation.unref?.();
+    unrefTimer(this.continuation);
   }
   async scheduledRun() {
     if (this.notAnsweringUntilMs > this.clockMs())
@@ -76531,7 +76543,7 @@ class TierSnifferService {
     const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
     if (!filters.length)
       return;
-    this.trainingTimer = setTimeout(() => {
+    this.trainingTimer = this.timers().setTimeout(() => {
       this.trainingTimer = undefined;
       const shouldYield = () => this.stopped || this.trainingJudge !== judge2 || this.yieldNow();
       const job = (async () => {
@@ -76554,12 +76566,12 @@ class TierSnifferService {
         this.scheduleTraining(judge2, !this.yieldNow() && filters.some((filter) => filter.trainingPending) ? 0 : 1000);
       });
     }, delay);
-    this.trainingTimer.unref?.();
+    unrefTimer(this.trainingTimer);
   }
   pauseTraining() {
     this.trainingJudge = undefined;
     if (this.trainingTimer)
-      clearTimeout(this.trainingTimer);
+      this.timers().clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
   }
   async finishTrainingValidation(signal) {
@@ -76585,10 +76597,10 @@ class TierSnifferService {
     this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation)
-      clearTimeout(this.continuation);
+      this.timers().clearTimeout(this.continuation);
     this.continuation = undefined;
     if (this.timer)
-      clearInterval(this.timer);
+      this.timers().clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running)
