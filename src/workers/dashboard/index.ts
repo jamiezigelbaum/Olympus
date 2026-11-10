@@ -34,7 +34,7 @@ import {
   renderDashboardSettingsPage,
   type DashboardPageOptions,
 } from './pages/local.ts';
-import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from './pages/private-answers.ts';
+import { DASHBOARD_SETTINGS_ZKAPI_ID, renderDashboardPrivateAnswersPage } from './pages/private-answers.ts';
 
 export { DASHBOARD_HTML_PATH };
 
@@ -78,11 +78,11 @@ export function dashboardLegacyRedirect(url: URL): string {
 }
 
 /**
- * Where the Anonymous answers page's old address goes: Private answers, with
- * the Anonymous answers section open, keeping a dash_ reader's token.
+ * Where the Anonymous answers page's old address goes: Settings › zkAPI
+ * (#1047), keeping a dash_ reader's token.
  */
 export function dashboardOutsideHelpRedirect(url: URL): string {
-  return `${dashboardLocalPageHref('privateAnswers', dashboardReadToken(url))}#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`;
+  return `${dashboardLocalPageHref('settings', dashboardReadToken(url))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
 }
 
 /** The computer's local pages. `view` is needed by Privacy settings (Keys), Connect a source and Private questions. */
