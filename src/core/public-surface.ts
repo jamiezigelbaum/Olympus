@@ -323,6 +323,10 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // Answer or Dismiss on a waiting question. Local control session only, as
   // above (workers/http.ts DASHBOARD_PRIVATE_ANSWERS_PATH).
   { method: 'POST', path: '/dashboard/private-answers' },
+  // What AI apps received (#1061): the list, its retention, Clear and "This
+  // should be Private". Local control session only, as above
+  // (workers/http.ts DASHBOARD_APPS_RECEIVED_ROUTE).
+  { method: 'POST', path: '/dashboard/apps-received' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [

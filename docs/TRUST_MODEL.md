@@ -496,8 +496,10 @@ Rules:
   and dates cleared and its locator kept only if it passes the same scan;
   the tombstone row stays so a later sync cannot resurrect it. The side
   stores that held its names or an excerpt keep none either: its queued
-  sniffer questions are deleted and its extraction jobs' captured names
-  cleared, at once, even while the engine is not running. A copy a move leaves behind is superseded: never
+  sniffer questions are deleted, its extraction jobs' captured names
+  cleared, and the titles and links the list of what AI apps received
+  recorded for it cleared (a record written later keeps none either), at
+  once, even while the engine is not running. A copy a move leaves behind is superseded: never
   searched, served, counted or exported. When an item is raised to Private,
   Olympus removes the lower copy's text, search vectors and text history once
   the Private copy holds the content, leaving only the item's names and
