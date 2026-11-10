@@ -176,6 +176,7 @@ export interface WaitForOptions {
 export const WAIT_FOR_DEFAULT_TIMEOUT_MS = 20_000;
 
 const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+const EXPIRED: unique symbol = Symbol('waitFor expired');
 
 function pause(ms: number): Promise<void> {
   return new Promise<void>((resolvePause) => { realSetTimeout(resolvePause, ms); });
@@ -192,24 +193,41 @@ export async function waitFor<T>(
 ): Promise<NonNullable<T>> {
   const timeoutMs = options.timeoutMs ?? WAIT_FOR_DEFAULT_TIMEOUT_MS;
   const intervalMs = options.intervalMs ?? 10;
-  const started = performance.now();
+  const deadline = performance.now() + timeoutMs;
   let lastError: unknown;
   let lastValue: unknown;
+  let expired = false;
   for (;;) {
+    // A check that never settles (a reply that never comes) must not outlast
+    // the ceiling, and a value that arrives after it does not count.
+    const remaining = Math.max(0, deadline - performance.now());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ceiling = new Promise<typeof EXPIRED>((resolveCeiling) => {
+      timer = realSetTimeout(() => resolveCeiling(EXPIRED), remaining);
+    });
     try {
-      const value = await condition();
-      if (value) return value as NonNullable<T>;
-      lastValue = value;
-      lastError = undefined;
+      const value = await Promise.race([Promise.resolve().then(condition), ceiling]);
+      if (value === EXPIRED) {
+        expired = true;
+      } else if (value) {
+        return value as NonNullable<T>;
+      } else {
+        lastValue = value;
+        lastError = undefined;
+      }
     } catch (error) {
       lastError = error;
+    } finally {
+      clearTimeout(timer);
     }
-    if (performance.now() - started >= timeoutMs) break;
-    await pause(intervalMs);
+    if (expired || performance.now() >= deadline) break;
+    await pause(Math.min(intervalMs, Math.max(0, deadline - performance.now())));
   }
   const what = options.description ?? 'condition';
-  const detail = lastError instanceof Error
-    ? `last error: ${lastError.message}`
-    : `last value: ${String(lastValue)}`;
+  const detail = expired
+    ? 'the last check was still running'
+    : lastError instanceof Error
+      ? `last error: ${lastError.message}`
+      : `last value: ${String(lastValue)}`;
   throw new Error(`waitFor: ${what} did not hold within ${timeoutMs} ms (${detail})`);
 }

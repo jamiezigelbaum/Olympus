@@ -60,4 +60,9 @@ describe('waitFor', () => {
     await expect(waitFor(() => { throw new Error('still reading'); }, { timeoutMs: 20, intervalMs: 5, description: 'the questions step' }))
       .rejects.toThrow('waitFor: the questions step did not hold within 20 ms (last error: still reading)');
   });
+
+  test('a check that never settles still fails at the ceiling', async () => {
+    await expect(waitFor(() => new Promise<boolean>(() => {}), { timeoutMs: 20, description: 'a reply that never comes' }))
+      .rejects.toThrow('waitFor: a reply that never comes did not hold within 20 ms (the last check was still running)');
+  });
 });
