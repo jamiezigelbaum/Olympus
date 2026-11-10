@@ -43717,10 +43717,40 @@ var init_dashboard_opening = __esm(() => {
 import { existsSync as existsSync24, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname33, join as join33 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir12();
   return join33(env.XDG_CACHE_HOME ?? join33(home, ".cache"), "olympus", "telegram-python");
+}
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync24) {
+  let directory = dirname33(fileURLToPath4(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    if (exists(join33(directory, TELEGRAM_REQUIREMENTS_FILE)))
+      return directory;
+    const parent = dirname33(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function telegramInstallCommands(input) {
+  const python = join33(input.venvDir, "bin", "python");
+  const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
+  return [
+    [...pip, "-r", join33(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join33(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+  ];
+}
+function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
+  const venv = "~/.cache/olympus/telegram-python";
+  const root = packageRoot ?? "<Olympus package>";
+  const [build, telethon] = telegramInstallCommands({ venvDir: venv, packageRoot: root }).map((argv) => argv.filter((arg) => arg !== "--quiet").map((arg) => arg.includes(" ") ? `"${arg}"` : arg).join(" "));
+  return `Use a private virtual environment: python3 -m venv ${venv}, then ${build}, then ${telethon}. Re-run olympus connect telegram --pair.`;
+}
+function telegramDependencyRefusedMessage(packageRoot) {
+  return `Olympus refused to install Telethon for Telegram: a downloaded package did not match the SHA-256 pinned in ${join33(packageRoot, TELEGRAM_REQUIREMENTS_FILE)}, so it may have been tampered with or substituted on the way. Nothing was installed. Check any pip mirror or proxy this computer uses, then re-run olympus connect telegram --pair; if it happens again, report it to the Olympus maintainers.`;
 }
 async function readyTelegramPython(options = {}) {
   if (options.pythonExecutable)
@@ -43749,35 +43779,49 @@ async function pythonImportsTelethon(python) {
   const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   return await child.exited === 0;
 }
-async function provisionTelegramPython(input) {
-  const run = async (argv) => {
-    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    let timeout;
-    const result = await Promise.race([
-      child.exited,
-      new Promise((resolve10) => {
-        timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
-      })
-    ]);
-    if (timeout)
-      clearTimeout(timeout);
-    if (result === "timeout")
-      child.kill("SIGKILL");
-    return result === 0;
-  };
+async function provisionTelegramPython(input, seams = {}) {
+  const packageRoot = seams.packageRoot ?? telegramRequirementsRoot();
+  if (!packageRoot)
+    throw new Error(`Olympus could not find its pinned Telethon list (${TELEGRAM_REQUIREMENTS_FILE}); reinstall Olympus, then re-run olympus connect telegram --pair.`);
+  const run = seams.run ?? runPip;
   const cacheHome = dirname33(dirname33(input.venvDir));
   ensurePrivateRootDirectorySync(cacheHome);
   ensurePrivateDirectoryTreeSync(cacheHome, dirname33(input.venvDir));
   const python = join33(input.venvDir, "bin", "python");
-  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
-  if (!ok)
+  const steps = [[input.python3, "-m", "venv", input.venvDir], ...telegramInstallCommands({ venvDir: input.venvDir, packageRoot }), [python, "-c", "import telethon"]];
+  for (const argv of steps) {
+    const result = await run(argv);
+    if (result.code === 0)
+      continue;
     rmSync6(input.venvDir, { recursive: true, force: true });
-  return ok;
+    if (PIP_HASH_MISMATCH.test(result.stderr))
+      throw new Error(telegramDependencyRefusedMessage(packageRoot));
+    return false;
+  }
+  return true;
 }
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0", TELEGRAM_DEPENDENCY_HINT, installing;
+async function runPip(argv) {
+  const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  const stderr = new Response(child.stderr).text().catch(() => "");
+  let timeout;
+  const result = await Promise.race([
+    child.exited,
+    new Promise((resolve10) => {
+      timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  if (result === "timeout")
+    child.kill("SIGKILL");
+  return { code: result, stderr: result === "timeout" ? "" : await stderr };
+}
+var TELEGRAM_TELETHON_VERSION = "1.45.0", TELEGRAM_TELETHON_REQUIREMENT, TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt", TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt", TELEGRAM_DEPENDENCY_HINT, PIP_HASH_MISMATCH, installing;
 var init_messaging_runtime = __esm(() => {
   init_atomic_file();
-  TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+  TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
+  TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
+  PIP_HASH_MISMATCH = /DO NOT MATCH THE HASHES|hashes are required in --require-hashes mode/i;
   installing = new Map;
 });
 
@@ -69522,7 +69566,7 @@ init_connected_handles();
 import { existsSync as existsSync25, mkdirSync as mkdirSync14, rmSync as rmSync7 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname34, join as join34 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -69681,7 +69725,7 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join34(dirname34(fileURLToPath4(import.meta.url)), "..", "..");
+    const packageRoot = options.packageRoot ?? join34(dirname34(fileURLToPath5(import.meta.url)), "..", "..");
     return { executable, args: [join34(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
