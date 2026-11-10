@@ -116,11 +116,28 @@ local Dropbox index and a reachable Argus lane:
    bun run eval:real
    ```
 
-   The runner reads the Dropbox account's Private store where this install
-   keeps it (its account folder, `sources/dropbox.files/1/stores/secure_local.sqlite`
-   under the data folder, or the legacy `dropbox-files-connector-store.sqlite`
-   until the boot migration moves it). `OLYMPUS_EVAL_DROPBOX_STORE=<path>` names
-   another file, a copy for instance; nothing relocates the worker's own store.
+   The runner searches the way Ask does: every Dropbox tier store this
+   install has (Private, Personal, and Public when it exists), through the
+   same answer lanes live answers use, judged by the source's tier ledger. It
+   finds each store where this install keeps it (the account folder,
+   `sources/dropbox.files/1/stores/<tier>.sqlite` under the data folder, or the
+   legacy `dropbox-files-connector-store.sqlite` for the Private store until
+   the boot migration moves it). `OLYMPUS_EVAL_DROPBOX_STORE=<path>` names
+   another Private store file, a copy for instance;
+   `OLYMPUS_EVAL_DROPBOX_PERSONAL_STORE`, `OLYMPUS_EVAL_DROPBOX_PUBLIC_STORE`
+   and `OLYMPUS_EVAL_DROPBOX_LEDGER` do the same for the other stores and the
+   tier ledger. Every store opens query-only; nothing relocates the worker's
+   own stores.
+
+   Meaning search uses the built-in embedding model this install configures,
+   loaded once per question process (bounded by
+   `OLYMPUS_EVAL_EMBEDDING_WARM_TIMEOUT_SECONDS`, default 180). When the model
+   is not installed, is not the built-in one, or does not load, the run falls
+   back to keyword search and says so on its `eval retrieval:` line and in the
+   report's `retrieval` field. It never downloads a model.
+
+   Gaps are graded from the release step's structured coverage notes (the
+   notes the released answer carries), not parsed back out of its text.
 
    Set `OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY` only if the instantiated
    private question set is intentionally limited to one Dropbox approved scope.

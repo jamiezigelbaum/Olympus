@@ -71086,7 +71086,8 @@ function releaseAnalystAnswer(input) {
   ]);
   const safeUnsupportedAnswer = "I found matching source material, but I could not extract a cited bounded answer from it in this pass.";
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer2(input.result);
-  const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack));
+  const safeUnsupportedGaps = safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack);
+  const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(unsupportedNoContent ? safeUnsupportedDraft : input.result.answer, unsupportedNoContent ? [] : releasedUnanswered);
   const originalScanDecision = finalDraftAnswer === originalDraftAnswer ? undefined : evaluateReleaseGate({
     facts,
@@ -71121,11 +71122,20 @@ function releaseAnalystAnswer(input) {
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
   } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.detail, input.releaseSecureContent);
+  const answer = answerForReleaseDecision(decision);
+  const draftNotes = [
+    [finalDraftAnswer, unsupportedNoContent ? safeUnsupportedGaps : releasedUnanswered],
+    [safeUnsupportedDraft, safeUnsupportedGaps],
+    [originalDraftAnswer, input.result.unanswered]
+  ];
+  const released = decision.decision === "allow" || decision.decision === "redact";
+  const unanswered = released ? (draftNotes.find(([draft]) => draft === answer)?.[1] ?? []).map((note) => note.trim()).filter(Boolean) : [];
   return {
     decision,
     facts,
     opsec: buildOpsecReleaseAudit(facts, decision),
-    answer: answerForReleaseDecision(decision)
+    answer,
+    unanswered
   };
 }
 function scannedUnsupportedNoContentDecision(input) {
