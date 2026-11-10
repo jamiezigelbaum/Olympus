@@ -124,7 +124,7 @@ export type OlympusDashboardControlParams =
   | { action: 'test_local_models'; base_url: string; answer_model: string }
   | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
   | { action: 'save_first_run_privacy'; choice: string }
-  | { action: 'save_judge'; choice: 'local' | 'venice'; cap_dollars: number }
+  | { action: 'save_judge'; choice: 'local' | 'local-then-venice' | 'venice'; cap_dollars: number }
   | { action: 'save_model_choice'; provider: 'local' | 'venice' | 'zkapi'; model: string }
   | { action: 'list_addable_models'; provider: 'venice' }
   /** Sources (?connect): check a connected source now, by the sync route's own name for it. */

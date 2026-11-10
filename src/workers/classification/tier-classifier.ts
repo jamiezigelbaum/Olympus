@@ -185,6 +185,12 @@ export interface TierSnifferRequest {
    * disposition cleared them (connector-store/tier-placement.ts).
    */
   stillAsk?: () => boolean;
+  /**
+   * Second round only (judge-second-round.ts): this sniffer's own cached
+   * Private verdict is not reused, so the question is asked again and the
+   * double-checking judge sees it. Never set by a landing or a re-judge.
+   */
+  recheckHeld?: boolean;
 }
 
 /**
