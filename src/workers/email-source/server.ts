@@ -6398,7 +6398,15 @@ export async function main(): Promise<void> {
               logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
             }),
             modelChoices,
-            goEasy: { on: () => localPacer.goEasy(), save: (on: boolean) => localPacer.save(on) },
+            goEasy: {
+              on: () => localPacer.goEasy(),
+              // In the split the background does the local work: it reads the saved choice again.
+              save: (on: boolean) => {
+                const saved = localPacer.save(on);
+                if (engineFront) void engineFront.client.post({ kind: 'reload', target: 'pacing' }).catch(() => undefined);
+                return saved;
+              },
+            },
             judgeSetup: createJudgeSetup({
               spending: judgeSpending, cloud: cloudJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
@@ -7785,6 +7793,8 @@ export async function main(): Promise<void> {
         reload: ({ target, corpora, frontPid }) => {
           // A model, judge or policy change: this process read them at boot, so
           // it restarts, after the front that asked has ended (as a delete does).
+          // Go easy on this computer, saved by the front.
+          if (target === 'pacing') { localPacer.reloadSetting(); return { reloaded: target }; }
           if (target === 'models') {
             if (!modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { reloaded: target, restarting: false };
             if (frontPid === undefined) return { reloaded: target, restarting: requestModelReload() };

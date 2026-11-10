@@ -265,6 +265,11 @@ export class LocalWorkPacer {
     return this.reading?.power !== 'no_battery';
   }
 
+  /** Read the owner's choice again: another process (the engine split's front) saved it. */
+  reloadSetting(): void {
+    if (this.options.settingPath) this.setting = readGoEasySetting(this.options.settingPath);
+  }
+
   save(on: boolean): { ok: true; status_message: string } {
     if (this.options.settingPath) saveGoEasySetting(this.options.settingPath, on);
     this.setting = on;

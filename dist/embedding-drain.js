@@ -74430,6 +74430,10 @@ class LocalWorkPacer {
       return this.setting;
     return this.reading?.power !== "no_battery";
   }
+  reloadSetting() {
+    if (this.options.settingPath)
+      this.setting = readGoEasySetting(this.options.settingPath);
+  }
   save(on) {
     if (this.options.settingPath)
       saveGoEasySetting(this.options.settingPath, on);

@@ -3,7 +3,7 @@
 // plugged in overnight, and cloud judging is never held back. Synthetic data
 // only; time comes from an injected clock, never a real sleep.
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
@@ -116,6 +116,24 @@ test('a desktop or server with no battery runs at full speed unless the owner tu
   restarted.save(false);
   expect(restarted.pace()).toBe('full');
   expect(readGoEasySetting(settingPath)).toBe(false);
+});
+
+test('in the engine split the background reads a choice the front saved', async () => {
+  const dir = tmp();
+  const settingPath = join(dir, 'go-easy.json');
+  const background = new LocalWorkPacer({ probe: fakeProbe({ idleSeconds: 1, power: 'no_battery' }), settingPath, now: () => new Date(AFTERNOON), platform: 'linux' });
+  const front = new LocalWorkPacer({ probe: fakeProbe({ idleSeconds: 1, power: 'no_battery' }), settingPath, now: () => new Date(AFTERNOON), platform: 'linux' });
+  await background.refresh();
+  expect(background.pace()).toBe('full');
+  front.save(true);
+  expect(background.goEasy()).toBe(false);
+  background.reloadSetting();
+  expect(background.goEasy()).toBe(true);
+  await background.refresh();
+  expect(background.pace()).toBe('trickle');
+  const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+  expect(server).toMatch(/if \(engineFront\) void engineFront\.client\.post\(\{ kind: 'reload', target: 'pacing' \}\)/);
+  expect(server).toMatch(/if \(target === 'pacing'\) \{ localPacer\.reloadSetting\(\);/);
 });
 
 test('the reading is cached for about 30 s, read off the hot path, and a failing probe never throws', async () => {

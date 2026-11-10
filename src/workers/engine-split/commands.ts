@@ -23,7 +23,7 @@ import { ENGINE_COMMANDS_PATH, ENGINE_READY_PATH, type EngineReadyBody } from '.
 import { hasValidWorkerBearerToken } from '../http.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
-export const ENGINE_RELOAD_KINDS = ['sources', 'scope', 'exclusions', 'embedding', 'models', 'archive', 'extraction'] as const;
+export const ENGINE_RELOAD_KINDS = ['sources', 'scope', 'exclusions', 'embedding', 'models', 'archive', 'extraction', 'pacing'] as const;
 export type EngineReloadKind = typeof ENGINE_RELOAD_KINDS[number];
 
 /** As judge-boost.ts (#1062): at most this many matched items per question. */
