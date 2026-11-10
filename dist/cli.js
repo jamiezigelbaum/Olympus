@@ -28916,6 +28916,38 @@ var init_manifest2 = __esm(() => {
   };
 });
 
+// src/workers/classification/sniffer-decision-mass.ts
+function tierMass(tokens, alreadyWritten = "") {
+  const left = (word) => word.slice(alreadyWritten.length);
+  const starts = (token, word) => {
+    const rest = left(word);
+    return word.startsWith(alreadyWritten) && rest.length > 0 && token.length > 0 && (rest.startsWith(token) || token.startsWith(rest + '"'));
+  };
+  const mass = { private: 0, personal: 0, ambiguous: 0 };
+  for (const { token, logprob } of tokens) {
+    if (!Number.isFinite(logprob) || logprob > 0)
+      continue;
+    const isPrivate = starts(token, "private");
+    const isPersonal = starts(token, "personal");
+    const chance = Math.exp(logprob);
+    if (isPrivate && isPersonal)
+      mass.ambiguous += chance;
+    else if (isPrivate)
+      mass.private += chance;
+    else if (isPersonal)
+      mass.personal += chance;
+  }
+  return mass;
+}
+function privateChance(mass) {
+  const coverage = mass.private + mass.personal + mass.ambiguous;
+  if (![mass.private, mass.personal, mass.ambiguous].every((value) => Number.isFinite(value) && value >= 0) || coverage + Number.EPSILON < SNIFFER_DECISION_MIN_COVERAGE)
+    return;
+  const total = mass.private + mass.personal;
+  return total > 0 ? mass.private / total : undefined;
+}
+var SNIFFER_DECISION_PRIVATE_BAR = 0.5, SNIFFER_DECISION_MIN_COVERAGE = 0.9;
+
 // src/workers/classification/delphi-scorer.ts
 function parseStrictJsonObject(text2) {
   let parsed;
@@ -28965,15 +28997,37 @@ var init_delphi_scorer = __esm(() => {
 
 // src/workers/classification/sniffer.ts
 import { createHash as createHash14 } from "node:crypto";
-function snifferTierKey(verdict) {
-  if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
+function validDecisionBar(bar) {
+  return typeof bar === "number" && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
+}
+function snifferDecisionBar(lane) {
+  if (validDecisionBar(lane.decisionBar))
+    return lane.decisionBar;
+  const id = lane.cacheModelId ?? lane.modelId;
+  const measured = SNIFFER_DECISION_BARS.find(([model]) => id === model || id.startsWith(`${model}:`))?.[1];
+  return validDecisionBar(measured) ? measured : SNIFFER_DECISION_PRIVATE_BAR;
+}
+function snifferDecisionPrivateChance(verdict) {
+  if (verdict.failSafe || verdict.category !== SNIFFER_DECISION_CATEGORY || !isUnitConfidence(verdict.confidence))
+    return;
+  if (verdict.tier === "private")
+    return verdict.confidence;
+  return verdict.tier === "personal" ? 1 - verdict.confidence : undefined;
+}
+function snifferTierKey(verdict, decisionBar = SNIFFER_DECISION_PRIVATE_BAR) {
+  if (verdict.failSafe || recordRequiresPrivate(verdict))
     return "secure";
-  if (verdict.category === SNIFFER_DECISION_CATEGORY)
-    return "private";
+  if (verdict.category === SNIFFER_DECISION_CATEGORY) {
+    const chance = snifferDecisionPrivateChance(verdict);
+    const bar = validDecisionBar(decisionBar) ? decisionBar : SNIFFER_DECISION_PRIVATE_BAR;
+    return chance === undefined || chance >= bar ? "secure" : "private";
+  }
+  if (verdict.tier === "private")
+    return "secure";
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? "private" : "secure";
 }
 function snifferVerdictTier(verdict, lane, flags) {
-  const tier = snifferTierKey(verdict);
+  const tier = snifferTierKey(verdict, snifferDecisionBar(lane));
   const code = snifferReasonCode(verdict);
   if (tier === "private" && snifferLaneIsSmall(lane) && flags.some((flag) => flag.startsWith(OWN_RECORD_FLAG_PREFIX))) {
     return { tier: "secure", code: `${SNIFFER_RECORD_HELD_CODE_PREFIX}${code}` };
@@ -29070,7 +29124,9 @@ function snifferCacheModelId(lane) {
   return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
-  const model = createHash14("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
+  const bar = lane.snifferMode === "decision" ? snifferDecisionBar(lane) : SNIFFER_DECISION_PRIVATE_BAR;
+  const judge = bar === SNIFFER_DECISION_PRIVATE_BAR ? snifferCacheModelId(lane) : `${snifferCacheModelId(lane)}:bar-${bar}`;
+  const model = createHash14("sha256").update(judge).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -29246,7 +29302,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -29275,6 +29331,7 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  SNIFFER_DECISION_BARS = [[QWEN35_4B.modelId, 0.15]];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
@@ -146984,38 +147041,6 @@ var init_judge_pacing = __esm(() => {
   };
 });
 
-// src/workers/classification/sniffer-decision-mass.ts
-function tierMass(tokens, alreadyWritten = "") {
-  const left = (word) => word.slice(alreadyWritten.length);
-  const starts = (token, word) => {
-    const rest = left(word);
-    return word.startsWith(alreadyWritten) && rest.length > 0 && token.length > 0 && (rest.startsWith(token) || token.startsWith(rest + '"'));
-  };
-  const mass = { private: 0, personal: 0, ambiguous: 0 };
-  for (const { token, logprob } of tokens) {
-    if (!Number.isFinite(logprob) || logprob > 0)
-      continue;
-    const isPrivate = starts(token, "private");
-    const isPersonal = starts(token, "personal");
-    const chance = Math.exp(logprob);
-    if (isPrivate && isPersonal)
-      mass.ambiguous += chance;
-    else if (isPrivate)
-      mass.private += chance;
-    else if (isPersonal)
-      mass.personal += chance;
-  }
-  return mass;
-}
-function privateChance(mass) {
-  const coverage = mass.private + mass.personal + mass.ambiguous;
-  if (![mass.private, mass.personal, mass.ambiguous].every((value2) => Number.isFinite(value2) && value2 >= 0) || coverage + Number.EPSILON < SNIFFER_DECISION_MIN_COVERAGE)
-    return;
-  const total = mass.private + mass.personal;
-  return total > 0 ? mass.private / total : undefined;
-}
-var SNIFFER_DECISION_PRIVATE_BAR = 0.5, SNIFFER_DECISION_MIN_COVERAGE = 0.9;
-
 // src/workers/classification/sniffer-decision.ts
 async function decisionPromptShape(format) {
   const formatted = await format(PLACEHOLDER);
@@ -147173,10 +147198,11 @@ function createDecisionSnifferModel(lane, full, options = {}) {
             reset();
             return { text: "", modelId: lane.modelId, decisionMetrics };
           }
+          const held = chance >= snifferDecisionBar(lane);
           return { text: "", modelId: lane.modelId, decisionMetrics, decisionVerdict: {
-            tier: chance >= SNIFFER_DECISION_PRIVATE_BAR ? "private" : "personal",
+            tier: held ? "private" : "personal",
             category: SNIFFER_DECISION_CATEGORY,
-            confidence: chance >= SNIFFER_DECISION_PRIVATE_BAR ? chance : 1 - chance,
+            confidence: held ? chance : 1 - chance,
             failSafe: false
           } };
         } catch (error2) {
