@@ -145617,7 +145617,7 @@ async function answerOnThisComputer(input, options) {
       candidates: detail.pack.candidates.length
     });
   } catch {}
-  const { leftOut, busy } = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, lanes.unmountedCorpusIds, options.sourceName);
+  const { leftOut, busy } = leftOutSources([...detail.skippedCorpora, ...cutShortCorpora(detail.laneAudits)], lanes.excludedCorpusIds, lanes.unmountedCorpusIds, options.sourceName);
   const busyField = busy.length > 0 ? { busy } : {};
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
@@ -145686,6 +145686,17 @@ function secretWhere(location) {
   if (named)
     return named;
   return `In ${providerSourceLabel(location.source) ?? "one of your sources"} (its name is Private, so it is not shown here)`;
+}
+function cutShortCorpora(audits) {
+  const corpora = new Set;
+  for (const audit of audits) {
+    if (audit.skippedReason !== "vector_scan_deadline_exceeded")
+      continue;
+    const corpusId = audit.laneName.split(":")[0];
+    if (corpusId)
+      corpora.add(corpusId);
+  }
+  return [...corpora].map((corpusId) => ({ corpusId, reason: "lane_timeout" }));
 }
 function leftOutSources(skipped2, excluded, unmounted, sourceName) {
   const leftOut = new Set;

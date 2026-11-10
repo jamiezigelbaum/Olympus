@@ -215,7 +215,12 @@ export async function answerOnThisComputer(
   } catch {
     // A log line never fails an answer.
   }
-  const { leftOut, busy } = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, lanes.unmountedCorpusIds, options.sourceName);
+  const { leftOut, busy } = leftOutSources(
+    [...detail.skippedCorpora, ...cutShortCorpora(detail.laneAudits)],
+    lanes.excludedCorpusIds,
+    lanes.unmountedCorpusIds,
+    options.sourceName,
+  );
   const busyField = busy.length > 0 ? { busy } : {};
   // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
@@ -293,6 +298,22 @@ function secretWhere(location: SecretLocationNote): string {
   const named = location.locator ?? location.title;
   if (named) return named;
   return `In ${providerSourceLabel(location.source) ?? 'one of your sources'} (its name is Private, so it is not shown here)`;
+}
+
+/**
+ * Corpora searched by keyword alone because their search by meaning ran out
+ * of time (a held thread spends the vector scan's own deadline even when the
+ * lane is given a grace, #1091 review). What they would have matched by
+ * meaning is unknown, so they count as busy: asking again can find more.
+ */
+function cutShortCorpora(audits: readonly { laneName: string; skippedReason?: string }[]): { corpusId: string; reason: string }[] {
+  const corpora = new Set<string>();
+  for (const audit of audits) {
+    if (audit.skippedReason !== 'vector_scan_deadline_exceeded') continue;
+    const corpusId = audit.laneName.split(':')[0];
+    if (corpusId) corpora.add(corpusId);
+  }
+  return [...corpora].map((corpusId) => ({ corpusId, reason: 'lane_timeout' }));
 }
 
 /**

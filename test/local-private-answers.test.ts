@@ -815,6 +815,20 @@ describe('an Ask whose searches ran out of time', () => {
     })]);
   });
 
+  test('a source searched by keyword only, its search by meaning cut short, is named as busy', async () => {
+    const cutShort = () => ({
+      hits: [],
+      latencyMs: 1,
+      rawExposed: false as const,
+      laneAudits: [
+        { laneName: `${CHATS}:connector_store_fts`, laneType: 'keyword' as const, candidateCount: 0, returnedCount: 0, localOnly: true, rawExposed: false as const },
+        { laneName: `${CHATS}:connector_store_vector`, laneType: 'semantic' as const, candidateCount: 0, returnedCount: 0, skippedReason: 'vector_scan_deadline_exceeded', localOnly: true, rawExposed: false as const },
+      ],
+    });
+    const result = await ask({ [CHATS]: cutShort, [MAIL]: empty });
+    expect(result).toEqual({ status: 'not_found', leftOut: [], busy: ['WhatsApp'] });
+  });
+
   test('a source that timed out is named as busy beside a real not found', async () => {
     const result = await ask({ [CHATS]: never, [MAIL]: empty });
     expect(result).toEqual({ status: 'not_found', leftOut: [], busy: ['WhatsApp'] });
