@@ -1,6 +1,6 @@
 import { createDashboardPeople } from './dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
-import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
@@ -558,7 +558,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
-import { engineRoleFromEnv } from '../../core/engine-split.ts';
+import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, engineStatusSnapshotPath, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
@@ -2009,6 +2009,12 @@ function createTierSnifferModel(input: {
   judgeStatus?: () => import('../classification/judge-spending.ts').JudgeSpendingStatus;
   judgeOnStop?: () => void;
   lane: SnifferLane;
+  /**
+   * The profile as configured under the lane's id. Credential readiness is
+   * recorded against it, so a judge Olympus derives from an answer profile
+   * (its own model, #1252) never replaces that profile's readiness evidence.
+   */
+  configuredProfile?: SovereigntyModelProfile | undefined;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   bootSecretResolver: WorkerBootSecretResolver;
@@ -2037,14 +2043,14 @@ function createTierSnifferModel(input: {
     return createDecisionSnifferModel(lane, createDelphiAnalystModel(new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }), {
       profile: 'source_answer',
       preflightTimeoutMs: 5_000,
-    }), { apiKey });
+    }), { apiKey, log: (line) => console.warn(line) });
   }
   if (lane.kind === 'venice' && profile.provider === 'venice') {
     const apiKey = resolveSecretRefSync(
       profile.secretRef,
       input.env,
       'Tier sniffer Venice model profile',
-      bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
+      bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile: input.configuredProfile ?? profile }),
     );
     if (!apiKey) return undefined;
     // Paced to the key's per-model request limit; a 429 waits and retries (#884).
@@ -2629,6 +2635,7 @@ export async function main(): Promise<void> {
   };
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
+  await carryCloudJudgeApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
   // The local judge's own speed and held share on this install, for the setup estimates (#891).
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
@@ -7679,8 +7686,9 @@ export async function main(): Promise<void> {
           if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
           return null;
         }
-        await response.body?.cancel();
-        return response.headers.getSetCookie();
+        // The cookies, and the unlock key the browser's storage keeps (#1187).
+        const body = (await response.json().catch(() => undefined) ?? {}) as { unlock_key?: unknown };
+        return { cookies: response.headers.getSetCookie(), ...(typeof body.unlock_key === 'string' ? { unlockKey: body.unlock_key } : {}) };
       },
     });
     desktopPoll = setInterval(() => { void probeDesktop(); }, 2_000); desktopPoll.unref();
@@ -7697,7 +7705,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
@@ -7717,7 +7725,7 @@ export async function main(): Promise<void> {
       lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
       promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
     })
-    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
     : undefined;
   if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
     console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
@@ -7836,7 +7844,8 @@ export async function main(): Promise<void> {
     const commands = startEngineBackgroundServer({
       socketPath: engineSocketPath!,
       authToken,
-      ...(process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID ? { instanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID } : {}),
+      ...((process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV])
+        ? { instanceId: (process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV])! } : {}),
       log: (line) => console.warn(line),
       handlers: {
         // A config file the front wrote: re-read it and wake what it governs.

@@ -47,6 +47,7 @@ import {
 } from './source-index/retrieval.ts';
 import {
   routeSourceIndexSearch,
+  type SourceIndexRoutedCorpusTiming,
   type SourceIndexRoutedMatchCount,
   type SourceIndexRoutedSearchHit,
   type SourceIndexRoutedSearchResponse,
@@ -260,6 +261,9 @@ export interface EvidencePackBuildDetail {
   // once (literal query plus planner expansions) and a loss on any of them is
   // a loss to the answer.
   degradations: readonly RetrievalDegradation[];
+  // How long each corpus search took and whether it beat the lane deadline,
+  // across every routed run of this build. Counts only.
+  corpusTimings?: readonly SourceIndexRoutedCorpusTiming[];
   // Kept beside the frozen EvidencePack contract. This is counts-only policy
   // state used to distinguish an ordinary empty search from evidence that was
   // deliberately removed before model dispatch.
@@ -545,6 +549,7 @@ async function buildPreparedEvidencePackDetailed(
     // counts-only, so there is nothing in it for that rewrite to protect, and
     // dropping it would re-hide exactly what this list exists to show.
     degradations: routed.degradations,
+    ...(routed.corpusTimings && routed.corpusTimings.length > 0 ? { corpusTimings: routed.corpusTimings } : {}),
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
@@ -746,7 +751,7 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
->;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings'>>;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -894,6 +899,7 @@ async function runRoutedSearches(
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
     secureLaneAudits: runs.flatMap((run) => [...run.secureLaneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
+    corpusTimings: runs.flatMap((run) => [...(run.corpusTimings ?? [])]),
     // The literal question's counts, not a merge across planner rephrasings:
     // the breadth reported is for what the owner asked.
     ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),

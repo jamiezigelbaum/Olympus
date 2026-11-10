@@ -21,6 +21,12 @@ import { workerSocketPath, type WorkerTransportOptions } from './worker-transpor
 
 export const ENGINE_ROLE_ENV = 'OLYMPUS_WORKER_ENGINE_ROLE';
 export const ENGINE_BACKGROUND_SOCKET_ENV = 'OLYMPUS_ENGINE_BACKGROUND_SOCKET';
+/**
+ * The background's instance id when the worker service's own unit supervises
+ * it (worker-service-split.ts), where there is no native service instance id:
+ * the readiness probe accepts only this instance.
+ */
+export const ENGINE_BACKGROUND_INSTANCE_ENV = 'OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID';
 
 /** `single` is today's one process; the other two exist only with the switch on. */
 export type EngineRole = 'single' | 'background' | 'front';

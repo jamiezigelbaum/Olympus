@@ -8,6 +8,7 @@ import { networkInterfaces } from 'node:os';
 import { validateWorkerSocket, type WorkerTransportOptions } from './worker-transport.ts';
 import { openLinuxOwnerTicketFile } from './linux-desktop-opener.ts';
 import { readBoundedRequestText } from '../workers/remote-request-body.ts';
+import { DASHBOARD_UNLOCK_STORAGE_KEY } from './dashboard-launch.ts';
 
 const COOKIE = 'olympus_desktop_owner';
 const PROOF_HEADER = 'X-Olympus-Owner-Proof';
@@ -178,7 +179,7 @@ function confirmation(): Response {
   claiming=true;
   try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
    if(r.status===202||r.status===503)return;
-   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);await resume();return;}
    const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
    message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
   }catch{}finally{claiming=false;}
@@ -237,7 +238,7 @@ function approve(request,proof){return new Promise(function(done){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript('r')};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);
  if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
@@ -269,11 +270,16 @@ export interface LinuxOwnerBridgeOptions {
   openFile?: (path: string) => Promise<void>;
   /** Called under an exclusive private-ticket claim. Null is a final refusal;
    * throw for a transient transport failure or worker 503 so the claim retries. */
-  establishDashboard?: () => Promise<readonly string[] | null>;
+  establishDashboard?: () => Promise<readonly string[] | EstablishedDashboard | null>;
   now?: () => number;
 }
 interface Ticket { value: string; challenge: string; target: string; path: string; expires: number; claimed?: boolean; timer?: ReturnType<typeof setTimeout> }
 interface Session { cookieHash: string; proofHash: string; expires: number }
+/** The engine's dashboard session for this browser: its cookies, and the unlock key its storage keeps (#1187). */
+export interface EstablishedDashboard { cookies: readonly string[]; unlockKey?: string }
+function established(result: readonly string[] | EstablishedDashboard): EstablishedDashboard {
+  return Array.isArray(result) ? { cookies: result as readonly string[] } : result as EstablishedDashboard;
+}
 /** The browser lane's one waiting page: approved in an Olympus window, then collected once by its claim. */
 interface Claim { hash: string; code: string; approvalId: string; ticket: Ticket; expires: number; state: 'waiting' | 'asked' | 'approved' | 'declined'; collecting?: boolean }
 const hashSecret = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -377,15 +383,17 @@ export class LinuxOwnerBridge {
     const session = this.cookieSession(request);
     return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
   }
-  private grantSession(dashboardCookies: readonly string[], extra: Record<string, unknown>): Response {
+  private grantSession(dashboard: EstablishedDashboard, extra: Record<string, unknown>): Response {
     const cookie = secret(), proof = secret();
     const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
     this.sessions = [...this.sessions.filter(s => s.expires > this.now()).slice(-14), session];
-    const response = Response.json({ proof, ...extra }, { headers: {
+    // The engine's unlock key goes to this origin's storage with the proof, where the dashboard's own
+    // shell reads it (core/dashboard-launch.ts): the engine's cookie alone renders no page (#1187).
+    const response = Response.json({ proof, ...(dashboard.unlockKey ? { unlock: dashboard.unlockKey } : {}), ...extra }, { headers: {
       'Set-Cookie': `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
       'Cache-Control': 'no-store', 'Clear-Site-Data': '"cache"', 'Content-Security-Policy': CSP,
     } });
-    for (const cookie of dashboardCookies) response.headers.append('Set-Cookie', cookie);
+    for (const cookie of dashboard.cookies) response.headers.append('Set-Cookie', cookie);
     return response;
   }
   async handle(request: Request, ownerRequestAdmitted?: () => void): Promise<Response> {
@@ -428,13 +436,13 @@ export class LinuxOwnerBridge {
       ticket.claimed = true; // exclusive claim before any asynchronous work
       try { unlinkSync(ticket.path); } catch {}
       const current = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
-      let dashboardCookies: readonly string[];
+      let dashboard: EstablishedDashboard;
       try {
         if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         if (result === null) { this.clearTicket(ticket); return refusal(); }
-        dashboardCookies = result;
+        dashboard = established(result);
       }
       catch {
         // A stale health snapshot may hide a just-restarted worker. Retain
@@ -448,7 +456,7 @@ export class LinuxOwnerBridge {
       const claim = this.claim?.record;
       const asking = claim?.ticket === ticket && claim.state === 'waiting' && claim.expires > this.now();
       if (asking) claim.state = 'asked';
-      return this.grantSession(dashboardCookies, { target: ticket.target, ...(asking ? { approval: { id: claim.approvalId, code: claim.code } } : {}) });
+      return this.grantSession(dashboard, { target: ticket.target, ...(asking ? { approval: { id: claim.approvalId, code: claim.code } } : {}) });
     }
     if (url.pathname === '/owner-claim' && request.method === 'POST') {
       let body: { claim?: string };
@@ -463,20 +471,20 @@ export class LinuxOwnerBridge {
       if (claim.collecting) return restarting(this.options.workerConflict?.());
       claim.collecting = true; // exclusive, like a ticket's claim
       const current = () => this.claim?.record === claim && claim.expires > this.now();
-      let dashboardCookies: readonly string[];
+      let dashboard: EstablishedDashboard;
       try {
         if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         if (result === null) { if (current()) this.claim = undefined; return refusal(); }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current()) { claim.collecting = false; return restarting(this.options.workerConflict?.()); }
         return refusal(503);
       }
       if (!this.live() || !current()) return refusal(503);
       this.claim = undefined; // collected once
-      return this.grantSession(dashboardCookies, {});
+      return this.grantSession(dashboard, {});
     }
     if (url.pathname === '/owner-approve' && request.method === 'POST') {
       let body: { id?: string; approve?: boolean };

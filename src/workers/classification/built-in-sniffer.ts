@@ -12,7 +12,8 @@
 // classification ledger like any classifier model.
 
 import type { AnalystModel } from '../../core/analyst.ts';
-import type { SovereigntyEngine } from '../../core/sovereignty.ts';
+import type { SovereigntyEngine, SovereigntyModelProfile } from '../../core/sovereignty.ts';
+import { DEFAULT_VENICE_JUDGE_MODEL } from './judge-spending.ts';
 import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane, type SnifferLaneRefusalReason } from './sniffer-lane.ts';
 
 /** The analyst name and sniffer profile id of the built-in private model. */
@@ -96,6 +97,31 @@ export function resolveTierSnifferRuntime(input: {
   }
 }
 
+/**
+ * Venice judges with its own default model (#1252), not the Private-answer
+ * model: when no Venice profile is declared for classification, the first
+ * Venice member of the secure pool lends its profile (key, endpoint, trust)
+ * with the judge model in place of its own. The lane keeps that member's
+ * profile id. Answers are untouched: only this lane resolution sees it.
+ */
+function withDefaultVeniceJudge(
+  profiles: Array<[string, SovereigntyModelProfile]>,
+  engine: Pick<SovereigntyEngine, 'resolveAnalystPool'>,
+): Array<[string, SovereigntyModelProfile]> {
+  if (profiles.some(([, profile]) => profile.purpose === 'classification' && profile.provider === 'venice')) return profiles;
+  let members: readonly { id: string; profile: SovereigntyModelProfile }[];
+  try {
+    const pool = engine.resolveAnalystPool({ trustDomain: 'secure_local' });
+    members = pool.explicitOrder ?? pool.members;
+  } catch {
+    return profiles;
+  }
+  const venice = members.find((member) => member.profile.provider === 'venice');
+  if (!venice) return profiles;
+  const judge = { ...venice.profile, model: DEFAULT_VENICE_JUDGE_MODEL, purpose: 'classification' } as SovereigntyModelProfile;
+  return [...profiles.filter(([id]) => id !== venice.id), [venice.id, judge]];
+}
+
 /** Setup selects among the already policy-eligible lanes; it grants no new route.
  * A recommendation alone never selects cloud. A terminal cloud stop uses local. */
 export function resolveJudgeChoiceRuntime(
@@ -106,9 +132,10 @@ export function resolveJudgeChoiceRuntime(
   const original = resolveTierSnifferRuntime(input);
   if (original.source === 'off' && original.reason !== 'no_private_lane') return original;
   const kind = choice.choice === 'venice' && !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0) ? 'venice' : 'local';
+  const kept = Object.entries(input.engine.config.modelProfiles)
+    .filter(([, profile]) => profile.purpose !== 'classification' || (kind === 'venice' ? profile.provider === 'venice' : profile.trust === 'local'));
   const engine = {
-    config: { ...input.engine.config, modelProfiles: Object.fromEntries(Object.entries(input.engine.config.modelProfiles)
-      .filter(([, profile]) => profile.purpose !== 'classification' || (kind === 'venice' ? profile.provider === 'venice' : profile.trust === 'local'))) },
+    config: { ...input.engine.config, modelProfiles: Object.fromEntries(kind === 'venice' ? withDefaultVeniceJudge(kept, input.engine) : kept) },
     resolveAnalystPool: (...args: Parameters<typeof input.engine.resolveAnalystPool>) => {
       const pool = input.engine.resolveAnalystPool(...args);
       const accepts = (member: { profile: { provider: string; trust: string } }) => kind === 'venice' ? member.profile.provider === 'venice' : member.profile.trust === 'local';

@@ -1,3 +1,4 @@
+import { DASHBOARD_UNLOCK_STORAGE_KEY } from '../src/core/dashboard-launch.ts';
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
 import { dashboardAttentionLine, dashboardStatus, dashboardWorkingSummary } from '../src/workers/dashboard/vocabulary.ts';
 import { engineBriefFromViewModel } from '../src/core/engine-brief.ts';
@@ -711,11 +712,16 @@ describe('multi-source source dashboard', () => {
     // host page exchanges a pasted token for a short-lived HttpOnly session,
     // keeps only the CSRF token in memory, and refuses the read-only dash_
     // token by name (unified dashboard phase 4: the gate sits on /dashboard
-    // itself while the controls are locked).
+    // itself while the controls are locked). Browser storage holds one value,
+    // this origin's unlock key (#1187, owner decision 2026-11-10), and nothing
+    // else: every storage call names that key.
     expect(html).toContain('data-dashboard-control-gate data-state="locked"');
     expect(html).toContain('/dashboard/control/session');
     expect(html).toContain('X-Olympus-CSRF');
-    expect(html).not.toContain('localStorage');
+    const storageCalls = html.match(/localStorage\.\w+\([^,)]*/g) ?? [];
+    expect(storageCalls.length).toBeGreaterThan(0);
+    for (const call of storageCalls) expect(call).toMatch(/\.(setItem|getItem|removeItem)\((input|config)\.unlockStorageKey$/);
+    expect(html).toContain(DASHBOARD_UNLOCK_STORAGE_KEY);
     expect(html).not.toContain('sessionStorage');
     expect(html).toContain('That is the read-only view token; use the worker bearer token from setup.');
     expect(html).not.toContain('name="worker_token"');

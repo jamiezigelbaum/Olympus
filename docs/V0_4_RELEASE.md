@@ -66,7 +66,7 @@ Rules for this release:
 1.4.3 is an urgent patch ahead of 1.5: on the owner's install on 2026-11-10,
 Ask and `source answer` searched no source because every lane timed out while
 the worker thread was held (#1079, with #1056). It does not change the 1.5
-scope.
+scope. Published 2026-11-10.
 
 1.4.4 follows it: on a Mac with more than one local account, a second account
 could open the owner's local dashboard controls (#1153, confirmed on a test
@@ -75,7 +75,7 @@ independent Critical review. That review found three older gaps of the same
 kind, which join the Owner controls lane as Critical work: connection approval
 that trusts loopback alone (#1186), a forwarded Linux owner socket (#1188,
 fixed in #1196) and a dashboard cookie not confined to the engine's origin
-(#1187).
+(#1187, fixed with a per-port unlock key: owner decision 2026-11-10).
 
 Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
 
@@ -90,6 +90,30 @@ Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
 - The check of the judge against the owner's own answers lives under Privacy,
   Your items, not Private questions, and shows no percentage until it has 30
   answers about randomly picked items.
+- Minor Private items do not gate a judge or the release (owner, 2026-11-10:
+  they are a judgment call even for the owner). The gate is the first bullet:
+  more than 75% agreement and no important Private item missed.
+
+Measured on the fresh sample (#883; 200 whole items labelled by the owner on
+2026-11-10: 145 Personal, 21 important Private, 34 minor Private; counts on
+the issue). On the test half (92 items) all three default judges meet the
+gate: the built-in 4B 92% agreement, the owner's Delphi 35B 88% at its
+measured bar (#1222), Venice DeepSeek V4 Flash 85 to 87%; none missed an
+important Private item there. Three things came out of the measurement:
+
+- The Venice lane sent no temperature or seed, so repeat runs disagreed on 37
+  of 200 items. With temperature 0 and a fixed seed (#1237) they disagree on
+  7; Venice still does not repeat exactly (#1236).
+- Venice stays on DeepSeek V4 Flash. Gemma 4 31B, Qwen 3.6 35B and Mistral
+  Small were run on the same items; Gemma scored best on the fresh sample but
+  missed 11 of 49 important Private items on the owner's 5 Nov labels, and the
+  other two miss important items on both sets.
+- The 7 Nov judge prompt change (#995) costs important Private items on
+  messages. With only the prompt changed, on the 5 Nov message set, Gemma goes
+  from 2 to 7 of 16 important missed and DeepSeek from 0 to 1, while holding
+  fewer Personal items. The wording is being revised for 1.5 (#1244), with a
+  one-time re-check of items settled Personal under the #995 prompt; the
+  7 Nov rule that a prompt change alone re-judges nothing otherwise stands.
 
 No freeze date is set. 2026-11-10 16:00Z was the target for that day's push,
 not the scope freeze.
@@ -116,11 +140,25 @@ tier gate as Ask, with the built-in embedder, and grades gaps from structured
 coverage notes (#1178). The run did expose one product bug, fixed in #1181:
 the keyword lane applied its row limit before the tier filter, so superseded
 copies could crowd visible rows out (#1174; pruning those copies is a 1.6
-item that waits on the owner). The rerun is still owed.
+item that waits on the owner).
+
+Reruns the same day (counts on #707) showed that diagnosis was too kind to
+retrieval. On current main, with both stores, the built-in embedder and the
+expected-evidence store ids corrected for the tier move, the set still scores
+0 to 1 of 7. A per-question audit added to the runner (#1239) shows why: on
+the owner's 1.3 GB store the vector lane ends at its deadline on every
+question and whole stores drop out with it, so packs are keyword-only or
+empty. Two real bugs found on the way are fixed: the merge buried a keyword
+rank-1 hit that the vector lane missed (#1230, fixed in #1231), and the
+vector scan's page query was quadratic (#1242, fixed in #1243). The deadline
+miss is still there on the real store after both and is being measured there
+directly. Two questions also fail at the answer step with the evidence in the
+pack (#1234). #707 stays open; this is the top open item for the Findable
+fast lane.
 
 Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
-Moved to 1.6: #672, #920. Waiting on the owner: fresh calibration labels
-(#883) and, optionally, #581.
+Moved to 1.6: #672, #920. Waiting on the owner: optionally, #581. The fresh
+calibration labels (#883) were finished on 2026-11-10.
 
 ## 1.4.0 The new dashboard (owner decision 2026-11-07)
 

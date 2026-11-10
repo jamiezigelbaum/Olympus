@@ -32,6 +32,8 @@ import { Buffer } from 'node:buffer';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { descendantGroupsRecorder, descendantGroupsSupported } from '../../../core/descendant-groups.ts';
+import { DESCENDANT_GROUPS_ENV } from '../../../core/native-process-service.ts';
 
 export interface ExtractionCommandRunRequest {
   command: string;
@@ -229,6 +231,23 @@ function executableFile(path: string): boolean {
   }
 }
 
+/**
+ * A detached group outlives the process that started it. When this process is
+ * supervised with a record of such groups (DESCENDANT_GROUPS_ENV, set by the
+ * supervision kernel), each command's group is recorded there while it runs,
+ * so that if this process dies, or restarts itself, mid-command, its
+ * supervisor stops the command before the replacement starts: the timeout
+ * that would have ended it died with this process.
+ */
+let groupRecorder: { path: string; recorder: ReturnType<typeof descendantGroupsRecorder> } | undefined;
+
+function commandGroupRecorder(): ReturnType<typeof descendantGroupsRecorder> | undefined {
+  const path = process.env[DESCENDANT_GROUPS_ENV]?.trim();
+  if (!path || !descendantGroupsSupported()) return undefined;
+  if (groupRecorder?.path !== path) groupRecorder = { path, recorder: descendantGroupsRecorder(path) };
+  return groupRecorder.recorder;
+}
+
 export async function runExtractionCommand(
   request: ExtractionCommandRunRequest,
   internals: ExtractionCommandRunInternals = {},
@@ -241,6 +260,14 @@ export async function runExtractionCommand(
       detached: process.platform !== 'win32',
       ...(request.env ? { env: { ...process.env, ...request.env } } : {}),
     });
+    const recorder = commandGroupRecorder();
+    const pid = child.pid;
+    if (recorder && pid) {
+      try { recorder.spawned(pid); } catch { /* Advisory. */ }
+      // 'close': the command and its output are done; a group killed on
+      // timeout is gone by then too.
+      child.once('close', () => { try { recorder.stopped(pid); } catch { /* Advisory. */ } });
+    }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;

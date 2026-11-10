@@ -356,6 +356,15 @@ section consolidates and supersedes all other policy wording.
 ### Change log
 
 - 2026-11-10 (no contract type version change; native sniffer cache stays
+  `decision-v2`): **a measured bar follows the weights, not the server's
+  name (#1253).** The decision probe reads the weights file a llama.cpp
+  server reports (`/props` `model_path`, base name only) into the lane's
+  `servedWeights`, and a file that is the measured base weights plus a
+  quantization suffix gets that bar, under any alias. A fine-tune doesn't.
+  A decision judge with no measured bar logs that once and keeps 0.5. As
+  before, the bar applies on read: a lane that gains a bar re-tiers its
+  stored decisions through the re-judge pass with no judge call.
+- 2026-11-10 (no contract type version change; native sniffer cache stays
   `decision-v2`): **the 35B-A3B's measured bar (#1184, #883).** Qwen3.6
   35B-A3B (`qwen36-35b-a3b-text`) holds Private at P(Private) 0.374, chosen
   on the dev half of the fresh whole-item sample (0 of 21 important Private

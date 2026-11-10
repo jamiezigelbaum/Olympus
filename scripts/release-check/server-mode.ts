@@ -83,17 +83,19 @@ emit() { printf '%s\\t%s\\n' "$1" "$2"; }
 
 /**
  * A local control session (what the unlocked dashboard page holds), then one POST from it; the response body goes to $out.
- * The local mint needs the owner's proof first (#1153): a session the owner's worker token opens, as the launch link does.
- * The token stays in this shell; nothing prints it or the cookies.
+ * The local mint needs the owner's proof first (#1153): a session the owner's worker token opens, as the launch link does,
+ * presented with its cookie and its CSRF token, as the owner's page sends it (#1187: the cookie alone is not the owner).
+ * The token stays in this shell; nothing prints it, the cookies or the CSRF tokens.
  */
 const CONTROL_POST = `control_post() {
   local h b j cookie csrf token
   h=$(mktemp); b=$(mktemp); j=$(mktemp)
   token=$("$HOME/.local/bin/olympus" dashboard token 2>/dev/null) || token=''
-  code=$(curl -sS --max-time 30 -c "$j" -o /dev/null -w '%{http_code}' -X POST -H "origin: ${ORIGIN}" -H "Authorization: Bearer $token" "${ORIGIN}/dashboard/control/session" 2>/dev/null) || code=000
+  code=$(curl -sS --max-time 30 -c "$j" -o "$b" -w '%{http_code}' -X POST -H "origin: ${ORIGIN}" -H "Authorization: Bearer $token" "${ORIGIN}/dashboard/control/session" 2>/dev/null) || code=000
   unset token
   if [ "$code" != 200 ]; then rm -f "$h" "$b" "$j"; code="owner-session-$code"; return 1; fi
-  code=$(curl -sS --max-time 30 -b "$j" -D "$h" -o "$b" -w '%{http_code}' -X POST -H "origin: ${ORIGIN}" "${ORIGIN}/dashboard/control/session/local" 2>/dev/null) || code=000
+  csrf=$(sed -n 's/.*"csrf_token" *: *"\\([^"]*\\)".*/\\1/p' "$b" | head -1)
+  code=$(curl -sS --max-time 30 -b "$j" -D "$h" -o "$b" -w '%{http_code}' -X POST -H "origin: ${ORIGIN}" -H "x-olympus-csrf: $csrf" "${ORIGIN}/dashboard/control/session/local" 2>/dev/null) || code=000
   rm -f "$j"
   if [ "$code" != 200 ]; then rm -f "$h" "$b"; code="session-$code"; return 1; fi
   cookie=$(tr -d '\\r' < "$h" | awk 'tolower($1)=="set-cookie:" { v=$2; sub(/;.*/, "", v); printf "%s%s", sep, v; sep="; " }')

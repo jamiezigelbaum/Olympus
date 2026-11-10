@@ -1,5 +1,6 @@
+import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import { linuxZkapiConfinement } from '../src/core/zkapi-confinement-linux.ts';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
  * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
@@ -933,7 +934,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const { cookie, csrf } = await localSession(fetcher);
     const response = await fetcher(post(DASHBOARD_OUTSIDE_HELP_PATHS.enable, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));
     expect(response.status).toBe(501);
-    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, ORIGIN, 'worker-secret'), Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(html).toContain('data-outside-unavailable');
   });
 
@@ -943,7 +944,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const counted: DashboardConsultBackend = { ...backend, status: async () => { calls.push('status'); return status(); } };
     const fetcher = worker(counted);
     const { cookie } = await localSession(fetcher);
-    const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, ORIGIN, 'worker-secret'), Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(session).toContain('data-outside-help ');
     expect(session).toContain('data-statement="only_when_asked"');
     expect(session).toContain('data-outside-enabled="true"');
@@ -951,7 +952,7 @@ describe('the worker serves the card only inside a local control session', () =>
     expect(calls).toEqual(['status']);
     // A bearer-minted session reads the same facts but is offered the local unlock, no controls.
     const bearerMinted = await controlSession(fetcher);
-    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, ORIGIN, 'worker-secret'), Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(offered).toContain('data-outside-unlock');
     expect(offered).not.toContain('data-outside-enabled="true">');
     expect(calls).toEqual(['status', 'status']);
@@ -1339,10 +1340,10 @@ describe('the adapter: turning outside help on and off', () => {
     writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     const fetcher = worker(stale.backend);
     const { cookie, csrf } = await localSession(fetcher);
-    const settings = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const settings = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, ORIGIN, 'worker-secret'), Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(settings).toContain(`data-outside-state="needs_acceptance"`);
     // What may be sent is saved on Privacy rules (#1047).
-    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?keys`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?keys`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, ORIGIN, 'worker-secret'), Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(html).toContain('data-outside-part="privacy"');
     const { document, window, posts, settle } = runCardScript(html, async (url, body) => {
       const response = await fetcher(post(url, body, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));

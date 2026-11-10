@@ -64,6 +64,19 @@ test('the 35B-A3B has its measured bar, by its model name or by its profile behi
   expect(snifferDecisionBar(lane)).toBe(0.374);
 });
 
+test('a served weights file finds its measured bar behind any alias, but a fine-tune does not (#1253)', () => {
+  const alias: SnifferLaneIdentity = { kind: 'local', modelId: 'delphi/source-answer', snifferMode: 'decision' };
+  for (const file of ['Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf', 'qwen3.6-35b-a3b-q8_0.gguf', 'Qwen3.6-35B-A3B.gguf', 'Qwen3.6-35B-A3B-Q4_K_M-00001-of-00002.gguf']) {
+    expect(snifferDecisionBar({ ...alias, servedWeights: file })).toBe(0.374);
+  }
+  expect(snifferDecisionBar({ ...alias, servedWeights: 'Qwen3.5-4B-Q4_K_M.gguf' })).toBe(0.15);
+  for (const file of ['Qwen3.6-35B-A3B-Abliterated-Q4_K_M.gguf', 'Qwen3.5-40B-Q4_K_M.gguf', 'Qwen3.5-2B-Q4_K_M.gguf', 'my-qwen3.6-35b-a3b-q4.gguf', 'Qwen3.6-35B-A3B-Q4_K_M.bin']) {
+    expect(snifferDecisionBar({ ...alias, servedWeights: file })).toBe(0.5);
+  }
+  // The lane's own bar still wins over a measured one.
+  expect(snifferDecisionBar({ ...alias, servedWeights: 'Qwen3.5-4B-Q4_K_M.gguf', decisionBar: 0.3 })).toBe(0.3);
+});
+
 test('a profile\'s decision bar can only lean Private, and only on a local profile', () => {
   for (const bar of [0, -0.1, 0.51, 1, Number.NaN]) {
     const config = structuredClone(loadSovereigntyPreset('local-first'));

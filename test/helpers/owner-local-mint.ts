@@ -26,3 +26,21 @@ export async function ownerLocalMint(
   if (peer !== null) recordRequestPeer(request, peer);
   return fetcher(request);
 }
+
+/**
+ * The unlock key the owner's browser keeps for this origin (#1187). Any
+ * control session minted at the origin hands out the same one, so a test that
+ * holds the worker token reads it from a bearer mint. A page navigation needs
+ * it beside the cookie: the cookie alone renders the unlock shell.
+ */
+export async function ownerUnlockKey(
+  fetcher: (request: Request) => Promise<Response> | Response,
+  origin: string,
+  token: string,
+): Promise<string> {
+  const minted = await fetcher(new Request(`${origin}/dashboard/control/session`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, Origin: origin },
+  }));
+  if (minted.status !== 200) throw new Error(`the owner's control session answered ${minted.status}`);
+  return (await minted.json() as { unlock_key: string }).unlock_key;
+}

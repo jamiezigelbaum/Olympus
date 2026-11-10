@@ -82,7 +82,8 @@ const options = () => ({ now: ((): (() => number) => { let t = 0; return () => (
 const GOOD_DASHBOARD = `<main><h1>Olympus</h1><section class="home-status" data-home-status="ok"><p>Olympus is up to date</p><p>2 sources · checked just now</p></section></main>`;
 const GOOD_SOURCES = `<main><div class="srcrows" id="sources">
   <div class="srcrow" data-source-row="readwise.library"><b>Readwise</b> <span>Synced just now</span><button>Sync now</button></div>
-  <div class="srcrow" data-source-row="local.files"><b>Files on this computer</b><button>Choose folders</button></div></div></main>`;
+  <div class="srcrow" data-source-row="local.files"><b>Files on this computer</b><button>Choose folders</button></div></div>
+  <div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button></div></main>`;
 const SOURCES_PAGES = { '/dashboard': GOOD_DASHBOARD, '/dashboard?connect': GOOD_SOURCES };
 
 describe('journey runner', () => {
@@ -259,7 +260,7 @@ function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
   const textarea = () => doc.querySelector('textarea') as unknown as { value: string } | null;
   const input = () => doc.querySelector('input') as unknown as { value: string } | null;
   const keep = () => { const area = textarea(); if (area) description = area.value; const field = input(); if (field) sender = field.value; };
-  const dashboard = () => { screen = 'dashboard'; editing = false; doc.body.innerHTML = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`; };
+  const dashboard = () => { screen = 'dashboard'; editing = false; doc.body.innerHTML = `<main><section class="home-status" data-home-status="ok"><p>Olympus is up to date</p></section><button>${PRIVACY.edit}</button></main>`; };
   const main = (asking = false) => {
     screen = 'main';
     const box = editing
@@ -281,7 +282,7 @@ function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
   };
   const review = () => { screen = 'review'; sheet(`<h1>${PRIVACY.confirmRule}</h1><p>${sender}</p>`, PRIVACY.makePrivate); };
   const unsaved = () => editing && description !== saved.description;
-  driver.pagesByPath['/dashboard'] = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`;
+  driver.pagesByPath['/dashboard'] = `<main><section class="home-status" data-home-status="ok"><p>Olympus is up to date</p></section><button>${PRIVACY.edit}</button></main>`;
   const openBox = () => { editing = true; description = saved.description; main(); };
   driver.onPress.set(PRIVACY.edit, () => { if (screen === 'dashboard') { editing = false; main(); } else openBox(); });
   driver.onPress.set(PRIVACY.descriptionStart, openBox);
@@ -306,14 +307,19 @@ function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
   driver.onPress.set(PRIVACY.makePrivate, () => { saved.senders.push(sender); main(); });
 }
 
-/** The dashboard with its Models line, which opens to the lines inside it; `empty` opens to nothing. */
-function modelsPanel(driver: DomDriver, empty = false): void {
-  const summary = `${PANEL.models} — ${PANEL.modelBuiltIn} · ${PANEL.modelReady}`;
-  const render = (open: boolean) => `<main><h2>${PANEL.sources}</h2><details${open ? ' open' : ''}><summary>${summary}</summary>
-    <ul>${empty ? '' : `<li>${PANEL.modelSearch}: ${PANEL.modelBuiltIn}</li><li>${PANEL.modelAnswers}: ${PANEL.modelBuiltIn}</li>`}</ul></details></main>`;
-  let open = false;
-  driver.pagesByPath['/dashboard'] = render(false);
-  driver.onPress.set(summary, (document) => { open = !open; document.body.innerHTML = render(open); });
+/**
+ * Settings as 1.5 draws it: a side list, one section at a time (Agents and access with no target), and Models on this computer
+ * with its Private answers row (#1043, #1085). `broken` says a model's download failed; `empty` has no Private answers row.
+ */
+function settingsPages(driver: DomDriver, opts: { broken?: boolean; empty?: boolean } = {}): void {
+  const models = `<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3><div class="srows">${opts.empty ? '' : '<div class="srow nodot" data-model-row="private-answers"><b>Private answers</b> — answered by Built-in.</div>'}${opts.broken ? '<div class="srow nodot" data-model-row="built-in"><b>Built-in model</b> — Qwen, download failed</div>' : ''}</div></section>`;
+  const agents = '<section class="setpane" id="agents"><h3 class="sect">Agents and access</h3></section>';
+  const render = (pane: 'agents' | 'models') => `<main><nav class="setside"><a href="#agents">Agents and access</a><a href="#models">Models on this computer</a></nav>${pane === 'agents' ? agents : models}</main>`;
+  driver.pagesByPath['/dashboard'] = GOOD_DASHBOARD;
+  driver.pagesByPath['/dashboard?settings'] = render('agents');
+  driver.pagesByPath['/dashboard?settings#models'] = render('models');
+  // The side list is on the host page (Settings is not the panel).
+  driver.onPress.set('Models on this computer', () => { driver.host.document.body.innerHTML = render('models'); });
 }
 
 describe('the shipped journeys, on a DOM', () => {
@@ -376,16 +382,24 @@ describe('the shipped journeys, on a DOM', () => {
     expect(saves.steps.find((step) => !step.ok)!.name).toBe('Press Back to privacy again');
   });
 
-  test('models-section-opens passes when the Models line opens to its lines and closes again, and FAILS when it opens to nothing', async () => {
+  test('models-ready passes on Settings › Models with a Private answers row, and FAILS when a model is broken', async () => {
+    const run = async (opts?: { broken?: boolean; empty?: boolean }) => { const driver = new DomDriver({}); settingsPages(driver, opts); return await runJourney(driver, find('models-ready'), options()); };
+    const good = await run();
+    expect(good.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
+    expect((await run({ broken: true })).ok).toBe(false);
+    expect((await run({ empty: true })).ok).toBe(false);
+  });
+
+  test('models-section-opens passes when the side list shows Models on this computer in place of Agents, and FAILS when it has no rows', async () => {
     const good = new DomDriver({});
-    modelsPanel(good);
+    settingsPages(good);
     const passed = await runJourney(good, find('models-section-opens'), options());
     expect(passed.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
     const empty = new DomDriver({});
-    modelsPanel(empty, true);
+    settingsPages(empty, { empty: true });
     const failed = await runJourney(empty, find('models-section-opens'), options());
     expect(failed.ok).toBe(false);
-    expect(failed.steps.find((step) => !step.ok)!.name).toBe('Press the Models line');
+    expect(failed.steps.find((step) => !step.ok)!.name).toBe('Press Models on this computer in the side list');
   });
 
   test('every journey has a source, steps with outcomes, and a unique id; the ones that change the install run last', () => {

@@ -1,5 +1,6 @@
+import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import { expect, test } from 'bun:test';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 import { sourceSupportDetails, systemSupportReport } from '../src/workers/dashboard/source-failure.ts';
 import { renderDashboardHelpPage } from '../src/workers/dashboard/pages/local.ts';
 
@@ -54,14 +55,14 @@ test('the Help route is reachable, and only locally opened controls get a system
     expect(await locked.text()).not.toContain('id="system-report"');
     expect(reads).toBe(0);
     const session = await ownerLocalMint(fetch, origin, 'worker-secret');
-    const request = new Request(origin + '/dashboard?help', { headers: { Cookie: session.headers.get('set-cookie')!.split(';')[0]! } });
+    const request = new Request(origin + '/dashboard?help', { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetch, origin, 'worker-secret'), Cookie: session.headers.get('set-cookie')!.split(';')[0]! } });
     recordRequestPeer(request, '127.0.0.1');
     const response = await fetch(request);
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('id="system-report"');
     expect(reads).toBe(1);
     sourcesReadable = false;
-    const broken = new Request(origin + '/dashboard?help', { headers: { Cookie: session.headers.get('set-cookie')!.split(';')[0]! } });
+    const broken = new Request(origin + '/dashboard?help', { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetch, origin, 'worker-secret'), Cookie: session.headers.get('set-cookie')!.split(';')[0]! } });
     recordRequestPeer(broken, '127.0.0.1');
     const fallback = await fetch(broken);
     expect(fallback.status).toBe(200);

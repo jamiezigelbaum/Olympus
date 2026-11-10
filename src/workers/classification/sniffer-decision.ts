@@ -3,9 +3,9 @@
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { fetchModelEndpoint } from '../../core/model-transport.ts';
 import { assertSnifferProfileAllowed, initialSnifferMode, snifferLaneOffersDecision, type SnifferLane } from './sniffer-lane.ts';
-import { buildSnifferBatchPrompt, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT, snifferDecisionBar } from './sniffer.ts';
+import { buildSnifferBatchPrompt, measuredSnifferDecisionBar, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT, snifferDecisionBar } from './sniffer.ts';
 import type { SnifferPass, StoredSnifferVerdict } from './sniffer-store.ts';
-import { privateChance, tierMass, type TokenChance } from './sniffer-decision-mass.ts';
+import { privateChance, SNIFFER_DECISION_PRIVATE_BAR, tierMass, type TokenChance } from './sniffer-decision-mass.ts';
 
 export const REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"';
 const PLACEHOLDER = 'CALIBRATION_ITEM_PLACEHOLDER';
@@ -74,6 +74,13 @@ interface EndpointState {
   rejudgeReady?: boolean;
   probedAt?: number;
   primed?: string | undefined;
+  /** The served weights file's base name, from `/props` (undefined when not reported). */
+  weights?: string | undefined;
+  /** Set once `/props` answered (with or without a path); a failed read is retried. */
+  weightsRead?: boolean;
+  weightsTriedAt?: number;
+  /** The no-measured-bar note is logged once per endpoint. */
+  barNoted?: boolean;
 }
 const endpoints = new Map<string, EndpointState>();
 async function exclusive<T>(state: EndpointState, run: () => Promise<T>): Promise<T> {
@@ -82,7 +89,15 @@ async function exclusive<T>(state: EndpointState, run: () => Promise<T>): Promis
   return result;
 }
 
-export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel, options: { apiKey?: string | undefined } = {}): SnifferModel {
+/** Base name of a served weights path, the only part of `/props` the judge keeps. */
+export function servedWeightsName(props: unknown): string | undefined {
+  const path = props && typeof props === 'object' ? (props as { model_path?: unknown }).model_path : undefined;
+  if (typeof path !== 'string' || !path.trim()) return undefined;
+  const name = path.trim().split(/[\\/]/).pop();
+  return name ? name.slice(0, 200) : undefined;
+}
+
+export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel, options: { apiKey?: string | undefined; log?: (line: string) => void } = {}): SnifferModel {
   lane.snifferMode = initialSnifferMode(lane.profile);
   if (!snifferLaneOffersDecision(lane)) return full;
   assertSnifferProfileAllowed(lane.profileId, lane.profile);
@@ -107,6 +122,31 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
       throw error instanceof NativeRequestError ? error : new NativeRequestError(false, timeout.aborted);
     }
   };
+  // A server that answers `/props` settles the weights for good; a timeout or
+  // error is retried a minute later, so one slow start never pins the default bar.
+  const readWeights = async (): Promise<void> => {
+    if (sharedState.weightsRead || Date.now() - (sharedState.weightsTriedAt ?? -Infinity) < 60_000) return;
+    sharedState.weightsTriedAt = Date.now();
+    try {
+      const response = await fetchModelEndpoint(fetch, `${endpoint}/props`, {
+        method: 'GET',
+        headers: options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {},
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) return;
+      sharedState.weights = servedWeightsName(await response.json());
+      sharedState.weightsRead = true;
+    } catch {
+      // Retried on a later preparation.
+    }
+  };
+  const noteBar = () => {
+    lane.servedWeights = sharedState.weights;
+    if (sharedState.barNoted || !sharedState.weightsRead || lane.snifferMode !== 'decision') return;
+    sharedState.barNoted = true;
+    if (lane.decisionBar !== undefined || measuredSnifferDecisionBar(lane) !== undefined) return;
+    options.log?.(`Olympus privacy judge: no measured decision bar for ${sharedState.weights ? `weights ${sharedState.weights}` : `model ${lane.modelId}`}; items are held Private at P(Private) ${SNIFFER_DECISION_PRIVATE_BAR}. Measure one with eval/calibration (README, "Measuring a new judge model").`);
+  };
   let shapeKey = '';
   let shape: Awaited<ReturnType<typeof decisionPromptShape>> | undefined;
   let written: string | undefined;
@@ -116,7 +156,10 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
     chat_template_kwargs: { enable_thinking: false },
   })).prompt;
   const prepare = async () => {
-    if (lane.profile.snifferMode === 'decision') { lane.snifferMode = 'decision'; lane.rejudgeReady = true; return; }
+    if (lane.profile.snifferMode === 'decision') {
+      await readWeights();
+      lane.snifferMode = 'decision'; lane.rejudgeReady = true; noteBar(); return;
+    }
     // Successful capability proof is cached; unsupported servers are re-probed
     // once a minute so a server replacement needs no owner action.
     if (sharedState.supported === undefined || (!sharedState.supported && Date.now() - (sharedState.probedAt ?? 0) >= 60_000)) {
@@ -134,8 +177,10 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
       sharedState.probedAt = Date.now();
       reset();
     }
+    if (sharedState.supported) await readWeights();
     lane.snifferMode = sharedState.supported ? 'decision' : 'full';
     lane.rejudgeReady = sharedState.rejudgeReady !== false;
+    noteBar();
   };
   return {
     async prepareSniffer(nextSignal) {

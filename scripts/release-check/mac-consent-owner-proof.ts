@@ -47,14 +47,20 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 if id "$account" >/dev/null 2>&1; then sudo -n /usr/sbin/sysadminctl -deleteUser "$account" >/dev/null 2>&1 || true; fi
+# Each setup step names itself before it runs, so a stop says where (the report shows the last \`step=\`).
+echo "step=account"
 # A standard account, not an administrator, with a random password nobody keeps.
 sudo -n /usr/sbin/sysadminctl -addUser "$account" -fullName "Olympus release check" -password "$(/usr/bin/openssl rand -hex 24)" >/dev/null 2>&1
 id "$account" >/dev/null
 chmod 777 "$shared"
+echo "step=pkce"
 verifier="$(/usr/bin/openssl rand -hex 32)"
 challenge="$(printf '%s' "$verifier" | /usr/bin/openssl dgst -sha256 -binary | /usr/bin/base64 | tr '+/' '-_' | tr -d '=')"
-client="$(/usr/bin/curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' -d '{"client_name":"Olympus release check","redirect_uris":["${REDIRECT}"]}' '${ENGINE}/connect/register' | /usr/bin/sed -n 's/.*"client_id":"\\([^"]*\\)".*/\\1/p')"
+echo "step=register"
+echo "register=$(/usr/bin/curl -sS -o "$jar/client.json" -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' -d '{"client_name":"Olympus release check","redirect_uris":["${REDIRECT}"]}' '${ENGINE}/connect/register' || true)"
+client="$(/usr/bin/sed -n 's/.*"client_id":"\\([^"]*\\)".*/\\1/p' "$jar/client.json" 2>/dev/null || true)"
 test -n "$client"
+echo "step=approve"
 query="${query}"
 as_other() { (cd / && sudo -n -u "$account" "$@"); }
 field() { /usr/bin/sed -n "s/.*$1.*/\\\\1/p" "$2" | head -1; }
@@ -72,6 +78,7 @@ if grep -q '${REFUSAL}' "$shared/form.html"; then echo "other_form_refused=yes";
 echo "other_page=$(as_other /usr/bin/curl -sS -o "$shared/alt.html" -w '%{http_code}' --max-time 10 -b "olympus_consent_$rid=$csrf" "\${nav[@]}" -X POST --data "$body" '${ENGINE}/connect/authorize')"
 if grep -q '${REFUSAL}' "$shared/alt.html"; then echo "other_page_refused=yes"; else echo "other_page_refused=no"; fi
 # The owner: a dashboard control session as \`olympus dashboard\` opens one, then the same page and Connect.
+echo "step=owner"
 token="$("$HOME/.local/bin/olympus" dashboard token)"
 /usr/bin/curl -sS -o /dev/null --max-time 10 -c "$jar/owner" -X POST -H 'Origin: ${ENGINE}' -H "Authorization: Bearer $token" '${ENGINE}/dashboard/control/session'
 unset token
@@ -87,9 +94,12 @@ case "$answer" in *'${REDIRECT}'*code=*) echo "owner_code=yes" ;; *) echo "owner
 
 /** Reads the script's output. Anything unreadable fails: the check never passes on a missing answer. */
 export function evaluateMacConsentOwnerProof(code: number, stdout: string): CheckResult {
-  const values = Object.fromEntries(stdout.split('\n').map((line) => line.trim().match(/^(page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=(\w+)$/)).filter((m): m is RegExpMatchArray => !!m).map((m) => [m[1]!, m[2]!]));
+  const values = Object.fromEntries(stdout.split('\n').map((line) => line.trim().match(/^(step|register|page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=(\w+)$/)).filter((m): m is RegExpMatchArray => !!m).map((m) => [m[1]!, m[2]!]));
   const seen = `page ${values.page ?? '?'}, second account at the form ${values.other_form ?? '?'} (owner check's page: ${values.other_form_refused ?? '?'}), at /connect/authorize ${values.other_page ?? '?'} (owner check's page: ${values.other_page_refused ?? '?'}), owner ${values.owner ?? '?'} (code: ${values.owner_code ?? '?'})`;
-  if (code !== 0) return { id: ID, title: TITLE, status: 'fail', detail: `the check did not finish (exit ${code}): ${seen}` };
+  if (code !== 0) {
+    const where = values.step ? ` at step ${values.step}${values.step === 'register' ? ` (registration answered ${values.register ?? '?'})` : ''}` : '';
+    return { id: ID, title: TITLE, status: 'fail', detail: `the check did not finish (exit ${code})${where}: ${seen}` };
+  }
   if (values.page !== '200' || values.form !== 'yes') return { id: ID, title: TITLE, status: 'fail', detail: `the approval page did not open with a form for the second account: ${seen}` };
   const refused = (status: string | undefined) => status === '401' || status === '403';
   if (!refused(values.other_form) || values.other_form_refused !== 'yes') return { id: ID, title: TITLE, status: 'fail', detail: `the second account's Connect was not refused by the owner check: ${seen}` };

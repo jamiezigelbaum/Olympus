@@ -1,3 +1,5 @@
+import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
+import { ownerUnlockKey } from './helpers/owner-local-mint.ts';
 /**
  * Unified dashboard phase 4 (owner decision 2026-10-09): the ChatGPT panel is
  * the only dashboard. These tests pin the three pieces that make that true on
@@ -346,13 +348,29 @@ describe('the computer\'s /dashboard', () => {
     const f = fixture();
     try {
       const session = await controlSession(f.fetch);
-      const response = await f.fetch(new Request('http://worker.test/dashboard', { headers: { Cookie: session.cookie } }));
+      const response = await f.fetch(new Request('http://worker.test/dashboard', { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(f.fetch, 'http://worker.test', AUTH), Cookie: session.cookie } }));
       expect(response.status).toBe(200);
       const html = await response.text();
       // The banner is there but hidden, for a session that expires while the page is open.
       expect(html).toContain(`data-dashboard-control-gate data-state="locked" aria-label="${DASHBOARD_HOST_GATE_COPY.title}" hidden>`);
       expect(html).toContain('data-locked="false"');
       expect(html).toContain(session.csrf);
+    } finally {
+      f.close();
+    }
+  });
+
+  test('the cookie alone gets the content-free shell, but ?connector still redirects first so its #build-connector survives (#1187 review)', async () => {
+    const f = fixture();
+    try {
+      const session = await controlSession(f.fetch);
+      const shell = await f.fetch(new Request('http://worker.test/dashboard', { headers: { Cookie: session.cookie } }));
+      expect(shell.status).toBe(200);
+      expect(shell.headers.get('X-Olympus-Dashboard-Shell')).toBe('1');
+      expect(await shell.text()).not.toContain(session.csrf);
+      const connector = await f.fetch(new Request('http://worker.test/dashboard?connector', { headers: { Cookie: session.cookie } }));
+      expect(connector.status).toBe(302);
+      expect(connector.headers.get('Location')).toBe('/dashboard?connect#build-connector');
     } finally {
       f.close();
     }

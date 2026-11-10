@@ -92,6 +92,8 @@ const VENICE_MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
 // catalog authority in docs/CONTRACTS.md#venice-s4-policy-normative.
 const VENICE_MODEL_PRIVACY_CATEGORIES: Readonly<Record<string, VenicePrivacyCategory>> = Object.freeze({
   'kimi-k3': 'private',
+  // Olympus's default Venice judge (#1252); Private per the live catalog, 2026-11-10.
+  'deepseek-v4-flash-0731': 'private',
   'inkling': 'private',
   'e2ee-glm-5-2-p': 'e2ee',
   'zai-org-glm-5-2': 'private',

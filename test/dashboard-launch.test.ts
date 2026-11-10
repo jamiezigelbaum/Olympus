@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { flushMicrotasks } from './helpers/test-clock.ts';
 import {
   DASHBOARD_LAUNCH_MINT_PATH,
   DASHBOARD_LAUNCH_PAGE_HTML,
@@ -8,6 +9,7 @@ import {
   DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY,
   DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
   DashboardLaunchTickets,
+  DASHBOARD_UNLOCK_STORAGE_KEY,
 } from '../src/core/dashboard-launch.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
@@ -341,20 +343,24 @@ describe('launch handoff boundary regressions', () => {
     const ticket = 'A'.repeat(43);
     const order: string[] = [];
     const script = DASHBOARD_LAUNCH_PAGE_HTML.split('<script>')[1]!.split('</script>')[0]!;
+    const stored: Record<string, string> = {};
     const window = {
       location: { hash: `#olympus_launch_ticket=${ticket}&%=x`, pathname: '/dashboard/launch', search: '', replace: () => order.push('navigate') },
       history: { replaceState: () => { order.push('clear'); window.location.hash = ''; } },
+      localStorage: { setItem: (key: string, value: string) => { order.push('store'); stored[key] = value; } },
     };
     const document = { getElementById: () => ({ textContent: '' }) };
     const fetch = async (_path: string, init: RequestInit) => {
       order.push('redeem');
       expect(window.location.hash).toBe('');
       expect(JSON.parse(init.body as string)).toEqual({ ticket });
-      return new Response('{}');
+      return Response.json({ ok: true, csrf_token: 'csrf', unlock_key: 'unlock-key' });
     };
     new Function('window', 'document', 'fetch', 'URLSearchParams', script)(window, document, fetch, URLSearchParams);
-    await Promise.resolve();
-    expect(order).toEqual(['clear', 'redeem', 'navigate']);
+    await flushMicrotasks();
+    // The key this browser proves later plain visits with (#1187) is kept before the dashboard opens; never the CSRF token.
+    expect(order).toEqual(['clear', 'redeem', 'store', 'navigate']);
+    expect(stored).toEqual({ [DASHBOARD_UNLOCK_STORAGE_KEY]: 'unlock-key' });
     const csp = dashboardLaunchPageHeaders()['Content-Security-Policy']!;
     expect(csp).toContain("script-src 'sha256-");
     expect(csp).not.toContain("script-src 'unsafe-inline'");

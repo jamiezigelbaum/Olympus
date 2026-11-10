@@ -16,7 +16,7 @@
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
 import { searchPrivateEvidence, probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import http from 'node:http';
@@ -57,7 +57,7 @@ import { DASHBOARD_TOOLS_CALL_PATH } from '../src/workers/dashboard/host-page.ts
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
-import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
+import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_UNLOCK_HEADER, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { installBuiltInEmbedding, reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
@@ -1194,8 +1194,10 @@ function post(body: unknown, headers: Record<string, string>): Request {
   return new Request(`${ORIGIN}${DASHBOARD_PRIVATE_ANSWERS_PATH}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
 }
 
-function page(fetcher: Fetcher, headers: Record<string, string>, query = 'private-answers'): Promise<Response> {
-  return fetcher(new Request(`${ORIGIN}/dashboard?${query}`, { headers: { Referer: `${ORIGIN}/dashboard`, ...headers } }));
+/** A page visit; with a session cookie, from the owner's browser, which holds this origin's unlock key (#1187). */
+async function page(fetcher: Fetcher, headers: Record<string, string>, query = 'private-answers'): Promise<Response> {
+  const unlock = headers.Cookie ? { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(fetcher, ORIGIN, TOKEN) } : {};
+  return fetcher(new Request(`${ORIGIN}/dashboard?${query}`, { headers: { Referer: `${ORIGIN}/dashboard`, ...unlock, ...headers } }));
 }
 
 describe('the worker serves Private answers only inside a local control session', () => {
