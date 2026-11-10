@@ -79,10 +79,15 @@ export function isSecretLabel(locations: SecretLocations, labelId: string): bool
   return false;
 }
 
-/** A chat with a Secrets chat rule, by its conversation id (any chat source: a match hides more, never less). */
+/**
+ * A chat on a Secrets location, by its conversation id (any chat source: a
+ * match hides more, never less). Chat connectors publish the conversation id
+ * among an item's folder keys, and the classifier matches `folderKey` and
+ * `chat` rules alike against them, so either kind of Secrets rule counts.
+ */
 export function isSecretChat(locations: SecretLocations, chatKey: string): boolean {
   const key = chatKey.trim().toLowerCase();
-  return key !== '' && locations.chatKeys.has(key);
+  return key !== '' && (locations.chatKeys.has(key) || locations.folderKeys.has(key));
 }
 
 export function isSecretSender(locations: SecretLocations, sender: string): boolean {

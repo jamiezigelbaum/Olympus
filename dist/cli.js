@@ -202408,7 +202408,7 @@ function isSecretLabel(locations, labelId) {
 }
 function isSecretChat(locations, chatKey) {
   const key2 = chatKey.trim().toLowerCase();
-  return key2 !== "" && locations.chatKeys.has(key2);
+  return key2 !== "" && (locations.chatKeys.has(key2) || locations.folderKeys.has(key2));
 }
 function isSecretSender(locations, sender) {
   return locations.senders.some((rule) => ownerSenderRuleMatches(sender, rule, true));

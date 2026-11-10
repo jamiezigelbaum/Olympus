@@ -85,6 +85,18 @@ test('a chat rule on a Secrets chat never leaves the computer', () => {
   expect(meta).not.toContain('Dr. Lee');
 });
 
+test('a chat held Secrets through a folder-key rule hides its chat rule too', () => {
+  const { env } = home();
+  // The classifier matches folderKey and chat rules alike against an item's folder keys, where chats publish their id.
+  writeOwnerTierRules([{ id: 'cli.vault', match: { kind: 'folderKey', value: 'Dr-Lee' }, tier: 'secrets', strength: 'force' }], { env });
+  writePrivacyProfile({ rules: [doctor] }, { env });
+  const secrets = loadSecretLocations(env);
+  expect(isSecretPrivacyRule(secrets, doctor)).toBe(true);
+  const meta = JSON.stringify(privacyToolResult(visiblePrivacy(readChatGptPrivacySettings(env, 0), secrets), 'current'));
+  expect(meta).not.toContain('dr-lee');
+  expect(meta).not.toContain('Dr. Lee');
+});
+
 const personal: TierSniffer = { id: 'personal-content', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) };
 
 test('a profile chat rule keeps that chat Private, raises messages already stored, and no other chat', async () => {
