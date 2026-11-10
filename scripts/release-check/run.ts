@@ -175,6 +175,8 @@ export interface RunOptions {
   skipScreenshots?: boolean;
   /** Run only these configured agents (by id); omitted runs every enabled one. */
   onlyAgents?: string[];
+  /** Turn `worker.engineSplit` on in the install's engine config before the legs run (the engine split, #1240). The report records it. */
+  engineSplit?: boolean;
   budgetMs?: number;
   /** An incremental run (impact.ts): the tested report, its path, and the plan for the change since its commit. The plan's skips are set. */
   carry?: { base: ReleaseReport; path: string; plan: ImpactPlan };
@@ -419,6 +421,7 @@ function agentConfig(options: RunOptions): AgentConfig {
       agent: { text: privateQuestion().text, facts: [...privateQuestion().privateFacts], citedTitle: INBOX_ASK.citedTitle },
       ask: { text: INBOX_ASK.text, facts: [...INBOX_ASK.facts], citedTitle: INBOX_ASK.citedTitle },
     },
+    ...(options.engineSplit ? { engineSplit: true } : {}),
   };
 }
 
@@ -485,6 +488,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     ms: prepare.ms,
   });
   if (prepare.result?.ok !== true) return false;
+  if (run.options.engineSplit) run.add(engineSplitCheck(prepare.result.engineSplit));
 
   const connect = await run.agent('connect-source', '', 120_000);
   run.add({
@@ -499,6 +503,17 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   // then what it found) stays on the card for ten minutes, about when the screens are taken, so the pictures varied by the clock.
 
   return (await settleIngest(run)).settled;
+}
+
+/** What prepare-source saw of the engine split after its restart: the roles' process counts, or null where it cannot read them (macOS). */
+export function engineSplitCheck(roles: unknown): CheckResult {
+  const id = 'engine.split';
+  const title = 'The engine split is on (worker.engineSplit): a front and a background are running';
+  if (roles === null) return { id, title, status: 'warn', detail: 'switch set in engine.json; the processes\' roles are not read on this platform' };
+  const r = (roles ?? {}) as { front?: unknown; background?: unknown };
+  const front = Number(r.front ?? 0);
+  const background = Number(r.background ?? 0);
+  return { id, title, status: front >= 1 && background >= 1 ? 'pass' : 'fail', detail: `${front} front and ${background} background process(es) after the restart` };
 }
 
 /** Carries one raw MCP message to the engine on the machine, through the driver's exec channel. */
@@ -1562,6 +1577,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     ...(options.harnessCommit ? { harnessCommit: options.harnessCommit } : {}),
     ...(selfTest ? { selfTest } : {}),
     ...(carry ? { carry } : {}),
+    ...(options.engineSplit ? { settings: { engineSplit: true } } : {}),
   });
   // The report must itself be clean; a hit fails the run without copying the marker.
   const reportLeaks = scanReport(report, run.markers);
@@ -1596,7 +1612,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1628,6 +1644,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (has('--update-baselines') && changesScreens.length > 0) throw new Error(`--update-baselines takes the pictures of a full run; drop ${changesScreens.join(', ')}`);
   if (has('--reviewer-plants') && has('--skip-journeys')) throw new Error('--reviewer-plants takes its pictures with the screens; drop --skip-journeys');
   if (has('--reviewer-plants') && has('--update-baselines')) throw new Error('--reviewer-plants is a qualification run; it never writes baselines');
+  if (has('--engine-split') && has('--update-baselines')) throw new Error('--engine-split tests a setting that is off by default; it never writes baselines');
   const onlyJourneys = get('--only-journeys');
   // An incremental run: the plan decides which legs run, so nothing else may change what runs or what the screens show.
   const carryFrom = get('--carry-from');
@@ -1636,7 +1653,9 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if ((carryFrom === undefined) !== (changedFiles === undefined)) throw new Error('--carry-from and --changed-files go together');
   if (carryFrom !== undefined && changedFiles !== undefined) {
     const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--skip-restore', '--skip-server-mode', '--only-journeys', '--agents',
-      '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine'].filter(has);
+      '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine',
+      // A tested run's results were taken with the switch off; they say nothing about the split.
+      '--engine-split'].filter(has);
     if (conflicts.length > 0) throw new Error(`--carry-from lets the change decide what runs; drop ${conflicts.join(', ')}`);
     if (!existsSync(resolve(changedFiles))) throw new Error(`--changed-files ${changedFiles} does not exist`);
     const path = resolve(carryFrom);
@@ -1679,6 +1698,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     keepMachine: has('--keep-machine'),
     skipRelay: skip('--skip-relay'),
     skipScreenshots: skip('--skip-screenshots'),
+    ...(has('--engine-split') ? { engineSplit: true } : {}),
     ...(carry ? { carry } : {}),
   };
 }

@@ -142,6 +142,8 @@ export interface ReleaseReportInput {
    * tested run's results. `files` is the proof: every changed file with the legs it reaches (impact.ts).
    */
   carry?: CarryRecord;
+  /** Settings the run turned on in the install under test that are off by default (`run.ts --engine-split`). */
+  settings?: { engineSplit?: boolean };
 }
 
 export interface CarryRecord {
@@ -508,6 +510,7 @@ export function renderHtml(report: ReleaseReport): string {
     + `<p class="muted">Candidate ${escapeHtml(report.candidate.label)}${report.candidate.sha ? ` (${escapeHtml(report.candidate.sha)})` : ''} · run ${escapeHtml(report.runId)} · ${escapeHtml(report.startedAt)} to ${escapeHtml(report.finishedAt)}</p>`
     + `<p class="muted">${harnessLine(report.harness)}</p>`
     + (report.selfTest ? `<p class="muted">Self-test: ${escapeHtml(report.selfTest)}</p>` : '')
+    + (report.settings?.engineSplit ? '<p class="muted">Engine split on: worker.engineSplit was set to true on the install under test</p>' : '')
     + errors
     + carrySection(report.carry)
     + report.machines.map(machineSection).join('')
