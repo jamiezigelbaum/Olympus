@@ -202,6 +202,9 @@ function backupClientScript(csrfToken: string, folder: string | null): string {
     var folders = $('[data-browser-folders]', dialog); var files = $('[data-browser-files]', dialog);
     var seq = browser.seq = (browser.seq || 0) + 1;
     browser.shown = key; setMore(dialog, null);
+    // A new folder drops the earlier pick: Enter in a passphrase left showing must never restore a backup not on screen.
+    browser.picked = null;
+    var restoreForm = $('[data-backup-restore]', dialog); restoreForm.hidden = true; restoreForm.reset();
     say('#backup-browser [data-backup-dialog-msg]', 'Reading…');
     var result = await post('browse', key ? { parent_key: key, files: browser.mode === 'restore' } : {});
     if (seq !== browser.seq) return;

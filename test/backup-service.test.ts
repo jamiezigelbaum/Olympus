@@ -359,6 +359,49 @@ describe('backup routes', () => {
 });
 
 describe('restore passphrase form', () => {
+  test('opening another folder drops the picked backup, so Enter in the passphrase restores nothing', async () => {
+    const { Window } = await import('happy-dom');
+    const status = { folder: '/Volumes/T7/Backup/Olympus', schedule: 'nightly' as const, passphraseSet: true, running: false, backups: [], restoreAvailable: true };
+    const html = renderDashboardSettingsPage({ backup: status, outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' });
+    const section = html.slice(html.indexOf('<section class="setpane" id="backup"'));
+    const start = section.indexOf('<script>') + '<script>'.length;
+    const script = section.slice(start, section.indexOf('</script>', start));
+    const win = new Window({ url: 'http://127.0.0.1:4100/dashboard?settings' });
+    const posts: string[] = [];
+    const fetchStub = async (url: string, init: { body?: string }) => {
+      const path = url.split('/').pop()!;
+      posts.push(path);
+      const body = JSON.parse(init.body ?? '{}') as { parent_key?: string };
+      if (path === 'browse') {
+        return new win.Response(JSON.stringify(body.parent_key === 'other'
+          ? { ok: true, path: '/other', folders: [], files: [] }
+          : { ok: true, path: '/Volumes/T7', folders: [{ key: 'other', name: 'other', selectable: true }], files: [{ key: 'b1', name: 'olympus-backup.olyb', bytes: 2000, encrypted: true }] }), { status: 200 });
+      }
+      return new win.Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    try {
+      win.document.body.innerHTML = section.slice(0, start - '<script>'.length) + '</section>';
+      new Function('window', 'document', 'HTMLInputElement', 'HTMLFormElement', 'HTMLElement', 'Element', 'fetch', script)(win, win.document, win.HTMLInputElement, win.HTMLFormElement, win.HTMLElement, win.Element, fetchStub);
+      const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
+      (win.document.querySelector('[data-backup-browse="restore"]') as unknown as HTMLElement).click();
+      await settle();
+      (win.document.querySelector('.bkpick') as unknown as HTMLElement).click();
+      const form = win.document.querySelector('[data-backup-restore]') as unknown as HTMLFormElement;
+      expect(form.hidden).toBe(false);
+      (form.querySelector('input[name="passphrase"]') as unknown as HTMLInputElement).value = 'correct horse battery';
+      const folder = Array.from(win.document.querySelectorAll('[data-browser-folders] button')).find((b) => b.textContent?.includes('other')) as unknown as HTMLElement;
+      folder.click();
+      await settle();
+      expect(form.hidden).toBe(true);
+      expect((form.querySelector('input[name="passphrase"]') as unknown as HTMLInputElement).value).toBe('');
+      form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }) as never);
+      await settle();
+      expect(posts).not.toContain('restore');
+    } finally {
+      await win.happyDOM.close();
+    }
+  });
+
   test('Enter in the restore passphrase starts the restore, never a native submit that would put it in the URL', async () => {
     const { Window } = await import('happy-dom');
     const status = { folder: '/Volumes/T7/Backup/Olympus', schedule: 'nightly' as const, passphraseSet: true, running: false, backups: [], restoreAvailable: true };
