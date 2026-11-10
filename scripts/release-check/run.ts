@@ -1264,7 +1264,8 @@ const tarballVersion = (dir: string): string | undefined => {
  */
 async function runRestoreLeg(run: Run, workDir: string, bundlePath: string, outDir: string): Promise<void> {
   const options = run.options;
-  if (options.skipRestore) return;
+  // Without the whole journeys leg there is no corrected item for the clean machine to find.
+  if (legPartial('restore', options)) return;
   const first = run.machine!;
   // Walks one restore journey on the current machine and records its trace; true when it passed.
   const walk = async (machine: JourneyMachine, label: string): Promise<boolean> => {
