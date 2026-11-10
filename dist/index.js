@@ -34622,7 +34622,7 @@ function canonicalDataRoot(root) {
 }
 async function callWorkerCli(operation, body, options = {}) {
   const env = options.env ?? process.env;
-  const config = loadConfig(env);
+  const config = options.config ?? loadConfig(env);
   const authToken = resolveWorkerAuthToken(env, config);
   if (!authToken)
     throw new WorkerUnreachableError("this command has no worker token to present");
@@ -34931,7 +34931,7 @@ async function readSetupStatus(options = {}) {
   const env = options.env ?? process.env;
   let answer;
   try {
-    answer = await callWorkerCli("setup-status", {}, { env, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
+    answer = await callWorkerCli("setup-status", {}, { env, ...options.config ? { config: options.config } : {}, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
   } catch (error) {
     if (!(error instanceof WorkerUnreachableError))
       throw error;
@@ -35429,7 +35429,7 @@ var operations = [
     mutating: false,
     nativeExposure: "always",
     cliHints: { name: "setup status" },
-    handler: async () => readSetupStatus()
+    handler: async (ctx) => readSetupStatus({ config: ctx.config })
   },
   {
     name: "ask_anonymously",

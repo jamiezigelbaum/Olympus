@@ -644,7 +644,7 @@ export const operations: Operation[] = [
     mutating: false,
     nativeExposure: 'always',
     cliHints: { name: 'setup status' },
-    handler: async () => readSetupStatus(),
+    handler: async (ctx) => readSetupStatus({ config: ctx.config }),
   },
   {
     name: 'ask_anonymously',

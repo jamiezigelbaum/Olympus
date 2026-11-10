@@ -6,6 +6,7 @@
  * every unknown step left to do. Read-only.
  */
 import { callWorkerCli, WorkerUnreachableError } from './cli-via-worker.ts';
+import type { OlympusConfig } from './config.ts';
 import { OperationError } from './operation-error.ts';
 import { buildSetupChecklist, parseSetupChecklist, type SetupChecklist } from './setup-checklist.ts';
 import { runningOlympusVersion } from './update-check.ts';
@@ -14,13 +15,15 @@ export interface SetupStatusOptions {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   version?: string;
+  /** A native tool's plugin configuration: its worker URL and token, not the command line's. */
+  config?: OlympusConfig;
 }
 
 export async function readSetupStatus(options: SetupStatusOptions = {}): Promise<SetupChecklist> {
   const env = options.env ?? process.env;
   let answer: unknown;
   try {
-    answer = await callWorkerCli('setup-status', {}, { env, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
+    answer = await callWorkerCli('setup-status', {}, { env, ...(options.config ? { config: options.config } : {}), ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
   } catch (error) {
     if (!(error instanceof WorkerUnreachableError)) throw error;
     return buildSetupChecklist({ version: options.version ?? runningOlympusVersion(), running: false });

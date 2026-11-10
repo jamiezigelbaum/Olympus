@@ -13,6 +13,7 @@ import {
   type SetupStepId,
 } from '../src/core/setup-checklist.ts';
 import { readSetupStatus } from '../src/core/setup-status.ts';
+import { loadConfig } from '../src/core/config.ts';
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { readSetupWorkerFacts, setupChecklistFromView, setupFactsFromView } from '../src/workers/setup-status.ts';
@@ -298,6 +299,22 @@ describe('olympus setup status reads the running Olympus', () => {
     const checklist = await readSetupStatus({ env, fetchImpl });
     expect(checklist).toEqual(buildSetupChecklist(ALL_DONE));
     expect(JSON.stringify(checklist)).not.toContain('worker-token-for-test');
+  });
+
+  test('a native tool reaches the worker its plugin configuration names, with its token', async () => {
+    const bare = { HOME: '/nonexistent-olympus-home' };
+    const config = { ...loadConfig(bare), email: { ...loadConfig(bare).email, baseUrl: 'http://127.0.0.1:9911/v1' }, worker: { ...loadConfig(bare).worker, authToken: 'plugin-config-token' } };
+    const seen: { url: string; auth: string | null }[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      seen.push({ url, auth: new Headers(init?.headers).get('authorization') });
+      if (url.endsWith('/health')) return new Response('{}');
+      return Response.json(buildSetupChecklist(ALL_DONE));
+    }) as unknown as typeof fetch;
+    const checklist = await readSetupStatus({ env: bare, config, fetchImpl });
+    expect(checklist).toEqual(buildSetupChecklist(ALL_DONE));
+    expect(seen.every((call) => call.url.startsWith('http://127.0.0.1:9911/'))).toBe(true);
+    expect(seen.at(-1)?.auth).toBe('Bearer plugin-config-token');
   });
 });
 
