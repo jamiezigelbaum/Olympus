@@ -5870,6 +5870,7 @@ import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync5, rmSync as rmSync2 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname11, join as join12 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir6();
@@ -5891,6 +5892,35 @@ function defaultTelegramPython(platform) {
   if (platform === "darwin" && python === "/usr/bin/python3" && spawnSync5("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
     return;
   return python;
+}
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync5) {
+  let directory = dirname11(fileURLToPath2(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    if (exists(join12(directory, TELEGRAM_REQUIREMENTS_FILE)))
+      return directory;
+    const parent = dirname11(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function telegramInstallCommands(input) {
+  const python = join12(input.venvDir, "bin", "python");
+  const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
+  return [
+    [...pip, "-r", join12(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join12(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+  ];
+}
+function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
+  const venv = "~/.cache/olympus/telegram-python";
+  const root = packageRoot ?? "<Olympus package>";
+  const [build, telethon] = telegramInstallCommands({ venvDir: venv, packageRoot: root }).map((argv) => argv.filter((arg) => arg !== "--quiet").map((arg) => arg.includes(" ") ? `"${arg}"` : arg).join(" "));
+  return `Use a private virtual environment: python3 -m venv ${venv}, then ${build}, then ${telethon}. Re-run olympus connect telegram --pair.`;
+}
+function telegramDependencyRefusedMessage(packageRoot) {
+  return `Olympus refused to install Telethon for Telegram: a downloaded package did not match the SHA-256 pinned in ${join12(packageRoot, TELEGRAM_REQUIREMENTS_FILE)}, so it may have been tampered with or substituted on the way. Nothing was installed. Check any pip mirror or proxy this computer uses, then re-run olympus connect telegram --pair; if it happens again, report it to the Olympus maintainers.`;
 }
 async function readyTelegramPython(options = {}) {
   if (options.pythonExecutable)
@@ -5919,35 +5949,49 @@ async function pythonImportsTelethon(python) {
   const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   return await child.exited === 0;
 }
-async function provisionTelegramPython(input) {
-  const run = async (argv) => {
-    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    let timeout;
-    const result = await Promise.race([
-      child.exited,
-      new Promise((resolve5) => {
-        timeout = setTimeout(() => resolve5("timeout"), 5 * 60 * 1000);
-      })
-    ]);
-    if (timeout)
-      clearTimeout(timeout);
-    if (result === "timeout")
-      child.kill("SIGKILL");
-    return result === 0;
-  };
+async function provisionTelegramPython(input, seams = {}) {
+  const packageRoot = seams.packageRoot ?? telegramRequirementsRoot();
+  if (!packageRoot)
+    throw new Error(`Olympus could not find its pinned Telethon list (${TELEGRAM_REQUIREMENTS_FILE}); reinstall Olympus, then re-run olympus connect telegram --pair.`);
+  const run = seams.run ?? runPip;
   const cacheHome = dirname11(dirname11(input.venvDir));
   ensurePrivateRootDirectorySync(cacheHome);
   ensurePrivateDirectoryTreeSync(cacheHome, dirname11(input.venvDir));
   const python = join12(input.venvDir, "bin", "python");
-  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
-  if (!ok)
+  const steps = [[input.python3, "-m", "venv", input.venvDir], ...telegramInstallCommands({ venvDir: input.venvDir, packageRoot }), [python, "-c", "import telethon"]];
+  for (const argv of steps) {
+    const result = await run(argv);
+    if (result.code === 0)
+      continue;
     rmSync2(input.venvDir, { recursive: true, force: true });
-  return ok;
+    if (PIP_HASH_MISMATCH.test(result.stderr))
+      throw new Error(telegramDependencyRefusedMessage(packageRoot));
+    return false;
+  }
+  return true;
 }
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0", TELEGRAM_DEPENDENCY_HINT, installing;
+async function runPip(argv) {
+  const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  const stderr = new Response(child.stderr).text().catch(() => "");
+  let timeout;
+  const result = await Promise.race([
+    child.exited,
+    new Promise((resolve5) => {
+      timeout = setTimeout(() => resolve5("timeout"), 5 * 60 * 1000);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  if (result === "timeout")
+    child.kill("SIGKILL");
+  return { code: result, stderr: result === "timeout" ? "" : await stderr };
+}
+var TELEGRAM_TELETHON_VERSION = "1.45.0", TELEGRAM_TELETHON_REQUIREMENT, TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt", TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt", TELEGRAM_DEPENDENCY_HINT, PIP_HASH_MISMATCH, installing;
 var init_messaging_runtime = __esm(() => {
   init_atomic_file();
-  TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+  TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
+  TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
+  PIP_HASH_MISMATCH = /DO NOT MATCH THE HASHES|hashes are required in --require-hashes mode/i;
   installing = new Map;
 });
 
@@ -22231,6 +22275,7 @@ class TierLedger {
     const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
     const key2 = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const nowIso = this.now().toISOString();
     const rows = this.db.query(`
       WITH win AS (
         SELECT * FROM tier_items
@@ -22247,16 +22292,17 @@ class TierLedger {
           -- resting on a retired prior: a prior replayed after a completed
           -- re-judge is a new decision and invalidates the old stamp, while a
           -- re-read that changed nothing (no text) stays settled (markRejudged).
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
-            WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || i.generation || char(0) || i.decided_at
-            ELSE ? END)
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
           -- Settled by a verdict under this classifier and sniffer (markJudged):
           -- not re-asked while its decision stays settled under this
           -- classifier. A later decision that left it owed a verdict (fail-safe,
           -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
             AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
@@ -22310,9 +22356,13 @@ class TierLedger {
           WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
           ELSE 'content_prompt'
         END AS rejudge_cause
-      FROM win i
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key2, key2, key2, key2, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "", key2, key2, key2, key2);
     const records = [];
     const causes = [];
     let builtinPromptSkipped = 0;
@@ -22320,6 +22370,8 @@ class TierLedger {
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1)
+        continue;
+      if (rejudgeUnavailableUntil(row, key2) > nowIso)
         continue;
       const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
       if (cause === "builtin_prompt_skipped") {
@@ -22356,6 +22408,25 @@ class TierLedger {
         THEN ?1 || char(0) || 'prior' || char(0) || generation || char(0) || decided_at ELSE ?1 END
       WHERE provider = ?2 AND account_scope = ?3 AND conversation_key = ?4 AND provider_item_id = ?5
     `).run(rejudgeKey(key2.engineVersion, key2.snifferId), ...idParams(identity2));
+  }
+  markRejudgeUnavailable(record, key2) {
+    const id = [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
+    const row = this.db.query(`
+      SELECT rejudged_key FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).get(...id, record.generation, record.decidedAt);
+    if (!row)
+      return;
+    const stampKey = rejudgeKey(key2.engineVersion, key2.snifferId);
+    const split = splitRejudgeStamp(row.rejudged_key);
+    const previous = split.unavailable?.split("\x01");
+    const misses = previous && previous[0] === stampKey && previous[1] === String(record.generation) && previous[2] === record.decidedAt ? (Number(previous[4]) || 0) + 1 : 0;
+    const wait = Math.min(REJUDGE_UNAVAILABLE_RETRY_MS * 2 ** Math.min(misses, 16), REJUDGE_UNAVAILABLE_MAX_RETRY_MS);
+    const retryAt = new Date(this.now().getTime() + wait).toISOString();
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).run([split.settled ?? "", stampKey, String(record.generation), record.decidedAt, retryAt, String(misses)].join("\x01"), ...id, record.generation, record.decidedAt);
   }
   markJudged(identity2, key2) {
     this.db.query(`
@@ -24253,6 +24324,18 @@ function copyFromRow(row) {
 function rejudgeKey(engineVersion, snifferId) {
   return `${engineVersion}\x00${snifferId ?? ""}`;
 }
+function rejudgeUnavailableUntil(row, key2) {
+  const mark = splitRejudgeStamp(row.rejudged_key).unavailable?.split("\x01");
+  return mark && mark[0] === key2 && mark[1] === String(row.generation) && mark[2] === row.decided_at ? mark[3] ?? "" : "";
+}
+function splitRejudgeStamp(value) {
+  if (!value)
+    return {};
+  const at = value.indexOf("\x01");
+  if (at < 0)
+    return { settled: value };
+  return { ...at > 0 ? { settled: value.slice(0, at) } : {}, unavailable: value.slice(at + 1) };
+}
 function identityOfRow(row) {
   return {
     provider: row.provider,
@@ -24369,7 +24452,7 @@ function settledSnifferRejudgeCause(row, cause, id) {
     return cause;
   const reasons = JSON.parse(row.reasons_json);
   const previous = [];
-  const stamp = row.rejudged_key?.split("\x00");
+  const stamp = splitRejudgeStamp(row.rejudged_key).settled?.split("\x00");
   if (stamp?.[0] === row.engine_version && (stamp.length === 2 || stamp.length === 3 && stamp[2] === "judged" && !reasons.some((reason) => reason.includes(":fail_safe:")))) {
     previous.push(stamp[1]);
   } else {
@@ -24925,11 +25008,13 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
   init_tier_ledger_path();
+  REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
+  REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
   TierLedgerGenerationConflictError = class TierLedgerGenerationConflictError extends Error {
     constructor(message2 = "Tier ledger generation changed; re-read the row before flipping.") {
       super(message2);
@@ -25624,7 +25709,7 @@ __export(exports_sovereignty, {
 });
 import { chmodSync as chmodSync8, existsSync as existsSync22, mkdirSync as mkdirSync14, readFileSync as readFileSync26 } from "node:fs";
 import { dirname as dirname27, join as join30, resolve as resolve9 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function isStandaloneEngineProcess(env) {
@@ -26091,8 +26176,8 @@ function migratePrivateMeaningSearch(path) {
   }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join30(dirname27(fileURLToPath2(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join30(dirname27(fileURLToPath2(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
+  const sourceLayoutPath = join30(dirname27(fileURLToPath3(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join30(dirname27(fileURLToPath3(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
   const path = existsSync22(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync26(path, "utf8"));
   return validateSovereigntyConfig(parsed);
@@ -41417,10 +41502,10 @@ import { spawn as spawnChild } from "node:child_process";
 import { randomBytes as randomBytes6 } from "node:crypto";
 import { homedir as homedir18 } from "node:os";
 import { dirname as dirname32, join as join36, resolve as resolve13 } from "node:path";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 async function pairMessagingSource(options) {
   const env = { ...process.env, ...options.env ?? {} };
-  const packageRoot = resolve13(options.packageRoot ?? join36(dirname32(fileURLToPath3(import.meta.url)), "..", ".."));
+  const packageRoot = resolve13(options.packageRoot ?? join36(dirname32(fileURLToPath4(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const account = { sourceId: options.source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID };
@@ -42159,7 +42244,7 @@ var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial
 import { existsSync as existsSync31, mkdirSync as mkdirSync19, rmSync as rmSync11 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { dirname as dirname33, join as join37 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -42382,7 +42467,7 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join37(dirname33(fileURLToPath4(import.meta.url)), "..", "..");
+    const packageRoot = options.packageRoot ?? join37(dirname33(fileURLToPath5(import.meta.url)), "..", "..");
     return { executable, args: [join37(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -56566,7 +56651,8 @@ var init_vocabulary = __esm(() => {
     veniceTag: "In Venice’s cloud",
     zkapiOff: "Turned off. zkAPI is turned off.",
     zkapiPaused: "Paused. Accept the updated statements to continue.",
-    turnOnInModels: "Turn on below",
+    turnOnInModels: "Turn on in Settings",
+    fixInSettings: "Fix in Settings",
     afterAsk: "Sent. The answer will appear in your inbox.",
     computerName: "Local model",
     veniceName: "Venice model",
@@ -56582,7 +56668,7 @@ var init_vocabulary = __esm(() => {
     levelStrictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
     levelStandard: "Standard",
     levelStandardHint: "Your words, prepared the way you chose in {models}.",
-    levelModelsLink: "zkAPI settings",
+    levelModelsLink: "Privacy rules",
     askComputer: "Ask the local model",
     askVenice: "Ask a Venice model",
     askZkapi: "Ask a model through zkAPI",
@@ -56612,10 +56698,11 @@ var init_vocabulary = __esm(() => {
     inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
     inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
     anonymousFailed: "Olympus could not answer this question.",
-    goToModels: "Review below",
+    goToModels: "Review in Settings",
     privatePath: "Local model",
     anonymousPath: "zkAPI model",
-    sent: "What was sent to zkAPI",
+    sentAsWritten: "Sent to zkAPI as you wrote it.",
+    sentRewritten: "Sent to zkAPI (rewritten)",
     askLabel: "Your question",
     askPlaceholder: "Ask anything, including about your Private items…",
     ask: "Ask",
@@ -56862,6 +56949,11 @@ var init_vocabulary = __esm(() => {
     abandonHint: "Stops waiting without finishing it; the unfinished payment may later link two sessions.",
     abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
     languagesTitle: "Languages",
+    privacyChoicesLink: "What zkAPI may send, and how the question is written, is on Privacy rules.",
+    accountLink: "Balance, limits and setup",
+    saveLanguages: "Save languages",
+    settingsTitle: "zkAPI",
+    settingsIntro: "Your anonymous account for outside answers: money, connection and limits.",
     languagesIntro: "The outside question may use these languages. Only languages with a word pack installed on this computer can be chosen.",
     packMissing: "pack not installed",
     domainsOn: "Besides everyday words in these languages, a question may use: {list}.",
@@ -61964,7 +62056,7 @@ import { closeSync as closeSync15, constants as constants6, existsSync as exists
 import { homedir as homedir25 } from "node:os";
 import { delimiter as delimiter3, dirname as dirname50, isAbsolute as isAbsolute20, join as join53 } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath as fileURLToPath5 } from "node:url";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 function helperEnvironment() {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -62196,7 +62288,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
   }
 }
 function helperPath() {
-  const here = dirname50(fileURLToPath5(import.meta.url));
+  const here = dirname50(fileURLToPath6(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join53(here, name);
     if (existsSync46(candidate))
@@ -63534,9 +63626,9 @@ var init_tier_row_rehome = __esm(() => {
 // src/workers/classification/secret-scan-off-thread.ts
 import { existsSync as existsSync47 } from "node:fs";
 import { dirname as dirname52, join as join56 } from "node:path";
-import { fileURLToPath as fileURLToPath6 } from "node:url";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
 function workerPath() {
-  const here = dirname52(fileURLToPath6(import.meta.url));
+  const here = dirname52(fileURLToPath7(import.meta.url));
   for (const name of ["secret-scan-worker.js", "secret-scan-worker.ts"]) {
     const candidate = join56(here, name);
     if (existsSync47(candidate))
@@ -63712,7 +63804,7 @@ function rejudgeStoredContent(set, record, options) {
   const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join("") ?? "";
   if (!exported || !text2.trim()) {
     if (key2)
-      ledger.markRejudged(identity2, key2);
+      ledger.markRejudgeUnavailable(record, key2);
     report.skipped += 1;
     return;
   }
@@ -66403,7 +66495,7 @@ function createLocalModelActivity() {
     const kind = localInferencePriority?.getStore() ?? "owner";
     pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try {
-        resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
+        resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key2, work)) : lease(key2, work)));
       } catch (error) {
         reject(error);
       }
@@ -66411,6 +66503,19 @@ function createLocalModelActivity() {
     queueMicrotask(pump);
   });
   const taggedRunning = new Map;
+  const ownerRunning = new Map;
+  const lease = async (key2, work) => {
+    const store = localInferencePriority?.getStore();
+    const owner = store !== "background" && store !== "maintenance";
+    if (owner)
+      ownerRunning.set(key2, (ownerRunning.get(key2) ?? 0) + 1);
+    try {
+      return await get(key2).run(work);
+    } finally {
+      if (owner)
+        ownerRunning.set(key2, (ownerRunning.get(key2) ?? 1) - 1);
+    }
+  };
   const resources = new Map;
   const busyListeners = new Map;
   const get = (key2) => {
@@ -66429,7 +66534,8 @@ function createLocalModelActivity() {
   return {
     busy: (key2) => get(key2).busy,
     busyExcept: (key2, tag) => get(key2).inFlight > (taggedRunning.get(`${key2}\x00${tag}`) ?? 0),
-    run: (key2, work) => get(key2).run(work),
+    ownerInFlight: (key2) => (ownerRunning.get(key2) ?? 0) > 0,
+    run: (key2, work) => lease(key2, work),
     onBusy(key2, listener) {
       const listeners = busyListeners.get(key2) ?? new Set;
       busyListeners.set(key2, listeners);
@@ -66442,7 +66548,7 @@ function createLocalModelActivity() {
     track(key2, model, options = {}) {
       const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work2) => get(key2).run(work2) : (work2) => dispatch(key2, work2, limit);
+        const run = options.serialize === false ? (work2) => lease(key2, work2) : (work2) => dispatch(key2, work2, limit);
         return run(async () => {
           const tagKey = options.tag === undefined ? undefined : `${key2}\x00${options.tag}`;
           if (tagKey !== undefined)
@@ -88273,9 +88379,9 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync55 } from "node:fs";
 import { dirname as dirname62, join as join76 } from "node:path";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync55) {
-  let directory = dirname62(fileURLToPath7(moduleUrl));
+  let directory = dirname62(fileURLToPath8(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
     const candidate = join76(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
@@ -89793,7 +89899,7 @@ var init_remote_vlm = __esm(() => {
 import { Worker as Worker2 } from "node:worker_threads";
 import { existsSync as existsSync56 } from "node:fs";
 import { dirname as dirname63, join as join80 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
+import { fileURLToPath as fileURLToPath9 } from "node:url";
 function modelThreadHandleId() {
   return nextHandle++;
 }
@@ -89893,7 +89999,7 @@ function cancelled() {
   return Object.assign(new Error("The request was cancelled."), { name: "AbortError" });
 }
 function modelWorkerPath() {
-  const here = dirname63(fileURLToPath8(import.meta.url));
+  const here = dirname63(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join80(here, name);
     if (existsSync56(path))
@@ -100502,6 +100608,22 @@ class LocalSourceSchedulerStateStore {
       `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
     });
   }
+  recordInterruption(input) {
+    const key2 = requireStateKey(input);
+    const interruptedAt = requireTimestamp2(input.interruptedAt, "interruptedAt");
+    return this.writeCurrentVersion(key2, () => {
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version,
+          not_before_at, attempt_in_progress, consecutive_failures, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          not_before_at = excluded.not_before_at,
+          attempt_in_progress = 0,
+          updated_at = excluded.updated_at
+      `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, interruptedAt, interruptedAt);
+    });
+  }
   writeCurrentVersion(key2, write) {
     return this.db.transaction(() => {
       const existing = this.db.query(`
@@ -104556,7 +104678,7 @@ import { homedir as homedir28 } from "node:os";
 import { randomUUID as randomUUID23 } from "node:crypto";
 import { statSync as statSync30 } from "node:fs";
 import { basename as basename14, delimiter as delimiter6, isAbsolute as isAbsolute28, join as join95 } from "node:path";
-import { fileURLToPath as fileURLToPath9 } from "node:url";
+import { fileURLToPath as fileURLToPath10 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
   let proofGeneration = 0;
@@ -104790,7 +104912,7 @@ function resolveBunRuntimePath(configured, env) {
   throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
 }
 function resolveWorkerExecutablePath(configured, moduleUrl) {
-  const candidate = configured ?? fileURLToPath9(new URL("./cli.js", moduleUrl));
+  const candidate = configured ?? fileURLToPath10(new URL("./cli.js", moduleUrl));
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
@@ -113592,7 +113714,7 @@ import { createHash as createHash74 } from "node:crypto";
 import { existsSync as existsSync73, readFileSync as readFileSync60, statSync as statSync35 } from "node:fs";
 import { homedir as homedir32 } from "node:os";
 import { basename as basename17, dirname as dirname78, join as join103 } from "node:path";
-import { fileURLToPath as fileURLToPath10 } from "node:url";
+import { fileURLToPath as fileURLToPath11 } from "node:url";
 import { gunzipSync as gunzipSync2 } from "node:zlib";
 function classifyPath(path, isNumber2) {
   const key2 = path.slice(path.lastIndexOf(".") + 1).replace(/\[\]$/u, "");
@@ -114124,7 +114246,7 @@ function readPack(path, sha2566) {
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname78(fileURLToPath10(moduleUrl));
+  const here = dirname78(fileURLToPath11(moduleUrl));
   const root = basename17(here) === "core" && basename17(dirname78(here)) === "src" ? dirname78(dirname78(here)) : basename17(here) === "dist" ? dirname78(here) : undefined;
   return root !== undefined && existsSync73(join103(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
@@ -119785,10 +119907,10 @@ var init_operations = __esm(() => {
 // src/version.ts
 import { readFileSync as readFileSync63 } from "node:fs";
 import { dirname as dirname79, join as join106 } from "node:path";
-import { fileURLToPath as fileURLToPath11 } from "node:url";
+import { fileURLToPath as fileURLToPath12 } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname79(dirname79(fileURLToPath11(import.meta.url)));
+  repoRoot = dirname79(dirname79(fileURLToPath12(import.meta.url)));
   manifest = JSON.parse(readFileSync63(join106(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
@@ -142512,7 +142634,7 @@ var init_embedding_runtime = __esm(() => {
 import { randomUUID as randomUUID31 } from "node:crypto";
 import { readFileSync as readFileSync75, statSync as statSync38 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname90, isAbsolute as isAbsolute34, join as join118 } from "node:path";
-import { fileURLToPath as fileURLToPath12 } from "node:url";
+import { fileURLToPath as fileURLToPath13 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
     id: SERVICE_ID2,
@@ -142554,7 +142676,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   env.GEMINI_API_KEY ??= env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY;
   env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY ??= env.GEMINI_API_KEY;
   const runtimePath = resolveBunRuntimePath2(drain.runtimePath, env);
-  const executablePath = assertUsableFile(fileURLToPath12(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
+  const executablePath = assertUsableFile(fileURLToPath13(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
   if (!isAbsolute34(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
@@ -146486,10 +146608,19 @@ function linuxModelReadiness(env = process.env, options = {}) {
     {
       name: "Transcription",
       state: transcriptionEnabled ? transcription.state : "unavailable",
-      detail: env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? "An external transcription command is configured." : transcriptionEnabled ? `Qwen3-ASR 0.6B: ${transcription.state}. Downloads when audio is chosen.` : "Built-in transcription is off or its audio decoder is unavailable. Install ffmpeg, or check OLYMPUS_BUILT_IN_TRANSCRIPTION, then restart Olympus.",
+      detail: env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? "An external transcription command is configured." : transcriptionEnabled ? `Qwen3-ASR 0.6B: ${transcription.state}. Downloads when audio is chosen.` : transcriptionOffReason(env, options.decoderPresent ?? (() => audioDecoderPresent(`linux-${process.arch}`, env))),
       downloadBytes: QWEN3_ASR_06B.files.reduce((sum2, file) => sum2 + file.bytes, 0)
     }
   ];
+}
+function transcriptionOffReason(env, decoderPresent) {
+  const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no") {
+    return `Built-in transcription is turned off by ${BUILT_IN_TRANSCRIPTION_ENV}=${raw}. Remove that setting to turn it on, then restart Olympus.`;
+  }
+  if (decoderPresent())
+    return "Built-in transcription is not available for this kind of computer.";
+  return "Built-in transcription needs ffmpeg, which is not installed. Install ffmpeg, then restart Olympus.";
 }
 var init_linux_model_readiness = __esm(() => {
   init_analyst_built_in();
@@ -154005,6 +154136,8 @@ function shortTime(iso2) {
   return `${shortDate(iso2.slice(0, 10))} ${iso2.slice(11, 16)}`.trim();
 }
 function renderOutsideHelpCard(status, input) {
+  if (input.part === "privacy")
+    return renderOutsideHelpPrivacyPart(status, input);
   const summary = summaryOf(status);
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
@@ -154019,8 +154152,9 @@ function renderOutsideHelpCard(status, input) {
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
   const missingRoute = !unavailable4 && route.state === "not_configured";
+  const writerHref = input.part === "account" && input.otherPartHref ? `${input.otherPartHref.split("#")[0]}#outside-writer` : undefined;
   if (missingRoute)
-    parts.push(renderProblems(status, access));
+    parts.push(renderProblems(status, access, writerHref));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
@@ -154032,18 +154166,24 @@ function renderOutsideHelpCard(status, input) {
     return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
   }
   if (!missingRoute)
-    parts.push(renderProblems(status, access));
+    parts.push(renderProblems(status, access, writerHref));
   if (route.state === "configured" && !route.acknowledgements.complete)
     parts.push(renderStatementsToAccept(access));
   const more = [];
   if (!on)
     more.push(renderBeforeTurningOn());
-  more.push(renderLevel(status, canEdit));
-  if (status.standard)
-    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
-  if (status.writer)
-    more.push(renderWriter(status.writer, canEdit));
-  more.push(renderLanguages(status, canEdit));
+  if (input.part === "account") {
+    parts.push(savedLanguagesForSwitch(status));
+    if (input.otherPartHref)
+      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
+  } else {
+    more.push(renderLevel(status, canEdit));
+    if (status.standard)
+      more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
+    if (status.writer)
+      more.push(renderWriter(status.writer, canEdit));
+    more.push(renderLanguages(status, canEdit));
+  }
   if (route.state === "configured")
     more.push(renderLimits(route, canEdit));
   if (route.state === "configured" && route.acknowledgements.complete)
@@ -154054,6 +154194,36 @@ function renderOutsideHelpCard(status, input) {
   const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
+}
+function savedLanguagesForSwitch(status) {
+  const chosen = new Set(status.settings.languages);
+  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
+}
+function renderOutsideHelpPrivacyPart(status, input) {
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
+  const summary = summaryOf(status);
+  const on = status.settings.state === "on";
+  const parts = [];
+  if (canUnlock) {
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
+  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
+  if (status.writer?.modelProblem) {
+    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
+  }
+  const more = [renderLevel(status, canEdit)];
+  if (status.standard)
+    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
+  if (status.writer)
+    more.push(renderWriter(status.writer, canEdit));
+  const invalid4 = status.settings.state === "invalid";
+  const save = canEdit && !invalid4 ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
+  parts.push(`<div class="ohmore">${more.join("")}</div>`);
+  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}`;
 }
 function outsideHelpScriptConfig(csrfToken) {
   return {
@@ -154108,7 +154278,7 @@ function problemLine(words2, fix, access, input = {}) {
   }
   return `<li${input.attrs ?? ""}><span>${escapeHtml2(words2)}</span>${action}</li>`;
 }
-function renderProblems(status, access) {
+function renderProblems(status, access, writerHref) {
   const canEdit = access === "edit";
   const route = status.route;
   const items = [];
@@ -154164,8 +154334,10 @@ function renderProblems(status, access) {
       items.push(problemLine(words2, fix, access, { attrs }));
     }
   }
-  if (status.writer?.modelProblem) {
+  if (status.writer?.modelProblem && writerHref === undefined) {
     items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
+  } else if (status.writer?.modelProblem && writerHref !== undefined) {
+    items.push(`<li data-outside-model-problem><span>${escapeHtml2(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml2(writerHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
   }
   if (items.length === 0)
     return "";
@@ -154426,6 +154598,7 @@ function outsideHelpClientScript(config2) {
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
       var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
+      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
       return body;
     }
     if (kind === 'route') {
@@ -163048,8 +163221,7 @@ function renderPrivateAnswersBody(options) {
     script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date) : "";
-  const zkapiSetup = `<section class="pasection" id="${ANONYMOUS_SETUP_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiSetupTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : csrfToken === undefined ? `<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)}</p>` : `<p class="pnote" data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`;
-  return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}${zkapiSetup}</div>${script2}`;
+  return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}</div>${script2}`;
 }
 function renderAsk(options, enabled, inbox) {
   const models = dashboardLocalPageHref("keys", readToken(options?.basePath));
@@ -163057,11 +163229,13 @@ function renderAsk(options, enabled, inbox) {
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
   const zkModel = zk?.route.state === "configured" ? zk.route.model : undefined;
-  const zkSetup = `#${ANONYMOUS_SETUP_ID}`;
+  const zkSetup = `${dashboardLocalPageHref("settings", readToken(options?.basePath))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
+  const zkModelHref = `${models}#zkapi-model`;
+  const zkPaused = zkState === "needs_acceptance" || zkState === "blocked" || zkState === "fence_held";
   const destinations = [
     { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerCard, model: states.computerModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLine, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
     { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceCard, model: states.veniceModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLine, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" },
-    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiCard, model: zkModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLine, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: zkSetup, action: "ask_anonymous" }
+    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiCard, model: zkModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLine, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.fixInSettings : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: zkSetup, action: "ask_anonymous" }
   ];
   const label = (d) => d.model ? `${d.name} · ${d.model}` : d.name;
   const first = enabled ? destinations.find((d) => d.state === "ready") : undefined;
@@ -163074,11 +163248,11 @@ function renderAsk(options, enabled, inbox) {
     };
     const state = d.state;
     const action = enabled ? actions[state] : "";
-    const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
+    const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
     const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot3]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot3}" aria-hidden="true"></span>${escapeHtml2(text4)}</span>`).join("");
     const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
-    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.id === "anonymous" && d.model && enabled ? ` <a class="pamodelchange" href="${escapeHtml2(zkSetup)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", zkSetup) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml2(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("");
   const answeredBy = first ? DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy.replace("{name}", label(first)) : DASHBOARD_PRIVATE_ANSWERS_COPY.noneReady;
   const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
@@ -163094,7 +163268,8 @@ function renderFailureNotice(reason) {
   return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml2(failure2.message)} ${failure2.href ? `<a href="${escapeHtml2(failure2.href)}">${escapeHtml2(failure2.action)}</a>` : escapeHtml2(failure2.action)}</p>`;
 }
 function renderWaiting(waiting, now) {
-  const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
+  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
@@ -163110,7 +163285,6 @@ function renderWaiting(waiting, now) {
     return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
-  parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button></div>`);
   parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
@@ -163130,7 +163304,8 @@ function privateAnswersClientScript(input) {
       venicePath: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName,
       destinationBusy: DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy,
       emptyQuestion: DASHBOARD_PRIVATE_ANSWERS_COPY.emptyQuestion,
-      sent: DASHBOARD_PRIVATE_ANSWERS_COPY.sent,
+      sentAsWritten: DASHBOARD_PRIVATE_ANSWERS_COPY.sentAsWritten,
+      sentRewritten: DASHBOARD_PRIVATE_ANSWERS_COPY.sentRewritten,
       privatePath: DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath,
       anonymousPath: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath,
       open: DASHBOARD_PRIVATE_ANSWERS_COPY.open,
@@ -163208,9 +163383,12 @@ function privateAnswersClientScript(input) {
   function panel(out, question) {
     out.textContent = '';
     var card = el('div', 'pacard');
-    var heading = el('p', 'paquestion');
-    heading.appendChild(el('strong', '', question));
-    card.appendChild(heading);
+    // An inbox row already shows its question as the row title (#1045); only the Ask result repeats it.
+    if (question && !out.closest('[data-pa-question]')) {
+      var heading = el('p', 'paquestion');
+      heading.appendChild(el('strong', '', question));
+      card.appendChild(heading);
+    }
     out.appendChild(card);
     return card;
   }
@@ -163265,8 +163443,12 @@ function privateAnswersClientScript(input) {
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
-      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      // What left for zkAPI, in the muted meta area (#1045): one line when it is the question as written, the text only when it was rewritten.
+      if (typeof result.sent === 'string') {
+        if (result.sent.trim() === String(question || '').trim()) meta.appendChild(el('p', 'palabel', config.copy.sentAsWritten));
+        else { meta.appendChild(el('div', 'palabel', config.copy.sentRewritten)); meta.appendChild(el('p', 'pasent', result.sent)); }
+      }
       renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -163527,15 +163709,19 @@ function privateAnswersClientScript(input) {
   schedule();
 })();`;
 }
-var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", DASHBOARD_SETTINGS_ZKAPI_ID = "zkapi", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
 .pa { width: 100%; min-width: 0; max-width: min(920px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
-.pa .pasection > .sect { margin: 0 0 12px; }
+.pa .pasection > .sect, .pa .pawaithead > .sect { margin: 0 0 12px; }
+.pa .pawaithead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pa .palink { padding: 0; border: 0; background: none; color: var(--t2); font: inherit; font-size: var(--fs-body); text-decoration: underline; cursor: pointer; }
+.pa .palink:hover, .pa .palink:focus-visible { color: var(--link); }
+.pa .palink[hidden] { display: none; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
-.pa .pasent { white-space: pre-wrap; }
+.pa .pameta .pasent { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--t2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -163639,14 +163825,13 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH 
 .judgecap { display: block; margin: 8px 0 4px; }
 .judgehow { margin: 10px 0 0; color: var(--t2); }
 @media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
-`, ANONYMOUS_SETUP_ID;
+`;
 var init_private_answers = __esm(() => {
   init_components();
   init_host_page();
   init_top_nav();
   init_outside_help();
   init_vocabulary();
-  ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
 });
 
 // src/workers/dashboard/source-logos.ts
@@ -163733,7 +163918,7 @@ function renderAnswerModelPickers(choices, unlocked) {
 function renderZkapiModelPicker(choices, unlocked) {
   if (!choices?.zkapi)
     return "";
-  return `<section id="zkapi-model"><h3 class="sect">On Private questions</h3><div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div></section>`;
+  return `<div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div>`;
 }
 var TITLES, LOCAL_MODEL_AGENT_REQUEST = `Help me add a local model to Olympus. Pick a model that fits this computer's memory, download it with Ollama or LM Studio, start it, and tell me when it is running so I can press "Look on this computer" in Olympus Privacy rules. Do not change Olympus settings yourself.`, MODEL_PICKER_CSS = `
 .pickrows { display: grid; gap: 12px; margin: 12px 0; }
@@ -163977,7 +164162,7 @@ function renderDashboardKeysPage(view3, options) {
     dashboardPrivacyTabs("settings", token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
     `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view3.model_setup) + `<div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
-    renderZkapiModelPicker(options?.modelChoices, unlocked(options)),
+    renderZkapiPrivacy(options, token),
     view3.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view3, options)
   ].filter((block) => block !== "").join(`
@@ -163987,9 +164172,17 @@ function renderDashboardKeysPage(view3, options) {
     tab: "privacy",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
-    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
     options
   });
+}
+function renderZkapiPrivacy(options, token) {
+  const picker2 = renderZkapiModelPicker(options?.modelChoices, unlocked(options));
+  const csrfToken = options?.controlSessionCsrfToken;
+  const card = options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "privacy", otherPartHref: `${dashboardLocalPageHref("settings", token)}#${DASHBOARD_SETTINGS_ZKAPI_ID}` }) : "";
+  if (!picker2 && !card)
+    return "";
+  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker2}${card}</section>`;
 }
 function sourceDomId(sourceId) {
   return sourceId.replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -164243,13 +164436,15 @@ function renderDashboardSettingsPage(options) {
   const token = readToken2(options?.basePath);
   const settings = options?.settings;
   const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
-  const agents = `<section id="settings-agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>') : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
-  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>' + (settings?.models?.length ? `<div class="srows">${settings.models.map((model) => `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(model.name)}</b> <span class="pnote">· ${escapeHtml2(model.state)}</span><p class="pnote">${escapeHtml2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p></div></div>`).join("")}</div>` : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>') + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml2(dashboardLocalPageHref("keys", token)) + '">Privacy rules</a>.</p></section>';
+  const agents = `<section class="setpane" id="agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>') : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3>' + (settings?.models?.length ? `<div class="srows">${settings.models.map((model) => `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(model.name)}</b> <span class="pnote">· ${escapeHtml2(model.state)}</span><p class="pnote">${escapeHtml2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p></div></div>`).join("")}</div>` : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>') + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml2(dashboardLocalPageHref("keys", token)) + '">Privacy rules</a>.</p></section>';
+  const csrfToken = options?.controlSessionCsrfToken;
+  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml2(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
   const update = settings?.update;
-  const updates = '<section><h3 class="sect" id="updates">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
-  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
-  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
-  return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
+  const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
+  return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS], options });
 }
 function renderDashboardHelpPage(options) {
   const report = options?.systemReport;
@@ -164328,16 +164523,7 @@ var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a c
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
-`, SETTINGS_SECTIONS, SETTINGS_CSS = `
-.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
-.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
-.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
-.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
-.setmain section + section { margin-top: 24px; }
-.setmain > section:first-child .sect { margin-top: 0; }
-.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
-`;
+`, SETTINGS_SECTIONS, SETTINGS_CSS;
 var init_local = __esm(() => {
   init_judge_spending();
   init_source_failure();
@@ -164354,6 +164540,7 @@ var init_local = __esm(() => {
   init_vocabulary();
   init_model_pickers();
   init_model_setup2();
+  init_outside_help();
   init_vocabulary();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
   CONNECTOR_PROMPT = [
@@ -164389,9 +164576,24 @@ var init_local = __esm(() => {
   SETTINGS_SECTIONS = [
     { id: "agents", label: "Agents and access" },
     { id: "models", label: "Models on this computer" },
+    { id: DASHBOARD_SETTINGS_ZKAPI_ID, label: "zkAPI" },
     { id: "updates", label: "Updates" },
     { id: "help", label: "Help" }
   ];
+  SETTINGS_CSS = `
+.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
+.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
+.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
+.setmain > .setpane { display: none; scroll-margin-top: 12px; }
+.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }
+.setmain > .setpane > .sect:first-child { margin-top: 0; }
+${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .setside a[href="#${section.id}"]`).join(`,
+`)},
+.setlayout:not(:has(.setpane:target)) .setside a:first-child { border-color: var(--link); background: var(--panel, transparent); font-weight: 600; }
+.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
+`;
 });
 
 // src/workers/dashboard/index.ts
@@ -164427,7 +164629,7 @@ function dashboardLegacyRedirect(url2) {
   return dashboardHomeHref(dashboardReadToken(url2));
 }
 function dashboardOutsideHelpRedirect(url2) {
-  return `${dashboardLocalPageHref("privateAnswers", dashboardReadToken(url2))}#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`;
+  return `${dashboardLocalPageHref("settings", dashboardReadToken(url2))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
 }
 function renderDashboardLocalPage(page2, input) {
   const options = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -170335,10 +170537,15 @@ function createEmailSourceWorker(options = {}) {
           if (page2 === "settings") {
             const installer = installerForPlatform(options.platform ?? process.platform);
             const update = installer ? options.updateAvailable?.() : undefined;
+            const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
+              return;
+            }) : undefined;
             return html2(renderDashboardLocalPage("settings", {
               url: url2,
               options: {
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                ...outsideHelp ? { outsideHelp } : {},
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 ...agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {},
                 ...options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {},
                 settings: {
@@ -176493,6 +176700,7 @@ class SourceScheduler {
   lastAfterTickAt;
   afterTickTimer;
   timer;
+  stops = 0;
   fastWakeTimers = new Map;
   continueAfterMs;
   setTimeoutImpl;
@@ -176563,6 +176771,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.stops += 1;
     this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
@@ -176889,6 +177098,7 @@ class SourceScheduler {
     const cadenceAnchor = state.nextRunAt;
     const attemptedAt = this.now().toISOString();
     state.lastAttemptAt = attemptedAt;
+    const stopsAtStart = this.stops;
     try {
       if (this.stateStore) {
         if (state.pendingUnpark && this.stateStore.claimUnparkAttempt) {
@@ -176919,7 +177129,7 @@ class SourceScheduler {
           }));
         }
       }
-      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance);
+      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
@@ -176988,6 +177198,10 @@ class SourceScheduler {
         this.wakeDownstream(state, continueAt);
     } catch (error2) {
       delete state.wakeAfterRun;
+      if (this.stops !== stopsAtStart) {
+        this.recordShutdownInterruption(state);
+        return;
+      }
       const message2 = error2 instanceof Error ? error2.message : String(error2);
       const errorKind2 = safeSchedulerErrorKind(error2);
       const errorHash = hash(message2);
@@ -177020,6 +177234,21 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind2} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind2, error2)}`);
     }
   }
+  recordShutdownInterruption(state) {
+    const interruptedAt = this.now().toISOString();
+    if (this.stateStore?.recordInterruption) {
+      try {
+        this.applyPersistedState(state, this.stateStore.recordInterruption({
+          ...schedulerTaskStateKey(state.source, state.task),
+          interruptedAt
+        }));
+      } catch (stateError) {
+        console.error(`[olympus:source-scheduler] state_persist_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${safeSchedulerErrorKind(stateError)}`);
+      }
+    }
+    state.nextRunAt = Date.parse(interruptedAt);
+    console.info(`[olympus:source-scheduler] task_interrupted_by_shutdown source_id=${state.source.sourceId} task_id=${state.task.id}`);
+  }
   applyPendingUnparks(dueAt) {
     if (!this.stateStore?.pendingUnparks)
       return;
@@ -177037,7 +177266,7 @@ ${request.taskId}`);
       state.nextRunAt = Math.min(state.nextRunAt, dueAt);
     }
   }
-  async runWithTransientRetries(state, task, attemptedAt, provenance) {
+  async runWithTransientRetries(state, task, attemptedAt, provenance, stopsAtStart) {
     let lastError;
     for (let attempt = 1;attempt <= this.maxTransientRetries; attempt += 1) {
       try {
@@ -177055,7 +177284,11 @@ ${request.taskId}`);
         lastError = error2;
         if (safeSchedulerRetryAt(error2) || !isTransientError(error2) || attempt >= this.maxTransientRetries)
           break;
+        if (this.stops !== stopsAtStart)
+          break;
         await this.sleep(this.errorBackoffMs);
+        if (this.stops !== stopsAtStart)
+          break;
       }
     }
     throw lastError;
@@ -195658,6 +195891,9 @@ var init_sniffer_resolver = __esm(() => {
 // src/workers/classification/sniffer-service.ts
 import { Database as Database24 } from "bun:sqlite";
 import { existsSync as existsSync103 } from "node:fs";
+function unrefTimer(timer) {
+  timer?.unref?.();
+}
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
@@ -195708,24 +195944,27 @@ class TierSnifferService {
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
   }
+  timers() {
+    return this.options.timers ?? GLOBAL_TIMERS;
+  }
   start() {
     if (this.timer)
       return;
-    this.timer = setInterval(() => {
+    this.timer = this.timers().setInterval(() => {
       this.drainMoves();
       this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
-    this.timer.unref?.();
+    unrefTimer(this.timer);
     this.wake();
   }
   wake() {
     if (this.stopped || this.continuation)
       return;
-    this.continuation = setTimeout(() => {
+    this.continuation = this.timers().setTimeout(() => {
       this.continuation = undefined;
       this.scheduledRun();
     }, 0);
-    this.continuation.unref?.();
+    unrefTimer(this.continuation);
   }
   async scheduledRun() {
     if (this.notAnsweringUntilMs > this.clockMs())
@@ -195739,7 +195978,7 @@ class TierSnifferService {
     const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
     if (!filters.length)
       return;
-    this.trainingTimer = setTimeout(() => {
+    this.trainingTimer = this.timers().setTimeout(() => {
       this.trainingTimer = undefined;
       const shouldYield = () => this.stopped || this.trainingJudge !== judge3 || this.yieldNow();
       const job = (async () => {
@@ -195762,12 +196001,12 @@ class TierSnifferService {
         this.scheduleTraining(judge3, !this.yieldNow() && filters.some((filter) => filter.trainingPending) ? 0 : 1000);
       });
     }, delay2);
-    this.trainingTimer.unref?.();
+    unrefTimer(this.trainingTimer);
   }
   pauseTraining() {
     this.trainingJudge = undefined;
     if (this.trainingTimer)
-      clearTimeout(this.trainingTimer);
+      this.timers().clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
   }
   async finishTrainingValidation(signal) {
@@ -195793,10 +196032,10 @@ class TierSnifferService {
     this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation)
-      clearTimeout(this.continuation);
+      this.timers().clearTimeout(this.continuation);
     this.continuation = undefined;
     if (this.timer)
-      clearInterval(this.timer);
+      this.timers().clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running)
@@ -196181,6 +196420,11 @@ class TierSnifferService {
       if (!this.fairTurn)
         this.yieldingSinceMs = undefined;
       return false;
+    }
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
     }
     if (this.fairTurn)
       return false;
@@ -196605,17 +196849,26 @@ class TierSnifferService {
     }
   }
   newRaisesQueued() {
-    return this.ledgerPaths().some((path) => {
+    const paths = this.ledgerPaths();
+    let budget = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+    const offset = this.moveLedgerOffsets.raise % Math.max(1, paths.length);
+    for (const path of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0)
+        return false;
       try {
         const set2 = tierSetForLedger(path);
         if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
-          return false;
-        const limit2 = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
-        return limit2 > 0 && set2.ledger.listMoving({ limit: limit2, direction: "raise" }).some((record8) => isAutoMoveCandidate(record8) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity2(record8))}\x00${record8.generation}`));
+          continue;
+        for (const record8 of set2.ledger.listMoving({ limit: budget, direction: "raise" }).filter(isAutoMoveCandidate)) {
+          budget--;
+          if (!this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity2(record8))}\x00${record8.generation}`))
+            return true;
+        }
       } catch {
         return true;
       }
-    });
+    }
+    return false;
   }
   async drainMoves(direction = "raise") {
     try {
@@ -196646,6 +196899,13 @@ class TierSnifferService {
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
       return;
+    }
+  }
+  ownerAnswering() {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
   answering() {
@@ -197011,7 +197271,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_embedding_prefilter();
   init_tier_move();
@@ -197033,6 +197293,12 @@ var init_sniffer_service = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   init_tier_ledger();
+  GLOBAL_TIMERS = {
+    setInterval: (callback, ms) => setInterval(callback, ms),
+    clearInterval: (timer) => clearInterval(timer),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
   DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
   EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
@@ -217759,7 +218025,8 @@ function createDashboardConsultAdapter(options) {
       const current2 = readConsultSettings(location);
       const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen = [...base.languages];
-      if (enabled && update.languages !== undefined) {
+      const savingLanguages = update.languages !== undefined && (enabled || update.save_languages === true);
+      if (savingLanguages) {
         if (!Array.isArray(update.languages) || update.languages.length === 0)
           return invalid5(MESSAGES3.languagesEmpty, "languages_empty");
         if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
@@ -217784,7 +218051,7 @@ function createDashboardConsultAdapter(options) {
         if (!acknowledgementsComplete())
           return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES3.acknowledgementsIncomplete };
       }
-      if (enabled && (turningOn || update.languages !== undefined)) {
+      if (turningOn || savingLanguages) {
         const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed2.has(language)))
           return invalid5(MESSAGES3.languageMissing, "language_pack_missing");
@@ -217801,7 +218068,7 @@ function createDashboardConsultAdapter(options) {
       }, location);
       if (result.ok) {
         const paused = enabled && Boolean(zkapiProfile()) && !acknowledgementsComplete();
-        const message2 = update.level !== undefined ? paused ? MESSAGES3.levelSavedPaused : MESSAGES3.levelSaved : enabled ? MESSAGES3.turnedOn : MESSAGES3.turnedOff;
+        const message2 = update.level !== undefined ? paused ? MESSAGES3.levelSavedPaused : MESSAGES3.levelSaved : update.save_languages === true ? MESSAGES3.languagesSaved : enabled ? MESSAGES3.turnedOn : MESSAGES3.turnedOff;
         return { ok: true, status_message: message2, revision: result.settings.revision };
       }
       return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
@@ -217953,7 +218220,7 @@ var init_dashboard_consult = __esm(() => {
     acknowledgementsIncomplete: "Accept the statements on this page before turning anonymous answers on.",
     levelUnknown: "Choose what zkAPI may send: Standard or Strict.",
     levelSaved: "Saved.",
-    levelSavedPaused: "Saved. Anonymous answers stay paused until you accept the statements on this page.",
+    levelSavedPaused: "Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.",
     languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
     languagesEmpty: "Choose at least one language.",
     noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
@@ -217972,6 +218239,7 @@ var init_dashboard_consult = __esm(() => {
     confirm: "This action needs your confirmation.",
     turnedOn: "Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.",
     turnedOff: "Anonymous answers are off. No question is sent.",
+    languagesSaved: "Languages saved.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
     routeAdded: "The zkAPI route is added. Finish the steps below.",
@@ -223528,6 +223796,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
+    ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),
