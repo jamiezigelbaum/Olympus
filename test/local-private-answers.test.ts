@@ -16,6 +16,7 @@
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
 import { searchPrivateEvidence, probePrivateMatch } from '../src/workers/source-index/analyst-answer.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import http from 'node:http';
@@ -34,7 +35,6 @@ import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSou
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
@@ -58,7 +58,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
-import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { installBuiltInEmbedding, reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
 import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
@@ -1098,9 +1098,7 @@ function worker(privateAnswers: LocalPrivateAnswers | undefined, panelTools?: Da
 type Fetcher = (request: Request) => Promise<Response>;
 
 async function localSession(fetcher: Fetcher): Promise<{ cookie: string; csrf: string }> {
-  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-  recordRequestPeer(request, '127.0.0.1');
-  const mint = await fetcher(request);
+  const mint = await ownerLocalMint(fetcher, ORIGIN, TOKEN);
   expect(mint.status).toBe(200);
   return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
 }

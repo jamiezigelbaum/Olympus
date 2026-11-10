@@ -165632,6 +165632,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))))
         return dashboardControlForbiddenResponse("origin_mismatch");
+      if (!requestFromOwnerSocket(request) && !hasOwnerControlSession(request, sessionSecret, now()))
+        return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
@@ -165821,6 +165823,9 @@ function dashboardLaunchRefusedResponse(status) {
 }
 function isDashboardLocalControlSessionRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
+}
+function hasOwnerControlSession(request, sessionSecret, nowMs) {
+  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === "allowed";
 }
 function isLoopbackOrigin(origin) {
   try {
