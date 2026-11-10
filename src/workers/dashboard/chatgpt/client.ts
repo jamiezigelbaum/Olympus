@@ -101,6 +101,8 @@ export interface ChatGptDashboardClientConfig {
     archiveRemoveTool: string;
     /** Stops an import that is an input of a source (`{archive_id}`): what it imported stays. */
     archiveStopTool: string;
+    /** Approves the local model the privacy check waits on (Needs you; unlocked computer dashboard only). */
+    classifierApproveTool: string;
     /** How long the place an open link landed on stays outlined (`.landed`). */
     landedMs: number;
     copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
@@ -507,7 +509,8 @@ export function chatgptDashboardClient(
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
     // Unpair's refusals, opening a file and the Archives row's controls are the computer's own sentences: always beside the control.
     if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool
-      || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool))) return '';
+      || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool
+      || name === H.classifierApproveTool))) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -587,8 +590,9 @@ export function chatgptDashboardClient(
         redraw();
         return;
       }
-      if (name === H.unpairTool) {
-        // Unpair says what it did, an incomplete removal included: keep its words on the page.
+      if (name === H.unpairTool || name === H.classifierApproveTool) {
+        // Unpair says what it did, an incomplete removal included, and Approve
+        // says the check starts on its next pass: keep their words on the page.
         const parts = result && Array.isArray(result.content) ? result.content : [];
         const said = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
         refresh();

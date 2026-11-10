@@ -46995,7 +46995,7 @@ var init_http = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", CLASSIFIER_APPROVE_TOOL_NAME = "olympus_privacy_classifier_approve", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -47024,7 +47024,8 @@ var init_dashboard_contract = __esm(() => {
     ARCHIVE_APPROVE_TOOL_NAME,
     ARCHIVE_DECLINE_TOOL_NAME,
     ARCHIVE_REMOVE_TOOL_NAME,
-    ARCHIVE_STOP_TOOL_NAME
+    ARCHIVE_STOP_TOOL_NAME,
+    CLASSIFIER_APPROVE_TOOL_NAME
   ];
 });
 
@@ -47306,7 +47307,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool)))
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool || name === H.classifierApproveTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text3 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -47374,7 +47375,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      if (name === H.unpairTool) {
+      if (name === H.unpairTool || name === H.classifierApproveTool) {
         const parts = result && Array.isArray(result.content) ? result.content : [];
         const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
         refresh();
@@ -53541,6 +53542,7 @@ function chatgptDashboardPageHtml(options = {}) {
       archiveDeclineTool: ARCHIVE_DECLINE_TOOL_NAME,
       archiveRemoveTool: ARCHIVE_REMOVE_TOOL_NAME,
       archiveStopTool: ARCHIVE_STOP_TOOL_NAME,
+      classifierApproveTool: CLASSIFIER_APPROVE_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
@@ -80449,6 +80451,12 @@ class TierSnifferService {
       ...counts,
       summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
+      ...this.lastTick?.state === "awaiting_owner_approval" ? { awaitingApproval: {
+        lane: this.lastTick.lane,
+        profileId: this.lastTick.profileId,
+        modelId: this.lastTick.modelId,
+        promptVersion: this.lastTick.promptVersion
+      } } : {},
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
   }
@@ -81126,7 +81134,7 @@ class TierSnifferService {
         entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions2.approval}`
       });
       await this.drainMoves();
-      return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
+      return { state: "awaiting_owner_approval", lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions2.approval };
     }
     phase("approval");
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });

@@ -1426,4 +1426,26 @@ describe('dashboard privacy field', () => {
     const approved = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 0, classifierAwaitingApproval: false } });
     expect(approved.needsYou.some((entry) => entry.id === 'privacy:classifier_approval')).toBe(false);
   });
+
+  test('a local model gets one Approve button on the computer\'s own dashboard, and a pointer to the computer anywhere else', () => {
+    const waiting = { configured: true, pendingCount: 4, ruleCount: 0, classifierAwaitingApproval: true, classifierWaiting: { lane: 'local' as const, modelId: 'qwen-35b' } };
+    const item = (privacy: typeof waiting & { approveHere?: boolean }, remote?: { port: number; agent: boolean }) =>
+      buildChatGptDashboardViewModel(emptyView(), { privacy, ...(remote ? { remote } : {}) }).needsYou.find((entry) => entry.id === 'privacy:classifier_approval');
+    const here = item({ ...waiting, approveHere: true });
+    expect(here?.fix).toEqual({ label: 'Approve', tool: 'olympus_privacy_classifier_approve', args: {} });
+    expect(here?.sentence).toContain('Approve qwen-35b');
+    expect(here?.sentence).not.toContain('tier classifier approve');
+    // ChatGPT or the OpenClaw tab: the row stays and sends the owner to the computer.
+    const elsewhere = item(waiting);
+    expect(elsewhere?.sentence).toContain('Open Olympus on your computer to approve it.');
+    expect(elsewhere?.sentence).not.toContain('tier classifier approve');
+    expect(elsewhere?.fix.tool).toBe('olympus_dashboard');
+    expect(elsewhere?.fix.href).toContain('/open/fix/models/');
+    // A headless server keeps the command line.
+    expect(item(waiting, { port: 8010, agent: false })?.sentence).toContain('On the server running Olympus, run "$HOME/.local/bin/olympus" tier classifier approve --why');
+    // A Venice model is chosen with its spending limit: never a one-click Approve.
+    const venice = item({ ...waiting, classifierWaiting: { lane: 'venice', modelId: 'deepseek-v4-flash-0731' } as never, approveHere: true });
+    expect(venice?.fix.tool).toBe('olympus_dashboard');
+    expect(venice?.sentence).toContain('tier classifier approve --why');
+  });
 });

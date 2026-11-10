@@ -3121,6 +3121,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
   // Always give the full launcher command; HOME expands on the named host.
   command: '"$HOME/.local/bin/olympus" tier classifier approve --why',
   reason: 'followed by your reason',
+  /** The computer's own dashboard, for a local model: one button instead of the command. */
+  here: 'Approve {model} to check what\'s private on this computer. Until you do, new items it would check wait.',
+  approve: 'Approve',
+  /** ChatGPT or another app, for a local model: approving happens on the computer. */
+  elsewhere: 'Open Olympus on your computer to approve it.',
 } as const;
 
 /**

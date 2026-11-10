@@ -383,6 +383,12 @@ function reviewPreview(variant: 'review' | 'review-unconfigured' | 'review-index
  */
 export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboardOptions, 'privacy' | 'privateModel'> {
   if (state.startsWith('privacy-')) return { privacy: { configured: true, pendingCount: 0, ruleCount: 3 } };
+  // The privacy check waits for its local model's approval: Approve on the
+  // computer's own unlocked dashboard, a pointer to the computer elsewhere.
+  if (state.startsWith('judge-approval')) {
+    return { privacy: { configured: true, pendingCount: 12, ruleCount: 3, classifierAwaitingApproval: true,
+      classifierWaiting: { lane: 'local', modelId: 'qwen3.6-35b-a3b' }, ...(state === 'judge-approval' ? { approveHere: true } : {}) } };
+  }
   if (!state.startsWith('review')) return {};
   const configured = state !== 'review-unconfigured';
   return {
@@ -399,6 +405,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     return view;
   }
   if (state.startsWith('privacy-')) return buildDashboardPreviewView('full');
+  if (state.startsWith('judge-approval')) return buildDashboardPreviewView('full');
   if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
     const view = buildDashboardPreviewView('fresh');
@@ -1727,7 +1734,7 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 export const DASHBOARD_PREVIEW_STATES = [
   'telegram-pair-phone', 'telegram-pair-code', 'telegram-pair-2fa', 'telegram-pair-error', 'telegram-post-pair', 'telegram-chats', 'telegram-capturing',
   'whatsapp-qr', 'whatsapp-post-pair', 'whatsapp-chats', 'whatsapp-capturing',
-  'inbox-failed', 'secret-notice', 'secret-inbox',
+  'inbox-failed', 'secret-notice', 'secret-inbox', 'judge-approval', 'judge-approval-elsewhere',
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-conflict',
   'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
   'first-run', 'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update', 'dropbox-unreadable',

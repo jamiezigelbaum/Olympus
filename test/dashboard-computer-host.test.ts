@@ -27,6 +27,7 @@ import {
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
+  CLASSIFIER_APPROVE_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
@@ -76,7 +77,7 @@ describe('the panel\'s tool lists', () => {
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_CHECK_TOOL_NAME);
   });
 
-  test('the computer adds exactly Index faster, Unpair, opening and paging unreadable files, and importing archives; ChatGPT\'s conversation tools are on neither list', () => {
+  test('the computer adds exactly Index faster, Unpair, opening and paging unreadable files, and importing archives, and approving the privacy check\'s local model; ChatGPT\'s conversation tools are on neither list', () => {
     expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([
       ...PANEL_TOOL_NAMES,
       INDEX_FASTER_TOOL_NAME,
@@ -90,7 +91,9 @@ describe('the panel\'s tool lists', () => {
       ARCHIVE_DECLINE_TOOL_NAME,
       ARCHIVE_REMOVE_TOOL_NAME,
       ARCHIVE_STOP_TOOL_NAME,
+      CLASSIFIER_APPROVE_TOOL_NAME,
     ]);
+    expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(CLASSIFIER_APPROVE_TOOL_NAME);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNPAIR_SOURCE_TOOL_NAME);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(OPEN_UNREADABLE_FILE_TOOL_NAME);
     for (const name of [ARCHIVE_UPLOAD_START_TOOL_NAME, ARCHIVE_UPLOAD_STATUS_TOOL_NAME, ARCHIVE_UPLOAD_CANCEL_TOOL_NAME, ARCHIVE_APPROVE_TOOL_NAME, ARCHIVE_DECLINE_TOOL_NAME, ARCHIVE_REMOVE_TOOL_NAME, ARCHIVE_STOP_TOOL_NAME]) {
