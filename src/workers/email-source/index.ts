@@ -1,4 +1,5 @@
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
+import { recordAgentAnswer } from '../apps-received.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
@@ -208,6 +209,7 @@ import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  DASHBOARD_APPS_RECEIVED_ROUTE,
   DASHBOARD_PRIVATE_ANSWERS_PATH,
 } from '../http.ts';
 import {
@@ -606,6 +608,11 @@ export interface EmailSourceWorkerOptions {
      * answers 501.
      */
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
+    /**
+     * What AI apps received (workers/apps-received.ts): served only through
+     * DASHBOARD_APPS_RECEIVED_ROUTE to a locally minted control session.
+     */
+    appsReceived?: Pick<import('../apps-received.ts').AppsReceived, 'handle'>;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
@@ -1140,6 +1147,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // Forward the manifest to an in-process remote call's sink too.
               for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
+              // An agent on this computer (an OpenClaw tool, a local MCP client) gets this result as it is:
+              // it goes on the owner's list of what each AI app received. A remote call is listed where
+              // its own output leaves (core/app-release-capture.ts); the owner's command line is not listed.
+              if (caller && caller.surface !== 'remote') recordAgentAnswer(sourceAnswerRequest.question, caller, result);
               let releaseTicket: string | undefined;
               if (caller?.surface !== 'remote') {
                 pruneReleaseTickets();
@@ -1512,6 +1523,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
                 },
+              },
+            }));
+          }
+          if (page === 'apps_received') {
+            // The page carries no request: its script reads the list through the local-only route.
+            return html(renderDashboardLocalPage('apps_received', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                appsReceivedAvailable: sourceDashboard?.appsReceived !== undefined,
               },
             }));
           }
@@ -2285,6 +2307,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           } catch {
             return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
           }
+        }
+
+        // What AI apps received: the questions apps asked and the titles they got. Like Private
+        // answers, only with the context header of a locally minted control session.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_APPS_RECEIVED_ROUTE) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.appsReceived) {
+            throw new EmailSourceWorkerError(501, 'apps_received_not_supported', 'What AI apps received is not available in this worker.');
+          }
+          const outcome = await sourceDashboard.appsReceived.handle(await parseObjectBody(request));
+          return new Response(JSON.stringify(outcome.body), {
+            status: outcome.status,
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+          });
         }
 
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {

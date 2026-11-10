@@ -30,6 +30,7 @@
  * The local stdio MCP surface, native OpenClaw and the ChatGPT surface do not
  * use this module; their output is unchanged.
  */
+import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from './app-release-capture.ts';
 import { boundedLogErrorMessage } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
@@ -320,18 +321,23 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
   let dropped: ReadonlySet<number> = new Set();
   if (options.releaseCheck) {
     const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
-    if ('withhold' in recheck) return withheldAnswer(recheck.withhold);
+    if ('withhold' in recheck) return withheldAnswer(recheck.withhold, evidence.length);
     dropped = recheck.dropped;
   }
   // The raw answer is scanned whole as well: only the Secret note (fixed text) is taken out first.
-  if (isSecretLike(record.answer)) return withheldAnswer(REMOTE_ANSWER_WITHHELD);
+  if (isSecretLike(record.answer)) return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
   const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, 'multiline');
-  if (answer.secret) return withheldAnswer(REMOTE_ANSWER_WITHHELD);
+  if (answer.secret) return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
   const citations: Array<Record<string, unknown>> = [];
+  // What the agent receives, by name, for the owner's list of what each AI app received.
+  const released: ReleasedItem[] = [];
   evidence.forEach((entry, index) => {
     if (dropped.has(index) || citations.length >= MAX_CITATIONS) return;
-    citations.push(citationOutput(entry));
+    const citation = citationOutput(entry);
+    citations.push(citation);
+    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === 'string' ? citation.title : undefined));
   });
+  noteReleasedItems(released);
   const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
   const coverageSuffix = privacyCoverage ? `\n\nCoverage notes:\n- ${privacyCoverage}` : '';
   return {
@@ -364,7 +370,8 @@ export function remotePrivateNote(answerId?: string, secretMatch = false): strin
   return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
 }
 
-function withheldAnswer(message: string): Record<string, unknown> {
+function withheldAnswer(message: string, heldBack = 0): Record<string, unknown> {
+  noteReleasedItems([], heldBack, true);
   return { kind: 'source_answer', status: 'withheld', answer: message, citations: [] };
 }
 

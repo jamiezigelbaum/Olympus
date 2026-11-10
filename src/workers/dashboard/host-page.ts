@@ -70,6 +70,7 @@ export const DASHBOARD_LOCAL_PAGES = {
   connect: 'connect',
   agents: 'agents',
   privateAnswers: 'private-answers',
+  appsReceived: 'apps-received',
   connector: 'connector',
   help: 'help',
   settings: 'settings',
