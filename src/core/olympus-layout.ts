@@ -75,6 +75,10 @@ export const SHARED_DATA_FILES = {
   // Beside the remote connections, where the relay's private questions wait.
   'waiting-private-questions': 'waiting-private-questions.sqlite',
   'tier-migration': 'tier-migration',
+  // The engine split (core/engine-split.ts): the background's private command
+  // socket folder off Linux, and the status snapshot it publishes.
+  'engine-run': 'engine-run',
+  'engine-status': 'engine-background-status.json',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
   'built-in-reasoning': 'models/built-in-reasoning',

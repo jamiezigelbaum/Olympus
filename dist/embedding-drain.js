@@ -1074,6 +1074,8 @@ var init_olympus_layout = __esm(() => {
     "credential-broker-state": "credential-broker-state.json",
     "waiting-private-questions": "waiting-private-questions.sqlite",
     "tier-migration": "tier-migration",
+    "engine-run": "engine-run",
+    "engine-status": "engine-background-status.json",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
     "built-in-reasoning": "models/built-in-reasoning",
@@ -5813,6 +5815,9 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   if (typeof worker?.authToken === "string" && worker.authToken.trim()) {
     config.worker.authToken = worker.authToken.trim();
   }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, "engineSplit")) {
+    config.worker.engineSplit = worker.engineSplit;
+  }
   const service = asRecord5(worker?.service);
   if (service) {
     if (typeof service.enabled === "boolean")
@@ -6221,6 +6226,7 @@ function applyModelProfileEnv(config, profile, env, prefix) {
     config.argus.modelProfiles[profile].secretRef = secretRef.trim();
 }
 function validateConfig(config) {
+  assertBoolean(config.worker.engineSplit, "worker.engineSplit");
   if (config.sovereignty?.configPath !== undefined) {
     if (typeof config.sovereignty.configPath !== "string" || !config.sovereignty.configPath.trim()) {
       throw new OperationError("config_error", "sovereignty.configPath must be a non-empty string.");
@@ -6556,6 +6562,7 @@ var init_config = __esm(() => {
   ]);
   DEFAULT_CONFIG = {
     worker: {
+      engineSplit: false,
       service: {
         enabled: false,
         startupTimeoutSeconds: 180,
@@ -6956,7 +6963,10 @@ async function nodeWorkerFetch(unix, input, init, options) {
   const request = new Request(input, init);
   const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
   const url = new URL(request.url);
-  validateWorkerSocket(options);
+  if (typeof options === "function")
+    options();
+  else
+    validateWorkerSocket(options);
   return new Promise((resolve7, reject) => {
     const outgoing = httpRequest(url, {
       socketPath: unix,
@@ -9490,6 +9500,25 @@ function closeSqliteStore(db, options = {}) {
   db.close();
 }
 
+// src/core/store-write-guard.ts
+function writableStoreOpensForbidden() {
+  return forbidden;
+}
+function assertWritableStoreOpenAllowed(kind, dbPath) {
+  if (forbidden && dbPath !== ":memory:")
+    throw new FrontStoreWriteError(kind);
+}
+var FrontStoreWriteError, forbidden = false;
+var init_store_write_guard = __esm(() => {
+  FrontStoreWriteError = class FrontStoreWriteError extends Error {
+    code = "front_store_write";
+    constructor(kind) {
+      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
+      this.name = "FrontStoreWriteError";
+    }
+  };
+});
+
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {
   const statement = db.prepare(sql);
@@ -10447,6 +10476,7 @@ class TierSnifferStore {
       return;
     }
     this.readOnly = false;
+    assertWritableStoreOpenAllowed("sniffer store", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
       mkdirSync8(dirname14(this.dbPath), { recursive: true, mode: 448 });
@@ -10874,6 +10904,7 @@ function snifferMigrations() {
 }
 var init_sniffer_store = __esm(() => {
   init_sqlite_migrations();
+  init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
 });
@@ -17728,6 +17759,7 @@ class SecretLocationsIndex {
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       return;
     }
+    assertWritableStoreOpenAllowed("secret-locations index", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
       mkdirSync10(dirname19(this.dbPath), { recursive: true, mode: 448 });
@@ -17961,6 +17993,7 @@ var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
 var init_secret_locations = __esm(() => {
   init_fts();
   init_sqlite_migrations();
+  init_store_write_guard();
   init_engine();
   init_tier_classifier();
   init_tier_ledger_path();
@@ -18046,6 +18079,8 @@ class TierLedger {
     this.dbPath = options.dbPath;
     this.readOnly = options.readOnly === true;
     this.now = options.now ?? (() => new Date);
+    if (!this.readOnly)
+      assertWritableStoreOpenAllowed("tier ledger", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk && !this.readOnly) {
       mkdirSync11(dirname20(this.dbPath), { recursive: true, mode: 448 });
@@ -21194,6 +21229,7 @@ function tierLedgerMigrations() {
 var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
+  init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
@@ -26240,6 +26276,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_store_write_guard();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -26403,8 +26440,10 @@ var init_local_index = __esm(() => {
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
-      } else if (this.dbPath !== ":memory:") {
-        mkdirSync13(dirname24(this.dbPath), { recursive: true, mode: 448 });
+      } else {
+        assertWritableStoreOpenAllowed("connector store", this.dbPath);
+        if (this.dbPath !== ":memory:")
+          mkdirSync13(dirname24(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
@@ -26571,7 +26610,7 @@ var init_local_index = __esm(() => {
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
-      const opened = new TierLedger({ dbPath: found, now: this.now });
+      const opened = new TierLedger({ dbPath: found, now: this.now, ...this.readOnly && writableStoreOpensForbidden() ? { readOnly: true } : {} });
       if (!holdsBoundId(opened)) {
         opened.close();
         throw new TierLedgerUnavailableError(this.corpusId);
@@ -44111,6 +44150,12 @@ var init_pairing_session_paths = __esm(() => {
   init_source_registry();
 });
 
+// src/core/engine-split.ts
+var init_engine_split = __esm(() => {
+  init_olympus_layout();
+  init_worker_transport();
+});
+
 // src/core/native-process-service.ts
 var init_native_process_service = () => {};
 
@@ -44120,6 +44165,7 @@ var init_native_worker_service = __esm(() => {
   init_data_owner_lock();
   init_linux_owner_bridge_host();
   init_worker_transport();
+  init_engine_split();
   init_config();
   init_native_process_service();
   init_olympus_layout();
@@ -77968,6 +78014,172 @@ init_classification_ledger();
 init_tier_migration();
 init_embedding_ledger();
 init_control_path_headroom();
+init_engine_split();
+init_store_write_guard();
+
+// src/workers/engine-split/runtime.ts
+init_engine_split();
+init_olympus_layout();
+init_atomic_file();
+init_worker_transport();
+
+// src/workers/engine-split/client.ts
+init_engine_split();
+
+// src/workers/engine-split/commands.ts
+init_engine_split();
+init_http();
+var ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
+
+class EngineCommandError extends Error {
+  status;
+  constructor(status, message2) {
+    super(message2);
+    this.status = status;
+    this.name = "EngineCommandError";
+  }
+}
+function orderKey(command) {
+  return "source" in command ? `source:${command.source}` : `kind:${command.kind}`;
+}
+
+class EngineCommandLedger {
+  options;
+  entries = new Map;
+  chains = new Map;
+  now;
+  maxSettled;
+  retentionMs;
+  constructor(options) {
+    this.options = options;
+    this.now = options.now ?? (() => Date.now());
+    this.maxSettled = options.maxSettled ?? 1000;
+    this.retentionMs = options.retentionMs ?? 60 * 60000;
+  }
+  get instanceId() {
+    return this.options.instanceId;
+  }
+  submit(envelope) {
+    this.prune();
+    const body = JSON.stringify(envelope.command);
+    const existing = this.entries.get(envelope.id);
+    if (existing) {
+      if (existing.body !== body)
+        throw new EngineCommandError(409, "That command id was used for a different command.");
+      return { ...existing.receipt };
+    }
+    const receipt = { id: envelope.id, state: "received", instance_id: this.options.instanceId };
+    const key2 = orderKey(envelope.command);
+    const previous = this.chains.get(key2) ?? Promise.resolve();
+    const entry = { body, receipt, settled: Promise.resolve() };
+    const settled = previous.then(() => this.apply(entry, envelope.command));
+    entry.settled = settled;
+    this.entries.set(envelope.id, entry);
+    this.chains.set(key2, settled);
+    settled.then(() => {
+      if (this.chains.get(key2) === settled)
+        this.chains.delete(key2);
+    });
+    return { ...receipt };
+  }
+  get(id) {
+    const entry = this.entries.get(id);
+    return entry ? { ...entry.receipt } : undefined;
+  }
+  async settled(id, wait) {
+    const entry = this.entries.get(id);
+    if (!entry)
+      return;
+    await Promise.race([entry.settled, wait]);
+    return { ...entry.receipt };
+  }
+  async apply(entry, command) {
+    const handler = this.options.handlers[command.kind];
+    try {
+      if (!handler)
+        throw new Error(`${command.kind} is not handled by this background.`);
+      const result = await handler(command);
+      entry.receipt.state = "done";
+      if (result !== undefined)
+        entry.receipt.result = result;
+    } catch (error2) {
+      entry.receipt.state = "failed";
+      entry.receipt.error = error2 instanceof Error ? error2.message : "The command failed.";
+    }
+    entry.settledAt = this.now();
+  }
+  prune() {
+    const cutoff = this.now() - this.retentionMs;
+    let settled = 0;
+    for (const entry of this.entries.values())
+      if (entry.settledAt !== undefined)
+        settled += 1;
+    for (const [id, entry] of this.entries) {
+      if (entry.settledAt === undefined)
+        continue;
+      if (entry.settledAt >= cutoff && settled <= this.maxSettled)
+        break;
+      this.entries.delete(id);
+      settled -= 1;
+    }
+  }
+}
+
+// src/workers/engine-split/client.ts
+class OwnerBusyRelay {
+  client;
+  log;
+  busyResources = new Set;
+  instanceId;
+  constructor(client, log = () => {}) {
+    this.client = client;
+    this.log = log;
+  }
+  busy(resource) {
+    this.busyResources.add(resource);
+    this.deliver({ kind: "owner_busy", resource });
+  }
+  idle(resource) {
+    if (!this.busyResources.delete(resource))
+      return;
+    this.deliver({ kind: "owner_idle", resource });
+  }
+  observeInstance(instanceId) {
+    if (instanceId === this.instanceId)
+      return;
+    const restarted = this.instanceId !== undefined;
+    this.instanceId = instanceId;
+    if (!restarted)
+      return;
+    for (const resource of this.busyResources)
+      this.deliver({ kind: "owner_busy", resource });
+  }
+  isBusy(resource) {
+    return this.busyResources.has(resource);
+  }
+  deliver(command) {
+    this.client.post(command, { timeoutMs: 30000 }).catch(() => {
+      this.log(`[engine-split] ${command.kind} could not reach the background engine; it is sent again when the background is back.`);
+    });
+  }
+}
+
+// src/workers/engine-split/snapshot.ts
+init_atomic_file();
+
+// src/workers/engine-split/runtime.ts
+var FRONT_REFUSED_POSTS = new Set([
+  "/dashboard/delete-source-data",
+  "/cli/data-delete",
+  "/cli/tier",
+  "/cli/pairing-placement",
+  "/cli/pairing-account",
+  "/source/index/embed",
+  "/dashboard/messaging/start",
+  "/dashboard/messaging/respond",
+  "/dashboard/messaging/cancel",
+  "/dashboard/messaging/scope"
+]);
 
 // src/core/remote-access-config.ts
 init_http();

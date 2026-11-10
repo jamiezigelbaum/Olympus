@@ -51,6 +51,8 @@ const IMPORT_ALLOWLIST = new Set([
   '../../core/sqlite-store.ts',
   '../../core/sqlite-rows.ts',
   '../../core/olympus-layout.ts',
+  // The engine split's front-write assertion (no source names; core/store-write-guard.ts).
+  '../../core/store-write-guard.ts',
   '../classification/engine.ts',
   '../classification/tier-classifier.ts',
   '../classification/tier-ledger.ts',

@@ -58,6 +58,10 @@
             ],
             "description": "Bearer token sent to Olympus worker HTTP endpoints. New installs should generate this and set OLYMPUS_WORKER_AUTH_TOKEN on the workers."
           },
+          "engineSplit": {
+            "type": "boolean",
+            "description": "Experimental: run the worker as a background process that does all writing and a read-only front that serves the dashboard and answers. Defaults to false."
+          },
           "service": {
             "type": "object",
             "additionalProperties": false,

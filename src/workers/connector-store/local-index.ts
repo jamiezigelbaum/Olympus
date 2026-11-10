@@ -1,4 +1,5 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
@@ -2814,8 +2815,9 @@ export class LocalConnectorStore {
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error('Connector store read-only mode requires a regular non-symlink database file.');
       }
-    } else if (this.dbPath !== ':memory:') {
-      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+    } else {
+      assertWritableStoreOpenAllowed('connector store', this.dbPath);
+      if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
@@ -3045,7 +3047,9 @@ export class LocalConnectorStore {
     // by the handle that is kept: check its id, and refuse a different one. A
     // replacement has had its schema migrated by this open before it is
     // checked; that is accepted, since it is closed unused.
-    const opened = new TierLedger({ dbPath: found, now: this.now });
+    // In the engine split's front a read-only store reads its bound ledger
+    // read-only too: only the background migrates or writes it (part 3).
+    const opened = new TierLedger({ dbPath: found, now: this.now, ...(this.readOnly && writableStoreOpensForbidden() ? { readOnly: true } : {}) });
     if (!holdsBoundId(opened)) {
       opened.close();
       throw new TierLedgerUnavailableError(this.corpusId);

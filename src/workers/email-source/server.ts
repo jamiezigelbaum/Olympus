@@ -542,6 +542,10 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { engineRoleFromEnv } from '../../core/engine-split.ts';
+import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
+import { createEngineFront, engineBackgroundSocketFromEnv, engineFrontRefusal, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, type EngineFront } from '../engine-split/runtime.ts';
+import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -2449,10 +2453,26 @@ function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
 }
 
 export async function main(): Promise<void> {
+  // The engine split (core/engine-split.ts): `single` unless the host runs
+  // this worker as the background writer or the read-only front.
+  const engineRole = engineRoleFromEnv(process.env);
+  const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
+  let engineFront: EngineFront | undefined;
+  if (engineRole === 'front') {
+    // The front takes no lock and does none of the boot work that needs the
+    // data root to itself: it waits until the background has done it, and
+    // from then on opens no background-owned store for writing.
+    const frontToken = workerAuthTokenFromEnv(process.env);
+    if (!frontToken) throw new Error('The engine front needs the worker auth token.');
+    forbidWritableStoreOpens();
+    await waitForEngineBackground({ socketPath: engineSocketPath!, authToken: frontToken });
+    engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
+  } else {
   // First, before anything mounts or opens a store: this worker owns the data
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts).
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);
+  }
   // A retired per-store path setting would open empty stores beside the
   // account's real files: refuse to start, naming each, before anything opens
   // or moves (the lock goes with the process).
@@ -2463,6 +2483,7 @@ export async function main(): Promise<void> {
       + 'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.',
     );
   }
+  if (engineRole !== 'front') {
   // An account a Delete marked is removed before anything else looks at it.
   deleteMarkedAccountsAtBoot(process.env);
   // An account recorded as legacy that holds nothing is placed in a folder instead.
@@ -2472,6 +2493,7 @@ export async function main(): Promise<void> {
   // From here on, a writable store open records its account in the registry
   // (core/source-storage.ts). Before any lane mounts.
   enableSourceRegistryAdoption();
+  }
   // Startup signals can close only this instance's listener/client. A second
   // foreground worker never revokes the engine host's epoch or runtime path.
   let closeDesktopBridge = () => {};
@@ -5701,7 +5723,11 @@ export async function main(): Promise<void> {
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);
   const schedulerSources = schedulerAssembly.sources;
-  const sourceScheduler = olympusConfig.worker.scheduler.enabled
+  // The split's front runs no scheduler: a stand-in answers from the
+  // background's snapshot and turns each wake into a command.
+  const sourceScheduler = engineFront
+    ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront!.status() }) as unknown as SourceScheduler
+    : olympusConfig.worker.scheduler.enabled
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
       sources: schedulerSources,
@@ -7157,8 +7183,10 @@ export async function main(): Promise<void> {
   };
   // A socket left by the unit's previous run, which systemd has already
   // stopped (worker-transport.ts).
-  if (releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
-  const socketPath = prepareWorkerSocket();
+  // The split's background serves no HTTP: the worker socket and port are the front's.
+  const listens = engineRole !== 'background';
+  if (listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
+  const socketPath = listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
     // connection tokens, or OAuth access tokens bound to this resource); the
@@ -7209,6 +7237,12 @@ export async function main(): Promise<void> {
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
+  if (engineFront) {
+    // Owner actions that have no command yet are refused, not written from the front.
+    const serveFront = serverOptions.fetch;
+    serverOptions.fetch = ((request: Request, server: Parameters<typeof serveFront>[1]) =>
+      engineFrontRefusal(request) ?? serveFront(request, server)) as typeof serveFront;
+  }
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
   await localFilesInitialCleanup;
@@ -7242,7 +7276,8 @@ export async function main(): Promise<void> {
         return response;
       } }))
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
-  const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
   // capability omit privateListeners and hide the choices.
@@ -7253,6 +7288,7 @@ export async function main(): Promise<void> {
     privacyPending: () => privacyChoicePending(sovereigntyEngine),
   });
   updateChecker.start();
+  }
   if (socketPath && process.env[OWNER_BRIDGE_HOST_ENV]) {
     const client = connectLinuxOwnerBridgeHost(process.env[OWNER_BRIDGE_HOST_ENV]!);
     desktopBridge = client;
@@ -7292,8 +7328,9 @@ export async function main(): Promise<void> {
     desktopPoll = setInterval(() => { void probeDesktop(); }, 2_000); desktopPoll.unref();
   }
   sourceScheduler?.start();
-  await reconcileCaptures();
-  const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
+  // Captures are background work; the split's front runs none.
+  if (!engineFront) await reconcileCaptures();
+  const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
 
   // The privacy-safe sniffer's bounded background pass over pending items.
@@ -7305,7 +7342,12 @@ export async function main(): Promise<void> {
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
-  const tierSniffer = snifferLane && snifferModel
+  // The owner's own call on the shared model, as the split's front reported it
+  // (owner_busy / owner_idle), until it says idle or ten minutes pass.
+  const remoteOwnerBusyUntil = new Map<string, number>();
+  const remoteOwnerBusy = (resource: string): boolean => (remoteOwnerBusyUntil.get(resource) ?? 0) > Date.now();
+  // The front judges nothing: the background is the only judge.
+  const tierSniffer = !engineFront && snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
@@ -7334,8 +7376,8 @@ export async function main(): Promise<void> {
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
-        answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
-        ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
+        answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
+        ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -7357,10 +7399,82 @@ export async function main(): Promise<void> {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
+  if (engineFront && snifferResource) {
+    // The judge runs in the background: carry the owner's own call to it.
+    const relay = engineFront.ownerBusy;
+    localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
+    localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
+  }
   classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
+  // The split's background: its private command socket, then the status
+  // snapshot, then ready. The front waits for ready before it serves.
+  let engineBackground: { stop(): void } | undefined;
+  if (engineRole === 'background') {
+    if (!authToken) throw new Error('The engine background needs the worker auth token.');
+    const refreshSchedulerSources = () => {
+      sourceScheduler?.updateSources(schedulerSourcesForHandles(
+        activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
+      ).sources);
+    };
+    const commands = startEngineBackgroundServer({
+      socketPath: engineSocketPath!,
+      authToken,
+      ...(process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID ? { instanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID } : {}),
+      log: (line) => console.warn(line),
+      handlers: {
+        // A config file the front wrote: re-read it and wake what it governs.
+        reload: ({ target }) => {
+          refreshSchedulerSources();
+          if (target === 'scope' || target === 'extraction') sourceScheduler?.wakeTasksOfKind('extract');
+          return { reloaded: target };
+        },
+        // Starts the pass and answers; the pass reports through the scheduler status.
+        sync_now: ({ source, manual }) => {
+          if (!sourceScheduler) return { outcome: 'scheduler_disabled' };
+          void sourceScheduler.runSource(source, undefined, manual ? 'operator' : 'scheduled').catch(() => {
+            console.warn(`[source-scheduler] source=${source} sync requested by the front failed; the next scheduled pass retries.`);
+          });
+          return { outcome: 'started' };
+        },
+        start_approved: ({ source }) => {
+          if (!sourceScheduler) return { outcome: 'scheduler_disabled' };
+          startApprovedSourceRun(sourceScheduler, source);
+          return { outcome: 'ingestion_started' };
+        },
+        owner_busy: ({ resource }) => {
+          remoteOwnerBusyUntil.set(resource, Date.now() + 10 * 60_000);
+          if (resource === snifferResource) tierSniffer?.preempt();
+          return { busy: true };
+        },
+        owner_idle: ({ resource }) => {
+          remoteOwnerBusyUntil.delete(resource);
+          if (resource === snifferResource) tierSniffer?.wake();
+          return { busy: false };
+        },
+        // Matched-first judging (#1062, PR #1115) is not in this build yet.
+        judge_boost: () => ({ applied: false, reason: 'matched_first_not_in_build' }),
+      },
+    });
+    const status = startEngineBackgroundStatus({
+      env: process.env,
+      instanceId: commands.instanceId,
+      collect: () => ({
+        scheduler: sourceScheduler?.status() ?? null,
+        judge: {
+          backlog: tierSniffer?.backlog() ?? null,
+          pending: null,
+          spending: judgeSpending.status(),
+        },
+        captures: dashboardCaptureRuntime(),
+      }),
+    });
+    commands.markReady();
+    engineBackground = { stop: () => { status.stop(); commands.stop(); } };
+    console.log('Olympus engine background ready on its private command socket.');
+  }
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -7399,14 +7513,16 @@ export async function main(): Promise<void> {
     waitingStore?.close();
     waitingStore = undefined;
     fileExtractionRuntime?.close();
-    void server.stop();
+    engineBackground?.stop();
+    engineFront?.stop();
+    void server?.stop();
     // The data owner lock stays held: the teardown above is still running, and
     // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
   requestModelReload = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
+    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); },
     exit: (code) => process.exit(code),
   });
   modelReloadInstalled = true;
@@ -7415,7 +7531,7 @@ export async function main(): Promise<void> {
   void modelChoices.refreshStrongest().catch(() => false);
   setInterval(() => { void modelChoices.refreshStrongest().catch(() => false); }, 24 * 60 * 60 * 1000).unref();
 
-  console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
+  if (listens) console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog('WhatsApp connector-store storage', whatsappConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog('Telegram connector-store storage', telegramConnectorStoreLane));

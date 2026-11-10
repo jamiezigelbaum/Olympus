@@ -30,6 +30,7 @@ import { sourceIndexTopicTokens } from '../../core/source-index/fts.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 import { hasCredentialUrl } from './tier-classifier.ts';
 
@@ -144,6 +145,7 @@ export class SecretLocationsIndex {
       this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       return;
     }
+    assertWritableStoreOpenAllowed('secret-locations index', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
     if (onDisk) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });

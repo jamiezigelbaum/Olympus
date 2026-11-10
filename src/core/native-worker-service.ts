@@ -2,7 +2,8 @@ import { homedir } from 'node:os';
 import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
-import { removeReleasedWorkerSocket, validateWorkerSocket, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
+import { createUnixSocketFetch, removeReleasedWorkerSocket, validateWorkerSocket, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
+import { ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from './engine-split.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
@@ -70,7 +71,21 @@ export interface NativeWorkerServiceOptions {
   engineHosted?: boolean;
   /** The home that holds ~/.local/bin/olympus; tests pass a temporary one. */
   homeDir?: string;
+  /**
+   * The engine split (core/engine-split.ts), set by a host that registered a
+   * background service: with `worker.engineSplit` on this worker is the
+   * front and starts only once that background is ready. With the switch
+   * off it runs as the one worker, exactly as without this option.
+   */
+  engineBackground?: { isReady(): boolean };
+  /** Test seams for the front's wait for its background. */
+  engineBackgroundWaitMs?: number;
+  engineBackgroundPollMs?: number;
 }
+
+/** The front's start while the background engine is not ready yet; the host retries. */
+export const WORKER_BACKGROUND_STARTING_MESSAGE = 'Olympus worker is waiting for its background engine, which is starting.';
+const DEFAULT_ENGINE_BACKGROUND_WAIT_MS = 30_000;
 
 /**
  * Who supervises the worker, set after worker.env is loaded so neither it nor an
@@ -139,6 +154,17 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
       });
       if (!settings) return undefined;
+      delete settings.env[ENGINE_ROLE_ENV];
+      delete settings.env[ENGINE_BACKGROUND_SOCKET_ENV];
+      if (options.engineBackground && freshConfig(input.context.config, input.initialConfig).config.worker.engineSplit) {
+        // The front serves only after the background has done the boot work
+        // that needs the data root to itself (design, part 3).
+        if (!await waitUntil(options.engineBackground.isReady, options.engineBackgroundWaitMs ?? DEFAULT_ENGINE_BACKGROUND_WAIT_MS, options.engineBackgroundPollMs ?? 100)) {
+          throw new NativeProcessRetryableStartError(WORKER_BACKGROUND_STARTING_MESSAGE);
+        }
+        settings.env[ENGINE_ROLE_ENV] = 'front';
+        settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
+      }
       if (options.ownerBridgeHostSocket) settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else delete settings.env[OWNER_BRIDGE_HOST_ENV];
       settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? 'engine' : 'gateway';
@@ -481,4 +507,105 @@ export async function waitForNativeWorkerOwnership(
     await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
   } while (Date.now() <= deadline);
   throw new NativeProcessConfigurationError('Native worker is not ready or does not own its endpoint; native capture was not started.');
+}
+
+async function waitUntil(condition: () => boolean, timeoutMs: number, pollMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    if (condition()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(pollMs, deadline - Date.now()))));
+  }
+}
+
+export const ENGINE_BACKGROUND_SERVICE_ID = 'olympus-worker-background';
+
+export interface NativeEngineBackgroundServiceOptions {
+  initialPluginConfig: unknown;
+  moduleUrl: string;
+  startupTimeoutMs?: number;
+  readinessPollMs?: number;
+  stopGraceMs?: number;
+  restartDelaysMs?: readonly number[];
+  stableUptimeMs?: number;
+  workerEnvPath?: string;
+  workingDirectory?: string;
+  engineHosted?: boolean;
+  /** Test seam: the fetch the readiness probe uses, given the socket path. */
+  fetchForSocket?: (socketPath: string) => typeof fetch;
+}
+
+/**
+ * The engine split's background process (core/engine-split.ts): the same
+ * packaged worker with ENGINE_ROLE_ENV=background, supervised like the
+ * worker (restart on exit with backoff, process-group cleanup). It serves no
+ * HTTP port, so there is no endpoint check; it is ready when its private
+ * command socket answers for this exact instance with its boot work done.
+ * With `worker.engineSplit` off it starts nothing.
+ */
+export function createNativeEngineBackgroundService(options: NativeEngineBackgroundServiceOptions): NativeWorkerServiceDefinition & { isReady(): boolean } {
+  let readyChild: ChildProcess | undefined;
+  let proofGeneration = 0;
+  const invalidate = () => { proofGeneration += 1; readyChild = undefined; };
+  const service = createNativeProcessService<WorkerLaunchSettings>({
+    id: ENGINE_BACKGROUND_SERVICE_ID,
+    label: 'background engine',
+    retryInitialStartFailure: true,
+    reload: {
+      configPrefixes: [
+        'plugins.entries.olympus.config.worker',
+        'plugins.entries.olympus.config.sourceIndex',
+        'plugins.entries.olympus.config.sovereignty',
+      ],
+    },
+    initialConfig: options.initialPluginConfig,
+    ...(options.workingDirectory ? { workingDirectory: options.workingDirectory } : {}),
+    ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
+    ...(options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {}),
+    ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
+    ...(options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {}),
+    defaultStartupTimeoutMs: DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_WORKER_STABLE_UPTIME_MS,
+    prepareStart: async (input) => {
+      invalidate();
+      const generation = proofGeneration;
+      const fresh = freshConfig(input.context.config, input.initialConfig);
+      const config = fresh.config;
+      if (!config.worker.service.enabled || !config.worker.engineSplit) return undefined;
+      assertNativeWorkerScopeConfigSupported(fresh.pluginConfig);
+      const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
+      const socketPath = engineBackgroundSocketPath({ env: settings.env });
+      prepareEngineBackgroundSocketDirectory(socketPath);
+      settings.env[ENGINE_ROLE_ENV] = 'background';
+      settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = socketPath;
+      settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? 'engine' : 'gateway';
+      const startupTimeoutMs = config.worker.service.startupTimeoutSeconds * 1_000;
+      const effective = options.startupTimeoutMs ?? startupTimeoutMs;
+      const fetchBackground = options.fetchForSocket ? options.fetchForSocket(socketPath) : createUnixSocketFetch(socketPath);
+      return {
+        ...settings,
+        startupTimeoutMs,
+        command: settings.runtimePath,
+        args: ['--no-env-file', settings.executablePath, '__worker-service-run', settings.instanceId],
+        endpointOccupied: false,
+        startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
+          ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
+        async readinessProbe(child) {
+          const ready = await probeEngineBackground(fetchBackground, settings.authToken, settings.instanceId,
+            Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effective, 1)));
+          if (ready && generation === proofGeneration) readyChild = child;
+          return ready;
+        },
+      };
+    },
+  });
+  return {
+    ...service,
+    isReady() {
+      return Boolean(readyChild?.pid && readyChild.exitCode === null
+        && readyChild.signalCode === null && !readyChild.killed);
+    },
+    async start(context) { invalidate(); await service.start(context); },
+    async stop() { invalidate(); await service.stop(); },
+  };
 }

@@ -10,6 +10,7 @@ import { createEmailTransport, EmailClient } from './core/email.ts';
 import { shouldExposeOperation } from './core/operation-exposure.ts';
 import { workerAuthTokenProvider } from './core/worker-auth.ts';
 import {
+  createNativeEngineBackgroundService,
   createNativeWorkerService,
   type NativeWorkerServiceDefinition,
 } from './core/native-worker-service.ts';
@@ -299,9 +300,17 @@ const plugin = {
     // CLI inventory may receive source SecretRefs. Service startup re-parses
     // the materialized runtime config strictly before spawning a worker.
     const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
+    // The engine split (core/engine-split.ts): with worker.engineSplit on, a
+    // background writer is registered before the worker, which becomes its
+    // front and starts once the background is ready. Captures still wait for
+    // the front (workerIsReady below), which itself waits for the background.
+    const engineBackground = config.worker.engineSplit
+      ? createNativeEngineBackgroundService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url })
+      : undefined;
     const workerService = createNativeWorkerService({
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
+      ...(engineBackground ? { engineBackground } : {}),
     });
     const { isReady: workerIsReady, ...workerRegistration } = workerService;
     const telegramService = createNativeTelegramService({
@@ -321,6 +330,10 @@ const plugin = {
     const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     const relayService = createNativeRelayService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
+      if (engineBackground) {
+        const { isReady: _backgroundIsReady, ...backgroundRegistration } = engineBackground;
+        api.registerService(backgroundNativeProcessService(backgroundRegistration));
+      }
       api.registerService(backgroundNativeProcessService(workerRegistration));
       api.registerService(backgroundNativeProcessService(telegramService));
       api.registerService(creditMonitorService);
