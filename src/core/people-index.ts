@@ -30,7 +30,7 @@
  */
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
@@ -48,6 +48,8 @@ export interface PeopleSenderObservation {
   privateOnly?: boolean;
   /** Conversations this sender spoke in (provider-scoped ids). */
   conversationIds?: readonly string[];
+  /** The corpus whose store holds these items, so a source's Delete can forget them here. */
+  corpusId?: string;
 }
 
 /**
@@ -92,6 +94,8 @@ export interface PeopleIdentity {
   isOwner: boolean;
   itemCount: number;
   personId: string;
+  /** The corpora this identity was seen in. */
+  corpusIds: string[];
   /** Why this identity joined its person; absent for the person's first identity. */
   linkReason?: PeopleLinkReason;
 }
@@ -149,6 +153,7 @@ function peopleIndexMigrations(): SqliteMigration[] {
           is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
           item_count INTEGER NOT NULL,
           person_id TEXT NOT NULL,
+          corpus_ids_json TEXT NOT NULL DEFAULT '[]',
           link_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_people_identities_person ON people_identities(person_id);
@@ -299,6 +304,7 @@ export function linkPeople(input: {
         isOwner: false,
         itemCount: 0,
         personId: '',
+        corpusIds: [],
         nameKeys: new Set(),
         publicNames: new Map(),
         conversations: new Set(),
@@ -309,6 +315,7 @@ export function linkPeople(input: {
     if (label && (!identity.senderLabel || !observation.privateOnly)) identity.senderLabel = label;
     identity.isOwner ||= observation.isOwner;
     identity.itemCount += observation.itemCount;
+    if (observation.corpusId && !identity.corpusIds.includes(observation.corpusId)) identity.corpusIds.push(observation.corpusId);
     for (const strong of [...strongKeysFromText(observation.senderId), ...strongKeysFromText(label)]) {
       if (!identity.keys.includes(strong)) identity.keys.push(strong);
     }
@@ -470,6 +477,7 @@ export function linkPeople(input: {
         isOwner: member.isOwner,
         itemCount: member.itemCount,
         personId,
+        corpusIds: [...member.corpusIds].sort(),
         ...(why ? { linkReason: why } : {}),
       };
     });
@@ -491,7 +499,9 @@ function bestName(members: readonly WorkingIdentity[]): string {
   for (const member of members) {
     for (const [name, count] of member.publicNames) counts.set(name, (counts.get(name) ?? 0) + count);
   }
-  const named = [...counts].sort(([a, ca], [b, cb]) => cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
+  // A real name before a handle ("Mark Alexander" before "@xandoru"), then the most used.
+  const handle = (name: string) => Number(name.startsWith('@'));
+  const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named) return named;
   const key = members.flatMap((member) => member.keys).sort()[0];
   if (key) return key.slice(key.indexOf(':') + 1);
@@ -558,8 +568,8 @@ export class LocalPeopleIndex {
   rebuild(observations: readonly PeopleSenderObservation[]): PeoplePerson[] {
     const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
     const insertIdentity = this.db.query(`
-      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, link_reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertPerson = this.db.query(`
       INSERT INTO people_persons (person_id, display_name, is_owner, name_shareable, item_count, linked_by_json) VALUES (?, ?, ?, ?, ?, ?)
@@ -572,7 +582,7 @@ export class LocalPeopleIndex {
           insertIdentity.run(
             identity.identityKey, identity.provider, identity.senderId ?? null, identity.senderLabel ?? null,
             JSON.stringify(identity.keys), JSON.stringify(identity.names), Number(identity.isOwner),
-            identity.itemCount, person.personId, identity.linkReason ?? null,
+            identity.itemCount, person.personId, JSON.stringify(identity.corpusIds), identity.linkReason ?? null,
           );
         }
       }
@@ -685,6 +695,8 @@ export class LocalPeopleIndex {
         }
         insert.run(correction.kind, correction.identityA, correction.identityB, null, at);
       } else if (correction.kind === 'split') {
+        // A split undoes the owner's earlier merges of this identity.
+        this.db.query(`DELETE FROM people_corrections WHERE kind = 'merge' AND (identity_a = ? OR identity_b = ?)`).run(correction.identity, correction.identity);
         insert.run('split', correction.identity, null, null, at);
       } else {
         const name = correction.name.trim().slice(0, 160);
@@ -723,11 +735,11 @@ export class LocalPeopleIndex {
       person_id: string; display_name: string; is_owner: number; name_shareable: number; item_count: number; linked_by_json: string;
     }>;
     const identities = this.db.query(`
-      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, link_reason
+      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason
       FROM people_identities ORDER BY identity_key
     `).all() as Array<{
       identity_key: string; provider: string; sender_id: string | null; sender_label: string | null; keys_json: string;
-      names_json: string; is_owner: number; item_count: number; person_id: string; link_reason: PeopleLinkReason | null;
+      names_json: string; is_owner: number; item_count: number; person_id: string; corpus_ids_json: string; link_reason: PeopleLinkReason | null;
     }>;
     const byPerson = new Map<string, PeopleIdentity[]>();
     for (const row of identities) {
@@ -741,6 +753,7 @@ export class LocalPeopleIndex {
         isOwner: row.is_owner === 1,
         itemCount: row.item_count,
         personId: row.person_id,
+        corpusIds: JSON.parse(row.corpus_ids_json) as string[],
         ...(row.link_reason ? { linkReason: row.link_reason } : {}),
       }]);
     }
@@ -778,6 +791,8 @@ export const PEOPLE_AUTHORED_FAMILIES: ReadonlySet<string> = new Set(['chat', 'e
 export interface PeopleObservationSource {
   family: string;
   peopleObservations(): PeopleSenderObservation[];
+  /** The store's latest sync run, so a refresh can tell when a sync has finished. */
+  lastSyncRun?(): { syncRunId: string; status: string; completedAt?: string } | undefined;
   setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
 }
 
@@ -801,4 +816,99 @@ export function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly Peo
     index.citationName(provider, senderId, senderLabel);
   for (const store of stores) store.setPeopleNames?.(resolver);
   return people;
+}
+
+/**
+ * Keeps the index current: a rebuild right after any authored store finishes
+ * a sync (`refreshIfSynced`, cheap to call often), and on demand.
+ */
+export class PeopleIndexRefresher {
+  private lastFingerprint: string | undefined;
+
+  constructor(
+    private readonly index: LocalPeopleIndex,
+    private readonly stores: () => readonly PeopleObservationSource[],
+  ) {}
+
+  /** Rebuild now. */
+  refresh(): PeoplePerson[] {
+    const stores = this.stores();
+    this.lastFingerprint = syncFingerprint(stores);
+    return refreshPeopleIndex(this.index, stores);
+  }
+
+  /** Rebuild when a sync has completed since the last rebuild; true when it did. */
+  refreshIfSynced(): boolean {
+    const fingerprint = syncFingerprint(this.stores());
+    if (fingerprint === this.lastFingerprint) return false;
+    this.refresh();
+    return true;
+  }
+}
+
+function syncFingerprint(stores: readonly PeopleObservationSource[]): string {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+    try {
+      const run = store.lastSyncRun?.();
+      return run && run.status === 'completed' ? `${run.syncRunId}@${run.completedAt ?? ''}` : '';
+    } catch {
+      return '';
+    }
+  }).join('|');
+}
+
+/**
+ * A source's Delete (core/source-forget-registry.ts): forget every identity
+ * seen in the account's corpora, the owner's corrections and contact-card
+ * entries that name them, and the derived people (rebuilt from the stores
+ * that remain at the next refresh). Returns how many rows it removed, or
+ * would remove on a dry run. A file that is not there has nothing to forget.
+ */
+export function forgetPeopleIndexRows(
+  dbPath: string,
+  scope: { corpusIds: readonly string[] },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(dbPath) || scope.corpusIds.length === 0) return 0;
+  const dryRun = options.dryRun === true;
+  const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? '' : 'PRAGMA secure_delete = ON;'}`);
+    const corpora = JSON.stringify([...scope.corpusIds]);
+    const keys = (db.query(`
+      SELECT identity_key FROM people_identities
+      WHERE EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?)))
+    `).all(corpora) as Array<{ identity_key: string }>).map((row) => row.identity_key);
+    if (keys.length === 0) return 0;
+    const keyList = JSON.stringify(keys);
+    const corrections = (db.query(`
+      SELECT COUNT(*) AS n FROM people_corrections
+      WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
+    `).get(keyList) as { n: number }).n;
+    const cards = (db.query(`
+      SELECT card_id FROM people_contact_cards
+      WHERE EXISTS (SELECT 1 FROM json_each(keys_json) k WHERE k.value IN (SELECT value FROM json_each(?)))
+    `).all(keyList) as Array<{ card_id: string }>).length;
+    if (dryRun) return keys.length + corrections + cards;
+    db.transaction(() => {
+      db.query(`DELETE FROM people_identities WHERE identity_key IN (SELECT value FROM json_each(?))`).run(keyList);
+      db.query(`
+        DELETE FROM people_corrections
+        WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
+      `).run(keyList);
+      // A card keeps its other entries; only the deleted source's are taken out.
+      const rows = db.query(`SELECT card_id, keys_json FROM people_contact_cards`).all() as Array<{ card_id: string; keys_json: string }>;
+      const gone = new Set(keys);
+      for (const row of rows) {
+        const kept = (JSON.parse(row.keys_json) as string[]).filter((key) => !gone.has(key));
+        if (kept.length === (JSON.parse(row.keys_json) as string[]).length) continue;
+        db.query(`UPDATE people_contact_cards SET keys_json = ? WHERE card_id = ?`).run(JSON.stringify(kept), row.card_id);
+      }
+      db.exec('DELETE FROM people_persons;');
+      db.query(`UPDATE people_identities SET person_id = identity_key`).run();
+    })();
+    return keys.length + corrections + cards;
+  } finally {
+    db.close();
+  }
 }

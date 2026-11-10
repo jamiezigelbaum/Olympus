@@ -5375,6 +5375,7 @@ export class LocalConnectorStore {
           ...(row.sender_label?.trim() ? { senderLabel: row.sender_label.trim() } : {}),
           isOwner: false,
           itemCount: 0,
+          corpusId: this.corpusId,
           conversations: new Set(),
           anyPublic: false,
         };

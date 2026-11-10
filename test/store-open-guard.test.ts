@@ -80,6 +80,7 @@ const SHARED_FILES: Record<string, string> = {
   'src/core/source-watch.ts': 'the shared source-watches database',
   'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
   'src/core/remote-connections.ts': 'the shared remote-connections database',
+  'src/core/people-index.ts': 'the shared people index (#1076): who is who across sources, and the owner\'s corrections',
   'src/workers/source-dashboard.ts': 'the shared dashboard history database',
   'src/workers/source-ingestion-ledger.ts': 'the shared dashboard database the ingestion ledger reads and writes',
   'src/workers/source-scheduler-state.ts': 'the shared scheduler database',
