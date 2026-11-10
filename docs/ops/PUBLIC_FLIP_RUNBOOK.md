@@ -358,19 +358,14 @@ Enumerated from the workflow files: **the workflows need none.**
 
 One value is *optional* and is not a secret:
 
-- **`OLYMPUS_GOOGLE_PILOT_CLIENT_ID`** — the release's Google Desktop client
-  decision, read by `scripts/release-artifact-ci.ts` and
+- **`OLYMPUS_GOOGLE_PILOT_CLIENT_ID`** — the release's optional Google
+  Desktop client, read by `scripts/release-artifact-ci.ts` and
   `scripts/release-artifact.ts` through `scripts/release-google-pilot-choice.ts`:
-  a publisher-owned Desktop client id, or `none`. **Olympus 1.0 ships `none`**
-  (owner decision 2026-10-03, `docs/V0_4_RELEASE.md` Decisions): every host's
-  Gmail and Drive connect uses the publisher Web client and relay, so no host
-  loses one-click Google sign-in. Unset, the builder refuses. Today no
-  workflow sets it, so the `static checks` lane proves that *fail-closed
-  refusal* instead of building the artifact. Setting it (as a repository
-  **variable**, `none` for 1.0, wired into the `static` job's env) flips that
-  lane to building and uploading a real release tarball on every push. It is
-  not a secret, but do not add it as a side effect of the flip — it is a
-  release decision, and it changes what CI publishes.
+  a live publisher-owned Desktop client id, or `none`. Unset means none, which
+  is what releases ship since #765 (2026-11-10, `docs/V0_4_RELEASE.md`
+  Decisions): every host's Gmail and Drive connect uses the publisher clients.
+  The retired beta.11 client is refused. No workflow sets it, and the `static
+  checks` lane builds and uploads the release tarball on every push.
 
 ## 10. Prove it before publishing `[anchor]` — reversible, and the last gate
 

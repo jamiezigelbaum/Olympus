@@ -184,6 +184,41 @@ const OLD_FLOOR_KEPT: Array<[string, string]> = [
   ['python format', 'password: %(password_value)s'],
 ];
 
+// Labelled account recovery and backup codes (issue #880). Made-up codes.
+const RECOVERY_CODES: Array<[string, string]> = [
+  ['recovery code', 'Recovery code: ABCD-EFGH-1234'],
+  ['recovery code, sentence', 'Your recovery code is 7Q4M-K2PX-9WZC'],
+  ['bold recovery key', '**Recovery key:** H3KD-82LM-QP4X-7RTV-W9NB-C5YZ'],
+  ['backup codes inline', 'Backup codes: 4829 1735, 6610 2948, 3057 8146'],
+  ['backup codes, list below', [
+    'GitHub 2FA backup codes:',
+    '',
+    'a1b2c-3d4e5',
+    'f6a7b-8c9d0',
+    '1e2f3-a4b5c',
+    'd6e7f-8a9b0',
+    'c1d2e-3f4a5',
+    'b6c7d-8e9f0',
+    'a2b3c-4d5e6',
+    'f7a8b-9c0d1',
+  ].join('\n')],
+  ['backup verification codes, numbered list', [
+    'Google backup verification codes',
+    'Backup codes:',
+    '1. 4829 1735    2. 6610 2948',
+    '3. 3057 8146    4. 9921 4470',
+    '5. 1184 6203    6. 7745 0391',
+    '7. 5506 8812    8. 2239 1657',
+    '9. 8870 3324   10. 6412 9958',
+  ].join('\n')],
+  ['recovery_codes key', 'recovery_codes = 39fk2-ma81q'],
+  ['quoted recovery code', 'Recovery code: "ABCD-EFGH-1234"'],
+  ['backticked recovery code', 'Recovery code: `ABCD-EFGH-1234`'],
+  ['masked first code, live codes after', 'Backup codes: XXXX-XXXX, 4829 1735'],
+  ['masked first line, live codes below', 'Backup codes:\nXXXX-XXXX\n4829 1735\n6610 2948'],
+  ['prose on the label line, codes below', 'Backup codes: keep these offline\n4829 1735\n6610 2948'],
+];
+
 const NEGATIVES: Array<[string, string]> = [
   // Prose mentioning credentials.
   ['reset prose', 'To continue, reset your password at the link below.'],
@@ -283,6 +318,22 @@ const NEGATIVES: Array<[string, string]> = [
   ['sig not a query parameter', 'the sig=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was in the text'],
 ];
 
+// Other codes, and recovery codes without a code (issue #880).
+const NOT_RECOVERY_CODES: Array<[string, string]> = [
+  ['code of conduct', 'Please read the recovery code of conduct before the meeting.'],
+  ['postal code', 'postal code: 12345'],
+  ['login code', 'Login code: 12345'],
+  ['verification code', 'Your verification code is 482913'],
+  ['area code', 'Call the office, area code 617.'],
+  ['zip code', 'zip code: 02139'],
+  ['source code', 'source code: see repo'],
+  ['recovery codes prose', 'Recovery codes: keep them somewhere safe, offline.'],
+  ['backup codes required', 'A backup code is required to sign in without your phone.'],
+  ['recovery code mask', 'Recovery code: XXXX-XXXX-XXXX'],
+  ['recovery code word with a digit', 'Recovery codes: 2fa-enabled accounts only'],
+  ['backup codes heading then prose', 'Backup codes:\nGenerate them from the security settings page.'],
+];
+
 // Placeholders and masks that must never count, whatever key they sit under.
 const PLACEHOLDER_VALUES = [
   '<password>', '${DB_PASSWORD}', '$DB_PASSWORD', '$db_password', '%DB_PASSWORD%', '{{ db_password }}', '{{DB_PASSWORD}}',
@@ -325,6 +376,22 @@ describe('Secrets floor: credential shapes the detector must catch', () => {
     const text = `${filler}\nservice config\nDB_PASSWORD=hunter2hunter2hunter2\n${filler}`;
     expect(detectSecretFindingKinds(text)).toEqual(['credential_assignment']);
   });
+});
+
+describe('Secrets floor: recovery and backup codes (#880)', () => {
+  for (const [name, text] of RECOVERY_CODES) {
+    test(`catches ${name}`, () => {
+      expect(detectSecretFindingKinds(text)).toEqual(['credential_assignment']);
+      expect(scanDropboxContentPolicyText({ text }).policy_decision).toBe('blocked_sensitive');
+      expect(secretLabelsInText(text)).toContain('recovery_code');
+    });
+  }
+  for (const [name, text] of NOT_RECOVERY_CODES) {
+    test(`clears ${name}`, () => {
+      expect(detectSecretFindingKinds(text)).toEqual([]);
+      expect(SHARED_SECRET_PATTERNS.some((spec) => hasSecretPatternHit(text, spec))).toBe(false);
+    });
+  }
 });
 
 describe('Secrets floor: words about credentials are not credentials', () => {
@@ -375,6 +442,7 @@ describe('the classifier sends these items to Secrets', () => {
     '{"client_secret": "' + GOOGLE_CLIENT_SECRET + '"}',
     'Password: correct horse battery staple',
     GITHUB.ghp,
+    'Recovery code: ABCD-EFGH-1234',
   ]) {
     test(text.slice(0, 24), () => {
       const decision = classifyItemTiers(
@@ -573,6 +641,10 @@ describe('Secrets floor: linear-time on adversarial input', () => {
     ['Authorization run', `Authorization: Bearer ${'a'.repeat(N)}`],
     ['many short pairs', 'a=b '.repeat(N / 4)],
     ['many short credential pairs', 'DB_PASSWORD=x '.repeat(N / 14)],
+    ['backup label then spaces', `backup${' '.repeat(N)}x`],
+    ['backup codes labels repeated', 'backup codes:\n'.repeat(N / 14)],
+    ['recovery code then a long hyphen run', `Recovery code: ${'a1-'.repeat(N / 3)}`],
+    ['recovery code then blank lines', `Recovery code:${'\n'.repeat(N)}1234-5678`],
   ];
   const small = casesAt(100_000);
   const large = casesAt(200_000);
