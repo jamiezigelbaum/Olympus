@@ -6057,6 +6057,9 @@ export async function main(): Promise<void> {
   // Built further down, once the ChatGPT surface exists; the worker only
   // calls it per request.
   let dashboardPanelTools: DashboardPanelTools | undefined;
+  // The setup checklist (#1077): bound once the worker exists (it reads the
+  // dashboard view through the worker), called only per request.
+  let setupStatusNow: (() => Promise<import('../../core/setup-checklist.ts').SetupChecklist>) | undefined;
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
@@ -6166,6 +6169,10 @@ export async function main(): Promise<void> {
               requestReload: () => requestModelReload(),
             }),
             modelSetup: getModelSetup,
+            setupStatus: async () => {
+              if (!setupStatusNow) throw new Error('the setup checklist is not ready');
+              return await setupStatusNow();
+            },
             computerSetup: macComputerSetupView,
             saveComputerUseChoice: saveMacComputerUseChoice,
             checkModelSetup: () => {
@@ -7122,7 +7129,21 @@ export async function main(): Promise<void> {
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
   const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
   const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
+  const { readSetupWorkerFacts, setupChecklistFromView } = await import('../setup-status.ts');
+  const setupWorkerFacts = () => readSetupWorkerFacts({
+    version: runningOlympusVersion(),
+    policy: { config: sovereigntyEngine.config, ...(sovereigntyEngine.source === 'file' && sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}) },
+    ...(sourceIndexReadEnabled ? { judge: judgeSpending } : {}),
+    connections: () => dashboardAgentStore?.(),
+    ...(process.env.OLYMPUS_ENGINE_HOST === '1' ? {} : { hostAgent: 'OpenClaw' }),
+  });
+  setupStatusNow = async () => {
+    const response = await worker.fetch(new Request('http://olympus-worker.internal/dashboard.json'));
+    const view = response.ok ? await response.json() as SourceDashboardViewModel : undefined;
+    return setupChecklistFromView(view, setupWorkerFacts());
+  };
   dashboardPanelTools = createDashboardPanelTools({
+    setupChecklist: (view) => setupChecklistFromView(view, setupWorkerFacts()),
     surface: () => chatgptSurface,
     setup: chatgptSetup,
     workerFetch: worker.fetch,
