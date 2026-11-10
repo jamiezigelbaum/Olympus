@@ -56,8 +56,14 @@ export function createFrontScheduler(options: FrontSchedulerOptions): FrontSched
   const now = options.now ?? (() => new Date());
   const log = options.log ?? ((line: string) => console.warn(line));
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); }));
+  // Only a current snapshot (snapshot.ts, `stale`) says what runs now: a dead
+  // publisher's last running tasks must not hold Disconnect or Unpair back.
+  const current = () => {
+    const read = options.snapshot();
+    return read && !read.stale ? read : undefined;
+  };
   const status = (): SourceSchedulerStatus => {
-    const scheduler = options.snapshot()?.snapshot.scheduler as SourceSchedulerStatus | undefined;
+    const scheduler = current()?.snapshot.scheduler as SourceSchedulerStatus | undefined;
     return scheduler?.kind === 'source_scheduler_status' ? scheduler : emptyStatus(now());
   };
   const post = (command: Parameters<EngineCommandClient['post']>[0]) => options.client.post(command).catch((error: unknown) => {
@@ -72,7 +78,7 @@ export function createFrontScheduler(options: FrontSchedulerOptions): FrontSched
       if (provenance !== 'operator') return status();
       const deadline = pressed + (options.manualSyncWaitMs ?? 30 * 60_000);
       for (;;) {
-        const run = options.snapshot()?.snapshot.manual_syncs?.[sourceIdOrCorpusId];
+        const run = current()?.snapshot.manual_syncs?.[sourceIdOrCorpusId];
         // A second's grace: the background stamps the start, on its own clock, as it gets the command.
         if (run && Date.parse(run.started_at) >= pressed - 1_000 && run.state !== 'running') {
           if (run.state === 'failed') throw new BackgroundSyncFailedError(run.failure_code);

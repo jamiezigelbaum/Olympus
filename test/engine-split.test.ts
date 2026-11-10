@@ -707,6 +707,32 @@ describe('state the front shows from the snapshot', () => {
     };
   }
 
+  test('a stale snapshot neither holds Disconnect back nor settles a Sync now', async () => {
+    const clock = createTestClock();
+    const status = {
+      kind: 'source_scheduler_status', enabled: true, running: true, generated_at: 'yesterday', policy: {},
+      sources: [{ source_id: 'gmail.email', corpus_id: 'internal.gmail', tasks: [{ kind: 'sync', running: true }] }],
+    };
+    const snapshot = snapshotWith({ scheduler: status, manual_syncs: { 'gmail.email': { started_at: clock.date().toISOString(), state: 'done' } } });
+    const scheduler = createFrontScheduler({
+      client: { post: async () => ({ id: 'x', state: 'received', instance_id: 'b' }) },
+      snapshot: snapshot.read, now: clock.date, sleep: clock.sleep, manualSyncWaitMs: 10_000,
+    });
+    expect(scheduler.hasExecutingTask(new Set(['gmail.email']))).toBe(true);
+    // The publisher stopped a day ago: its last running task is not running now.
+    snapshot.setStale(true);
+    expect(scheduler.hasExecutingTask(new Set(['gmail.email']))).toBe(false);
+    expect(scheduler.status().sources).toEqual([]);
+    // Nor does its record settle a press: the press waits out its time instead.
+    let settled = false;
+    void scheduler.runSource('gmail.email', undefined, 'operator').then(() => { settled = true; });
+    await flushMicrotasks();
+    await clock.advance(5_000);
+    expect(settled).toBe(false);
+    await clock.advance(6_000);
+    expect(settled).toBe(true);
+  });
+
   test('Sync now in the front settles when the background says its pass ended, and reads a failure as one', async () => {
     const clock = createTestClock();
     const status = { kind: 'source_scheduler_status', enabled: true, running: false, generated_at: 'now', sources: [], policy: {} };
