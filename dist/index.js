@@ -19948,6 +19948,9 @@ var init_analyst_openclaw_infer = __esm(() => {
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
+// src/core/evidence-reranker.ts
+var init_evidence_reranker = () => {};
+
 // src/core/parent-label.ts
 var init_parent_label = __esm(() => {
   init_types();
@@ -19957,6 +19960,7 @@ var init_parent_label = __esm(() => {
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
   init_router();

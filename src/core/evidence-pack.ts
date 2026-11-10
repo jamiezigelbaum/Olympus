@@ -1,4 +1,12 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
+import {
+  rerankCandidates,
+  rerankPassage,
+  rerankPoolSize,
+  type EvidenceRerankAudit,
+  type EvidenceReranker,
+  type RerankTimers,
+} from './evidence-reranker.ts';
 // buildEvidencePack: the retrieval -> reasoning boundary (Contract 2).
 //
 // Retrieval (router + corpus adapters) is a hard membrane: it returns locators
@@ -29,6 +37,7 @@ import {
 import type { SourceIndexCorpusRegistry } from './source-index/corpus.ts';
 import {
   assertEvidenceCandidateModelEligible,
+  assertModelTrustTierAllowed,
   SourceModelPolicyDeniedError,
 } from './source-model-policy.ts';
 import {
@@ -196,6 +205,16 @@ export interface BuildEvidencePackInput {
   // item in an ordinary corpus included), with its extraction gap: the
   // ordinary-route rebuild after the private route was unavailable.
   excludeSecureSensitivity?: boolean;
+  /**
+   * Local cross-encoder that reorders the fused candidates before the cut
+   * (core/evidence-reranker.ts). Retrieval then returns its pool, every pool
+   * candidate is read, and the reranker's best maxResults make the pack.
+   * Absent (the default): the fused order and cut, unchanged. Not applied to
+   * caller-selected items or to a question about recency, whose order is
+   * already decided.
+   */
+  reranker?: EvidenceReranker;
+  rerankTimers?: RerankTimers;
   now?: () => Date;
 }
 
@@ -288,6 +307,9 @@ export interface EvidencePackBuildDetail {
   // Private corpus that was skipped or matched nothing contributed no text and
   // does not set it. Each build has its own flag: a rebuild starts clean.
   encounteredSecureLocal: boolean;
+  // Counts only: whether the reranker ran and what it changed. Absent when no
+  // reranker was configured or it did not apply to this build.
+  rerank?: EvidenceRerankAudit;
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -301,9 +323,14 @@ export async function buildEvidencePackDetailed(input: BuildEvidencePackInput): 
 async function buildPreparedEvidencePackDetailed(
   input: BuildEvidencePackInput,
 ): Promise<EvidencePackBuildDetail> {
+  const reranker = input.reranker && !input.selectedItems?.length
+    && !hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? '')
+    ? input.reranker
+    : undefined;
+  const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input);
+    : await runRoutedSearches(input, retrievalLimit);
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -330,8 +357,10 @@ async function buildPreparedEvidencePackDetailed(
   let encounteredSecureLocal = input.excludeSecureSensitivity ? false : routed.encounteredSecureLocal;
 
   const hydrationStartedAt = Date.now();
+  // A reranked build reads its whole pool but keeps only maxResults, so each
+  // kept candidate gets the share it would have had without the pool.
   const maxBytesPerCandidate = evidenceBytesPerCandidate(
-    routedHits.length,
+    reranker ? Math.min(routedHits.length, input.maxResults) : routedHits.length,
     input.maxCharsPerCandidate,
     input.evidenceByteBudget,
   );
@@ -339,7 +368,7 @@ async function buildPreparedEvidencePackDetailed(
   // byte), so providers can keep their character contract; the returned
   // chunks are then clipped to the byte share below.
   const maxCharsPerCandidate = maxBytesPerCandidate;
-  const hydrated = await Promise.all(routedHits.map(async (hit) => {
+  const pool = await Promise.all(routedHits.map(async (hit) => {
     const provenance = hitProvenance(hit);
     const provider = input.contentProviders[hit.corpusId];
     let content: LocalContentBlock | undefined;
@@ -361,6 +390,53 @@ async function buildPreparedEvidencePackDetailed(
   }));
   recordSourceAnswerHydration(Date.now() - hydrationStartedAt);
 
+  const sensitivityOf = (entry: (typeof pool)[number]) =>
+    entry.content?.sensitivity ?? hitFallbackSensitivity(
+      entry.hit,
+      input.registry.get(entry.hit.corpusId)?.defaultSensitivity
+        ?? conservativeSensitivity(entry.hit.trustDomain),
+    );
+
+  let hydrated = pool;
+  let rerank: EvidenceRerankAudit | undefined;
+  if (reranker && pool.length > 0) {
+    // The reranker is a model, so every pooled item passes the same model
+    // policy the pack does BEFORE any text reaches it, not only the items
+    // that survive the cut: S5 content hard-stops the build here.
+    const scorable: typeof pool = [];
+    const denied: typeof pool = [];
+    for (const entry of pool) {
+      if (entry.policyDenied) {
+        denied.push(entry);
+        continue;
+      }
+      const sensitivity = sensitivityOf(entry);
+      assertNoTrustDomainDowngrade(entry.hit, sensitivity);
+      assertModelTrustTierAllowed(sensitivity.trustTier);
+      for (const fact of entry.content?.facts ?? []) assertModelTrustTierAllowed(fact.sensitivity.trustTier);
+      if (isSecureSensitivity(sensitivity)) {
+        // An exclusion rebuild drops secure items below, so they are not scored.
+        if (input.excludeSecureSensitivity) continue;
+        // The reranker reads every scorable item, so secure text it reads
+        // counts even when the cut drops it.
+        encounteredSecureLocal = true;
+      }
+      scorable.push(entry);
+    }
+    const reranked = await rerankCandidates({
+      reranker,
+      query: literalSearchQuery(input),
+      items: scorable,
+      passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
+      keep: input.maxResults,
+      ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
+    });
+    // Denied items carry no text, but every one is still counted below, so the
+    // policy gap and the content-free lane audits do not depend on the cut.
+    hydrated = [...denied, ...reranked.kept];
+    rerank = reranked.audit;
+  }
+
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
       encounteredSecureLocal = true;
@@ -375,10 +451,7 @@ async function buildPreparedEvidencePackDetailed(
     // hit carries one, never by a lower corpus default; an item of unknown
     // tier is judged S4 (secure by isSecureSensitivity), so its title never
     // reaches an ordinary analyst or ordinary released evidence.
-    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(
-      hit,
-      input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain),
-    );
+    const sensitivity = sensitivityOf({ hit, provenance, provider, content, policyDenied });
     assertNoTrustDomainDowngrade(hit, sensitivity);
 
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri
@@ -479,6 +552,7 @@ async function buildPreparedEvidencePackDetailed(
     contentPrivateCandidateIndexes,
     unreadCandidates,
     encounteredSecureLocal,
+    ...(rerank ? { rerank } : {}),
     ...(labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {}),
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
@@ -761,14 +835,17 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
 //
 // Nothing here reads the question's wording — the branch is purely "how many
 // candidates did retrieval already return".
-async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedSearchSlice> {
+async function runRoutedSearches(
+  input: BuildEvidencePackInput,
+  retrievalLimit: number = input.maxResults,
+): Promise<RoutedSearchSlice> {
   const literalQuery = literalSearchQuery(input);
   // Kicked off BEFORE the literal search so the two overlap rather than queue.
   const pendingPlan = input.queryPlanner
     ? startQueryPlanner(input.queryPlanner, input.question)
     : undefined;
 
-  const literalRun = await runRoutedSearch(input, literalQuery, 1);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit);
   if (!pendingPlan) return literalRun;
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -785,7 +862,7 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
 
   const runs: SourceIndexRoutedSearchResponse[] = [literalRun];
   for (const query of expansions) {
-    runs.push(await runRoutedSearch(input, query, runs.length + 1));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit));
   }
 
   const queries = [literalQuery, ...expansions];
@@ -803,7 +880,7 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     // record it.
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
   });
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, input.maxResults);
+  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, retrievalLimit);
 
   return {
     hits: fused,
@@ -845,6 +922,7 @@ function runRoutedSearch(
   input: BuildEvidencePackInput,
   query: string,
   ordinal: number,
+  maxResults: number,
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
@@ -852,7 +930,7 @@ function runRoutedSearch(
       adapters: input.adapters,
       request: {
         query,
-        maxResults: input.maxResults,
+        maxResults,
         ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
         context: input.searchContext,
       },

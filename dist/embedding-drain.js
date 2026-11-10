@@ -11348,6 +11348,217 @@ var init_judge_spending = __esm(() => {
   });
 });
 
+// src/core/evidence-reranker.ts
+var init_evidence_reranker = () => {};
+
+// src/workers/source-index/built-in-embedding/runtime.ts
+import { createRequire as createRequire5 } from "node:module";
+import { join as join17 } from "node:path";
+function onnxRuntimeFromDirectory(runtimeDir) {
+  return {
+    async createSession(modelPath, options) {
+      const requireFromPack = createRequire5(join17(runtimeDir, "olympus-runtime.json"));
+      const ort = requireFromPack("onnxruntime-node");
+      const session = await ort.InferenceSession.create(modelPath, {
+        executionProviders: ["cpu"],
+        intraOpNumThreads: options.threads,
+        interOpNumThreads: 1,
+        executionMode: "sequential",
+        graphOptimizationLevel: "all",
+        enableCpuMemArena: false
+      });
+      const releaseAtExit = () => {
+        session.release().catch(() => {
+          return;
+        });
+      };
+      process.once("exit", releaseAtExit);
+      const wantsTokenTypes = session.inputNames.includes("token_type_ids");
+      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
+      if (!outputName)
+        throw new Error("The built-in search model has no outputs.");
+      return {
+        async run(batch) {
+          const dims = [batch.batchSize, batch.sequenceLength];
+          const feeds = {
+            input_ids: new ort.Tensor("int64", batch.inputIds, dims),
+            attention_mask: new ort.Tensor("int64", batch.attentionMask, dims)
+          };
+          if (wantsTokenTypes)
+            feeds.token_type_ids = new ort.Tensor("int64", batch.tokenTypeIds, dims);
+          const output = (await session.run(feeds))[outputName];
+          if (!output || !(output.data instanceof Float32Array)) {
+            throw new Error("The built-in search model returned an unexpected output.");
+          }
+          return { data: output.data, dims: output.dims };
+        },
+        release: () => {
+          process.removeListener("exit", releaseAtExit);
+          return session.release();
+        }
+      };
+    }
+  };
+}
+var init_runtime = () => {};
+
+// src/workers/source-index/built-in-embedding/wordpiece.ts
+class WordPieceTokenizer {
+  vocab;
+  clsId;
+  sepId;
+  unkId;
+  padId;
+  constructor(vocabText) {
+    const vocab = new Map;
+    const lines = vocabText.split(`
+`);
+    for (let index = 0;index < lines.length; index += 1) {
+      const token = lines[index].replace(/\r$/, "");
+      if (token.length === 0 && index === lines.length - 1)
+        continue;
+      if (!vocab.has(token))
+        vocab.set(token, index);
+    }
+    this.vocab = vocab;
+    this.clsId = requireToken(vocab, "[CLS]");
+    this.sepId = requireToken(vocab, "[SEP]");
+    this.unkId = requireToken(vocab, "[UNK]");
+    this.padId = requireToken(vocab, "[PAD]");
+  }
+  tokenize(text2) {
+    const ids = [];
+    for (const word of preTokenize(normalize2(text2))) {
+      this.wordPiece(word, ids);
+    }
+    return ids;
+  }
+  encode(text2, maxLength) {
+    const content = this.tokenize(text2);
+    const room = Math.max(0, maxLength - 2);
+    const truncated = content.length > room;
+    return {
+      ids: [this.clsId, ...truncated ? content.slice(0, room) : content, this.sepId],
+      truncated
+    };
+  }
+  encodePair(first, second, maxLength) {
+    let a = this.tokenize(first);
+    let b = this.tokenize(second);
+    const room = Math.max(0, maxLength - 3);
+    const truncated = a.length + b.length > room;
+    if (truncated) {
+      let keepA = a.length;
+      let keepB = b.length;
+      while (keepA + keepB > room) {
+        if (keepB >= keepA)
+          keepB -= 1;
+        else
+          keepA -= 1;
+      }
+      a = a.slice(0, keepA);
+      b = b.slice(0, keepB);
+    }
+    const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+    const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
+    return { ids, typeIds, truncated };
+  }
+  wordPiece(word, out) {
+    const chars = Array.from(word);
+    if (chars.length > MAX_INPUT_CHARS_PER_WORD) {
+      out.push(this.unkId);
+      return;
+    }
+    const pieces = [];
+    let start = 0;
+    while (start < chars.length) {
+      let end = chars.length;
+      let found;
+      while (start < end) {
+        const piece = (start > 0 ? CONTINUING_SUBWORD_PREFIX : "") + chars.slice(start, end).join("");
+        const id = this.vocab.get(piece);
+        if (id !== undefined) {
+          found = id;
+          break;
+        }
+        end -= 1;
+      }
+      if (found === undefined) {
+        out.push(this.unkId);
+        return;
+      }
+      pieces.push(found);
+      start = end;
+    }
+    out.push(...pieces);
+  }
+}
+function requireToken(vocab, token) {
+  const id = vocab.get(token);
+  if (id === undefined)
+    throw new Error(`WordPiece vocabulary is missing ${token}.`);
+  return id;
+}
+function normalize2(text2) {
+  let cleaned = "";
+  for (const char of text2) {
+    const code = char.codePointAt(0);
+    if (code === 0 || code === 65533)
+      continue;
+    if (char === "\t" || char === `
+` || char === "\r") {
+      cleaned += " ";
+      continue;
+    }
+    if (CONTROL.test(char))
+      continue;
+    if (WHITESPACE.test(char)) {
+      cleaned += " ";
+      continue;
+    }
+    cleaned += isChineseChar(code) ? ` ${char} ` : char;
+  }
+  return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
+}
+function preTokenize(text2) {
+  const words = [];
+  let current2 = "";
+  for (const char of text2) {
+    if (char === " " || WHITESPACE.test(char)) {
+      if (current2)
+        words.push(current2);
+      current2 = "";
+    } else if (isPunctuation(char)) {
+      if (current2)
+        words.push(current2);
+      words.push(char);
+      current2 = "";
+    } else {
+      current2 += char;
+    }
+  }
+  if (current2)
+    words.push(current2);
+  return words;
+}
+function isPunctuation(char) {
+  const code = char.codePointAt(0);
+  if (code >= 33 && code <= 47 || code >= 58 && code <= 64 || code >= 91 && code <= 96 || code >= 123 && code <= 126) {
+    return true;
+  }
+  return PUNCTUATION.test(char);
+}
+function isChineseChar(code) {
+  return code >= 19968 && code <= 40959 || code >= 13312 && code <= 19903 || code >= 131072 && code <= 173791 || code >= 173824 && code <= 177983 || code >= 177984 && code <= 178207 || code >= 178208 && code <= 183983 || code >= 63744 && code <= 64255 || code >= 194560 && code <= 195103;
+}
+var MAX_INPUT_CHARS_PER_WORD = 100, CONTINUING_SUBWORD_PREFIX = "##", CONTROL, WHITESPACE, COMBINING_MARK, PUNCTUATION;
+var init_wordpiece = __esm(() => {
+  CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
+  WHITESPACE = /[\s\p{Zs}]/u;
+  COMBINING_MARK = /\p{Mn}/gu;
+  PUNCTUATION = /\p{P}/u;
+});
+
 // src/core/model-transport.ts
 function isModelEndpointRedirectError(error) {
   return error instanceof ModelEndpointRedirectError;
@@ -11511,7 +11722,7 @@ var init_engine_children = __esm(() => {
 });
 
 // src/core/linux-engine-service.ts
-import { createRequire as createRequire5 } from "node:module";
+import { createRequire as createRequire6 } from "node:module";
 var runtimeRequire3, heldLifecycleLocks;
 var init_linux_engine_service = __esm(() => {
   init_file_lease();
@@ -11524,7 +11735,7 @@ var init_linux_engine_service = __esm(() => {
   init_engine_children();
   init_linux_secret_backend();
   init_worker_transport();
-  runtimeRequire3 = createRequire5(import.meta.url);
+  runtimeRequire3 = createRequire6(import.meta.url);
   heldLifecycleLocks = new Set;
 });
 
@@ -14041,9 +14252,9 @@ var init_credential_broker = __esm(() => {
 import { randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync16 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname16, join as join17 } from "node:path";
+import { dirname as dirname16, join as join18 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join17(homedir9(), ".config", "olympus", "handles.json");
+  return join18(homedir9(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
   const path = connectedHandleGrantEpochPath(registryPath);
@@ -14503,9 +14714,9 @@ var init_file_scope_sources = __esm(() => {
 // src/core/source-scope-approval.ts
 import { createHash as createHash10, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync11, readFileSync as readFileSync17 } from "node:fs";
-import { dirname as dirname17, join as join18 } from "node:path";
+import { dirname as dirname17, join as join19 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
-  return join18(dirname17(handleRegistryPath), "file-source-scopes.json");
+  return join19(dirname17(handleRegistryPath), "file-source-scopes.json");
 }
 function isFileSourceScopeId(value) {
   return getFileScopeSource(value) !== undefined;
@@ -14736,9 +14947,9 @@ var init_source_scope_approval = __esm(() => {
 // src/core/mail-source-scope.ts
 import { createHash as createHash11, randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync12, readFileSync as readFileSync18 } from "node:fs";
-import { dirname as dirname18, join as join19 } from "node:path";
+import { dirname as dirname18, join as join20 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
-  return join19(dirname18(handleRegistryPath), "mail-source-scopes.json");
+  return join20(dirname18(handleRegistryPath), "mail-source-scopes.json");
 }
 function connectedMailSourceAccountGeneration(registry, pinnedHandle) {
   return connectedSourceScopeAccountGeneration(MAIL_SOURCE_SCOPE_ID, MAIL_SOURCE_SCOPE_CAPABILITY, registry, pinnedHandle);
@@ -17006,9 +17217,9 @@ function francAll(value, options = {}) {
     }
     return singleLanguageTuples(script2[0]);
   }
-  return normalize2(value, getDistances(asTuples(value), numericData[script2[0]], only, ignore));
+  return normalize3(value, getDistances(asTuples(value), numericData[script2[0]], only, ignore));
 }
-function normalize2(value, distances) {
+function normalize3(value, distances) {
   const min = distances[0][1];
   const max = value.length * MAX_DIFFERENCE - min;
   let index = -1;
@@ -21762,7 +21973,7 @@ self.onmessage = (event) => {
 
 // src/core/store-identity.ts
 import { existsSync as existsSync16, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
-import { basename as basename3, dirname as dirname21, isAbsolute as isAbsolute9, join as join20, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
+import { basename as basename3, dirname as dirname21, isAbsolute as isAbsolute9, join as join21, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
     return;
@@ -21781,7 +21992,7 @@ function storePathKey(path) {
   try {
     real = realpathSync3(folder);
   } catch {}
-  return join20(real, basename3(path));
+  return join21(real, basename3(path));
 }
 function registryKey(env = process.env) {
   const path = sourceRegistryPath(env);
@@ -21789,7 +22000,7 @@ function registryKey(env = process.env) {
   try {
     folder = realpathSync3.native(folder);
   } catch {}
-  return join20(folder, basename3(path));
+  return join21(folder, basename3(path));
 }
 function matchStore(sourceId, slot, dbPath, names, env) {
   const wanted = storePathKey(dbPath);
@@ -21880,7 +22091,7 @@ function storePlacementView(env = process.env) {
     try {
       roots.add(resolve7(accountFoldersRoot(env)));
       if (root !== undefined)
-        roots.add(join20(realpathSync3(root), ACCOUNT_FOLDERS_DIR));
+        roots.add(join21(realpathSync3(root), ACCOUNT_FOLDERS_DIR));
     } catch {}
     return [...roots];
   };
@@ -22005,7 +22216,7 @@ import {
   statSync as statSync10,
   writeFileSync as writeFileSync4
 } from "node:fs";
-import { basename as basename4, dirname as dirname22, isAbsolute as isAbsolute10, join as join21, resolve as resolve8 } from "node:path";
+import { basename as basename4, dirname as dirname22, isAbsolute as isAbsolute10, join as join22, resolve as resolve8 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute10(configured))
@@ -22065,7 +22276,7 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
   try {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
-      rmSync5(join21(refs, name), { force: true });
+      rmSync5(join22(refs, name), { force: true });
     const remaining = existsSync17(refs) ? readdirSync2(refs) : [];
     if (remaining.length > 0)
       return false;
@@ -22096,7 +22307,7 @@ function sweepMediaCache(dir, options = {}) {
     return 0;
   }
   for (const name of entries) {
-    const path = join21(dir, name);
+    const path = join22(dir, name);
     try {
       if (name.startsWith(".") && name.endsWith(".tmp")) {
         if (old(path))
@@ -22108,7 +22319,7 @@ function sweepMediaCache(dir, options = {}) {
       const refs = refsDir(path);
       if (existsSync17(refs)) {
         for (const marker of readdirSync2(refs)) {
-          const markerPath = join21(refs, marker);
+          const markerPath = join22(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
           if (gone)
             rmSync5(markerPath, { force: true });
@@ -22132,23 +22343,23 @@ function addMarker(path, holder) {
     addStoreMarker(refs, holder);
     return;
   }
-  const marker = join21(refs, holderName(holder));
+  const marker = join22(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name)
     writeFileSync4(marker, name, { mode: 384 });
   const legacy = legacyHolderName(holder);
   if (legacy)
-    rmSync5(join21(refs, legacy), { force: true });
+    rmSync5(join22(refs, legacy), { force: true });
 }
 function addStoreMarker(refs, holder) {
-  const marker = join21(refs, storeMarkerName(holder));
+  const marker = join22(refs, storeMarkerName(holder));
   const text2 = storeMarkerText(holder);
   if (readMarker(marker) !== text2)
     writePrivateFileAtomicSync(marker, text2);
   else
     flushMarker(marker, refs);
   for (const name of pathMarkerNames(holder))
-    rmSync5(join21(refs, name), { force: true });
+    rmSync5(join22(refs, name), { force: true });
 }
 function flushMarker(marker, refs) {
   const descriptor = openSync9(marker, "r");
@@ -22216,7 +22427,7 @@ function parseStoreMarker(text2) {
   }
 }
 function refsDir(path) {
-  return join21(dirname22(path), `${basename4(path)}.refs`);
+  return join22(dirname22(path), `${basename4(path)}.refs`);
 }
 function holderDigest(name) {
   return createHash17("sha256").update(name).digest("hex").slice(0, 32);
@@ -22258,14 +22469,14 @@ var init_media_cache = __esm(() => {
 
 // src/workers/classification/tier-set-binding.ts
 import { existsSync as existsSync18 } from "node:fs";
-import { basename as basename5, dirname as dirname23, join as join22 } from "node:path";
+import { basename as basename5, dirname as dirname23, join as join23 } from "node:path";
 function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const candidates = [recordedLedgerPath];
   if (storeDbPath !== ":memory:" && recordedLedgerPath !== ":memory:") {
     const secure = accountSiblingStorePath(storeDbPath, "secure_local");
     if (secure)
       candidates.push(tierLedgerPathForStore(secure));
-    candidates.push(join22(dirname23(storeDbPath), basename5(recordedLedgerPath)));
+    candidates.push(join23(dirname23(storeDbPath), basename5(recordedLedgerPath)));
   }
   return [...new Set(candidates)];
 }
@@ -26336,7 +26547,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -31921,6 +32132,36 @@ var init_local_index = __esm(() => {
     `).get(modelId, ...exclusion.params);
       return row !== null;
     }
+    vectorLaneServable(modelId) {
+      if (this.embeddingCurrencyRebuildPending(modelId))
+        return false;
+      const memo = this.vectorLaneMemo?.get(modelId);
+      if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
+        return true;
+      if (!this.tierHiddenCountsMemo) {
+        this.refreshTierHiddenCountsInTurns();
+        return this.anyCurrentEmbedding(modelId);
+      }
+      const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+      if (servable)
+        (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
+      else
+        this.vectorLaneMemo?.delete(modelId);
+      return servable;
+    }
+    anyCurrentEmbedding(modelId) {
+      return this.db.query(`
+      SELECT 1 AS present
+      FROM chunk_embeddings emb
+      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+      JOIN items i ON i.item_pk = emb.item_pk
+      WHERE emb.model_id = ?
+        AND i.tombstoned = 0
+        AND emb.content_hash = c.embedding_input_hash
+      LIMIT 1
+    `).get(modelId) !== null;
+    }
+    vectorLaneMemo;
     async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
       const scoredRows = await this.vectorSearchItemsWithScores(query, provider, maxResults, accountScope, filters, deadlineAtMs);
       return scoredRows.map(({ bestCosine: _bestCosine, ...row }) => row);
@@ -34438,7 +34679,7 @@ var init_tier_content_purge = __esm(() => {
 import { spawn } from "node:child_process";
 import { closeSync as closeSync10, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, statSync as statSync12 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname26, isAbsolute as isAbsolute11, join as join24 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname26, isAbsolute as isAbsolute11, join as join25 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -34658,7 +34899,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync10(join24(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        fd = openSync10(join25(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
         return fstatSync2(fd).isCharacterDevice();
       } catch {
         return false;
@@ -34674,7 +34915,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
 function helperPath() {
   const here = dirname26(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join24(here, name);
+    const candidate = join25(here, name);
     if (existsSync21(candidate))
       return candidate;
   }
@@ -34684,9 +34925,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join24(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join24(directory, bunName)),
-    join24(homedir10(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join25(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join25(directory, bunName)),
+    join25(homedir10(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute11(candidate))
@@ -34830,193 +35071,6 @@ class RemoteLiteRtEmbedder {
   }
 }
 var init_remote_litert_runtime = () => {};
-
-// src/workers/source-index/built-in-embedding/runtime.ts
-import { createRequire as createRequire6 } from "node:module";
-import { join as join25 } from "node:path";
-function onnxRuntimeFromDirectory(runtimeDir) {
-  return {
-    async createSession(modelPath, options) {
-      const requireFromPack = createRequire6(join25(runtimeDir, "olympus-runtime.json"));
-      const ort = requireFromPack("onnxruntime-node");
-      const session = await ort.InferenceSession.create(modelPath, {
-        executionProviders: ["cpu"],
-        intraOpNumThreads: options.threads,
-        interOpNumThreads: 1,
-        executionMode: "sequential",
-        graphOptimizationLevel: "all",
-        enableCpuMemArena: false
-      });
-      const releaseAtExit = () => {
-        session.release().catch(() => {
-          return;
-        });
-      };
-      process.once("exit", releaseAtExit);
-      const wantsTokenTypes = session.inputNames.includes("token_type_ids");
-      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
-      if (!outputName)
-        throw new Error("The built-in search model has no outputs.");
-      return {
-        async run(batch) {
-          const dims = [batch.batchSize, batch.sequenceLength];
-          const feeds = {
-            input_ids: new ort.Tensor("int64", batch.inputIds, dims),
-            attention_mask: new ort.Tensor("int64", batch.attentionMask, dims)
-          };
-          if (wantsTokenTypes)
-            feeds.token_type_ids = new ort.Tensor("int64", batch.tokenTypeIds, dims);
-          const output = (await session.run(feeds))[outputName];
-          if (!output || !(output.data instanceof Float32Array)) {
-            throw new Error("The built-in search model returned an unexpected output.");
-          }
-          return { data: output.data, dims: output.dims };
-        },
-        release: () => {
-          process.removeListener("exit", releaseAtExit);
-          return session.release();
-        }
-      };
-    }
-  };
-}
-var init_runtime = () => {};
-
-// src/workers/source-index/built-in-embedding/wordpiece.ts
-class WordPieceTokenizer {
-  vocab;
-  clsId;
-  sepId;
-  unkId;
-  padId;
-  constructor(vocabText) {
-    const vocab = new Map;
-    const lines = vocabText.split(`
-`);
-    for (let index = 0;index < lines.length; index += 1) {
-      const token = lines[index].replace(/\r$/, "");
-      if (token.length === 0 && index === lines.length - 1)
-        continue;
-      if (!vocab.has(token))
-        vocab.set(token, index);
-    }
-    this.vocab = vocab;
-    this.clsId = requireToken(vocab, "[CLS]");
-    this.sepId = requireToken(vocab, "[SEP]");
-    this.unkId = requireToken(vocab, "[UNK]");
-    this.padId = requireToken(vocab, "[PAD]");
-  }
-  tokenize(text2) {
-    const ids = [];
-    for (const word of preTokenize(normalize3(text2))) {
-      this.wordPiece(word, ids);
-    }
-    return ids;
-  }
-  encode(text2, maxLength) {
-    const content = this.tokenize(text2);
-    const room = Math.max(0, maxLength - 2);
-    const truncated = content.length > room;
-    return {
-      ids: [this.clsId, ...truncated ? content.slice(0, room) : content, this.sepId],
-      truncated
-    };
-  }
-  wordPiece(word, out) {
-    const chars = Array.from(word);
-    if (chars.length > MAX_INPUT_CHARS_PER_WORD) {
-      out.push(this.unkId);
-      return;
-    }
-    const pieces = [];
-    let start = 0;
-    while (start < chars.length) {
-      let end = chars.length;
-      let found;
-      while (start < end) {
-        const piece = (start > 0 ? CONTINUING_SUBWORD_PREFIX : "") + chars.slice(start, end).join("");
-        const id = this.vocab.get(piece);
-        if (id !== undefined) {
-          found = id;
-          break;
-        }
-        end -= 1;
-      }
-      if (found === undefined) {
-        out.push(this.unkId);
-        return;
-      }
-      pieces.push(found);
-      start = end;
-    }
-    out.push(...pieces);
-  }
-}
-function requireToken(vocab, token) {
-  const id = vocab.get(token);
-  if (id === undefined)
-    throw new Error(`WordPiece vocabulary is missing ${token}.`);
-  return id;
-}
-function normalize3(text2) {
-  let cleaned = "";
-  for (const char of text2) {
-    const code = char.codePointAt(0);
-    if (code === 0 || code === 65533)
-      continue;
-    if (char === "\t" || char === `
-` || char === "\r") {
-      cleaned += " ";
-      continue;
-    }
-    if (CONTROL.test(char))
-      continue;
-    if (WHITESPACE.test(char)) {
-      cleaned += " ";
-      continue;
-    }
-    cleaned += isChineseChar(code) ? ` ${char} ` : char;
-  }
-  return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
-}
-function preTokenize(text2) {
-  const words2 = [];
-  let current2 = "";
-  for (const char of text2) {
-    if (char === " " || WHITESPACE.test(char)) {
-      if (current2)
-        words2.push(current2);
-      current2 = "";
-    } else if (isPunctuation(char)) {
-      if (current2)
-        words2.push(current2);
-      words2.push(char);
-      current2 = "";
-    } else {
-      current2 += char;
-    }
-  }
-  if (current2)
-    words2.push(current2);
-  return words2;
-}
-function isPunctuation(char) {
-  const code = char.codePointAt(0);
-  if (code >= 33 && code <= 47 || code >= 58 && code <= 64 || code >= 91 && code <= 96 || code >= 123 && code <= 126) {
-    return true;
-  }
-  return PUNCTUATION.test(char);
-}
-function isChineseChar(code) {
-  return code >= 19968 && code <= 40959 || code >= 13312 && code <= 19903 || code >= 131072 && code <= 173791 || code >= 173824 && code <= 177983 || code >= 177984 && code <= 178207 || code >= 178208 && code <= 183983 || code >= 63744 && code <= 64255 || code >= 194560 && code <= 195103;
-}
-var MAX_INPUT_CHARS_PER_WORD = 100, CONTINUING_SUBWORD_PREFIX = "##", CONTROL, WHITESPACE, COMBINING_MARK, PUNCTUATION;
-var init_wordpiece = __esm(() => {
-  CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
-  WHITESPACE = /[\s\p{Zs}]/u;
-  COMBINING_MARK = /\p{Mn}/gu;
-  PUNCTUATION = /\p{P}/u;
-});
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { createHash as createHash21 } from "node:crypto";
@@ -37079,6 +37133,7 @@ var init_router = __esm(() => {
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
   init_router();
@@ -69908,6 +69963,13 @@ init_classification_ledger();
 init_built_in_sniffer();
 init_judge_spending();
 init_venice_models();
+
+// src/workers/source-index/built-in-reranker.ts
+init_evidence_reranker();
+init_assets();
+init_manifest();
+init_runtime();
+init_wordpiece();
 
 // src/workers/email-source/server.ts
 init_judge_spending();
