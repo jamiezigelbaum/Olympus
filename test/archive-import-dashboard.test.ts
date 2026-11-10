@@ -133,7 +133,7 @@ function bigMbox(): string {
   ].join('\n')]);
 }
 
-function fixture(options: { model?: ArchivePrivateModelState } = {}) {
+function fixture(options: { model?: ArchivePrivateModelState; checksElsewhere?: () => void } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-dashboard-')));
   cleanups.push(() => rmSync(base, { recursive: true, force: true }));
   const home = join(base, 'home');
@@ -179,10 +179,11 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
       return runtime.lane(family);
     },
   };
-  const open = () => {
+  const open = (elsewhere = options.checksElsewhere) => {
     const opened = createArchiveImportDashboard({
       runtime: counting,
       resolver,
+      ...(elsewhere ? { checksElsewhere: elsewhere } : {}),
       refreshScheduler: () => { refreshes += 1; },
       privateModel: () => model,
       scheduling: () => scheduling,
@@ -207,7 +208,9 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
     setScheduling: (next: ArchiveSchedulingState) => { scheduling = next; },
     breakCounts: (broken: boolean) => { countsBroken = broken; },
     /** The dashboard as a restarted Olympus builds it, over the same files. */
-    reopen: open,
+    reopen: () => open(),
+    /** The engine split's background over the same files: it runs the checks. */
+    openBackground: () => open(undefined),
   };
 }
 
@@ -325,6 +328,25 @@ describe('approving an import', () => {
     const request = f.dashboard.view().requests[0]!;
     expect(f.dashboard.decline(request.id)).toEqual({ ok: true });
     expect(f.dashboard.view().requests).toEqual([]);
+  });
+
+  test('in the engine split\'s front a possible copy is left checking for the background, which reads it on resume', async () => {
+    let handed = 0;
+    const f = fixture({ checksElsewhere: () => { handed += 1; } });
+    const first = await approveKey(f, f.write('Big.mbox', bigMbox()));
+    if (!first.ok || first.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, first.archive_id);
+    mkdirSync(join(f.home, 'Desktop'));
+    copyFileSync(join(f.exports, 'Big.mbox'), join(f.home, 'Desktop', 'Big copy.mbox'));
+    expect(await approveKey(f, join(f.home, 'Desktop', 'Big copy.mbox'))).toMatchObject({ ok: true, status: 'checking' });
+    expect(handed).toBe(1);
+    await f.dashboard.idle();
+    // The front read nothing: still checking.
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ status: 'checking' })]);
+    const background = f.openBackground();
+    background.resume();
+    await background.idle();
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ status: 'already_imported', archiveId: first.archive_id })]);
   });
 
   test('a possible copy that differs inside is started once the check has read it', async () => {

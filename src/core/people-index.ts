@@ -36,6 +36,7 @@ import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 import { addressSpansIn } from './sender-rules.ts';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from './store-write-guard.ts';
 
 /** What one store knows about one sender: the input the index is built from. */
 export interface PeopleSenderObservation {
@@ -682,13 +683,32 @@ export class LocalPeopleIndex {
   private people: PeoplePerson[];
   private readonly bySender: Map<string, PeoplePerson>;
   private readonly now: () => Date;
+  private readonly readOnly: boolean;
 
-  constructor(options: { dbPath: string; now?: () => Date }) {
+  /**
+   * `readOnly`: the engine split's front, which reads the index the
+   * background rebuilds; `reload` picks up each rebuild. Otherwise a writable
+   * open, which the front's write guard refuses.
+   */
+  constructor(options: { dbPath: string; now?: () => Date; readOnly?: boolean }) {
     this.people = [];
     this.bySender = new Map();
+    this.now = options.now ?? (() => new Date());
+    this.readOnly = options.readOnly === true;
+    if (this.readOnly) {
+      this.db = new Database(options.dbPath, { readonly: true, create: false, strict: true });
+      try {
+        this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;');
+        this.loadPeople();
+      } catch (error) {
+        closeSqliteStore(this.db, { checkpoint: false });
+        throw error;
+      }
+      return;
+    }
+    assertWritableStoreOpenAllowed('people index', options.dbPath);
     if (options.dbPath !== ':memory:') mkdirSync(dirname(options.dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(options.dbPath, { create: true, strict: true });
-    this.now = options.now ?? (() => new Date());
     try {
       if (options.dbPath !== ':memory:') chmodSync(options.dbPath, 0o600);
       this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;');
@@ -704,7 +724,12 @@ export class LocalPeopleIndex {
   }
 
   close(): void {
-    closeSqliteStore(this.db);
+    closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : {});
+  }
+
+  /** Read the people again from the file: a read-only open follows the writer's rebuilds. */
+  reload(): void {
+    this.loadPeople();
   }
 
   /** Rebuild the derived people from fresh observations; corrections and cards stay. */

@@ -1,4 +1,5 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
@@ -3021,7 +3022,11 @@ export class LocalConnectorStore {
     this.now = options.now ?? (() => new Date());
     this.controlPath = options.controlPath ?? controlPathHeadroom;
     this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
-    if (options.tierLedger === null || options.readOnly === true) {
+    // A read-only store judges by no ledger of its own, except in the engine
+    // split's front, where every store is read-only and must still judge
+    // visibility and the release check by its ledger: it reads that ledger
+    // read-only (tierLedger()).
+    if (options.tierLedger === null || (options.readOnly === true && !writableStoreOpensForbidden())) {
       this.tierLedgerDisabled = true;
     } else if (options.tierLedger) {
       this.tierLedgerHandle = options.tierLedger;
@@ -3041,8 +3046,9 @@ export class LocalConnectorStore {
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error('Connector store read-only mode requires a regular non-symlink database file.');
       }
-    } else if (this.dbPath !== ':memory:') {
-      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+    } else {
+      assertWritableStoreOpenAllowed('connector store', this.dbPath);
+      if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
@@ -3127,11 +3133,23 @@ export class LocalConnectorStore {
     return this.tierLedgerHandle?.dbPath ?? tierLedgerPathForStore(this.dbPath);
   }
 
+  /**
+   * The ledger that decides what this store may serve (its bound tier set's,
+   * or its own), without creating one: undefined when none exists yet, so
+   * everything in it is still legacy. Throws when a bound ledger is missing.
+   */
+  governingTierLedger(): TierLedger | undefined {
+    return this.visibilityLedger();
+  }
+
   /** The ledger this store records tier decisions in, opening the default one on first use. */
   tierLedger(): TierLedger | undefined {
     if (this.tierLedgerDisabled === true) return undefined;
     if (!this.tierLedgerHandle) {
-      this.tierLedgerHandle = new TierLedger({ dbPath: tierLedgerPathForStore(this.dbPath), now: this.now });
+      const path = tierLedgerPathForStore(this.dbPath);
+      // The front's read-only store: the ledger the background writes, when it exists.
+      if (this.readOnly && (path === ':memory:' || !existsSync(path))) return undefined;
+      this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
       this.tierLedgerOwned = true;
     }
     return this.tierLedgerHandle;
@@ -3287,9 +3305,10 @@ export class LocalConnectorStore {
     // checked; that is accepted, since it is closed unused.
     // A read-only store reads its ledger read-only too, so a read does not
     // repair or lock the ledger another process is writing. A ledger from an
-    // older build is opened writable to migrate it, as it always was.
+    // older build is opened writable to migrate it, as it always was, except
+    // in the engine split's front, which writes nothing: the background migrates it.
     let opened = new TierLedger({ dbPath: found, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
-    if (this.readOnly && !opened.hasCurrentSchema()) {
+    if (this.readOnly && !opened.hasCurrentSchema() && !writableStoreOpensForbidden()) {
       opened.close();
       opened = new TierLedger({ dbPath: found, now: this.now });
     }

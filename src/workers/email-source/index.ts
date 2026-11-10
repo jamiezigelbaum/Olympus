@@ -587,6 +587,12 @@ export interface EmailSourceWorkerOptions {
   sourceScheduler?: SourceScheduler;
   sourceWatch?: {
     store: LocalSourceWatchStore;
+    /**
+     * The id a create writes under, when the request was forwarded by the
+     * engine split's front (engine-split/commands.ts): the same on every retry
+     * of one command, so a retry finds the watch instead of making another.
+     */
+    recordId?: (request: Request) => string | undefined;
   };
   sourceDashboard?: {
     sovereigntyEngine: SovereigntyEngine;
@@ -1493,7 +1499,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'POST' && url.pathname === `${basePath}/source/watch/create`) {
           if (!sourceWatch) throw sourceWatchNotSupported();
           const owner = authenticatedWatchOwner(request);
-          const create = await parseSourceWatchCreateRequest(request);
+          const recordId = sourceWatch.recordId?.(request);
+          const create = { ...(await parseSourceWatchCreateRequest(request)), ...(recordId ? { watchId: recordId } : {}) };
           const watch = createSourceWatchPublicView({ store: sourceWatch.store, create, owner });
           return json({ kind: 'source_watch', watch, policy: SOURCE_WATCH_POLICY });
         }

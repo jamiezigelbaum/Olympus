@@ -92,6 +92,12 @@ export interface OlympusConfig {
     /** Internal marker: an explicit host SecretRef must never use ambient auth. */
     authTokenSecretRefUnresolved?: boolean;
     /**
+     * Run the worker as two processes (docs/design/engine-split.md, part 3):
+     * a background process that is the only writer and a read-only front
+     * that serves HTTP. Defaults to false: one worker process, as before.
+     */
+    engineSplit: boolean;
+    /**
      * Opt-in OpenClaw supervision of the packaged worker subprocess. The
      * native child loads the same ~/.config/olympus/worker.env written by
      * Olympus setup/connect; host service-wrapper environment is not inherited.
@@ -217,6 +223,7 @@ export interface OlympusConfig {
 
 const DEFAULT_CONFIG: OlympusConfig = {
   worker: {
+    engineSplit: false,
     service: {
       enabled: false,
       startupTimeoutSeconds: 180,
@@ -721,6 +728,9 @@ export function configFromPluginConfig(
   if (typeof worker?.authToken === 'string' && worker.authToken.trim()) {
     config.worker.authToken = worker.authToken.trim();
   }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, 'engineSplit')) {
+    config.worker.engineSplit = worker.engineSplit as boolean;
+  }
   const service = asRecord(worker?.service);
   if (service) {
     if (typeof service.enabled === 'boolean') config.worker.service.enabled = service.enabled;
@@ -1211,6 +1221,7 @@ function applyModelProfileEnv(
 }
 
 function validateConfig(config: OlympusConfig): void {
+  assertBoolean(config.worker.engineSplit, 'worker.engineSplit');
   if (config.sovereignty?.configPath !== undefined) {
     if (typeof config.sovereignty.configPath !== 'string' || !config.sovereignty.configPath.trim()) {
       throw new OperationError('config_error', 'sovereignty.configPath must be a non-empty string.');

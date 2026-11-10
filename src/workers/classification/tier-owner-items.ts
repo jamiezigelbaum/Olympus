@@ -280,7 +280,7 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
       records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
         ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
           .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
-        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId);
+        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId, true);
     } catch {
       // A ledger that cannot be read lists nothing.
     }
@@ -338,7 +338,7 @@ export function countOwnerTierItems(context: TierCliContext = {}): OwnerTierItem
         counts.personal += byTier.private;
         counts.private += byTier.secure;
         counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').length;
-      }, ledger.boundLedgerId);
+      }, ledger.boundLedgerId, true);
     } catch {
       // A ledger that cannot be read counts nothing.
     }
@@ -387,7 +387,7 @@ function readLocatedState(items: readonly LocatedItem[], context: TierCliContext
         state.ownerTier = override.tier;
       }
       if (ledger.itemIsSecret(item.identity)) state.secret = true;
-    }, item.boundLedgerId);
+    }, item.boundLedgerId, true);
   }
   return state;
 }

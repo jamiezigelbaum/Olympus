@@ -219,6 +219,12 @@ export interface ArchiveImportDashboardOptions {
    */
   refreshScheduler: () => void;
   /**
+   * The engine split's front: an approved check is recorded as checking and
+   * handed to the background (which reads and records it on its resume)
+   * instead of being read here.
+   */
+  checksElsewhere?: () => void;
+  /**
    * How the private model stands now.
    */
   privateModel: () => ArchivePrivateModelState;
@@ -700,7 +706,9 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (!entry) return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
         if (!requestId) answered();
         // A second press while the first is checking: one check is enough.
-        if (!running.has(entry.request_id)) {
+        if (options.checksElsewhere) {
+          options.checksElsewhere();
+        } else if (!running.has(entry.request_id)) {
           check(entry.request_id, prepared);
           handed = true;
         }

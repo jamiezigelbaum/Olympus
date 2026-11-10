@@ -77,6 +77,10 @@ export const SHARED_DATA_FILES = {
   // What each AI app received (core/app-release-log.ts), beside them too.
   'app-release-log': 'app-release-log.sqlite',
   'tier-migration': 'tier-migration',
+  // The engine split (core/engine-split.ts): the background's private command
+  // socket folder off Linux, and the status snapshot it publishes.
+  'engine-run': 'engine-run',
+  'engine-status': 'engine-background-status.json',
   // Private, short-lived: an export being packed into a backup, or a backup
   // being opened for a restore (data-backup.ts). Removed when each finishes.
   'backup-staging': 'backup-staging',

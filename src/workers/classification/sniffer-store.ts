@@ -17,6 +17,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
@@ -107,6 +108,7 @@ export class TierSnifferStore {
       return;
     }
     this.readOnly = false;
+    assertWritableStoreOpenAllowed('sniffer store', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
     if (onDisk) mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     const previousUmask = onDisk ? process.umask(0o077) : undefined;

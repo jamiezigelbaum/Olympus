@@ -27,6 +27,7 @@ import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
   TIER_KEYS,
   contentJudgeVerdictReason,
@@ -386,6 +387,7 @@ export class TierLedger {
     this.dbPath = options.dbPath;
     this.readOnly = options.readOnly === true;
     this.now = options.now ?? (() => new Date());
+    if (!this.readOnly) assertWritableStoreOpenAllowed('tier ledger', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
     if (onDisk && !this.readOnly) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });

@@ -157,14 +157,29 @@ export function createWorkerFetch(options: WorkerTransportOptions = {}, fetchImp
   }) as typeof fetch;
 }
 
+/**
+ * A fetch that always connects to one unix socket, under Bun or Node, for a
+ * private socket that is not the worker's own (the engine split's background
+ * command socket, core/engine-split.ts). The URL's origin only names the
+ * route; `validate` runs before each dispatch.
+ */
+export function createUnixSocketFetch(socketPath: string, validate: () => void = () => {}): typeof fetch {
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    validate();
+    if (typeof Bun === 'undefined') return nodeWorkerFetch(socketPath, input, init, validate);
+    return globalThis.fetch(input, { ...init, unix: socketPath, redirect: 'error' } as RequestInit);
+  }) as typeof fetch;
+}
+
 /** The Gateway loads plugins under Node. Keep its HTTP origin, body and abort
  * semantics while connecting exclusively to the same validated owner socket. */
-async function nodeWorkerFetch(unix: string, input: RequestInfo | URL, init: RequestInit | undefined, options: WorkerTransportOptions): Promise<Response> {
+async function nodeWorkerFetch(unix: string, input: RequestInfo | URL, init: RequestInit | undefined, options: WorkerTransportOptions | (() => void)): Promise<Response> {
   const request = new Request(input, init);
   const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
   const url = new URL(request.url);
   // Recheck after an asynchronous body read, immediately before dispatch.
-  validateWorkerSocket(options);
+  if (typeof options === 'function') options();
+  else validateWorkerSocket(options);
   return new Promise((resolve, reject) => {
     const outgoing = httpRequest(url, {
       socketPath: unix,

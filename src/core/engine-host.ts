@@ -40,7 +40,7 @@ import {
   type NativeProcessServiceDefinition,
 } from './native-process-service.ts';
 import { createNativeRelayService } from './native-relay-service.ts';
-import { createNativeWorkerService, WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
+import { createNativeEngineBackgroundService, createNativeWorkerService, ENGINE_BACKGROUND_SERVICE_ID, WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { resolveRemoteAccessMode } from './remote-access.ts';
 import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocketDirectory } from './worker-transport.ts';
 
@@ -94,8 +94,14 @@ export interface EngineHostHandle {
 
 export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>, ownerBridgeHostSocket?: string): NativeProcessServiceDefinition[] {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}) });
+  // The engine split (core/engine-split.ts): the background writer starts
+  // first and the worker becomes its front, which waits for it to be ready.
+  // Stop runs in reverse, so the front stops before the background.
+  const split = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }).worker.engineSplit;
+  const background = split ? createNativeEngineBackgroundService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed }) : undefined;
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}), ...(background ? { engineBackground: background } : {}) });
   return [
+    ...(background ? [backgroundNativeProcessService((({ isReady: _isReady, ...rest }) => rest)(background))] : []),
     backgroundNativeProcessService(worker),
     backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
     backgroundNativeProcessService(createNativeEmbeddingDrainService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
@@ -126,6 +132,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
       // Services whose config turns them off start nothing and report nothing;
       // say so instead of leaving them "starting".
       enabled = {
+        ...(parsed.worker.engineSplit ? { [ENGINE_BACKGROUND_SERVICE_ID]: parsed.worker.service.enabled } : {}),
         'olympus-worker': parsed.worker.service.enabled,
         'olympus-remote-relay': remoteMode !== 'off',
         'olympus-source-embedding-drain': parsed.worker.embeddingDrain.enabled,

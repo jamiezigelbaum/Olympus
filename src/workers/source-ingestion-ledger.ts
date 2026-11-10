@@ -2,6 +2,7 @@ import { hasFolderLayout, placedRosterStores } from '../core/source-placement.ts
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
+import { assertWritableStoreOpenAllowed } from '../core/store-write-guard.ts';
 import type { ContentExtractionThroughputSignal } from '../core/ingestion-throughput.ts';
 import { defaultConfig, type OlympusConfig } from '../core/config.ts';
 import {
@@ -524,10 +525,28 @@ export function buildSourceIngestionLedgerSnapshot(
 const SAMPLE_RETENTION_MS = 24 * 60 * 60_000;
 const MAX_SAMPLES_PER_CORPUS = 720;
 
+/**
+ * The shared dashboard file on a read-only, query-only connection: the
+ * engine split's front reads dashboard progress through it
+ * (engine-split/front-history.ts), and the background, its one writer,
+ * records. The file must exist.
+ */
+export function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()): Database {
+  const db = new Database(dbPath, { readonly: true, create: false });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+    return db;
+  } catch (error) {
+    closeSqliteStore(db, { checkpoint: false });
+    throw error;
+  }
+}
+
 export class SqliteSourceIngestionLedgerStore {
   private readonly db: Database;
 
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
+    assertWritableStoreOpenAllowed('ingestion ledger', dbPath);
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');

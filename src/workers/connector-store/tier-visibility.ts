@@ -226,3 +226,31 @@ export function createReleaseTierCheck(
     },
   };
 }
+
+/**
+ * Register a store that no lane governs yet (a configured mount such as
+ * Reflect or Roam) with the ledger that governs it, so the gate and every
+ * release check read its items' tiers instead of treating them as legacy. A
+ * store with no ledger yet holds only legacy items and waits; a lane already
+ * on that ledger takes the corpus; a bound ledger that cannot be opened is
+ * left for the next call (the store's own reads fail closed meanwhile).
+ */
+export function registerGovernedStore<L extends { ledger: TierLedger; corpusIds: Set<string> }>(
+  lanes: L[],
+  store: { corpusId: string; governingTierLedger(): TierLedger | undefined },
+  newLane: (ledger: TierLedger) => L,
+  log: (line: string) => void = () => {},
+): 'registered' | 'joined' | 'already' | 'no_ledger' | 'unavailable' {
+  if (lanes.some((lane) => lane.corpusIds.has(store.corpusId))) return 'already';
+  let ledger: TierLedger | undefined;
+  try { ledger = store.governingTierLedger(); }
+  catch (error) {
+    log(`[tier] ${store.corpusId}: its tier ledger is unavailable; registered when it is readable (${error instanceof Error ? error.name : 'error'})`);
+    return 'unavailable';
+  }
+  if (!ledger) return 'no_ledger';
+  const sharing = lanes.find((lane) => lane.ledger.dbPath === ledger!.dbPath);
+  if (sharing) { sharing.corpusIds.add(store.corpusId); return 'joined'; }
+  lanes.push(newLane(ledger));
+  return 'registered';
+}

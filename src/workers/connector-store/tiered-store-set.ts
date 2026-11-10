@@ -41,6 +41,7 @@
 // Everything here is source-neutral: a lane declares its legs; nothing
 // branches on which source an item came from.
 
+import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -156,6 +157,11 @@ export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
  */
 export function tieredStoreSetLedgerPath(secureLocalStoreDbPath: string): string {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
+}
+
+/** A lane's set ledger by path; the engine split's front reads the one the background writes. */
+function openSetLedger(dbPath: string): TierLedger {
+  return new TierLedgerClass({ dbPath, ...(writableStoreOpensForbidden() ? { readOnly: true } : {}) });
 }
 
 export interface TieredStoreLegSpec {
@@ -322,9 +328,12 @@ export class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
-    void this.repairLowerContent();
-    // Orphans left by a parent that went while the worker was down.
-    void this.sweepOrphanedChildren();
+    // Repairs and sweeps write; in the engine split's front the background does them.
+    if (!writableStoreOpensForbidden()) {
+      void this.repairLowerContent();
+      // Orphans left by a parent that went while the worker was down.
+      void this.sweepOrphanedChildren();
+    }
   }
 
   // ---- Child items whose parent is gone ---------------------------------------
@@ -1263,7 +1272,7 @@ export interface LaneTieredStoreSetOptions {
 export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): TieredStoreSet {
   const ledger = options.ledger
     ?? options.secureStore.tierLedger()
-    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+    ?? openSetLedger(tieredStoreSetLedgerPath(options.secureStore.dbPath));
   return new TieredStoreSet({
     setId: options.setId,
     ledger,
@@ -1340,7 +1349,7 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
   if (!secureDbPath) throw new Error('A tiered lane needs a secure_local store or a way to create one.');
   const ledger = options.ledger
     ?? secure.store?.tierLedger()
-    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+    ?? openSetLedger(tieredStoreSetLedgerPath(secureDbPath));
   const legs: TieredStoreLegSpec[] = [];
   for (const domain of TIER_DOMAIN_ORDER) {
     const leg = options.legs[domain];
@@ -1432,7 +1441,7 @@ export function createExistingStoreTierLane(options: {
     : options.newLegs.secure_local?.dbPath;
   if (!secureDbPath) throw new Error('A tiered lane needs a secure_local store or a way to create one.');
   const ledger = (options.store.trustDomain === 'secure_local' ? options.store.tierLedger() : undefined)
-    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+    ?? openSetLedger(tieredStoreSetLedgerPath(secureDbPath));
   const newStores: Partial<Record<SourceTrustDomain, OnDemandTierStore>> = {};
   const legs: Partial<Record<SourceTrustDomain, TieredLaneLeg>> = {};
   for (const domain of TIER_DOMAIN_ORDER) {

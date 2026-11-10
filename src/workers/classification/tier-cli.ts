@@ -22,6 +22,7 @@ import { lifecycleStorePaths, type LifecyclePathContext } from '../../data-lifec
 import { defaultMailSourceScopeStatePath, readMailSourceScopeApproval } from '../../core/mail-source-scope.ts';
 import { handleRegistryPathFromEnv, readConnectedHandleRegistry } from '../credential-broker/connected-handles.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
 import {
@@ -287,7 +288,7 @@ function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedIte
     localItemId,
     ...(boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath)! } : {}),
   });
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path)));
+  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), true));
   if (deciding.length > 0) return deciding.map(located);
   const fallback = matches[0]!;
   return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
@@ -351,8 +352,9 @@ function identityKey(identity: TierLedgerIdentity): string {
  * been replaced in between. (A replacement has had its schema migrated by this
  * open before it is checked; that is accepted, since it is closed unused.)
  */
-export function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string): T {
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}) });
+export function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string, readsOnly = false): T {
+  // The engine split's front runs only the reads (`tier explain`), on read-only opens.
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}), ...(readsOnly && writableStoreOpensForbidden() ? { readOnly: true } : {}) });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
       throw new OperationError(
@@ -520,11 +522,11 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity),
-    }), item.boundLedgerId);
+    }), item.boundLedgerId, true);
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn: string[] = [];
     if (existsSync(snifferPath)) {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...(writableStoreOpensForbidden() ? { readOnly: true } : {}) });
       try {
         waitingOn = (['metadata', 'content'] as const).filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
       } finally {
