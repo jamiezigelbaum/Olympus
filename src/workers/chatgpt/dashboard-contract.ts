@@ -1152,7 +1152,9 @@ export const PRIVACY_CHECK_TOOL_NAME = 'olympus_privacy_check';
 /** The `_meta` key carrying the privacy rules to the widget only. */
 export const PRIVACY_META_KEY = 'olympus/privacy';
 
-export type PrivacyRuleKind = 'folder' | 'label' | 'sender';
+export type PrivacyRuleKind = 'folder' | 'label' | 'sender' | 'chat';
+/** Chat sources an always-Private chat rule may name (privacy-profile.ts RULE_SOURCES.chat). */
+export type PrivacyChatSourceId = 'telegram.messages' | 'whatsapp.personal.messages';
 
 /** A folder that is always Private: the picker's opaque node key. */
 export interface PrivacyFolderRule {
@@ -1179,12 +1181,23 @@ export interface PrivacySenderRule {
 }
 
 /**
+ * A chat that is always Private: the owner's own whole-chat rule. `key` is the
+ * conversation id the chat's messages carry; `display` its name, only in `_meta`.
+ */
+export interface PrivacyChatRule {
+  kind: 'chat';
+  source_id: PrivacyChatSourceId;
+  key: string;
+  display?: string;
+}
+
+/**
  * One always-Private rule, as `olympus_privacy_set` takes it and
  * `olympus_privacy_get` returns it (only in `_meta[PRIVACY_META_KEY]`).
  * Caps: 100 rules; key 1024 characters; label name and display 200; sender
  * an address or `@domain` of at most 240.
  */
-export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySenderRule;
+export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySenderRule | PrivacyChatRule;
 
 /** `olympus_privacy_get {}` → `_meta[PRIVACY_META_KEY]`; also `olympus_privacy_set`'s. */
 export interface PrivacySettings {
