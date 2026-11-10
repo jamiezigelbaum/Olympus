@@ -1,7 +1,7 @@
 import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import { runTierClassifier } from '../src/workers/classification/tier-cli.ts';
 import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
-import { adoptExistingCloudApproval, createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
+import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { approveClassifier, readClassificationLedger, isClassifierApproved, revokeClassifier } from '../src/workers/classification-ledger.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
@@ -15,7 +15,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop } from '../src/workers/classification/judge-spending.ts';
+import { DEFAULT_VENICE_JUDGE_MODEL, JUDGE_PRICES, JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { renderJudgeChoice } from '../src/workers/dashboard/pages/local.ts';
@@ -495,4 +495,61 @@ test('the Keys page renders through the real setup object and shows the upgrade 
   const second = await keys();
   expect(second).toContain('Sorting your archive by privacy');
   expect(second).not.toContain('You can now set a spending limit');
+});
+
+test('Venice judges with its own default model, not the Private-answer model; a declared judge profile wins (#1252)', () => {
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const answerMember = (engine.resolveAnalystPool({ trustDomain: 'secure_local' }).members).find(m => m.profile.provider === 'venice')!;
+  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 1 });
+  expect(cloud.source !== 'off' && cloud.lane.kind).toBe('venice');
+  if (cloud.source === 'off') return;
+  expect(cloud.lane.modelId).toBe(DEFAULT_VENICE_JUDGE_MODEL);
+  expect(cloud.lane.profileId).toBe(answerMember.id);
+  expect(JUDGE_PRICES[DEFAULT_VENICE_JUDGE_MODEL]).toBeDefined();
+  // Answers keep the owner's chosen model.
+  expect(engine.resolveAnalystPool({ trustDomain: 'secure_local' }).members.find(m => m.id === answerMember.id)!.profile.model).toBe(answerMember.profile.model);
+  // A local choice is untouched.
+  const local = resolveJudgeChoiceRuntime({ engine }, { choice: 'local', stop: null, remainingDollars: 0 });
+  expect(local.source !== 'off' && local.lane.kind).toBe('local');
+
+  const config = structuredClone(loadSovereigntyPreset('local-first'));
+  config.modelProfiles['my-judge'] = { ...config.modelProfiles[answerMember.id]!, model: 'qwen3-6-35b-a3b', purpose: 'classification' } as never;
+  const declared = resolveJudgeChoiceRuntime({ engine: createSovereigntyEngine(config) }, { choice: 'venice', stop: null, remainingDollars: 1 });
+  expect(declared.source !== 'off' && declared.lane.modelId).toBe('qwen3-6-35b-a3b');
+  expect(declared.source !== 'off' && declared.lane.profileId).toBe('my-judge');
+});
+
+test('an owner\'s Venice opt-in carries to the new default judge, but never past a revocation or a local choice (#1252)', async () => {
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 1 });
+  if (cloud.source === 'off') throw new Error('expected a Venice lane');
+  const promptVersion = snifferPromptVersions().approval;
+  const key = { lane: cloud.lane.kind, profileId: cloud.lane.profileId, modelId: cloud.lane.modelId, promptVersion };
+  const old = { kind: 'venice', profileId: cloud.lane.profileId, modelId: 'kimi-k3' };
+
+  // Opted in on the judge card under the old judge model and an older prompt: carried.
+  const a = fixture(); a.budget.choose('venice', 5);
+  await approveClassifier(a.path + '.ledger', old, 'p-older', 'Owner opted in.');
+  expect(await carryCloudJudgeApproval(a.budget, cloud, a.path + '.ledger', promptVersion)).toBe(true);
+  expect(isClassifierApproved((await readClassificationLedger(a.path + '.ledger')).entries, key)).toBe(true);
+  expect(await carryCloudJudgeApproval(a.budget, cloud, a.path + '.ledger', promptVersion)).toBe(false);
+
+  // The owner's newest word is a revocation: not carried.
+  const b = fixture(); b.budget.choose('venice', 5);
+  await approveClassifier(b.path + '.ledger', old, promptVersion, 'Owner opted in.');
+  await revokeClassifier(b.path + '.ledger', old, promptVersion, 'Owner chose local.');
+  expect(await carryCloudJudgeApproval(b.budget, cloud, b.path + '.ledger', promptVersion)).toBe(false);
+
+  // A local choice, or no choice record at all: not carried.
+  const c = fixture(); c.budget.choose('local', 5);
+  await approveClassifier(c.path + '.ledger', old, promptVersion, 'Owner opted in.');
+  expect(await carryCloudJudgeApproval(c.budget, cloud, c.path + '.ledger', promptVersion)).toBe(false);
+  const d = fixture();
+  await approveClassifier(d.path + '.ledger', old, promptVersion, 'Owner opted in.');
+  expect(await carryCloudJudgeApproval(d.budget, cloud, d.path + '.ledger', promptVersion)).toBe(false);
+
+  // Another profile's approval does not carry.
+  const e = fixture(); e.budget.choose('venice', 5);
+  await approveClassifier(e.path + '.ledger', { ...old, profileId: 'someone-else' }, promptVersion, 'Owner opted in.');
+  expect(await carryCloudJudgeApproval(e.budget, cloud, e.path + '.ledger', promptVersion)).toBe(false);
 });

@@ -1,6 +1,6 @@
 import { createDashboardPeople } from './dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
-import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
@@ -2628,6 +2628,7 @@ export async function main(): Promise<void> {
   };
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
+  await carryCloudJudgeApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
   // The local judge's own speed and held share on this install, for the setup estimates (#891).
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));

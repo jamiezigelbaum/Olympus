@@ -10,10 +10,19 @@ import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 
 export { JudgeCloudStopped } from './sniffer.ts';
 
+/**
+ * Venice's default privacy judge (#1252, owner decision 2026-11-10): the
+ * model that measured best on the owner's labels (#883, the 5 Nov set), not
+ * the model the owner picked for Private answers. A Venice profile declared
+ * with purpose "classification" still wins. Private tier, temperature 0 (#1237).
+ */
+export const DEFAULT_VENICE_JUDGE_MODEL = 'deepseek-v4-flash-0731';
+
 // USD per million tokens. One dated authority for both setup and dispatch.
 // https://github.com/veniceai/api-docs/blob/main/models/text.mdx
-export const JUDGE_PRICE_DATE = '2026-11-06';
+export const JUDGE_PRICE_DATE = '2026-11-10';
 export const JUDGE_PRICES: Readonly<Record<string, { input: number; output: number }>> = Object.freeze({
+  'deepseek-v4-flash-0731': { input: 0.13, output: 0.26 },
   'qwen3-6-35b-a3b': { input: 0.10, output: 1.00 },
   'kimi-k3': { input: 3.75, output: 18.75 },
   'zai-org-glm-5-2': { input: 1.40, output: 4.40 },
