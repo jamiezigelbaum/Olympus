@@ -36,7 +36,7 @@
  * reader is entitled to know the difference.
  */
 import { sharedDataPath } from '../core/olympus-layout.ts';
-import { chmod, mkdir, open, readFile, stat } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, stat, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
 
@@ -174,15 +174,54 @@ export async function appendEmbeddingLedgerEntry(
 async function appendEmbeddingLedgerEntries(path: string, entries: readonly EmbeddingLedgerEntry[]): Promise<void> {
   const line = entries.map(entry => `${JSON.stringify(entry)}\n`).join('');
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const handle = await open(path, 'a', 0o600);
+  const handle = await open(path, 'a+', 0o600);
   try {
     await handle.chmod(0o600);
+    await restoreLineBoundary(handle);
     await handle.appendFile(line, 'utf8');
     // fsync: this is a record of decisions, not telemetry. Losing the tail of
     // it to a crash would recreate the exact hole the ledger exists to close.
     await handle.sync();
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Make the file end on a line boundary before appending to it (#1012, #1014).
+ *
+ * An append interrupted after a partial line (ENOSPC, a crash before fsync)
+ * leaves an incomplete tail. Appending straight after it would weld the next
+ * entry onto that fragment as one unreadable line, and the caller would then
+ * acknowledge an entry nobody can read. The fragment itself was never
+ * acknowledged, because its append never fsynced, so it is cut back to the
+ * last newline; the caller still holds it and will write it again whole. One
+ * exception keeps valid history: a last line that already parses as an entry
+ * (a hand-edited file saved without a final newline) is terminated instead.
+ *
+ * The common case costs one fstat and a one-byte read.
+ */
+async function restoreLineBoundary(handle: FileHandle): Promise<void> {
+  const { size } = await handle.stat();
+  if (size === 0) return;
+  const last = Buffer.alloc(1);
+  await handle.read(last, 0, 1, size - 1);
+  if (last[0] === 0x0a) return;
+  let boundary = 0;
+  const chunk = Buffer.alloc(64 * 1024);
+  for (let end = size; end > 0 && boundary === 0;) {
+    const start = Math.max(0, end - chunk.length);
+    const { bytesRead } = await handle.read(chunk, 0, end - start, start);
+    const newline = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
+    if (newline >= 0) boundary = start + newline + 1;
+    end = start;
+  }
+  const tail = Buffer.alloc(size - boundary);
+  await handle.read(tail, 0, tail.length, boundary);
+  if (parseEmbeddingLedgerJsonl(tail.toString('utf8')).entries.length === 1) {
+    await handle.appendFile('\n', 'utf8');
+  } else {
+    await handle.truncate(boundary);
   }
 }
 
@@ -211,6 +250,11 @@ export async function appendEmbeddingLedgerEntriesOnce(
   path: string, entries: readonly EmbeddingLedgerEntry[],
 ): Promise<number> {
   if (!entries.length) return 0;
+  // Nothing to deduplicate: append without stating or parsing the ledger (#1011).
+  if (!entries.some(entry => entry.entry_id?.trim())) {
+    await appendEmbeddingLedgerEntries(path, entries);
+    return entries.length;
+  }
   const known = await recordedEntryIds(path);
   const pendingIds = new Set<string>();
   const pending = entries.filter(entry => {
