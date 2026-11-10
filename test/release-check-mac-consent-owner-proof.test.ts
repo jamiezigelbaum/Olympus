@@ -13,7 +13,7 @@ function fake(os: 'linux' | 'macos', result: Partial<ExecResult> | Error) {
   return { machine, scripts };
 }
 
-const PASS = 'page=200\nform=yes\nother_form=403\nother_form_refused=yes\nother_page=403\nowner=303\nowner_code=yes\n';
+const PASS = 'page=200\nform=yes\nother_form=403\nother_form_refused=yes\nother_page=403\nother_page_refused=yes\nowner=303\nowner_code=yes\n';
 
 describe('release check: approving an app connection on a Mac needs the owner (#1186)', () => {
   test('passes when the second account is refused by the owner check at both paths and the owner approves', async () => {
@@ -26,6 +26,8 @@ describe('release check: approving an app connection on a Mac needs the owner (#
     expect(evaluateMacConsentOwnerProof(0, PASS.replace('other_form=403', 'other_form=303')).detail).toContain('not refused by the owner check');
     expect(evaluateMacConsentOwnerProof(0, PASS.replace('other_form_refused=yes', 'other_form_refused=no')).status).toBe('fail');
     expect(evaluateMacConsentOwnerProof(0, PASS.replace('other_page=403', 'other_page=303')).detail).toContain('/connect/authorize was not refused');
+    // A refusal at the cookie check (the cookie is scoped to the form's path) is not the owner check.
+    expect(evaluateMacConsentOwnerProof(0, PASS.replace('other_page_refused=yes', 'other_page_refused=no')).status).toBe('fail');
   });
 
   test('fails when the owner cannot approve, or the page never had a form', () => {
@@ -57,9 +59,11 @@ describe('release check: approving an app connection on a Mac needs the owner (#
     expect(script).toContain('sysadminctl -deleteUser "$account"');
     expect(script).toContain('sudo -n -u "$account"');
     expect(script).toContain('unset token');
+    // The post to /connect/authorize names the consent cookie, so it reaches the owner check.
+    expect(script).toContain('-b "olympus_consent_$rid=$csrf"');
     // Only status codes and yes/no flags are echoed.
     for (const line of script.split('\n').map((l) => l.trim()).filter((l) => /\becho\b/.test(l))) {
-      expect(line).toMatch(/echo "(page|form|other_form|other_form_refused|other_page|owner|owner_code)=/);
+      expect(line).toMatch(/echo "(page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=/);
     }
     // It is valid bash.
     expect(spawnSync('bash', ['-n'], { input: script, encoding: 'utf8' }).status).toBe(0);

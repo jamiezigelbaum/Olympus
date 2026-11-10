@@ -7,7 +7,8 @@
  * engine, then:
  * - as a standard second account it opens the approval page, keeps the page's
  *   consent cookie and posts Connect to the form's action and to the page's
- *   own path, with no dashboard session;
+ *   own path (naming the cookie, which is scoped to the form's path), with no
+ *   dashboard session;
  * - as the owner it opens a dashboard control session with the owner's token
  *   (what `olympus dashboard` does), opens the same page and posts Connect.
  * The account is removed again on every exit. Nothing it prints carries a
@@ -31,7 +32,7 @@ const REFUSAL = 'Open the Olympus dashboard in this browser first';
  * One script, run as the owner. Prints:
  * - `page`: the approval page as the second account (expect 200) and `form=yes` when it had a form to post;
  * - `other_form` / `other_form_refused`: Connect from the second account to the form's action (expect 401 or 403, and the owner check's page);
- * - `other_page`: the same post to `/connect/authorize` (expect 401 or 403);
+ * - `other_page` / `other_page_refused`: the same post to `/connect/authorize`, with the consent cookie named explicitly (expect 401 or 403, and the owner check's page);
  * - `owner` / `owner_code`: Connect from the owner's browser session (expect 303 to the redirect with a code).
  */
 export function macConsentOwnerProofScript(account = MAC_CONSENT_PROOF_ACCOUNT): string {
@@ -67,7 +68,9 @@ if [ -n "$action" ] && [ -n "$rid" ] && [ -n "$csrf" ]; then echo "form=yes"; el
 body="request_id=$rid&csrf=$csrf&action=approve"
 echo "other_form=$(as_other /usr/bin/curl -sS -o "$shared/form.html" -w '%{http_code}' --max-time 10 -b "$shared/c" "\${nav[@]}" -X POST --data "$body" "${ENGINE}$action")"
 if grep -q '${REFUSAL}' "$shared/form.html"; then echo "other_form_refused=yes"; else echo "other_form_refused=no"; fi
-echo "other_page=$(as_other /usr/bin/curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -b "$shared/c" "\${nav[@]}" -X POST --data "$body" '${ENGINE}/connect/authorize')"
+# The consent cookie is scoped to the form's path, so name it here: the post must reach the owner check, not the cookie check.
+echo "other_page=$(as_other /usr/bin/curl -sS -o "$shared/alt.html" -w '%{http_code}' --max-time 10 -b "olympus_consent_$rid=$csrf" "\${nav[@]}" -X POST --data "$body" '${ENGINE}/connect/authorize')"
+if grep -q '${REFUSAL}' "$shared/alt.html"; then echo "other_page_refused=yes"; else echo "other_page_refused=no"; fi
 # The owner: a dashboard control session as \`olympus dashboard\` opens one, then the same page and Connect.
 token="$("$HOME/.local/bin/olympus" dashboard token)"
 /usr/bin/curl -sS -o /dev/null --max-time 10 -c "$jar/owner" -X POST -H 'Origin: ${ENGINE}' -H "Authorization: Bearer $token" '${ENGINE}/dashboard/control/session'
@@ -84,13 +87,13 @@ case "$answer" in *'${REDIRECT}'*code=*) echo "owner_code=yes" ;; *) echo "owner
 
 /** Reads the script's output. Anything unreadable fails: the check never passes on a missing answer. */
 export function evaluateMacConsentOwnerProof(code: number, stdout: string): CheckResult {
-  const values = Object.fromEntries(stdout.split('\n').map((line) => line.trim().match(/^(page|form|other_form|other_form_refused|other_page|owner|owner_code)=(\w+)$/)).filter((m): m is RegExpMatchArray => !!m).map((m) => [m[1]!, m[2]!]));
-  const seen = `page ${values.page ?? '?'}, second account at the form ${values.other_form ?? '?'} (owner check's page: ${values.other_form_refused ?? '?'}), at /connect/authorize ${values.other_page ?? '?'}, owner ${values.owner ?? '?'} (code: ${values.owner_code ?? '?'})`;
+  const values = Object.fromEntries(stdout.split('\n').map((line) => line.trim().match(/^(page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=(\w+)$/)).filter((m): m is RegExpMatchArray => !!m).map((m) => [m[1]!, m[2]!]));
+  const seen = `page ${values.page ?? '?'}, second account at the form ${values.other_form ?? '?'} (owner check's page: ${values.other_form_refused ?? '?'}), at /connect/authorize ${values.other_page ?? '?'} (owner check's page: ${values.other_page_refused ?? '?'}), owner ${values.owner ?? '?'} (code: ${values.owner_code ?? '?'})`;
   if (code !== 0) return { id: ID, title: TITLE, status: 'fail', detail: `the check did not finish (exit ${code}): ${seen}` };
   if (values.page !== '200' || values.form !== 'yes') return { id: ID, title: TITLE, status: 'fail', detail: `the approval page did not open with a form for the second account: ${seen}` };
   const refused = (status: string | undefined) => status === '401' || status === '403';
   if (!refused(values.other_form) || values.other_form_refused !== 'yes') return { id: ID, title: TITLE, status: 'fail', detail: `the second account's Connect was not refused by the owner check: ${seen}` };
-  if (!refused(values.other_page)) return { id: ID, title: TITLE, status: 'fail', detail: `the second account's Connect at /connect/authorize was not refused: ${seen}` };
+  if (!refused(values.other_page) || values.other_page_refused !== 'yes') return { id: ID, title: TITLE, status: 'fail', detail: `the second account's Connect at /connect/authorize was not refused by the owner check: ${seen}` };
   if (values.owner !== '303' || values.owner_code !== 'yes') return { id: ID, title: TITLE, status: 'fail', detail: `the owner's Connect did not approve: ${seen}` };
   return { id: ID, title: TITLE, status: 'pass', detail: seen };
 }
