@@ -14835,22 +14835,37 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
-  const keywordStartedAt = Date.now();
-  let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
-  const baselineKeywordLane = keywordAlternatives(request.query)?.size
-    ? keywordLane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
-    : undefined;
-  let keywordElapsedMs = Date.now() - keywordStartedAt;
-  const vectorStartedAt = Date.now();
-  const vectorLane = await store.vectorSearchLane(
-    request.query,
-    provider,
-    laneLimit,
-    accountScope,
-    filters,
-    request.deadlineAtMs,
-  );
-  const vectorElapsedMs = Date.now() - vectorStartedAt;
+  // The two lanes run side by side, each against the whole deadline: the
+  // keyword lane reads the FTS index on the read pool, the vector lane the
+  // embeddings. Run one after the other, a slow keyword lane left the vector
+  // lane the remainder of the budget, and it missed the deadline on every
+  // question (Sparta 2026-11-10, #1242).
+  const keywordWork = (async () => {
+    const keywordStartedAt = Date.now();
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
+    const baseline = keywordAlternatives(request.query)?.size
+      ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
+      : undefined;
+    return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
+  })();
+  const vectorWork = (async () => {
+    const vectorStartedAt = Date.now();
+    const lane = await store.vectorSearchLane(
+      request.query,
+      provider,
+      laneLimit,
+      accountScope,
+      filters,
+      request.deadlineAtMs,
+    );
+    return { lane, elapsedMs: Date.now() - vectorStartedAt };
+  })();
+  const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
+  let keywordLane = keywordResult.lane;
+  const baselineKeywordLane = keywordResult.baseline;
+  let keywordElapsedMs = keywordResult.elapsedMs;
+  const vectorLane = vectorResult.lane;
+  const vectorElapsedMs = vectorResult.elapsedMs;
   let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
