@@ -64,3 +64,38 @@ test('the vector lane starts while the keyword lane is still searching', async (
   // Started before the keyword lane's first search came back.
   expect(vectorStart).toBeLessThan(events.indexOf('keyword:end'));
 });
+
+test('the vector scan does not wait a timer tick after every page', async () => {
+  const { dir, cleanup } = tempDir('olympus-vector-yield-');
+  const store = new LocalConnectorStore({
+    dbPath: join(dir, 'internal.sqlite'),
+    corpusId: DROPBOX_TIER_CORPUS_IDS.internal!,
+    family: 'file',
+    trustDomain: 'internal',
+    tierLedger: null,
+  });
+  cleanups.push(cleanup, () => store.close());
+  const provider = new RecordingProvider('built-in', 'yield-model', 'local');
+  // Six 256-row pages of current embeddings.
+  await store.syncFromConnector(fixtureConnector(() => Array.from({ length: 1300 }, (_, n) => ({
+    id: `n${n}`, name: `note-${n}.txt`, text: `Synthetic note ${n} about item ${n * 7}.`,
+  }))), { fetchContent: true });
+  await store.embedChunks({ provider });
+
+  // Rerun 7 on Sparta: 599 pages, each followed by setTimeout(0), cost the
+  // lane about 0.7 s idle and more under load before it scored anything.
+  const realSetTimeout = globalThis.setTimeout;
+  let zeroDelayTimers = 0;
+  globalThis.setTimeout = ((handler: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    if (!delay) zeroDelayTimers += 1;
+    return realSetTimeout(handler, delay, ...args);
+  }) as typeof setTimeout;
+  try {
+    const lane = await store.vectorSearchLane('synthetic note', provider, 10);
+    expect(lane.rows.length).toBeGreaterThan(0);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  // One yield after the first page; the next would follow page 9.
+  expect(zeroDelayTimers).toBe(1);
+});

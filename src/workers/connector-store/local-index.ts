@@ -12547,6 +12547,7 @@ export class LocalConnectorStore {
     const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
     let dimensionMismatches = 0;
     let afterChunkPk = 0;
+    let pagesScanned = 0;
 
     try {
       if (ownsScanDb) {
@@ -12598,7 +12599,7 @@ export class LocalConnectorStore {
         }
         afterChunkPk = page.at(-1)!.chunkPk;
         if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
-        await yieldConnectorStoreVectorScan();
+        if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
       }
     } finally {
       try {
@@ -15026,6 +15027,13 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs: number | undefined): 
 function yieldConnectorStoreVectorScan(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// The scan yields after its first page and then every eighth page (2,048
+// rows), not after every page: a 153k-row store scans 599 pages, and a timer
+// tick after each cost about 0.7 s idle and more under load before the lane
+// could score (Sparta 2026-11-10, #1242). Timers and I/O still run between
+// pages at that spacing.
+const CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8;
 
 function normalizeSemanticRelevanceBar(value: number | undefined): number | undefined {
   if (value === undefined) return undefined;
