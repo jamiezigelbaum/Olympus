@@ -305,7 +305,13 @@ async function main(): Promise<void> {
   };
   const json = JSON.stringify(report, null, 2);
   if (args.out) writeFileSync(args.out, `${json}\n`);
-  process.stdout.write(`${json}\n`);
+  await new Promise<void>((resolve) => process.stdout.write(`${json}\n`, () => resolve()));
 }
 
-if (import.meta.main) await main();
+// The built-in embedding provider keeps its model helpers running for the
+// life of the process (they are killed on exit), so end the run explicitly
+// once the report is written.
+if (import.meta.main) {
+  await main();
+  process.exit(process.exitCode ?? 0);
+}

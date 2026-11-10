@@ -49,6 +49,8 @@ interface State {
   reloadsOnRevoke?: boolean;
   /** The Build a connector page has no Lock, as in the product. */
   noLockOnConnector?: boolean;
+  /** The Build a connector page opens in a modal dialog, with the top bar's Lock behind it (the product since the top bar). */
+  modalOnConnector?: boolean;
   /** A closed section and an open one, each holding a button (the box stub gives both a box, as Chrome does). */
   sections?: boolean;
   /** A closed section whose summary reloads the page (it comes back open), holding a button that asks before it acts. */
@@ -114,7 +116,12 @@ class PagesDriver implements JourneyDriver {
       ${s.secret ? secret : ''}
       <ul>${rows}</ul>
       ${s.noLockOnConnector && this.path.endsWith('connector') ? '' : s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
-    </main>`;
+    </main>${s.modalOnConnector && this.path.endsWith('connector') ? '<dialog open data-modal><h3>Build a connector with your agent</h3><button type="button" class="btn" data-copy-target="#sheet">Copy prompt</button></dialog>' : ''}`;
+    // happy-dom has no top layer: the browser's :modal is answered for the dialog opened with showModal().
+    for (const dialog of Array.from(this.host.document.querySelectorAll('dialog[data-modal]'))) {
+      const matches = dialog.matches.bind(dialog);
+      dialog.matches = (selector: string) => selector === ':modal' || matches(selector);
+    }
     evalIn(this.host, PROBE_SOURCE);
     const on = (selector: string, handler: (el: Element) => void): void => {
       for (const el of Array.from(this.host.document.querySelectorAll(selector))) el.addEventListener('click', ((event: { preventDefault(): void }) => { event.preventDefault(); handler(el as unknown as Element); }) as never);
@@ -180,7 +187,9 @@ class PagesDriver implements JourneyDriver {
   async click(_frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
     const info = evalIn(this.host, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
     if (!info) return null;
-    if (!info.disabled) evalIn(this.host, `__rc.element(${JSON.stringify(target)}).click()`);
+    // A press at the control's place: behind an open modal dialog it lands on the backdrop, as in a browser.
+    const behindModal = evalIn(this.host, `(() => { const d = document.querySelector('dialog[data-modal][open]'); return !!d && !d.contains(__rc.element(${JSON.stringify(target)})); })()`);
+    if (!info.disabled && !behindModal) evalIn(this.host, `__rc.element(${JSON.stringify(target)}).click()`);
     return info;
   }
   async type(): Promise<boolean> { return false; }
@@ -392,6 +401,14 @@ describe('exploring the other pages', () => {
     expect(steps.some((step) => step.name === 'Lock' && step.ok)).toBe(true);
     expect(result.pages.map((page) => page.id)).toEqual(['agents', 'connector']);
     expect(result.coverage.entries.find((entry) => entry.id === 'components.ts:Lock')?.status).toBe('pressed');
+  });
+
+  test('a Lock behind the last page\'s open modal dialog cannot be pressed there, so Lock is pressed at the end on a page that has it in reach', async () => {
+    const driver = new PagesDriver({ modalOnConnector: true });
+    const { steps, failed } = await run(driver);
+    expect(failed.map((step) => `${step.at} ${step.name}: ${step.actual}`)).toEqual([]);
+    expect(driver.pressed.filter((press) => press === 'lock')).toHaveLength(1);
+    expect(steps.some((step) => step.name === 'Lock' && step.ok && step.at.includes('agents'))).toBe(true);
   });
 
   test('a page whose controls cannot be read fails instead of passing empty', async () => {

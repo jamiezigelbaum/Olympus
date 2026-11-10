@@ -52,7 +52,11 @@ export function layoutRulesScript(): string {
     }
     return false;
   };
-  const hidden = (el) => { const s = getComputedStyle(el); return s.visibility === 'hidden' || s.display === 'none' || !!el.closest('details:not([open]) > :not(summary), [hidden], [aria-hidden="true"]') || forReaders(el); };
+  // An open modal dialog draws over the page behind its backdrop and leaves that page inert: only the dialog is what the person sees
+  // (2026-11-10: the Sources page's "Readwise" under the open Build a connector dialog was reported as overlapping its heading).
+  const isModal = (dialog) => { try { return dialog.matches(':modal'); } catch (error) { return false; } };
+  const modal = Array.from(document.querySelectorAll('dialog[open]')).filter(isModal).pop() || null;
+  const hidden = (el) => { const s = getComputedStyle(el); return s.visibility === 'hidden' || s.display === 'none' || !!el.closest('details:not([open]) > :not(summary), [hidden], [aria-hidden="true"]') || (modal !== null && !modal.contains(el)) || forReaders(el); };
   const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !hidden(el); };
   const own = (el) => Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join('').replace(/\s+/g, ' ').trim();
   const words = (el) => (own(el) || el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60);
