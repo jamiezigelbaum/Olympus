@@ -153,6 +153,17 @@ export interface TierSnifferServiceOptions {
   intervalMs?: number;
   /** Test seam: the timers behind the tick, wakes and training slices. Default: the global timers. */
   timers?: SnifferTimers;
+  /**
+   * Test seam: the monotonic clock (ms) behind slice deadlines and tick
+   * timing. Default: performance.now(). A synthetic clock passed here stays
+   * out of the worker's shared control-path clock.
+   */
+  monotonicNow?: () => number;
+  /**
+   * Test seam: the turn back to the event loop between units of work.
+   * Default: the worker's shared control-path turn (control-path-headroom.ts).
+   */
+  ingestionTurn?: () => Promise<void> | undefined;
   /** A pass still running after this long is aborted at the next tick. Default DEFAULT_TIER_SNIFFER_MAX_PASS_MS. */
   maxPassMs?: number;
   /**
@@ -343,7 +354,7 @@ export class TierSnifferService {
   private trainingJob: Promise<void> | undefined;
   private trainingJudge: string | undefined;
   private finalizingTraining = false;
-  /** When the last tick ended (performance.now()), for the idle time before the next one. */
+  /** When the last tick ended (performance.now() by default), for the idle time before the next one. */
   private lastTickEndedAt: number | undefined;
   private readonly moveAbort = new AbortController();
   private moving: Promise<TierAutoMoveReport> | undefined;
@@ -396,6 +407,14 @@ export class TierSnifferService {
 
   private timers(): SnifferTimers {
     return this.options.timers ?? GLOBAL_TIMERS;
+  }
+
+  private monotonicNow(): number {
+    return this.options.monotonicNow?.() ?? performance.now();
+  }
+
+  private ingestionTurn(): Promise<void> | undefined {
+    return (this.options.ingestionTurn ?? ingestionTurn)();
   }
 
   start(): void {
@@ -485,9 +504,10 @@ export class TierSnifferService {
 
   /**
    * An answer needs the private pool (the worker calls this when answers in
-   * flight go from 0 to 1): abort the sniffer's in-flight call at once. The
-   * pass stops as `preempted`; nothing is counted against any item, and the
-   * sniffer never records anything in the answer pool's breakers.
+   * flight go from 0 to 1, and when an answer is queued behind a running
+   * call): abort the sniffer's in-flight call at once. The pass stops as
+   * `preempted`; nothing is counted against any item, and the sniffer never
+   * records anything in the answer pool's breakers.
    */
   preempt(): void {
     // The owner's own answer ends a fair turn too, lowering slice included:
@@ -632,7 +652,7 @@ export class TierSnifferService {
           if (hi === null) break;
           this.addPendingSlice(counts, opened, [lo, hi]);
           lo = hi;
-          await ingestionTurn();
+          await this.ingestionTurn();
           if (this.stopped) return undefined;
         }
         if (opened.hasQueue) {
@@ -644,7 +664,7 @@ export class TierSnifferService {
             if (hi === null) break;
             this.addQuestionSlice(counts, opened.db, [lo, hi]);
             lo = hi;
-            await ingestionTurn();
+            await this.ingestionTurn();
             if (this.stopped) return undefined;
           }
         }
@@ -772,7 +792,7 @@ export class TierSnifferService {
       tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
     } finally {
       leave();
-      this.lastTickEndedAt = performance.now();
+      this.lastTickEndedAt = this.monotonicNow();
       // The turn is used: answers lead again, and a new wait starts from now.
       if (this.fairTurn) {
         this.fairTurn = false;
@@ -1152,12 +1172,12 @@ export class TierSnifferService {
     // Wall time of each step around the pass, for its log line: on Sparta
     // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
     // the rest of the time went.
-    const phaseStarted = performance.now();
+    const phaseStarted = this.monotonicNow();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
     let phaseAt = phaseStarted;
     const phaseMs: Record<string, number> = {};
     const phase = (name: string): void => {
-      const now = performance.now();
+      const now = this.monotonicNow();
       phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
       phaseAt = now;
     };
@@ -1261,7 +1281,7 @@ export class TierSnifferService {
         + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(',')}}; `
         + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; `
         + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; `
-        + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)}`}.`,
+        + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)}`}.`,
       );
     }
     // A move that just landed may have carried an item whose owner override
@@ -1278,14 +1298,14 @@ export class TierSnifferService {
   private async recoverMissingQuestions(signal: AbortSignal, allowReask = false): Promise<void> {
     // Cooperative bound: one row (including its synchronous store reads) may
     // finish after the deadline. Two phases cost at most two such overruns.
-    const deadline = performance.now() + MISSING_QUESTION_RECOVERY_PHASE_MS;
+    const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     // Separate cursors keep model-independent recovery and approved re-asking
     // from skipping alternating pages of a large ledger.
     const cursorKey = allowReask ? 'sniffer_missing_question_reask_cursor_v1' : 'sniffer_missing_question_cursor_v1';
     const paths = this.ledgerPaths();
     const offset = (this.recoveryLedgerOffsets.get(cursorKey) ?? 0) % (paths.length || 1);
     for (let n = 0; n < paths.length; n++) {
-      if (signal.aborted || this.stopped || (n > 0 && performance.now() >= deadline)) break;
+      if (signal.aborted || this.stopped || (n > 0 && this.monotonicNow() >= deadline)) break;
       const index = (offset + n) % paths.length;
       const ledgerPath = paths[index]!;
       this.recoveryLedgerOffsets.set(cursorKey, (index + 1) % paths.length);
@@ -1313,8 +1333,8 @@ export class TierSnifferService {
         let processed = 0;
         for (const row of rows) {
           // Each row can re-judge a stored body: let requests in between.
-          await ingestionTurn();
-          if (signal.aborted || this.stopped || (processed > 0 && performance.now() >= deadline)) break;
+          await this.ingestionTurn();
+          if (signal.aborted || this.stopped || (processed > 0 && this.monotonicNow() >= deadline)) break;
           const identity = recordIdentity(row);
           lastProcessed = identity;
           processed++;
@@ -1489,7 +1509,7 @@ export class TierSnifferService {
   private async settleStoredItems(): Promise<void> {
     this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
-      await ingestionTurn();
+      await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       void set.repairLowerContent({ ...(this.options.autoMoves ? {
@@ -1583,7 +1603,7 @@ export class TierSnifferService {
     if (perPass <= 0) return total;
     const maxOpen = Math.max(0, this.options.rejudgeMaxOpenQuestions ?? 2 * perPass);
     for (const ledgerPath of this.ledgerPaths()) {
-      await ingestionTurn();
+      await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       try {
@@ -1594,7 +1614,7 @@ export class TierSnifferService {
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = await rejudgeRoutedItemsInTurns({
           set,
-          turn: ingestionTurn,
+          turn: () => this.ingestionTurn(),
           limit: perPass,
           ...(after ? { after } : {}),
           autoMoves: this.autoMovesFor(set),
@@ -1607,7 +1627,7 @@ export class TierSnifferService {
       }
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60_000;
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.rechecked > 0 || logSkipped) {
       if (total.builtinPromptSkipped > 0) this.lastBuiltinPromptSkipLogMs = this.clockMs();
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
@@ -1616,7 +1636,7 @@ export class TierSnifferService {
         + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
         + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}`
         + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}`
-        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`,
+        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}; owner_recheck=${total.rechecked}.`,
       );
     }
     return total;
@@ -1640,7 +1660,7 @@ export class TierSnifferService {
     direction: 'raise' | 'lower',
   ): Promise<TierAutoMoveReport> {
     const timings = emptyTierMoveTimings();
-    const started = performance.now();
+    const started = this.monotonicNow();
     const paths = this.ledgerPaths();
     const backlog = direction === 'lower'
       ? paths.reduce((n, path) => {
@@ -1660,7 +1680,7 @@ export class TierSnifferService {
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || (direction === 'lower'
-      && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow()));
+      && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date()))().getTime();
@@ -1724,7 +1744,7 @@ export class TierSnifferService {
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset = 0; offset < queued.length && budget > 0 && !shouldStop();) {
         const pending: Array<{ record: TierLedgerRecord; move: TierMoveOptions }> = [];
-        const batchDeadline = Math.min(deadline, performance.now() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
+        const batchDeadline = Math.min(deadline, this.monotonicNow() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
         for (let n = 0; n < (direction === 'raise' ? 1 : batchSize) && offset < queued.length && !shouldStop(); n++) {
           const record = queued[offset++]!;
           budget--;
@@ -1747,7 +1767,7 @@ export class TierSnifferService {
             let copied = 0;
             const results = moveTieredItemsLowering(pending.map(entry => entry.move), {
               // One item is indivisible; do not start another after its bound.
-              shouldStop: () => shouldStop() || (copied++ > 0 && performance.now() >= batchDeadline),
+              shouldStop: () => shouldStop() || (copied++ > 0 && this.monotonicNow() >= batchDeadline),
             });
             results.forEach((result, index) => {
               if ('error' in result) failure(pending[index]!.record, result.error);
@@ -1760,13 +1780,13 @@ export class TierSnifferService {
           } catch (error) { for (const { record } of pending) failure(record, error); }
         }
         await flushTierMoveNotes(set.ledger, { timings, shouldStop });
-        await ingestionTurn();
+        await this.ingestionTurn();
       }
       // Retry note obligations even when a previous process already flipped
       // every move, leaving no queued row to trigger a write.
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
-    report.elapsedMs = performance.now() - started;
+    report.elapsedMs = this.monotonicNow() - started;
     if (direction === 'lower' || report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
