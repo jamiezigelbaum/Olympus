@@ -232,6 +232,24 @@ describe('the log', () => {
     expect(reopened.list()[0]!.items.map((item) => item.source)).toEqual(['Dropbox']);
   });
 
+  test('one imported archive removed takes only its rows; a row with no account scope stays', () => {
+    const path = join(tempDir(), 'data', 'app-release-log.sqlite');
+    const store = openAppReleaseLog(path);
+    const item = (accountScope: string | undefined, title: string) => ({
+      source: 'Mail archive', title, tier: 'personal' as const, corpusId: 'internal.archive.email', provider: 'mbox',
+      ...(accountScope ? { accountScope } : {}), providerItemId: 'same-id', locator: `synthetic://${title}`,
+    });
+    store.record({ ...sample(Date.now()), items: [item('archive-a', 'A'), item('archive-b', 'B'), item(undefined, 'Unscoped')] });
+    store.close();
+    const selector = { corpusIds: ['internal.archive.email'], accountScopes: ['archive-a'] };
+    expect(forgetAppReleaseItems(path, selector, { dryRun: true })).toBe(1);
+    expect(forgetAppReleaseItems(path, selector)).toBe(1);
+    expect(forgetAppReleaseItems(path, { ...selector, accountScopes: [] })).toBe(0);
+    const reopened = openAppReleaseLog(path);
+    cleanups.push(() => reopened.close());
+    expect(reopened.list()[0]!.items.map((entry) => entry.title)).toEqual(['B', 'Unscoped']);
+  });
+
   test('Delete all removes it and export names it as left behind', async () => {
     const homeDir = join(tempDir(), 'home');
     const env = { HOME: homeDir } as Record<string, string>;
@@ -353,11 +371,12 @@ describe('the per-item override, bound to the recorded item', () => {
       contentProviders: { [store.corpusId]: createConnectorStoreContentProvider({ store }) },
     });
     const raw = await searchReleasedEvidence({ lanes: lanes as never, question: 'violet turnips Saturday' });
-    expect(raw.evidence[0]).toMatchObject({ provider_item_id: 'msg-7', provider_conversation_id: 'chat-3' });
+    expect(raw.evidence[0]).toMatchObject({ provider_item_id: 'msg-7', provider_conversation_id: 'chat-3', account_scope: 'personal' });
     const noted = createReleaseCapture();
     runWithReleaseCapture(noted, () => searchToolResult(raw));
     const recorded = noted.items![0]!;
-    expect(recorded).toMatchObject({ source: 'Telegram', provider: 'telegram', providerItemId: 'msg-7', providerConversationId: 'chat-3' });
+    // Its account scope too: removing one imported archive takes only its rows (core/app-release-log.ts).
+    expect(recorded).toMatchObject({ source: 'Telegram', provider: 'telegram', accountScope: 'personal', providerItemId: 'msg-7', providerConversationId: 'chat-3' });
     const context = { storePaths: [dbPath], env };
     runTierSetOnRecordedItem(recorded.locator!, 'private', {
       provider: recorded.provider!,
