@@ -9,12 +9,12 @@
  * shell script, written by the test.
  */
 import { createHash } from 'node:crypto';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { resolveZkapiExecutable, ZKAPI_SUPPORTED_DAEMON_VERSIONS } from '../src/core/consult-transport-zkapi.ts';
 import {
   createManagedToolsJob,
@@ -50,7 +50,7 @@ import {
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { createDashboardConsultAdapter, dashboardInstallView } from '../src/workers/email-source/dashboard-consult.ts';
 import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
-import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONSULT_CONTROL_PATHS, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 
 const cleanups: Array<() => void> = [];
@@ -967,9 +967,7 @@ describe('the install route', () => {
     const bearerGrade = await fetcher(post({ Cookie: cookieOf(bearerMint), Origin: ORIGIN, 'X-Olympus-CSRF': bearerCsrf }));
     expect(bearerGrade.status).toBe(403);
     expect(((await bearerGrade.json()) as { error: { code: string } }).error.code).toBe('mac_dashboard_only');
-    const localRequest = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(localRequest, '127.0.0.1');
-    const localMint = await fetcher(localRequest);
+    const localMint = await ownerLocalMint(fetcher, ORIGIN, TOKEN);
     expect(localMint.status).toBe(200);
     const cookie = cookieOf(localMint);
     const csrf = ((await localMint.json()) as { csrf_token: string }).csrf_token;

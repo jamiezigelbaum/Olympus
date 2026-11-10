@@ -207,6 +207,12 @@ export function withWorkerBearerAuth(
       // The socket peer, as the server recorded it (core/request-peer.ts):
       // loopback, or no mint. A request with no recorded peer is remote.
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request)))) return dashboardControlForbiddenResponse('origin_mismatch');
+      // Without the owner socket (macOS), a loopback peer is any account on
+      // this computer, not the owner. The owner proof there is a live control
+      // session in this same browser: one the owner's launch link or token
+      // opened, which needs the worker token only the owner can read
+      // (worker.env, 0600). No session, no mint (#1153).
+      if (!requestFromOwnerSocket(request) && !hasOwnerControlSession(request, sessionSecret, now())) return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
@@ -454,6 +460,19 @@ export const DASHBOARD_LOCAL_CONTROL_SESSION_PATH = '/dashboard/control/session/
 
 function isDashboardLocalControlSessionRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
+}
+
+/**
+ * The local mint's owner proof where there is no owner socket: this browser's
+ * live control session, signed by this worker, unexpired and bound to this
+ * origin. The CSRF token is not asked for, so a page opened before this check
+ * existed can still unlock: the session cookie is HttpOnly and
+ * SameSite=Strict, the caller has already proved a loopback Origin equal to
+ * the request's own, and the answer is a new session readable only by that
+ * same origin.
+ */
+function hasOwnerControlSession(request: Request, sessionSecret: string, nowMs: number): boolean {
+  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === 'allowed';
 }
 
 function isLoopbackOrigin(origin: string): boolean {
