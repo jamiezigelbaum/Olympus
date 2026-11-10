@@ -71407,11 +71407,6 @@ var CODEX_SNIPPET = [
 init_vocabulary();
 // src/workers/dashboard/pages/private-answers.ts
 init_vocabulary();
-
-// src/workers/dashboard/pages/judge-check.ts
-init_vocabulary();
-
-// src/workers/dashboard/pages/private-answers.ts
 var DASHBOARD_SETTINGS_ZKAPI_ID = "zkapi";
 
 // src/workers/dashboard/pages/local.ts
@@ -71459,6 +71454,9 @@ ${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .set
 `;
 
 // src/workers/dashboard/pages/privacy-items.ts
+init_vocabulary();
+
+// src/workers/dashboard/pages/judge-check.ts
 init_vocabulary();
 
 // src/workers/dashboard/index.ts

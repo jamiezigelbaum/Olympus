@@ -2035,7 +2035,7 @@ function previewPrivacyItemsAction(path: string, body: Record<string, unknown>):
   return Response.json({ ok: true, item: shown(item), changed: 'set', applies: 'now', results: [] });
 }
 
-// "Check the judge" (#887): the real round logic (judge-check.ts) over ten
+// "Check how Olympus labelled your items" (#887): the real round logic (judge-check.ts) over ten
 // fixture items, its file in a temporary folder. Nothing reaches a worker.
 function previewJudgeCheckItems(): OwnerTierItem[] {
   const item = (id: string, source: string, title: string, sender: string | null, tier: 'Personal' | 'Private', confidence: number, preview: string): OwnerTierItem => ({
@@ -2285,7 +2285,7 @@ if (import.meta.main) {
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
       if (dashboardHtmlRoutePage(url) === 'privacy_items') previewPrivacyItems = previewPrivacyItemsFixture();
-      if (dashboardHtmlRoutePage(url) === 'private_answers' && url.searchParams.has('judge-reset')) previewJudgeCheck = createPreviewJudgeCheck();
+      if (dashboardHtmlRoutePage(url) === 'privacy_items' && url.searchParams.has('judge-reset')) previewJudgeCheck = createPreviewJudgeCheck();
       if (stateOverride?.startsWith('privacy-')) { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [

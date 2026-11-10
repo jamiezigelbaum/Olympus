@@ -467,7 +467,7 @@ export interface EmailSourceWorkerOptions {
    */
   ownerTierItems?: OwnerTierItems;
   /**
-   * "Check the judge" on Private questions (classification/judge-check.ts):
+   * "Check how Olympus labelled your items" on Privacy › Your items (classification/judge-check.ts):
    * a round of items the owner labels before seeing the judge's label. Local
    * dashboard session only (`/dashboard/privacy/judge-check`). Absent: 501.
    */

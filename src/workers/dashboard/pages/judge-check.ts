@@ -1,19 +1,19 @@
 /**
- * "Check the judge" (issue #887; mockups release-1.5/l3/v2 L3-4, L3-5): an
- * optional card at the top of Private questions' Inbox. One item at a time,
+ * "Check how Olympus labelled your items" (issue #887; mockups release-1.5/l3/v2
+ * L3-4, L3-5): an optional card at the top of Privacy › Your items (moved from
+ * Private questions' Inbox, owner 2026-11-10: the Inbox holds answers only). One item at a time,
  * the owner answers Personal, Private or Not sure; the judge's label shows
  * only afterwards. The round and its answers live on this computer
  * (classification/judge-check.ts), behind `/dashboard/privacy/judge-check`,
  * which only a session minted here reaches.
  */
 import { escapeScriptJson } from '../components.ts';
-import { dashboardLocalPageHref } from '../host-page.ts';
 import { sourceLogoTilesByProvider } from '../source-logos.ts';
 import { DASHBOARD_JUDGE_CHECK_COPY as J } from '../vocabulary.ts';
 
 export const DASHBOARD_JUDGE_CHECK_PATH = '/dashboard/privacy/judge-check';
 
-/** Where the card goes: the top of the Inbox. Empty until the script reads the round. */
+/** Where the card goes: the top of Your items. Empty until the script reads the round. */
 export const JUDGE_CHECK_MOUNT = '<div class="jc" data-judge-check aria-live="polite"></div>';
 
 export const JUDGE_CHECK_CSS = `
@@ -68,11 +68,11 @@ export const JUDGE_CHECK_CSS = `
 `;
 
 /** The card's controller. Reads the round, then redraws from each answer the route sends back. */
-export function judgeCheckClientScript(input: { csrfToken: string; token?: string }): string {
+export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: string }): string {
   const config = {
     csrfToken: input.csrfToken,
     path: DASHBOARD_JUDGE_CHECK_PATH,
-    itemsHref: dashboardLocalPageHref('privacyItems', input.token),
+    itemsHref: input.itemsHref,
     logos: sourceLogoTilesByProvider(),
     copy: J,
   };

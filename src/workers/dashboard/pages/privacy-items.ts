@@ -20,6 +20,7 @@ import {
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
   JUDGE_REASON_PHRASES,
 } from '../vocabulary.ts';
+import { JUDGE_CHECK_CSS, JUDGE_CHECK_MOUNT, judgeCheckClientScript } from './judge-check.ts';
 import type { DashboardPageOptions } from './local.ts';
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 
@@ -29,6 +30,9 @@ export const DASHBOARD_PRIVACY_ITEMS_PATHS = {
 } as const;
 
 /** How long the confirmation with Undo stays up after a change. */
+/** The items list on this tab, which the check's "See them in Your items" link scrolls to. */
+export const PRIVACY_ITEMS_LIST_ID = 'your-items';
+
 export const PRIVACY_ITEMS_TOAST_MS = 6_000;
 /** How long typing settles before the search runs. */
 export const PRIVACY_ITEMS_SEARCH_DEBOUNCE_MS = 250;
@@ -128,7 +132,7 @@ export function renderDashboardPrivacyItemsPage(options?: DashboardPageOptions):
     nav: dashboardTopNav({ active: 'privacy', unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...(token ? { token } : {}) }),
     meta: '',
     body: dashboardPrivacyTabs('items', token) + renderBody(options, token),
-    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, PRIVACY_TABS_CSS, SOURCE_LOGO_CSS, PRIVACY_ITEMS_CSS],
+    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, PRIVACY_TABS_CSS, SOURCE_LOGO_CSS, PRIVACY_ITEMS_CSS, JUDGE_CHECK_CSS],
   });
 }
 
@@ -153,7 +157,9 @@ function renderBody(options: DashboardPageOptions | undefined, token: string | u
       + `<span class="pimsg" data-pi-msg role="status"></span></form></div>`
       + `<script>${privacyItemsClientScript({ csrfToken: '', unlockOnly: true })}</script>`;
   }
-  return `<div class="pi" data-privacy-items><div class="pigrid"><div class="pimain">${head}`
+  // The optional check of how Olympus labelled items (judge-check.ts) sits at the top of this tab:
+  // its answers set items in the list below. Local session only, like the list.
+  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}`
     + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml(C.searchLabel)}" placeholder="${escapeHtml(C.searchPlaceholder)}"></label>`
     + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml(C.filtersLabel)}">`
     + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml(C.recentHeading)}</button>`
@@ -174,7 +180,8 @@ function renderBody(options: DashboardPageOptions | undefined, token: string | u
     + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml(C.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml(C.makePersonal)}</button></div>`
     + `</div></dialog>`
     + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml(C.undo)}</button></div>`
-    + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>`;
+    + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>`
+    + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
 }
 
 /**

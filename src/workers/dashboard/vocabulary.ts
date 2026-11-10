@@ -3813,13 +3813,13 @@ export function judgeReasonPhrase(code: string | null | undefined): string | und
 }
 
 /**
- * "Check the judge" on Private questions' Inbox (issue #887; mockups
+ * "Check how Olympus labelled your items" at the top of Privacy › Your items (issue #887; mockups
  * release-1.5/l3/v2 L3-4, L3-5). Optional; the judge's label shows only after
  * the owner's answer; the result is a count and a likely range, measured
  * against the owner's answers, never the model's own confidence.
  */
 export const DASHBOARD_JUDGE_CHECK_COPY = {
-  title: 'Check the judge',
+  title: 'Check how Olympus labelled your items',
   optional: 'optional',
   roundDone: 'round done',
   intro: '{total} of your items: the ones the judge was least sure about, plus a few picked at random. Olympus keeps reading and answering while you do this.',

@@ -1,11 +1,11 @@
-// The "Check the judge" card at the top of Private questions' Inbox (issue
+// The "Check how Olympus labelled your items" card at the top of Privacy › Your items (issue
 // #887; mockups L3-4, L3-5), run in a page against the real round logic
 // (judge-check.ts) over fixture items: the judge's label is hidden until the
 // owner answers, mid-round there is a count and no range, and the finished
 // round shows the count and the Wilson range as a band.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Window } from 'happy-dom';
@@ -14,6 +14,7 @@ import { createJudgeCheck, wilsonInterval } from '../src/workers/classification/
 import type { OwnerTierItem } from '../src/workers/classification/tier-owner-items.ts';
 import { DASHBOARD_JUDGE_CHECK_PATH } from '../src/workers/dashboard/pages/judge-check.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
+import { PRIVACY_ITEMS_LIST_ID, renderDashboardPrivacyItemsPage } from '../src/workers/dashboard/pages/privacy-items.ts';
 import { DASHBOARD_JUDGE_CHECK_COPY as J } from '../src/workers/dashboard/vocabulary.ts';
 import { flushMicrotasks } from './helpers/test-clock.ts';
 
@@ -38,13 +39,12 @@ async function card() {
     path: join(root, 'judge-check.json'),
     random: () => 0.5,
   });
-  const html = renderDashboardPrivateAnswersPage({
+  const html = renderDashboardPrivacyItemsPage({
     now: DASHBOARD_PREVIEW_NOW,
     controlSessionCsrfToken: 'csrf-token',
     outsideHelpLocalSession: true,
-    privateAnswers: { available: true, destinations: { computer: 'ready', venice: 'not_allowed' }, waiting: { questions: [], olderRemoved: false } },
   });
-  const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?private-answers' });
+  const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?privacy-items' });
   windows.push(window);
   const document = window.document;
   const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
@@ -68,10 +68,10 @@ async function card() {
   return { $, click, text, current, document };
 }
 
-describe('Check the judge', () => {
-  test('sits at the top of the Inbox as an optional offer until started', async () => {
+describe('Check how Olympus labelled your items', () => {
+  test('sits at the top of Your items as an optional offer until started', async () => {
     const c = await card();
-    expect(c.$('#waiting')).not.toBeNull();
+    expect(c.$('[data-privacy-items] > [data-judge-check]')).not.toBeNull();
     expect(c.text('[data-jc-offer]')).toContain(J.offer);
     expect(c.text('[data-jc-offer]')).toContain(J.optional);
     await c.click('[data-jc-act="start"]');
@@ -110,13 +110,34 @@ describe('Check the judge', () => {
       await c.click(`[data-jc-answer="${index === 0 ? (judge === 'Personal' ? 'Private' : 'Personal') : judge}"]`);
     }
     expect(c.text('[data-jc-count]')).toBe('The judge agreed with you on 9 of 10.');
-    const range = wilsonInterval(9, 10);
+    // The range rests on the random picks alone (classification/judge-check.ts).
+    const stored = JSON.parse(readFileSync(join(root, 'judge-check.json'), 'utf8')) as { round: { items: Array<{ random?: boolean; answer: string; judge: string }> } };
+    const picks = stored.round.items.filter((item) => item.random);
+    const range = wilsonInterval(picks.filter((item) => item.answer === item.judge).length, picks.length);
     const low = Math.round(range.low * 100);
     const high = Math.round(range.high * 100);
-    expect(c.text('[data-jc-result]')).toContain(`it would likely agree with you on ${low}% to ${high}% of your items.`);
+    expect(c.text('[data-jc-result]')).toContain(`From ${picks.length} answers about items picked at random, it would likely agree with you on ${low}% to ${high}% of your items.`);
     const band = c.$('[data-jc-range] i')!.getAttribute('style');
     expect(band).toBe(`left:${low}%;width:${high - low}%`);
     expect(c.text('[data-jc-fixed]')).toContain('1 changed to your answer · 9 confirmed · 0 “Not sure” left with the judge');
     expect(c.$('[data-jc-act="start"]')!.textContent).toBe(J.more);
+    // "See them in Your items" goes to the list below the card, on the same tab.
+    expect(c.$('[data-jc-fixed] a')!.getAttribute('href')).toBe(`#${PRIVACY_ITEMS_LIST_ID}`);
+  });
+});
+
+describe('where the card lives', () => {
+  test('at the top of Your items, and nowhere in Private questions', () => {
+    const items = renderDashboardPrivacyItemsPage({ now: DASHBOARD_PREVIEW_NOW, controlSessionCsrfToken: 'csrf-token', outsideHelpLocalSession: true });
+    expect(items.indexOf('data-judge-check')).toBeGreaterThan(-1);
+    expect(items.indexOf('data-judge-check')).toBeLessThan(items.indexOf('data-pi-list'));
+    const questions = renderDashboardPrivateAnswersPage({
+      now: DASHBOARD_PREVIEW_NOW,
+      controlSessionCsrfToken: 'csrf-token',
+      outsideHelpLocalSession: true,
+      privateAnswers: { available: true, destinations: { computer: 'ready', venice: 'not_allowed' }, waiting: { questions: [], olderRemoved: false } },
+    });
+    expect(questions).not.toContain('data-judge-check');
+    expect(questions).not.toContain(J.title);
   });
 });
