@@ -15,6 +15,7 @@ import type { SourceConnector, SourceConnectorListPage } from '../src/core/contr
 import { archiveFamilyProvider, archiveImportFamilies, type ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
+import { appReleaseLogDbPath, openAppReleaseLog } from '../src/core/app-release-log.ts';
 import {
   openWaitingPrivateQuestionStore,
   waitingPrivateQuestionsDbPath,
@@ -548,6 +549,43 @@ describe('removing an archive', () => {
     // The chosen file is never touched, and a removal that finished has nothing left to do.
     expect(existsSync(join(f.exports, 'Removed.mbox'))).toBe(true);
     expect((await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed })).kind).toBe('not_removing');
+  });
+});
+
+describe('removing an archive from what AI apps received', () => {
+  test('takes the names its items were released under, and keeps the other archive\'s', async () => {
+    const f = fixture();
+    const removed = f.start('Removed.mbox', mbox([mail(0, { tag: 'removed' })]));
+    const kept = f.start('Kept.mbox', mbox([mail(0, { tag: 'kept' })]));
+    await importAll(f.runtime, removed);
+    await importAll(f.runtime, kept);
+    const lane = f.runtime.lane('email');
+    const logPath = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(f.env));
+    const corpusId = archiveCorpusId('internal', 'email');
+    const log = openAppReleaseLog(logPath);
+    log.record({
+      at: Date.now(), connection: { name: 'ChatGPT', kind: 'app' }, question: 'Synthetic?', heldBack: 0, answeredPrivately: false, withheld: false,
+      items: [
+        { source: 'Mail archive', title: 'SYNTHETIC_REMOVED_TITLE', tier: 'personal', corpusId, provider: 'mbox', accountScope: removed, providerItemId: 'same-id', locator: 'synthetic://removed' },
+        { source: 'Mail archive', title: 'SYNTHETIC_KEPT_TITLE', tier: 'personal', corpusId, provider: 'mbox', accountScope: kept, providerItemId: 'same-id', locator: 'synthetic://kept' },
+      ],
+    });
+    log.close();
+
+    requestArchiveRemoval(f.runtime.state, removed);
+    let outcome = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed });
+    for (let run = 0; run < 20 && outcome.kind === 'progress'; run += 1) {
+      outcome = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed });
+    }
+    expect(outcome.kind).toBe('removed');
+
+    const db = new Database(logPath, { readonly: true });
+    try {
+      const rows = db.query('SELECT title, locator FROM app_release_items ORDER BY position').all() as Array<{ title: string | null; locator: string | null }>;
+      expect(rows).toEqual([{ title: 'SYNTHETIC_KEPT_TITLE', locator: 'synthetic://kept' }]);
+    } finally {
+      db.close();
+    }
   });
 });
 

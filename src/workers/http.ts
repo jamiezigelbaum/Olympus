@@ -117,12 +117,8 @@ export function withWorkerBearerAuth(
   // The signing key is the secret bound to the bearer: the bearer alone
   // cannot forge a cookie (it lacks the secret), and rotating the worker
   // token still revokes every session at once (the key changes with it).
-  const sessionSecret = createHmac('sha256', options.sessionSecret?.trim() || randomBytes(32).toString('base64url'))
-    .update('olympus-dashboard-control-key-v1')
-    .update('\0')
-    // No bearer configured: the wrapper refuses everything but health anyway.
-    .update(authToken ?? '')
-    .digest('base64url');
+  // No bearer configured: the wrapper refuses everything but health anyway.
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes(32).toString('base64url'), authToken ?? '');
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request: Request): Promise<Response> => {
@@ -854,6 +850,59 @@ function mintDashboardControlSession(
   };
 }
 
+function dashboardControlSigningKey(sessionSecret: string, authToken: string): string {
+  return createHmac('sha256', sessionSecret)
+    .update('olympus-dashboard-control-key-v1')
+    .update('\0')
+    .update(authToken)
+    .digest('base64url');
+}
+
+/**
+ * The owner proof for approving an app connection where there is no owner
+ * socket (#1186): this browser's live dashboard control session, signed by
+ * this worker, unexpired and bound to `origin`. Only the owner's launch
+ * ticket or the worker token (owner-only worker.env) opens one, and since
+ * #1153 the local mint needs one too, so another account on this computer
+ * that can reach the loopback port has none. Either grade counts: both come
+ * from the owner. The caller states the origin (the approval page's own,
+ * from its loopback Host), because that page sends `Origin: null` under its
+ * `no-referrer` policy; the cookie's origin tag still has to match it.
+ * Without a configured bearer or session secret no session can be checked,
+ * so the answer is always no.
+ */
+export function dashboardOwnerSessionCheck(options: {
+  authToken: string | undefined;
+  sessionSecret: string | undefined;
+  now?: () => number;
+}): (request: Request, origin: string) => boolean {
+  const authToken = normalizeWorkerAuthToken(options.authToken);
+  const configured = options.sessionSecret?.trim();
+  if (!authToken || !configured) return () => false;
+  const sessionSecret = dashboardControlSigningKey(configured, authToken);
+  const now = options.now ?? Date.now;
+  return (request, origin) => {
+    const parts = liveDashboardControlSessionParts(request, sessionSecret, now());
+    return !!parts && constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin));
+  };
+}
+
+/** The request's control cookie when this worker signed it and it is live; nothing about origin or CSRF. */
+function liveDashboardControlSessionParts(request: Request, sessionSecret: string, nowMs: number): DashboardControlSessionParts | undefined {
+  const cookie = cookieValue(request.headers.get('Cookie'), DASHBOARD_CONTROL_COOKIE);
+  if (!cookie) return undefined;
+  const parts = decodeDashboardControlSession(cookie);
+  if (!parts) return undefined;
+  // Signature first: a cookie this worker's token did not sign is no session
+  // at all, whatever else it claims. Then lifetime.
+  const expected = dashboardControlSignature(sessionSecret, parts);
+  if (!constantTimeStringEqual(parts.signature, expected)) return undefined;
+  const expiresAtMs = dashboardControlExpiresAtMs(parts);
+  // A cookie dated in the future was not issued by this worker's clock.
+  if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60_000) return undefined;
+  return parts;
+}
+
 function authorizeDashboardControlSession(
   request: Request,
   sessionSecret: string,
@@ -879,17 +928,10 @@ function authorizeDashboardControlSession(
    */
   allowOriginlessNavigation = false,
 ): AuthorizedDashboardControlSession | { status: 'missing' | 'origin_mismatch' | 'csrf_mismatch' } {
-  const cookie = cookieValue(request.headers.get('Cookie'), DASHBOARD_CONTROL_COOKIE);
-  if (!cookie) return { status: 'missing' };
-  const parts = decodeDashboardControlSession(cookie);
+  // Signature and lifetime first, then origin, then CSRF.
+  const parts = liveDashboardControlSessionParts(request, sessionSecret, nowMs);
   if (!parts) return { status: 'missing' };
-  // Signature first: a cookie this worker's token did not sign is no session
-  // at all, whatever else it claims. Then lifetime, then origin, then CSRF.
-  const expected = dashboardControlSignature(sessionSecret, parts);
-  if (!constantTimeStringEqual(parts.signature, expected)) return { status: 'missing' };
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
-  // A cookie dated in the future was not issued by this worker's clock.
-  if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60_000) return { status: 'missing' };
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined) return { status: 'origin_mismatch' };
   if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin))) {

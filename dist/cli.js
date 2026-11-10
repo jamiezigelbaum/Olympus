@@ -21998,7 +21998,7 @@ class TierLedger {
     try {
       db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
-        db.exec("PRAGMA query_only = ON;");
+        db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         this.db = db;
         return;
       }
@@ -22013,6 +22013,9 @@ class TierLedger {
       throw error;
     }
     this.db = db;
+  }
+  hasCurrentSchema() {
+    return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
   }
   close() {
     try {
@@ -29416,6 +29419,7 @@ function releasedItemFromEvidence(evidence, source, title) {
   const shownTitle = boundedString(title, TITLE_MAX);
   const corpusId = boundedString(evidence.corpus_id, ID_MAX);
   const provider = boundedString(evidence.provider, ID_MAX);
+  const accountScope = boundedString(evidence.account_scope, ID_MAX);
   const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
   const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
   const locator = boundedString(evidence.uri, ID_MAX);
@@ -29425,6 +29429,7 @@ function releasedItemFromEvidence(evidence, source, title) {
     tier: releasedTierOf(evidence.trust_domain),
     ...corpusId ? { corpusId } : {},
     ...provider ? { provider } : {},
+    ...accountScope ? { accountScope } : {},
     ...providerItemId ? { providerItemId } : {},
     ...providerConversationId ? { providerConversationId } : {},
     ...locator ? { locator } : {}
@@ -30466,13 +30471,13 @@ function openAppReleaseLog(dbPath, options = {}) {
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         const secret2 = db.query(`SELECT 1 FROM app_release_secret_items
           WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
         record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
           const named = !(item.provider && item.providerItemId && secret2.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
-          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
         });
       })();
       expire();
@@ -30531,13 +30536,15 @@ function openAppReleaseLog(dbPath, options = {}) {
     markAnsweredPrivately(privateQuestionKey2) {
       return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey2).changes;
     },
-    forgetCorpora(corpusIds, dryRun) {
-      if (corpusIds.length === 0)
+    forgetCorpora(corpusIds, dryRun, accountScopes) {
+      if (corpusIds.length === 0 || accountScopes?.length === 0)
         return 0;
-      const marks = corpusIds.map(() => "?").join(", ");
+      const marks = (values) => values.map(() => "?").join(", ");
+      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
+      const params = [...corpusIds, ...accountScopes ?? []];
       if (dryRun)
-        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds).n;
-      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
+      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
     },
     forgetSecretItem(item, options2 = {}) {
       const conversation = item.providerConversationId ?? "";
@@ -30576,7 +30583,7 @@ function forgetAppReleaseItems(dbPath, selector, options = {}) {
     return 0;
   const store = openAppReleaseLog(dbPath);
   try {
-    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+    return store.forgetCorpora(selector.corpusIds, options.dryRun === true, selector.accountScopes);
   } finally {
     store.close();
   }
@@ -30654,6 +30661,15 @@ function migrations2() {
         CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
       `);
     }
+  }, {
+    version: 3,
+    name: "app_release_items_account_scope",
+    up(db) {
+      db.exec(`
+        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
+        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
+      `);
+    }
   }];
 }
 function hardenPrivatePath2(dbPath) {
@@ -30674,7 +30690,7 @@ function hardenPrivatePath2(dbPath) {
       throw new Error("The AI apps log must be a regular file, not a symlink.");
   }
 }
-var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 2, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
+var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 3, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
 var init_app_release_log = __esm(() => {
   init_olympus_layout();
   init_remote_connections();
@@ -33585,6 +33601,53 @@ function connectorStoreMigrations() {
     }
   ];
 }
+function createConnectorStoreVisibilityTables(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_visibility_feed (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tier_visibility_members (
+      generation INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL,
+      flags INTEGER NOT NULL,
+      item_pks_json TEXT NOT NULL,
+      PRIMARY KEY (generation, provider, account_scope, conversation_key, provider_item_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS tier_visibility_lease (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      owner TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tier_visibility_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      corpus_id TEXT NOT NULL,
+      ledger_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      ledger_cursor INTEGER NOT NULL,
+      store_cursor INTEGER NOT NULL
+    );
+  `);
+  const note = (row) => `
+    INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id)
+      VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
+    DELETE FROM item_visibility_feed
+      WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed);`;
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_insert AFTER INSERT ON items BEGIN ${note("NEW")} END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_delete AFTER DELETE ON items BEGIN ${note("OLD")} END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_update
+      AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned,
+        trust_tier, parent_local_item_id ON items
+      BEGIN ${note("OLD")} ${note("NEW")} END;
+  `);
+}
 function addConnectorStoreChildItemColumns(db) {
   addColumnIfMissing(db, "items", "parent_local_item_id", "TEXT");
   addColumnIfMissing(db, "items", "deferred_locator", "TEXT");
@@ -33788,6 +33851,40 @@ class MutablePkList {
       this.positions.set(last, index);
     }
   }
+}
+function visibilityPublishLeaseError() {
+  const error = new Error("Another connection is saving this store's visibility set.");
+  error.name = "VisibilityPublishLeaseError";
+  return error;
+}
+function visibilityWriters() {
+  return visibilityWritersByLedger ??= new Map;
+}
+function emptyTierVisibilityMemo(ledger, ledgerId, ledgerCursor, storeCursor, dataVersion) {
+  return {
+    ledger,
+    ledgerId,
+    ledgerCursor,
+    storeCursor,
+    dataVersion,
+    lists: {
+      hidden: new MutablePkList,
+      held: new MutablePkList,
+      heldForJudgment: new MutablePkList,
+      metadataLayer: new MutablePkList,
+      metadataLayerContentUnread: new MutablePkList
+    },
+    members: new Map,
+    value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
+  };
+}
+function visibilityMemberBits(flags) {
+  let value = 0;
+  for (const [flag, bit] of Object.entries(VISIBILITY_MEMBER_BITS)) {
+    if (flags[flag])
+      value |= bit;
+  }
+  return value;
 }
 function connectorStoreEmbeddingDeferredReason(error) {
   return `embedding_provider_unavailable:${error.reason}`;
@@ -36029,6 +36126,14 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
 }
+function validateConnectorStoreVisibilitySchema(db, versionLabel) {
+  assertExactTableColumns(db, "item_visibility_feed", ["seq", "provider", "account_scope", "conversation_key", "provider_item_id"], false, versionLabel);
+  assertExactTableColumns(db, "tier_visibility_members", ["generation", "provider", "account_scope", "conversation_key", "provider_item_id", "flags", "item_pks_json"], false, versionLabel);
+  assertExactTableColumns(db, "tier_visibility_state", ["id", "corpus_id", "ledger_id", "generation", "ledger_cursor", "store_cursor"], false, versionLabel);
+  assertExactTableColumns(db, "tier_visibility_lease", ["id", "owner", "expires_at"], false, versionLabel);
+  for (const trigger of CONNECTOR_STORE_VISIBILITY_TRIGGERS)
+    assertTriggerExists(db, trigger, versionLabel);
+}
 function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
   validateConnectorStoreFtsOwnership(db, "v6");
@@ -36045,6 +36150,7 @@ function validateConnectorStoreSchema(db) {
   assertIndexColumns(db, "idx_connector_store_media_judgments_unapplied", ["media_sha256"], "v14");
   assertExactTableColumns(db, "item_text_versions", ["item_pk", "source_version", "recorded_at"], false, "v14");
   assertTriggerExists(db, "connector_store_item_text_version_capture", "v14");
+  validateConnectorStoreVisibilitySchema(db, "v15");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks, itemColumns = CONNECTOR_STORE_V12_ITEM_COLUMNS) {
   validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkColumns);
@@ -36530,7 +36636,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -36585,6 +36691,11 @@ var init_local_index = __esm(() => {
   CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
   CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
   MEDIA_JUDGE_RETRY_BASE_MS = CHUNK_MEDIA_RETRY_BASE_MS;
+  CONNECTOR_STORE_VISIBILITY_TRIGGERS = [
+    "connector_store_item_visibility_insert",
+    "connector_store_item_visibility_delete",
+    "connector_store_item_visibility_update"
+  ];
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -36640,6 +36751,14 @@ var init_local_index = __esm(() => {
       this.name = "TierLedgerUnavailableError";
     }
   };
+  VISIBILITY_MEMBER_BITS = {
+    hidden: 1,
+    held: 2,
+    heldForJudgment: 4,
+    metadataLayer: 8,
+    metadataLayerContentUnread: 16,
+    moving: 32
+  };
   NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
@@ -36677,6 +36796,15 @@ var init_local_index = __esm(() => {
     embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
+      this.visibilityOwner = randomUUID8();
+      this.visibilityNow = () => Date.now();
+      this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
+      this.visibilityTimers = {
+        setTimeout: (callback, ms) => setTimeout(callback, ms),
+        clearTimeout: (timer) => clearTimeout(timer),
+        setInterval: (callback, ms) => setInterval(callback, ms),
+        clearInterval: (timer) => clearInterval(timer)
+      };
       this.readOnly = options.readOnly === true;
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
@@ -36725,10 +36853,14 @@ var init_local_index = __esm(() => {
           createConnectorStoreChunkMediaReleases(this.db);
           createConnectorStoreMediaJudgments(this.db);
           createConnectorStoreItemTextVersions(this.db);
+          createConnectorStoreVisibilityTables(this.db);
           validateConnectorStoreSchema(this.db);
         }
         if (options.readOnly !== true)
           this.createVisibilityJournal();
+        this.visibilityFeedPresent = this.db.query(`SELECT COUNT(*) AS present FROM sqlite_master
+        WHERE (type = 'table' AND name IN ('item_visibility_feed', 'tier_visibility_members', 'tier_visibility_state'))
+          OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`).get(JSON.stringify(CONNECTOR_STORE_VISIBILITY_TRIGGERS)).present === 3 + CONNECTOR_STORE_VISIBILITY_TRIGGERS.length;
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
@@ -36742,6 +36874,7 @@ var init_local_index = __esm(() => {
       }
     }
     close() {
+      this.stopVisibilityPublisher();
       try {
         if (!this.readOnly)
           this.releaseUnreferencedChunkMedia();
@@ -36875,7 +37008,11 @@ var init_local_index = __esm(() => {
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
-      const opened = new TierLedger({ dbPath: found, now: this.now });
+      let opened = new TierLedger({ dbPath: found, now: this.now, ...this.readOnly ? { readOnly: true } : {} });
+      if (this.readOnly && !opened.hasCurrentSchema()) {
+        opened.close();
+        opened = new TierLedger({ dbPath: found, now: this.now });
+      }
       if (!holdsBoundId(opened)) {
         opened.close();
         throw new TierLedgerUnavailableError(this.corpusId);
@@ -36993,46 +37130,55 @@ var init_local_index = __esm(() => {
     tierLedgerHiddenItemPks() {
       return runSteps(this.tierLedgerHiddenSteps());
     }
+    async saveVisibilityInTurns() {
+      if (this.readOnly)
+        return;
+      await runStepsInTurns(this.tierLedgerHiddenSteps());
+      await this.publishVisibility();
+    }
     tierLedgerHiddenMemo;
     visibilityJournal = false;
+    visibilityFeedPresent = false;
     visibilitySqlMemo;
+    visibilityPending;
+    visibilityPublishing;
+    visibilityPublishTimer;
+    visibilityRetryDelay = 0;
+    visibilityBackstop;
+    visibilityRefreshing;
+    visibilityRegisteredLedger;
+    visibilityClosed = false;
+    visibilityOwner;
+    visibilityNow;
+    visibilityPublishChunk;
+    visibilityTimers;
     createVisibilityJournal() {
-      this.db.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
-      CREATE TEMP TABLE item_visibility_changes (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
-      conversation_key TEXT, provider_item_id TEXT
-    );`);
-      const note = (row) => `
-      INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
-        VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
-      DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);`;
-      this.db.exec(`
-      CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN ${note("NEW")} END;
-      CREATE TEMP TRIGGER item_visibility_delete AFTER DELETE ON main.items BEGIN ${note("OLD")} END;
-      CREATE TEMP TRIGGER item_visibility_update
-        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned ON main.items
-        BEGIN ${note("OLD")} ${note("NEW")} END;
-    `);
+      this.db.exec("CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));");
       this.visibilityJournal = true;
     }
     itemVisibilityChangesSince(after) {
-      if (!this.visibilityJournal)
+      if (!this.visibilityFeedPresent)
         return { cursor: 0, identities: [] };
-      const bounds = this.db.query("SELECT (SELECT MIN(seq) FROM item_visibility_changes) AS first, (SELECT MAX(seq) FROM item_visibility_changes) AS last").get();
-      const cursor = bounds.last ?? 0;
-      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1)
-        return { cursor };
-      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-      FROM item_visibility_changes WHERE seq > ?`).all(after);
-      return { cursor, identities: rows.map((row) => ({
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        providerConversationId: row.conversation_key
-      })) };
+      return this.db.transaction(() => {
+        const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_feed) AS first,
+        (SELECT MAX(seq) FROM main.item_visibility_feed) AS last,
+        (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued`).get();
+        const cursor = bounds.last ?? bounds.issued ?? 0;
+        if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1)
+          return { cursor };
+        const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+        FROM main.item_visibility_feed WHERE seq > ?`).all(after);
+        return { cursor, identities: rows.map((row) => ({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          providerConversationId: row.conversation_key
+        })) };
+      })();
     }
     *tierLedgerHiddenSteps() {
       const ledger = this.visibilityLedger();
+      this.registerVisibilityWriter(ledger);
       if (!ledger) {
         if (this.visibilitySqlMemo)
           this.db.exec("DELETE FROM temp.tier_visibility_pks");
@@ -37040,29 +37186,23 @@ var init_local_index = __esm(() => {
         this.tierLedgerHiddenMemo = undefined;
         return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
-      const version = this.db.query("PRAGMA data_version").get().data_version;
+      const version = this.visibilityFeedPresent ? 0 : this.db.query("PRAGMA data_version").get().data_version;
       const prior = this.tierLedgerHiddenMemo;
-      const priorLedgerCursor = prior?.ledgerCursor;
-      const priorStoreCursor = prior?.storeCursor;
       const same = prior?.ledger === ledger && prior.dataVersion === version;
-      const ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-      const storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
-      const incremental = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined;
-      const memo = incremental ? prior : {
-        ledger,
-        ledgerCursor: ledgerChanges.cursor,
-        storeCursor: storeChanges.cursor,
-        dataVersion: version,
-        lists: {
-          hidden: new MutablePkList,
-          held: new MutablePkList,
-          heldForJudgment: new MutablePkList,
-          metadataLayer: new MutablePkList,
-          metadataLayerContentUnread: new MutablePkList
-        },
-        members: new Map,
-        value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
-      };
+      let ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+      let storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+      let base = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined ? prior : undefined;
+      if (!base && this.visibilityFeedPresent) {
+        const saved = yield* this.savedVisibilitySteps(ledger);
+        if (saved)
+          ({ memo: base, ledgerChanges, storeChanges } = saved);
+        if (this.tierLedgerHiddenMemo !== prior)
+          return yield* this.tierLedgerHiddenSteps();
+      }
+      const incremental = base !== undefined;
+      const memo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor, storeChanges.cursor, version);
+      const startLedgerCursor = memo.ledgerCursor;
+      const startStoreCursor = memo.storeCursor;
       for (const flag of VISIBILITY_PK_FLAGS)
         memo.value[flag] = memo.lists[flag].values;
       const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity2) => [tierLedgerIdentityKey(identity2), identity2])).values()] : undefined;
@@ -37095,9 +37235,10 @@ var init_local_index = __esm(() => {
           yield;
         }
       }
-      if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== priorLedgerCursor || memo.storeCursor !== priorStoreCursor)) {
+      if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor)) {
         return yield* this.tierLedgerHiddenSteps();
       }
+      const touched = updates.filter(({ identity: identity2, pks, flags }) => flags !== undefined || pks.length > 0 || memo.members.has(tierLedgerIdentityKey(identity2))).map(({ identity: identity2 }) => identity2);
       try {
         this.applyVisibilityUpdates(memo, updates);
       } catch (error) {
@@ -37117,7 +37258,367 @@ var init_local_index = __esm(() => {
       memo.ledgerCursor = ledgerChanges.cursor;
       memo.storeCursor = storeChanges.cursor;
       this.tierLedgerHiddenMemo = memo;
+      const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
+      if (!this.readOnly && this.visibilityFeedPresent && moved) {
+        this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
+      }
       return memo.value;
+    }
+    ledgerIdOf(ledger) {
+      try {
+        return ledger.ledgerId();
+      } catch {
+        return;
+      }
+    }
+    readVisibilityState() {
+      return this.db.query(`SELECT corpus_id, ledger_id, generation, ledger_cursor, store_cursor
+      FROM main.tier_visibility_state WHERE id = 1`).get();
+    }
+    *savedVisibilitySteps(ledger) {
+      const ledgerId = this.ledgerIdOf(ledger);
+      if (ledgerId === undefined)
+        return;
+      const page2 = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+      FROM main.tier_visibility_members
+      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
+      for (let attempt = 0;attempt < 3; attempt += 1) {
+        const state = this.readVisibilityState();
+        if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId)
+          return;
+        const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
+        let after = ["", "", "", ""];
+        for (;; ) {
+          const rows = page2.all(state.generation, ...after, VISIBILITY_PUBLISH_CHUNK);
+          for (const row of rows) {
+            const identity2 = {
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+            };
+            const pks = JSON.parse(row.item_pks_json);
+            const flags = {
+              ...identity2,
+              hidden: (row.flags & VISIBILITY_MEMBER_BITS.hidden) !== 0,
+              held: (row.flags & VISIBILITY_MEMBER_BITS.held) !== 0,
+              heldForJudgment: (row.flags & VISIBILITY_MEMBER_BITS.heldForJudgment) !== 0,
+              metadataLayer: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayer) !== 0,
+              metadataLayerContentUnread: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayerContentUnread) !== 0,
+              moving: (row.flags & VISIBILITY_MEMBER_BITS.moving) !== 0
+            };
+            for (const flag of VISIBILITY_PK_FLAGS)
+              if (flags[flag])
+                for (const pk of pks)
+                  memo.lists[flag].add(pk);
+            if (flags.moving)
+              memo.value.moving += 1;
+            memo.members.set(tierLedgerIdentityKey(identity2), { pks, flags });
+          }
+          if (rows.length < VISIBILITY_PUBLISH_CHUNK)
+            break;
+          const last = rows[rows.length - 1];
+          after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+          yield;
+        }
+        if (this.readVisibilityState()?.generation !== state.generation)
+          continue;
+        const ledgerChanges = ledger.visibilityChangesSince(state.ledger_cursor);
+        const storeChanges = this.itemVisibilityChangesSince(state.store_cursor);
+        if (ledgerChanges.identities === undefined || storeChanges.identities === undefined)
+          return;
+        return { memo, ledgerChanges, storeChanges };
+      }
+      return;
+    }
+    notePublish(memo, from, touched) {
+      const pending = this.visibilityPending;
+      if (pending?.memo === memo) {
+        if (!pending.full)
+          for (const identity2 of touched)
+            pending.ids.set(tierLedgerIdentityKey(identity2), identity2);
+      } else {
+        this.visibilityPending = from ? { memo, full: false, from, ids: new Map(touched.map((identity2) => [tierLedgerIdentityKey(identity2), identity2])) } : { memo, full: true, ids: new Map };
+      }
+      this.scheduleVisibilityPublish(0);
+    }
+    scheduleVisibilityPublish(delayMs) {
+      if (this.visibilityClosed || this.visibilityPublishTimer !== undefined)
+        return;
+      const timer = this.visibilityTimers.setTimeout(() => {
+        this.visibilityPublishTimer = undefined;
+        this.publishVisibility();
+      }, delayMs);
+      timer?.unref?.();
+      this.visibilityPublishTimer = timer;
+      if (this.visibilityBackstop === undefined) {
+        const backstop = this.visibilityTimers.setInterval(() => this.refreshVisibilityIfBehind(), VISIBILITY_BACKSTOP_MS);
+        backstop?.unref?.();
+        this.visibilityBackstop = backstop;
+      }
+    }
+    publishVisibility() {
+      if (this.visibilityPublishTimer !== undefined) {
+        this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
+        this.visibilityPublishTimer = undefined;
+      }
+      if (this.visibilityPublishing)
+        return this.visibilityPublishing;
+      if (!this.visibilityPending || this.visibilityClosed)
+        return Promise.resolve();
+      let publishing;
+      publishing = (async () => {
+        try {
+          while (this.visibilityPending && !this.visibilityClosed)
+            await runStepsInTurns(this.visibilityPublishSteps());
+          this.visibilityRetryDelay = 0;
+        } catch {
+          if (!this.visibilityClosed) {
+            this.visibilityRetryDelay = Math.min(Math.max(this.visibilityRetryDelay * 2, VISIBILITY_RETRY_MIN_MS), VISIBILITY_RETRY_MAX_MS);
+            this.scheduleVisibilityPublish(this.visibilityRetryDelay);
+          }
+        } finally {
+          if (this.visibilityPublishing === publishing)
+            this.visibilityPublishing = undefined;
+        }
+      })();
+      this.visibilityPublishing = publishing;
+      return publishing;
+    }
+    visibilityWrite(write, options = {}) {
+      if (this.db.inTransaction)
+        throw new Error("The store is in another transaction; the visibility save waits.");
+      this.db.exec("PRAGMA busy_timeout = 0");
+      try {
+        return this.db.transaction(() => {
+          const now = this.visibilityNow();
+          const lease = this.db.query("SELECT owner, expires_at FROM main.tier_visibility_lease WHERE id = 1").get();
+          const mine = lease?.owner === this.visibilityOwner;
+          if (options.take === true ? lease !== null && !mine && lease.expires_at > now : !mine) {
+            throw visibilityPublishLeaseError();
+          }
+          this.db.query("INSERT OR REPLACE INTO main.tier_visibility_lease (id, owner, expires_at) VALUES (1, ?, ?)").run(this.visibilityOwner, now + VISIBILITY_LEASE_MS);
+          return write();
+        }).immediate();
+      } finally {
+        this.db.exec("PRAGMA busy_timeout = 10000");
+      }
+    }
+    releaseVisibilityLease() {
+      try {
+        this.db.exec("PRAGMA busy_timeout = 0");
+        this.db.query("DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?").run(this.visibilityOwner);
+      } catch {} finally {
+        try {
+          this.db.exec("PRAGMA busy_timeout = 10000");
+        } catch {}
+      }
+    }
+    *visibilityPublishSteps() {
+      const pending = this.visibilityPending;
+      if (!pending)
+        return;
+      this.visibilityPending = undefined;
+      const { memo } = pending;
+      const ledgerId = memo.ledgerId;
+      const current2 = () => !this.visibilityClosed && this.tierLedgerHiddenMemo === memo;
+      if (ledgerId === undefined || !current2())
+        return;
+      const stamp = { ledger: memo.ledgerCursor, store: memo.storeCursor };
+      const chunk = Math.max(1, this.visibilityPublishChunk);
+      const put = (generation, flags) => {
+        const key2 = [generation, flags.provider, flags.accountScope, flags.providerConversationId ?? "", flags.providerItemId];
+        const member = memo.members.get(tierLedgerIdentityKey(flags));
+        if (member) {
+          this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_members
+          (generation, provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(...key2, visibilityMemberBits(member.flags), JSON.stringify(member.pks));
+        } else {
+          this.db.query(`DELETE FROM main.tier_visibility_members
+          WHERE generation = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...key2);
+        }
+      };
+      let leased = false;
+      try {
+        const { state, top } = this.visibilityWrite(() => ({
+          state: this.readVisibilityState(),
+          top: this.db.query("SELECT MAX(generation) AS generation FROM main.tier_visibility_members").get().generation ?? 0
+        }), { take: true });
+        leased = true;
+        const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
+        if (sameAuthority && state.ledger_cursor >= stamp.ledger && state.store_cursor >= stamp.store)
+          return;
+        const unchanged = () => {
+          const now = this.readVisibilityState();
+          if (now?.generation !== state?.generation || now?.ledger_cursor !== state?.ledger_cursor || now?.store_cursor !== state?.store_cursor || now?.corpus_id !== state?.corpus_id || now?.ledger_id !== state?.ledger_id) {
+            throw new Error("Another connection saved this store's visibility set first.");
+          }
+        };
+        const moveStamp = (generation2) => this.visibilityWrite(() => {
+          unchanged();
+          this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_state (id, corpus_id, ledger_id, generation, ledger_cursor, store_cursor)
+          VALUES (1, ?, ?, ?, ?, ?)`).run(this.corpusId, ledgerId, generation2, stamp.ledger, stamp.store);
+        });
+        const from = pending.from;
+        if (!pending.full && from && sameAuthority && state.ledger_cursor >= from.ledger && state.ledger_cursor <= stamp.ledger && state.store_cursor >= from.store && state.store_cursor <= stamp.store) {
+          const ids = [...pending.ids.values()];
+          for (let start = 0;start < ids.length; start += chunk) {
+            yield;
+            if (!current2())
+              return;
+            this.visibilityWrite(() => {
+              unchanged();
+              for (const identity2 of ids.slice(start, start + chunk))
+                put(state.generation, identity2);
+            });
+          }
+          yield;
+          if (!current2())
+            return;
+          moveStamp(state.generation);
+          return;
+        }
+        const generation = Math.max(state?.generation ?? 0, top) + 1;
+        let batch = [];
+        const flush = () => {
+          const rows = batch;
+          batch = [];
+          this.visibilityWrite(() => {
+            for (const identity2 of rows)
+              put(generation, identity2);
+          });
+        };
+        for (const { flags } of memo.members.values()) {
+          batch.push(flags);
+          if (batch.length < chunk)
+            continue;
+          yield;
+          if (!current2())
+            return;
+          flush();
+        }
+        if (batch.length > 0) {
+          yield;
+          if (!current2())
+            return;
+          flush();
+        }
+        yield;
+        if (!current2())
+          return;
+        moveStamp(generation);
+        for (;; ) {
+          yield;
+          if (this.visibilityClosed)
+            return;
+          const removed = this.visibilityWrite(() => this.db.query(`DELETE FROM main.tier_visibility_members
+          WHERE (generation, provider, account_scope, conversation_key, provider_item_id) IN (
+            SELECT generation, provider, account_scope, conversation_key, provider_item_id
+            FROM main.tier_visibility_members
+            WHERE generation < (SELECT generation FROM main.tier_visibility_state WHERE id = 1) LIMIT ?)`).run(chunk).changes);
+          if (removed < chunk)
+            return;
+        }
+      } catch (error) {
+        if (current2()) {
+          const queued = this.visibilityPending;
+          if (!queued)
+            this.visibilityPending = pending;
+          else if (queued.memo === memo) {
+            queued.full ||= pending.full;
+            if (!queued.full) {
+              for (const [key2, identity2] of pending.ids)
+                if (!queued.ids.has(key2))
+                  queued.ids.set(key2, identity2);
+              if (pending.from)
+                queued.from = pending.from;
+            }
+          }
+        }
+        throw error;
+      } finally {
+        if (leased)
+          this.releaseVisibilityLease();
+      }
+    }
+    refreshVisibilityIfBehind(options = {}) {
+      if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing)
+        return;
+      try {
+        const ledger = this.visibilityRegisteredLedger;
+        const state = this.readVisibilityState();
+        if (!ledger || !state || state.corpus_id !== this.corpusId)
+          return;
+        const ledgerCursor = options.ledgerCursor ?? ledger.visibilityChangesSince().cursor;
+        const storeCursor = this.db.query("SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed'").get()?.seq ?? 0;
+        const ledgerLag = ledgerCursor - state.ledger_cursor;
+        const storeLag = storeCursor - state.store_cursor;
+        const behind = options.anyMovement === true ? ledgerLag > 0 || storeLag > 0 : ledgerLag > LEDGER_VISIBILITY_FEED_RETENTION / 2 || storeLag > ITEM_VISIBILITY_FEED_RETENTION / 2;
+        if (!behind)
+          return;
+      } catch {
+        return;
+      }
+      let refreshing;
+      refreshing = (async () => {
+        try {
+          await runStepsInTurns(this.tierLedgerHiddenSteps());
+          await this.publishVisibility();
+        } catch {} finally {
+          if (this.visibilityRefreshing === refreshing)
+            this.visibilityRefreshing = undefined;
+        }
+      })();
+      this.visibilityRefreshing = refreshing;
+    }
+    tickVisibilityWriters(options = {}) {
+      const ledger = this.visibilityRegisteredLedger;
+      if (!ledger)
+        return;
+      let ledgerCursor;
+      try {
+        ledgerCursor = ledger.visibilityChangesSince().cursor;
+      } catch {
+        return;
+      }
+      for (const store of visibilityWriters().get(ledger) ?? []) {
+        store.refreshVisibilityIfBehind({ ledgerCursor, anyMovement: options.completed === true && store === this });
+      }
+    }
+    registerVisibilityWriter(ledger) {
+      if (this.readOnly || !this.visibilityFeedPresent || this.visibilityClosed || ledger === this.visibilityRegisteredLedger)
+        return;
+      this.unregisterVisibilityWriter();
+      if (!ledger)
+        return;
+      let writers = visibilityWriters().get(ledger);
+      if (!writers)
+        visibilityWriters().set(ledger, writers = new Set);
+      writers.add(this);
+      this.visibilityRegisteredLedger = ledger;
+    }
+    unregisterVisibilityWriter() {
+      const ledger = this.visibilityRegisteredLedger;
+      if (!ledger)
+        return;
+      const writers = visibilityWriters().get(ledger);
+      writers?.delete(this);
+      if (writers?.size === 0)
+        visibilityWriters().delete(ledger);
+      this.visibilityRegisteredLedger = undefined;
+    }
+    stopVisibilityPublisher() {
+      this.visibilityClosed = true;
+      this.unregisterVisibilityWriter();
+      if (!this.readOnly && this.visibilityFeedPresent)
+        this.releaseVisibilityLease();
+      if (this.visibilityPublishTimer !== undefined)
+        this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
+      if (this.visibilityBackstop !== undefined)
+        this.visibilityTimers.clearInterval(this.visibilityBackstop);
+      this.visibilityPublishTimer = undefined;
+      this.visibilityBackstop = undefined;
+      this.visibilityPending = undefined;
     }
     applyVisibilityUpdates(memo, updates) {
       for (const { identity: identity2 } of updates) {
@@ -40476,7 +40977,12 @@ var init_local_index = __esm(() => {
     }
     async syncFromConnector(connector, options) {
       try {
-        return await this.syncFromConnectorHeld(connector, options);
+        this.registerVisibilityWriter(this.visibilityLedger());
+      } catch {}
+      try {
+        const summary = await this.syncFromConnectorHeld(connector, options);
+        this.tickVisibilityWriters({ completed: true });
+        return summary;
       } finally {
         this.releaseUnreferencedChunkMedia();
       }
@@ -40569,6 +41075,8 @@ var init_local_index = __esm(() => {
               break;
             }
             itemsSeen += 1;
+            if (itemsSeen % VISIBILITY_TICK_ITEMS === 0)
+              this.tickVisibilityWriters();
             await this.controlPath.ingestionTurn();
             const exclusion = this.exclusions.evaluateMetadata(item.metadata);
             if (exclusion.excluded) {
@@ -73717,6 +74225,7 @@ function evidenceFromCitations(citations, detail) {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
@@ -73781,6 +74290,7 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
@@ -73940,6 +74450,7 @@ async function searchReleasedEvidence(input) {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
       ...cite?.title ? { title: cite.title } : {},
@@ -103856,6 +104367,10 @@ var init_source_forget_registry = __esm(() => {
       forget(account, context2, { dryRun }) {
         const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context2.env));
         return line(path, "titles shared with apps", forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
+      },
+      forgetAccountScopes(account, accountScopes, context2, { dryRun }) {
+        const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context2.env));
+        return line(path, "titles shared with apps", forgetAppReleaseItems(path, { corpusIds: account.corpus_ids, accountScopes }, { dryRun }));
       }
     },
     {
@@ -157235,7 +157750,7 @@ function outsideHelpClientScript(config2) {
   // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
   // (in memory), which says it again in the same form, with its section open.
   function formKey(form) {
-    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : form.hasAttribute('data-outside-save-languages') ? ':languages' : '');
   }
   function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
   (function showSaved() {
@@ -157301,7 +157816,8 @@ function outsideHelpClientScript(config2) {
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
+        // The switch's new state shows on the redrawn card; Save languages leaves nothing to see but its confirmation.
+        if ((kind !== 'enable' || form.hasAttribute('data-outside-save-languages')) && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
           redrawWhenBack(4000, form);
@@ -166122,6 +166638,9 @@ function renderLoopbackConsentPage(input) {
   const nonce = randomBytes28(16).toString("base64");
   const name = escapeHtml2(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
+  const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
+<p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
+` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -166145,10 +166664,10 @@ ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${esca
 ${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="/connect/authorize">
+<form method="post" action="${escapeHtml2(input.action ?? "/connect/authorize")}">
 <input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
-${TERMS_ASSENT}
+${ownerNeeded}${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
@@ -170104,7 +170623,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac5("sha256", options.sessionSecret?.trim() || randomBytes29(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes29(32).toString("base64url"), authToken ?? "");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -170576,19 +171095,41 @@ function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bear
     grade
   };
 }
-function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+function dashboardControlSigningKey(sessionSecret, authToken) {
+  return createHmac5("sha256", sessionSecret).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken).digest("base64url");
+}
+function dashboardOwnerSessionCheck(options) {
+  const authToken = normalizeWorkerAuthToken(options.authToken);
+  const configured = options.sessionSecret?.trim();
+  if (!authToken || !configured)
+    return () => false;
+  const sessionSecret = dashboardControlSigningKey(configured, authToken);
+  const now = options.now ?? Date.now;
+  return (request, origin) => {
+    const parts = liveDashboardControlSessionParts(request, sessionSecret, now());
+    return !!parts && constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin));
+  };
+}
+function liveDashboardControlSessionParts(request, sessionSecret, nowMs) {
   const cookie = cookieValue(request.headers.get("Cookie"), DASHBOARD_CONTROL_COOKIE);
   if (!cookie)
-    return { status: "missing" };
+    return;
   const parts = decodeDashboardControlSession(cookie);
   if (!parts)
-    return { status: "missing" };
+    return;
   const expected = dashboardControlSignature(sessionSecret, parts);
   if (!constantTimeStringEqual(parts.signature, expected))
-    return { status: "missing" };
+    return;
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
   if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60000)
+    return;
+  return parts;
+}
+function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+  const parts = liveDashboardControlSessionParts(request, sessionSecret, nowMs);
+  if (!parts)
     return { status: "missing" };
+  const expiresAtMs = dashboardControlExpiresAtMs(parts);
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined)
     return { status: "origin_mismatch" };
@@ -194606,6 +195147,7 @@ async function runArchiveRemoval(options) {
   lane.ledger.deleteSetCursor(archiveTierSetId(lane.family), connectorId);
   counts.secret_locations_removed += lane.secretLocations?.removeAccountScope(provider, accountScope) ?? 0;
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
+  forgetAppReleaseItems(appReleaseLogDbPath(resolveRemoteConnectionsDbPath(lane.env)), { corpusIds, accountScopes: [accountScope] });
   options.state.delete(record8.archive_id);
   return { kind: "removed", counts };
 }
@@ -194614,6 +195156,8 @@ var init_removal = __esm(() => {
   init_atomic_file();
   init_classification_ledger();
   init_source_forget_registry();
+  init_app_release_log();
+  init_remote_connections();
   init_source_storage();
   init_tier_ledger_path();
   init_continuation_cache();
@@ -220313,6 +220857,8 @@ function createRemoteOAuthHandler(options) {
     };
   };
   const directLoopback = (request) => !isRelayed(request) && loopbackHost(request) && (requestFromOwnerSocket(request) || !options.requireOwnerSocket && isLoopbackAddress(peerAddress(request)));
+  const ownerProof = (request) => requestFromOwnerSocket(request) || (options.ownerSession?.(request, new URL(request.url).origin) ?? false);
+  const approvalAction = (request, u) => u.installId && !requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.ownerAuthorize : REMOTE_OAUTH_PATHS.authorize;
   const linux = (options.platform ?? process.platform) === "linux";
   const notOnThisComputer = () => errorPage(403, linux ? "Approve on this computer through the owner's approval route. On a headless host, configure the owner-only SSH socket forward first." : "Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.");
   const authorizeGet = async (request, u, demo = false) => {
@@ -220366,7 +220912,7 @@ function createRemoteOAuthHandler(options) {
         if (entry2.demo || entry2.transaction !== transaction)
           continue;
         entry2.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
-        return consentPage(id, entry2, u);
+        return consentPage(id, entry2, u, undefined, true, approvalAction(request, u));
       }
     }
     admitPending();
@@ -220386,7 +220932,7 @@ function createRemoteOAuthHandler(options) {
       demo
     };
     pending.set(requestId, entry);
-    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u);
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request, u));
   };
   const demoPage = (requestId, entry, error2) => {
     const page2 = renderDemoSignInPage({
@@ -220474,9 +221020,11 @@ function createRemoteOAuthHandler(options) {
     }
     return issueCode(requestId, entry, u);
   };
-  const consentPage = (requestId, entry, u, error2, showAttempts = true) => {
+  const consentPage = (requestId, entry, u, error2, showAttempts = true, action = REMOTE_OAUTH_PATHS.authorize, ownerNeeded = false) => {
     const page2 = u.installId ? renderLoopbackConsentPage({
       platform: options.platform ?? process.platform,
+      action,
+      ownerNeeded,
       requestId,
       csrf: entry.csrf,
       clientName: entry.client.clientName,
@@ -220497,8 +221045,8 @@ function createRemoteOAuthHandler(options) {
       ...error2 && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}
     });
     const headers = new Headers(page2.headers);
-    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000));
-    return new Response(page2.body, { status: error2 ? 400 : 200, headers });
+    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000, consentCookiePath(action)));
+    return new Response(page2.body, { status: ownerNeeded ? 403 : error2 ? 400 : 200, headers });
   };
   const authorizePost = async (request, u) => {
     if ((u.installId || options.requireOwnerSocket) && !directLoopback(request))
@@ -220521,24 +221069,26 @@ function createRemoteOAuthHandler(options) {
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
       return errorPage(403, "This approval did not come from the Olympus page.");
     }
+    const path = new URL(request.url).pathname;
+    const clearCookie = (response) => {
+      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0, consentCookiePath(path)));
+      return response;
+    };
     const finish2 = (params) => {
       pending.delete(requestId);
-      const response = redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer });
-      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
-      return response;
+      return clearCookie(redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer }));
     };
     const action = form.get("action");
     if (action === "deny")
       return finish2({ error: "access_denied", error_description: "The owner denied the request." });
     if (action !== "approve")
       return errorPage(400, "The approval form was malformed.");
-    const approve = () => {
-      const response = issueCode(requestId, entry, u);
-      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
-      return response;
-    };
-    if (u.installId)
-      return approve();
+    const approve = () => clearCookie(issueCode(requestId, entry, u));
+    if (u.installId) {
+      if (ownerProof(request))
+        return approve();
+      return consentPage(requestId, entry, u, undefined, true, approvalAction(request, u), true);
+    }
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
@@ -220722,6 +221272,12 @@ function createRemoteOAuthHandler(options) {
           if (method === "POST")
             return await authorizePost(request, urls);
           return methodNotAllowed("GET, POST");
+        case REMOTE_OAUTH_PATHS.ownerAuthorize:
+          if (!urls.installId)
+            return jsonResponse2(404, { error: "not_found" });
+          if (method === "POST")
+            return await authorizePost(request, urls);
+          return methodNotAllowed("POST");
         case REMOTE_OAUTH_PATHS.demoAuthorize:
           if (method === "GET")
             return await authorizeGet(request, urls, true);
@@ -220858,8 +221414,11 @@ function readCookie(request, name) {
 function consentCookieName(requestId) {
   return `olympus_consent_${requestId}`;
 }
-function consentCookie(requestId, value2, secure, maxAgeSeconds) {
-  return `${consentCookieName(requestId)}=${value2}; Path=/connect; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+function consentCookiePath(action) {
+  return action === REMOTE_OAUTH_PATHS.ownerAuthorize ? "/dashboard/connect" : "/connect";
+}
+function consentCookie(requestId, value2, secure, maxAgeSeconds, path = "/connect") {
+  return `${consentCookieName(requestId)}=${value2}; Path=${path}; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
 }
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left);
@@ -220947,6 +221506,7 @@ var init_handler = __esm(() => {
     protectedResourceDirectoryMcp: `/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
     authorizationServer: "/.well-known/oauth-authorization-server",
     authorize: "/connect/authorize",
+    ownerAuthorize: "/dashboard/connect/authorize",
     demoAuthorize: "/connect/demo/authorize",
     token: "/connect/token",
     register: "/connect/register",
@@ -230215,6 +230775,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       publicUrls: remotePublicUrls,
       requireOwnerSocket: !!socketPath,
       isRelayed: carriesRelayMarker2,
+      ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
