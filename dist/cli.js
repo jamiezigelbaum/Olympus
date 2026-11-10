@@ -234245,7 +234245,7 @@ function createTierSnifferModel(input) {
     }), { apiKey });
   }
   if (lane.kind === "venice" && profile.provider === "venice") {
-    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Tier sniffer Venice model profile", bootSecretOptions(input.bootSecretResolver, [lane.profileId], ["classification"], { id: lane.profileId, profile }));
+    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Tier sniffer Venice model profile", bootSecretOptions(input.bootSecretResolver, [lane.profileId], ["classification"], { id: lane.profileId, profile: input.configuredProfile ?? profile }));
     if (!apiKey)
       return;
     const pacer = new JudgeRateLimitPacer;
@@ -238472,7 +238472,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }, 1e4);
   captureTick.unref?.();
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
+  const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
     requestModelReload();
   } });
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
@@ -238486,7 +238486,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     profileId: cloudJudgeRuntime.lane.profileId,
     modelId: cloudJudgeRuntime.lane.modelId,
     promptVersion: snifferPromptVersions(privacyOwnerWords()).approval
-  }) ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
+  }) ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
     requestModelReload();
   } }) : undefined;
   if (!engineFront && judgeChoice.choice === "local-then-venice" && snifferModel && !secondRoundVenice) {

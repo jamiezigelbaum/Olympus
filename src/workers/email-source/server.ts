@@ -2008,6 +2008,12 @@ function createTierSnifferModel(input: {
   judgeStatus?: () => import('../classification/judge-spending.ts').JudgeSpendingStatus;
   judgeOnStop?: () => void;
   lane: SnifferLane;
+  /**
+   * The profile as configured under the lane's id. Credential readiness is
+   * recorded against it, so a judge Olympus derives from an answer profile
+   * (its own model, #1252) never replaces that profile's readiness evidence.
+   */
+  configuredProfile?: SovereigntyModelProfile | undefined;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   bootSecretResolver: WorkerBootSecretResolver;
@@ -2043,7 +2049,7 @@ function createTierSnifferModel(input: {
       profile.secretRef,
       input.env,
       'Tier sniffer Venice model profile',
-      bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
+      bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile: input.configuredProfile ?? profile }),
     );
     if (!apiKey) return undefined;
     // Paced to the key's per-model request limit; a 429 waits and retries (#884).
@@ -7698,7 +7704,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
@@ -7718,7 +7724,7 @@ export async function main(): Promise<void> {
       lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
       promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
     })
-    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
     : undefined;
   if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
     console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
