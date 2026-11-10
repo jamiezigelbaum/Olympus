@@ -138,7 +138,7 @@ import type { Operation, OperationContext } from './core/operations.ts';
 import { VERSION } from './version.ts';
 import type { WorkerServicePlatform, WorkerServiceState } from './core/worker-service.ts';
 import { writeManagedWorkerEnvSecret } from './core/worker-service.ts';
-import { isValidSshTarget, parseServerModeSetting, resolveServerMode, remoteOpenInstructions } from './core/remote-open.ts';
+import { isValidPort, isValidSshTarget, parseServerModeSetting, resolveServerMode, remoteOpenInstructions } from './core/remote-open.ts';
 import {
   runWorkerLifecycle,
   type LifecycleRecoverySignal,
@@ -585,9 +585,10 @@ async function main(): Promise<void> {
       // list (core/open-targets.ts). The remote-mode instructions name it so
       // a link opened through an SSH tunnel lands on the right screen.
       const target = dashboardTargetArg(args);
+      const port = dashboardPortArg(args);
       const result = args.includes('--read-only')
         ? runDashboardReadOnlyCommand({ noOpen })
-        : await runDashboardCommand({ noOpen, ...(target ? { target } : {}) });
+        : await runDashboardCommand({ noOpen, ...(target ? { target } : {}), ...(port !== undefined ? { port } : {}) });
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -1498,7 +1499,7 @@ function printHelp(): void {
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
   console.log(`  ${ENGINE_CLI_USAGE['engine install-helper']}`);
   console.log('  olympus engine uninstall|status [--brief]|start|stop|restart|rollback|logs');
-  console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>]');
+  console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>] [--port <n>]');
   console.log('  olympus dashboard token');
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
@@ -1562,7 +1563,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
-  dashboard: 'olympus dashboard [--read-only] [--no-open] [--target <place>]',
+  dashboard: 'olympus dashboard [--read-only] [--no-open] [--target <place>] [--port <n>]',
   open: 'olympus open olympus://open/<target>',
   'open-handler install': 'olympus open-handler install',
   'open-handler uninstall': 'olympus open-handler uninstall',
@@ -3326,6 +3327,11 @@ export interface DashboardCommandDependencies {
   noOpen?: boolean;
   /** Where the opened dashboard lands (an `olympus://` link's target); the plain dashboard when absent. */
   target?: OpenTarget;
+  /**
+   * The port the owner's end of the SSH tunnel listens on, when the engine's
+   * own port is busy on their computer (#776). The link is bound to it.
+   */
+  port?: number;
 }
 
 /**
@@ -3351,10 +3357,17 @@ export async function runDashboardCommand(
   dependencies: DashboardCommandDependencies = {},
 ): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = cliWorkerRoot(config);
+  const engineBase = cliWorkerRoot(config);
   const token = resolveWorkerAuthToken(process.env, config);
+  // --port: the link is minted for the tunnel's own port. Only a worker
+  // reached through its owner socket can take that, since the socket answers
+  // whatever loopback port the request names (#776).
+  if (dependencies.port !== undefined && !validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {})) {
+    throw new OperationError('invalid_params', '--port is for opening a server\'s dashboard over SSH, and this engine is not reached through an SSH socket.', 'Run the command without --port.');
+  }
+  const base = dependencies.port === undefined ? engineBase : `http://127.0.0.1:${dependencies.port}`;
   let desktopUnavailable = false;
-  if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen) {
+  if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen && dependencies.port === undefined) {
     if (!token) throw new OperationError('config_error', 'No worker auth token is configured. Run olympus setup first.');
     let response: Response;
     try { response = await (dependencies.fetchImpl ?? workerFetch)(`${base}${DESKTOP_OWNER_OPEN_PATH}${dependencies.target ? '?target=' + openTargetPath(dependencies.target) : ''}`, {
@@ -3383,7 +3396,8 @@ export async function runDashboardCommand(
   return {
     url: openUrl,
     opened,
-    hint: handoff ? `${desktopUnavailable ? 'No desktop session is available. ' : ''}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
+    hint: handoff ? `${desktopUnavailable ? 'No desktop session is available. ' : ''}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.`
+      + ` If ssh says "Address already in use", port ${new URL(base).port || '80'} is already taken on your computer: run ${olympusCommandHint()} dashboard --no-open --port <another port> on this server instead, and use the command it prints.` : dependencies.noOpen
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
@@ -3521,6 +3535,17 @@ export function runServerModeCommand(
 }
 
 /** `--target <path>` for `olympus dashboard`: one of the closed list, or a refusal naming them. */
+/** `--port <n>` for `olympus dashboard` (#776). */
+export function dashboardPortArg(args: readonly string[]): number | undefined {
+  const index = args.indexOf('--port');
+  if (index < 0) return undefined;
+  const value = Number(args[index + 1]);
+  if (!isValidPort(value) || value < 1024 || !/^\d+$/.test(args[index + 1] ?? '')) {
+    throw new OperationError('invalid_params', '--port takes a port number from 1024 to 65535.', 'For example: --port 8011.');
+  }
+  return value;
+}
+
 export function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
   const index = args.indexOf('--target');
   if (index < 0) return undefined;

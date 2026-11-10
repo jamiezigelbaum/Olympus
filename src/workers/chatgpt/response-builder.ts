@@ -60,6 +60,7 @@ import type {
   ModelLoadFailedReason,
   ModelRetryResult,
   ModelSetResult,
+  PrivacyChatSourceId,
   PrivacyRuleView,
   PrivacySettings,
   PrivacySummary,
@@ -138,6 +139,8 @@ const FOLDER_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['google_drive.docs', 'd
 const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', ...FOLDER_SOURCE_IDS]);
 /** Folder sources an always-Private rule may name (privacy-profile.ts RULE_SOURCES.folder). */
 const PRIVACY_FOLDER_SOURCE_IDS = new Set<string>(['google_drive.docs', 'dropbox.files', 'evernote.notes']);
+/** Chat sources an always-Private chat rule may name (privacy-profile.ts RULE_SOURCES.chat). */
+const PRIVACY_CHAT_SOURCE_IDS = new Set<PrivacyChatSourceId>(['telegram.messages', 'whatsapp.personal.messages']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);
 const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
@@ -1161,7 +1164,7 @@ export function privacyToolResult(
         ? 'Not saved: the privacy settings changed since they were shown. The Olympus panel shows the current ones to save again.'
         : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
-  if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
+  if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label, sender or chat rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
   if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the computer.`);
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
@@ -1170,7 +1173,7 @@ export function privacyToolResult(
   };
 }
 
-const PRIVACY_RULE_KINDS = new Set(['folder', 'label', 'sender']);
+const PRIVACY_RULE_KINDS = new Set(['folder', 'label', 'sender', 'chat']);
 const MAX_PRIVACY_RULES = 100;
 const MAX_PRIVACY_DESCRIPTION = 2_000;
 
@@ -1181,7 +1184,13 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       ? settings.description.replace(UNSAFE_CHARS, ' ').trim().slice(0, MAX_PRIVACY_DESCRIPTION)
       : '',
     rules: (settings.rules ?? []).slice(0, MAX_PRIVACY_RULES).flatMap((rule): PrivacyRuleView[] => {
-      if (!PRIVACY_RULE_KINDS.has(rule.kind) || !SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
+      if (!PRIVACY_RULE_KINDS.has(rule.kind)) return [];
+      if (rule.kind === 'chat') {
+        if (!PRIVACY_CHAT_SOURCE_IDS.has(rule.source_id)) return [];
+        const display = text(rule.display);
+        return [{ kind: 'chat', source_id: rule.source_id, key: opaque(rule.key), ...(display ? { display } : {}) }];
+      }
+      if (!SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
       if (rule.kind === 'sender') return [{ kind: 'sender', source_id: 'gmail.email', value: text(rule.value) }];
       if (rule.kind === 'label') return [{ kind: 'label', source_id: 'gmail.email', key: opaque(rule.key), value: text(rule.value) }];
       const sourceId = PRIVACY_FOLDER_SOURCE_IDS.has(rule.source_id) ? rule.source_id : undefined;

@@ -277,6 +277,8 @@ if (verb === 'provision') {
   if (script.includes('apparmor_restrict_unprivileged_userns')) { console.log('absent'); process.exit(0); }
   if (script.includes('zkapi install-tools')) process.exit(0);
   if (script.includes('zkapi check-confinement')) { console.log('network confinement: ready (scripted)'); process.exit(0); }
+  // The forwarded-socket owner proof (#1188): the bare forwarded mint is refused, the owner's opened page unlocks.
+  if (script.includes('forward_bare=')) { console.log('forward_bare=401\nowner_page=200'); process.exit(0); }
   const sub = /agent\.js (\S+)/.exec(script)?.[1];
   const upgraded = flag('upgraded');
   const say = (value) => console.log(JSON.stringify(value));

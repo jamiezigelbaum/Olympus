@@ -8979,6 +8979,9 @@ var init_manifest2 = __esm(() => {
   };
 });
 
+// src/workers/classification/sniffer-decision-mass.ts
+var SNIFFER_DECISION_PRIVATE_BAR = 0.5;
+
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash3 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
@@ -10967,15 +10970,37 @@ var init_sniffer_store = __esm(() => {
 
 // src/workers/classification/sniffer.ts
 import { createHash as createHash7 } from "node:crypto";
-function snifferTierKey(verdict) {
-  if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
+function validDecisionBar(bar) {
+  return typeof bar === "number" && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
+}
+function snifferDecisionBar(lane) {
+  if (validDecisionBar(lane.decisionBar))
+    return lane.decisionBar;
+  const id = lane.cacheModelId ?? lane.modelId;
+  const measured = SNIFFER_DECISION_BARS.find(([model]) => id === model || id.startsWith(`${model}:`))?.[1];
+  return validDecisionBar(measured) ? measured : SNIFFER_DECISION_PRIVATE_BAR;
+}
+function snifferDecisionPrivateChance(verdict) {
+  if (verdict.failSafe || verdict.category !== SNIFFER_DECISION_CATEGORY || !isUnitConfidence(verdict.confidence))
+    return;
+  if (verdict.tier === "private")
+    return verdict.confidence;
+  return verdict.tier === "personal" ? 1 - verdict.confidence : undefined;
+}
+function snifferTierKey(verdict, decisionBar = SNIFFER_DECISION_PRIVATE_BAR) {
+  if (verdict.failSafe || recordRequiresPrivate(verdict))
     return "secure";
-  if (verdict.category === SNIFFER_DECISION_CATEGORY)
-    return "private";
+  if (verdict.category === SNIFFER_DECISION_CATEGORY) {
+    const chance = snifferDecisionPrivateChance(verdict);
+    const bar = validDecisionBar(decisionBar) ? decisionBar : SNIFFER_DECISION_PRIVATE_BAR;
+    return chance === undefined || chance >= bar ? "secure" : "private";
+  }
+  if (verdict.tier === "private")
+    return "secure";
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? "private" : "secure";
 }
 function snifferVerdictTier(verdict, lane, flags) {
-  const tier = snifferTierKey(verdict);
+  const tier = snifferTierKey(verdict, snifferDecisionBar(lane));
   const code = snifferReasonCode(verdict);
   if (tier === "private" && snifferLaneIsSmall(lane) && flags.some((flag) => flag.startsWith(OWN_RECORD_FLAG_PREFIX))) {
     return { tier: "secure", code: `${SNIFFER_RECORD_HELD_CODE_PREFIX}${code}` };
@@ -11072,7 +11097,9 @@ function snifferCacheModelId(lane) {
   return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
-  const model = createHash7("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
+  const bar = lane.snifferMode === "decision" ? snifferDecisionBar(lane) : SNIFFER_DECISION_PRIVATE_BAR;
+  const judge = bar === SNIFFER_DECISION_PRIVATE_BAR ? snifferCacheModelId(lane) : `${snifferCacheModelId(lane)}:bar-${bar}`;
+  const model = createHash7("sha256").update(judge).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -11248,7 +11275,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -11277,6 +11304,7 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  SNIFFER_DECISION_BARS = [[QWEN35_4B.modelId, 0.15]];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
@@ -15002,23 +15030,18 @@ function connectedMailSourceAccountGeneration(registry, pinnedHandle) {
 }
 function readMailSourceScopeApproval(input) {
   const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
-  const read = readState2(input.statePath);
-  const carried = read.kind === "valid" ? read.state.carried_owner_rules?.always_private_senders : undefined;
-  const pending = (revision, reason) => ({
-    ...pendingSnapshot2(revision, account?.generation, reason),
-    ...carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}
-  });
   if (!account)
-    return pending("not-connected", "not_connected");
+    return pendingSnapshot2("not-connected", undefined, "not_connected");
+  const read = readState2(input.statePath);
   if (read.kind === "missing")
-    return pending(`missing:${account.generation}`, "missing");
+    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
   if (read.kind === "malformed")
-    return pending(`malformed:${read.digest}`, "malformed");
+    return pendingSnapshot2(`malformed:${read.digest}`, account.generation, "malformed");
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
   if (!approval)
-    return pending(`missing:${account.generation}`, "missing");
+    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
   if (approval.account_generation !== account.generation) {
-    return pending(`stale:${approval.revision}:${account.generation}`, "account_changed");
+    return pendingSnapshot2(`stale:${approval.revision}:${account.generation}`, account.generation, "account_changed");
   }
   return {
     sourceId: MAIL_SOURCE_SCOPE_ID,
@@ -15208,19 +15231,10 @@ function readState2(path) {
     const approvals = record.approvals.map(parseApproval2);
     if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length)
       throw new Error("duplicate");
-    const carried = record.carried_owner_rules === undefined ? undefined : parseCarriedOwnerRules(record.carried_owner_rules);
-    return { kind: "valid", state: { version: 1, approvals, ...carried ? { carried_owner_rules: carried } : {} } };
+    return { kind: "valid", state: { version: 1, approvals } };
   } catch {
     return { kind: "malformed", digest };
   }
-}
-function parseCarriedOwnerRules(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error("carried");
-  const record = value;
-  if (record.source_id !== MAIL_SOURCE_SCOPE_ID)
-    throw new Error("carried");
-  return { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: normalizeSenders(record.always_private_senders, "always Private") };
 }
 function parseApproval2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -18107,17 +18121,6 @@ class SecretLocationsIndex {
         content_hash = excluded.content_hash, detected_at = excluded.detected_at
     `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
     return true;
-  }
-  rebindScopeGenerations(input) {
-    return this.db.transaction(() => {
-      let changed = 0;
-      for (const generation of input.fromGenerations) {
-        if (generation === input.accountGeneration)
-          continue;
-        changed += this.db.query("UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?").run(input.accountGeneration, input.revision, input.provider, generation).changes;
-      }
-      return changed;
-    }).immediate();
   }
   remove(identity) {
     return this.db.query(`
@@ -22262,60 +22265,6 @@ var init_off_thread_reads = __esm(() => {
   turns = [];
   snapshotWaiters = [];
   releases = new Map;
-});
-
-// src/core/provider-account-identity.ts
-function parseProviderAccountId(id) {
-  const labels = new Map;
-  for (const label of id.trim().split(".")) {
-    const kind = LABEL.exec(label)?.[1];
-    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
-      return;
-    if (labels.has(kind))
-      return;
-    labels.set(kind, label);
-  }
-  return labels.size > 0 ? labels : undefined;
-}
-function compareProviderAccounts(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return recorded.trim() === observed.trim() ? "same" : "different";
-  let shared = false;
-  for (const kind of IMMUTABLE_LABEL_KINDS) {
-    const left = a.get(kind);
-    const right = b.get(kind);
-    if (left === undefined || right === undefined)
-      continue;
-    if (left !== right)
-      return "different";
-    shared = true;
-  }
-  if (shared)
-    return "same";
-  if (hasImmutableAccountLabel(recorded))
-    return "unproven";
-  const address = a.get("google");
-  return address !== undefined && address === b.get("google") ? "same" : "different";
-}
-function hasImmutableAccountLabel(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
-}
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, IMMUTABLE_LABEL_KINDS, LABEL;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
-  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
 });
 
 // src/core/store-identity.ts
@@ -26948,7 +26897,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -26962,7 +26911,6 @@ var init_local_index = __esm(() => {
   init_keyword_expansion();
   init_control_path_headroom();
   init_off_thread_reads();
-  init_provider_account_identity();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -27059,7 +27007,7 @@ var init_local_index = __esm(() => {
       this.name = "TierLedgerUnavailableError";
     }
   };
-  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
+  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -27311,40 +27259,6 @@ var init_local_index = __esm(() => {
           return this.tierLedgerHandle.dbPath;
       } catch {}
       return findTierSetLedger(this.dbPath, binding);
-    }
-    rebindRestoredSourceScope(input) {
-      const generations = this.restoredScopeGenerations(input.provider, input.providerAccountId);
-      if (generations === undefined)
-        return 0;
-      return this.db.transaction(() => {
-        let changed = 0;
-        for (const generation of generations) {
-          if (generation === input.accountGeneration)
-            continue;
-          changed += this.db.query(`
-          UPDATE items SET source_scope_generation = ?, source_scope_revision = ?
-          WHERE provider = ? AND source_scope_generation = ?
-        `).run(input.accountGeneration, input.revision, input.provider, generation).changes;
-        }
-        this.db.query("DELETE FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
-        return changed;
-      }).immediate();
-    }
-    restoredScopeGenerations(provider, providerAccountId) {
-      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
-      if (!row?.cursor)
-        return;
-      let record;
-      try {
-        record = JSON.parse(row.cursor);
-      } catch {
-        return;
-      }
-      if (record.provider !== provider || typeof record.providerAccountId !== "string")
-        return;
-      if (compareProviderAccounts(record.providerAccountId, providerAccountId) !== "same")
-        return;
-      return Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
     }
     tierSetBinding() {
       const row = this.db.query(`
@@ -32965,93 +32879,111 @@ var init_local_index = __esm(() => {
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const rows = yield { mode: "all", sql: `
-      SELECT
-        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
-        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
-        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
-        i.trust_tier, i.sync_run_id,
-        -- Bare column beside a single MIN(): SQLite takes it from the very row
-        -- that produced the minimum, so this is the BEST-RANKING chunk for the
-        -- item rather than an arbitrary one. That is exactly the chunk the
-        -- citation should point at.
-        connector_store_fts.chunk_pk AS chunk_pk,
-        MIN(connector_store_fts.rank) AS rank
-      FROM connector_store_fts
-      JOIN items i ON i.item_pk = connector_store_fts.item_pk
-      WHERE connector_store_fts MATCH ?
-        AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-        AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
-        ${ftsOptions.contentOnly ? "AND connector_store_fts.chunk_pk IS NOT NULL" : ""}
-        ${selectedAccount ? "AND i.account_scope = ?" : ""}
-        ${selectedFilters.sql}
-        ${selectedFtsScope.sql}
-      GROUP BY i.item_pk
-      ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
-      LIMIT ?
-    `, params: [
-        terms,
-        ...selectedAccount ? [selectedAccount] : [],
-        ...selectedFilters.params,
-        ...selectedFtsScope.params,
-        fetchLimit
-      ] };
       const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
-      let selected = rows;
       const matchedGroups = new Map;
       const matchedGroupIndexes = new Map;
-      if (minimumSignal && rows.length > 0) {
-        const pks = rows.map((row) => row.item_pk);
-        const placeholders = pks.map(() => "?").join(", ");
-        const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
-        const sameItem = (hit) => {
-          const row = itemAt.get(hit.item_pk);
-          return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
-        };
-        for (const [groupIndex, group] of groups.entries()) {
-          const hits = (yield { mode: "all", sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts
-          JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ?
-            AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
-          for (const hit of hits) {
-            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-            matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
-          }
-        }
-        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-        const weights = rows.every(enough) ? undefined : yield* this.conceptWeightsSteps(groups, exact);
-        const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
-        const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
-        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
-        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+      let conceptWeights;
+      const selected = [];
+      const seen = new Set;
+      let scanned = 0;
+      let pageSize = fetchLimit;
+      let exhausted = false;
+      while (true) {
+        const page = yield { mode: "all", sql: `
+        SELECT
+          i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+          i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+          i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+          i.mime_type, i.authored_at, i.updated_at,
+          i.trust_tier, i.sync_run_id,
+          -- Bare column beside a single MIN(): SQLite takes it from the very row
+          -- that produced the minimum, so this is the BEST-RANKING chunk for the
+          -- item rather than an arbitrary one. That is exactly the chunk the
+          -- citation should point at.
+          connector_store_fts.chunk_pk AS chunk_pk,
+          MIN(connector_store_fts.rank) AS rank
+        FROM connector_store_fts
+        JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          AND i.tombstoned = 0
+          AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
+          ${ftsOptions.contentOnly ? "AND connector_store_fts.chunk_pk IS NOT NULL" : ""}
+          ${selectedAccount ? "AND i.account_scope = ?" : ""}
+          ${selectedFilters.sql}
           ${selectedFtsScope.sql}
-      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
-        selected = rows.filter((row) => {
-          if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
-            return true;
-          if (!weights)
-            return false;
-          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-          if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
-            return true;
-          const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
-          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
-        });
+        GROUP BY i.item_pk
+        ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
+        LIMIT ? OFFSET ?
+      `, params: [
+          terms,
+          ...selectedAccount ? [selectedAccount] : [],
+          ...selectedFilters.params,
+          ...selectedFtsScope.params,
+          pageSize,
+          scanned
+        ] };
+        scanned += page.length;
+        exhausted = page.length < pageSize;
+        const rows = page.filter((row) => !seen.has(row.item_pk));
+        for (const row of rows)
+          seen.add(row.item_pk);
+        let signalled = rows;
+        if (minimumSignal && rows.length > 0) {
+          const pks = rows.map((row) => row.item_pk);
+          const placeholders = pks.map(() => "?").join(", ");
+          const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
+          const sameItem = (hit) => {
+            const row = itemAt.get(hit.item_pk);
+            return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
+          };
+          for (const [groupIndex, group] of groups.entries()) {
+            const hits = (yield { mode: "all", sql: `
+            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
+            for (const hit of hits) {
+              matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+              matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
+            }
+          }
+          const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+          const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact);
+          const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
+          const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
+          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
+          signalled = rows.filter((row) => {
+            if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
+              return true;
+            if (!weights)
+              return false;
+            const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+            if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
+              return true;
+            const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
+            return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+          });
+        }
+        const visible = this.tierVisibleRows(signalled, (row) => ({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+        selected.push(...visible);
+        if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
+          break;
+        pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
       }
-      selected = this.tierVisibleRows(selected, (row) => ({
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       const spanTerms = queryTermsForSpan(query);
       const kept = selected.slice(0, limit);
       const located = [];
@@ -33071,7 +33003,7 @@ var init_local_index = __esm(() => {
       }
       return {
         rows: located,
-        saturated: rows.length >= fetchLimit || selected.length > limit,
+        saturated: !exhausted || selected.length > limit,
         concepts: {
           total: groups.length,
           matched: new Map(locatedRows.map((row) => [
@@ -33990,6 +33922,20 @@ var init_local_index = __esm(() => {
     "why"
   ]);
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
+});
+
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });
 
 // src/core/source-storage.ts
@@ -45035,6 +44981,9 @@ var init_source_watch = __esm(() => {
   });
 });
 
+// src/workers/dashboard/session-marker.ts
+var init_session_marker = () => {};
+
 // src/workers/chatgpt/dashboard-contract.ts
 var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
@@ -51812,6 +51761,7 @@ var init_dashboard_resource = __esm(() => {
 // src/workers/http.ts
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
 var init_http = __esm(() => {
+  init_session_marker();
   init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
@@ -51819,19 +51769,6 @@ var init_http = __esm(() => {
   AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
   AGENT_MINT_WINDOW_MS = 10 * 60000;
   REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
-});
-
-// src/core/source-disposition-tree.ts
-var init_source_disposition_tree = __esm(() => {
-  init_source_ingestion_exclusions();
-});
-
-// src/workers/source-dispositions.ts
-var init_source_dispositions = __esm(() => {
-  init_atomic_file();
-  init_source_disposition_tree();
-  init_operation_error();
-  init_source_ingestion_exclusions();
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -52248,8 +52185,6 @@ var init_data_lifecycle = __esm(() => {
   init_source_forget_registry();
   init_source_registry();
   init_sovereignty();
-  init_tier_rules();
-  init_source_dispositions();
   init_pairing_session_paths();
   init_unpaired_sources();
   init_source_corpus_registry();
@@ -52257,8 +52192,6 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
-  init_mail_source_scope();
-  init_source_account_binding();
   backgroundTrashRemovals = new Set;
 });
 
@@ -71563,6 +71496,7 @@ init_corpora();
 init_zkapi_consult_settings();
 
 // src/workers/dashboard/components.ts
+init_session_marker();
 init_open_targets();
 init_source_dashboard();
 
@@ -72196,7 +72130,18 @@ var REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
 // src/workers/email-source/index.ts
 init_source_dashboard();
 init_credential_health();
-init_source_dispositions();
+
+// src/workers/source-dispositions.ts
+init_atomic_file();
+
+// src/core/source-disposition-tree.ts
+init_source_ingestion_exclusions();
+
+// src/workers/source-dispositions.ts
+init_operation_error();
+init_source_ingestion_exclusions();
+
+// src/workers/email-source/index.ts
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
@@ -76119,16 +76064,6 @@ class FileSourceScopeAuthority {
       registry: this.fileScopeRegistry(),
       statePath: this.statePath
     });
-  }
-  approvedProviderAccount(approval) {
-    if (approval.status !== "approved" || !approval.accountGeneration)
-      return;
-    try {
-      const account = connectedFileSourceAccountGeneration(approval.sourceId, this.fileScopeRegistry());
-      return account?.generation === approval.accountGeneration ? account.handle.providerAccountId : undefined;
-    } catch {
-      return;
-    }
   }
   assertCurrent(ref) {
     const key2 = this.approvalFilesKey(ref);
