@@ -29,7 +29,7 @@ import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from '
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-  SNIFFER_MAX_CONCURRENT_CALLS,
+  SNIFFER_MAX_CONCURRENT_CLOUD_CALLS,
   SnifferCallBudget,
   runSnifferPass,
   DEFAULT_SNIFFER_PASS_TIME_MS,
@@ -485,9 +485,10 @@ export class TierSnifferService {
 
   /**
    * An answer needs the private pool (the worker calls this when answers in
-   * flight go from 0 to 1): abort the sniffer's in-flight call at once. The
-   * pass stops as `preempted`; nothing is counted against any item, and the
-   * sniffer never records anything in the answer pool's breakers.
+   * flight go from 0 to 1, and when an answer is queued behind a running
+   * call): abort the sniffer's in-flight call at once. The pass stops as
+   * `preempted`; nothing is counted against any item, and the sniffer never
+   * records anything in the answer pool's breakers.
    */
   preempt(): void {
     // The owner's own answer ends a fair turn too, lowering slice included:
@@ -1607,7 +1608,7 @@ export class TierSnifferService {
       }
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60_000;
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.rechecked > 0 || logSkipped) {
       if (total.builtinPromptSkipped > 0) this.lastBuiltinPromptSkipLogMs = this.clockMs();
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
@@ -1616,7 +1617,7 @@ export class TierSnifferService {
         + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
         + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}`
         + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}`
-        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`,
+        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}; owner_recheck=${total.rechecked}.`,
       );
     }
     return total;
@@ -1933,7 +1934,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   intervalMs: number;
   /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
-  /** Calls in flight at once (default 1, at most SNIFFER_MAX_CONCURRENT_CALLS). */
+  /** Calls in flight at once (default 1; a pass holds a local lane to SNIFFER_MAX_CONCURRENT_CALLS). */
   concurrentCalls?: number;
   maxCallsPerDay?: number;
 } {
@@ -1946,7 +1947,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
       : {}),
     ...(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim()
-      ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
+      ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CLOUD_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
       : {}),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim()
       ? { maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}),

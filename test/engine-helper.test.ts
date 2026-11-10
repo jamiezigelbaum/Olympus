@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { engineStatusReport, runEngineCommand, parseInstallHelperArgs } from '../src/core/engine-cli.ts';
@@ -11,6 +11,7 @@ import {
   installEngine,
   installedEngineHelper,
   installedProgram,
+  recoverInterruptedHelperSwap,
   renderEnginePlist,
   uninstallEngine,
   type EngineExec,
@@ -305,6 +306,82 @@ describe('olympus engine install-helper', () => {
     expect(parseInstallHelperArgs(['--from', '/a.app', '--identity', 'Developer ID Application: X'])).toEqual({ from: '/a.app', identity: 'Developer ID Application: X' });
     expect(() => parseInstallHelperArgs(['--from'])).toThrow('needs a value');
     expect(() => parseInstallHelperArgs(['--nope'])).toThrow('Unknown');
+  });
+
+  // #693: what a stop between the two renames leaves is no helper, and the old one in a staging folder.
+  function interrupted(home: string, pid: number): string {
+    const paths = enginePaths(home);
+    const staging = join(paths.appSupportDir, `.helper-${pid}-abc123`);
+    const aside = join(staging, 'previous.app');
+    mkdirSync(join(aside, 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(join(aside, 'Contents', 'MacOS', 'OlympusEngineHost'), '#!/bin/sh\n');
+    chmodSync(join(aside, 'Contents', 'MacOS', 'OlympusEngineHost'), 0o755);
+    writeFileSync(join(aside, 'marker'), 'old');
+    mkdirSync(join(staging, 'copy.app'), { recursive: true });
+    return aside;
+  }
+  const dead = () => false;
+
+  test('after an interrupted replacement, the next engine install puts the previous helper back before writing the plist', () => {
+    const { home, checkout, bun } = fixture();
+    interrupted(home, 999_999);
+    const paths = enginePaths(home);
+    expect(existsSync(paths.helperAppPath!)).toBe(false);
+    installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: launchctl().exec, fromCheckout: checkout, bunBin: bun, helperRecovery: { pidAlive: dead } });
+    expect(readFileSync(join(paths.helperAppPath!, 'marker'), 'utf8')).toBe('old');
+    expect(installedProgram(paths.plistPath)?.helperPath).toBe(paths.helperExecutablePath);
+    expect(readdirSync(paths.appSupportDir).filter(name => name.startsWith('.helper-'))).toEqual([]);
+  });
+
+  test('a replacement stopped between the renames keeps the previous app, and install-helper recovers it first', () => {
+    const { root, home } = fixture();
+    const app = prebuilt(root);
+    const base = { platform: 'darwin', homeDir: home, from: app, exec: codesign(GOOD) };
+    const first = installEngineHelper(base);
+    writeFileSync(join(first.app_path, 'marker'), 'old');
+    let calls = 0;
+    // The first rename moves the old app aside; nothing after it gets done.
+    const stopped = (from: string, to: string) => {
+      calls += 1;
+      if (calls >= 2) throw new Error('interrupted');
+      renameSync(from, to);
+    };
+    expect(() => installEngineHelper({ ...base, rename: stopped })).toThrow();
+    expect(existsSync(first.app_path)).toBe(false);
+    // The previous app was not deleted with the staging folder.
+    expect(recoverInterruptedHelperSwap(enginePaths(home), { pidAlive: dead })).toBe('restored');
+    expect(readFileSync(join(first.app_path, 'marker'), 'utf8')).toBe('old');
+    // install-helper recovers before it starts, so it replaces the old app rather than installing fresh.
+    rmSync(first.app_path, { recursive: true });
+    interrupted(home, 999_998);
+    expect(installEngineHelper({ ...base, helperRecovery: { pidAlive: dead } }).replaced).toBe(true);
+    expect(readdirSync(enginePaths(home).appSupportDir)).toEqual(['Olympus Engine.app']);
+  });
+
+  test('a recovery that another process finished first does not fail (#693 review)', () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    interrupted(home, 999_997);
+    const rival = (from: string, to: string) => {
+      renameSync(from, to); // the other process restores the helper first
+      renameSync(from, to); // then this one's rename finds nothing to move
+    };
+    expect(recoverInterruptedHelperSwap(paths, { pidAlive: dead, rename: rival })).toBe('cleaned');
+    expect(existsSync(paths.helperAppPath!)).toBe(true);
+    expect(readdirSync(paths.appSupportDir)).toEqual(['Olympus Engine.app']);
+  });
+
+  test('a replacement still running in another process is left alone; a stale folder beside a helper is cleared', () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    interrupted(home, 4242);
+    expect(recoverInterruptedHelperSwap(paths, { pidAlive: pid => pid === 4242 })).toBe('none');
+    expect(existsSync(paths.helperAppPath!)).toBe(false);
+    expect(readdirSync(paths.appSupportDir)).toEqual(['.helper-4242-abc123']);
+    installFakeHelper(home);
+    expect(recoverInterruptedHelperSwap(paths, { pidAlive: dead })).toBe('cleaned');
+    expect(readdirSync(paths.appSupportDir)).toEqual(['Olympus Engine.app']);
+    expect(recoverInterruptedHelperSwap(paths, { pidAlive: dead })).toBe('none');
   });
 });
 
