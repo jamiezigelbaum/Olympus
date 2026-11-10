@@ -547,6 +547,12 @@ export interface ComputerDashboardMeta {
    */
   indexedItems?: number;
   /**
+   * The setup checklist (#1077, core/setup-checklist.ts): the same steps,
+   * states and ways forward `olympus setup status` gives the owner's agent.
+   * Names and states only; computer only.
+   */
+  setup?: import('../../core/setup-checklist.ts').SetupChecklist;
+  /**
    * Imported archives and the imports waiting on the person, for the
    * Archives row (archive-import/dashboard.ts). The list, with the folders
    * the person's files are in, is only ever in this meta; what needs the
