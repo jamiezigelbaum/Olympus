@@ -301,7 +301,7 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -468,7 +468,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 15,
       name: 'connector_store_child_items',
       up(db: Database) {
         // Additive and inert: nullable columns and a partial index. An
@@ -477,8 +477,88 @@ export function connectorStoreMigrations() {
         addConnectorStoreChildItemColumns(db);
       },
     },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_visibility_feed',
+      up(db: Database) {
+        // Additive: the item change feed and an empty saved visibility set.
+        // Nothing existing is rewritten; the writer fills the set on its
+        // next visibility build (docs/design/engine-split.md, part 1).
+        createConnectorStoreVisibilityTables(db);
+      },
+    },
   ];
 }
+
+/**
+ * Entries the item change feed keeps. Larger than the ledger's 8,192 because
+ * an import writes items much faster than verdicts arrive, and a reader that
+ * finds its cursor past the oldest kept entry cannot use the saved set.
+ */
+const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
+
+/**
+ * Item visibility kept in the store file itself (#858 option 1), so every
+ * connection, not just the writer's, can bring its hidden-copy set up to date
+ * without a full rebuild:
+ *
+ * - `item_visibility_changes`: a bounded feed of item identities whose rows
+ *   were inserted, deleted or changed in what decides visibility, written by
+ *   real triggers in the item write's own transaction (like the ledger's
+ *   `tier_visibility_changes`).
+ * - `tier_visibility_members`: the set a writer last built, one row per item
+ *   identity with a copy here the ledger does not simply serve (its flags and
+ *   the item pks it maps to).
+ * - `tier_visibility_state`: which ledger, corpus and feed cursors that set
+ *   covers. A reader applies only the feed entries past them, and fails closed
+ *   when either feed no longer holds them.
+ */
+function createConnectorStoreVisibilityTables(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_visibility_changes (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tier_visibility_members (
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL,
+      flags INTEGER NOT NULL,
+      item_pks_json TEXT NOT NULL,
+      PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS tier_visibility_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      corpus_id TEXT NOT NULL,
+      ledger_id TEXT NOT NULL,
+      ledger_cursor INTEGER NOT NULL,
+      store_cursor INTEGER NOT NULL
+    );
+  `);
+  const note = (row: 'NEW' | 'OLD') => `
+    INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+      VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
+    DELETE FROM item_visibility_changes
+      WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_changes);`;
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_insert AFTER INSERT ON items BEGIN ${note('NEW')} END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_delete AFTER DELETE ON items BEGIN ${note('OLD')} END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_update
+      AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned,
+        trust_tier, parent_local_item_id ON items
+      BEGIN ${note('OLD')} ${note('NEW')} END;
+  `);
+}
+
+const CONNECTOR_STORE_VISIBILITY_TRIGGERS = [
+  'connector_store_item_visibility_insert',
+  'connector_store_item_visibility_delete',
+  'connector_store_item_visibility_update',
+] as const;
 
 /**
  * The child-item columns (docs/design/child-items.md, "Storage"). A child is
@@ -993,6 +1073,8 @@ const VISIBILITY_PK_FLAGS = ['hidden', 'held', 'heldForJudgment', 'metadataLayer
 
 interface TierVisibilityMemo {
   ledger: TierLedger;
+  /** The ledger's identity, for the saved set's stamp; undefined when it has none. */
+  ledgerId: string | undefined;
   ledgerCursor: number;
   storeCursor: number;
   dataVersion: number;
@@ -1010,6 +1092,59 @@ export class TierLedgerUnavailableError extends Error {
     );
     this.name = 'TierLedgerUnavailableError';
   }
+}
+
+/**
+ * A connection that does not build visibility itself (a read-only store)
+ * could not prove its hidden-copy set current: the saved set is missing, was
+ * made under another ledger or corpus, or a change feed no longer holds the
+ * entries past it. Nothing from the store is counted or embedded until the
+ * writer's next visibility build saves a set the feeds cover. A kind of
+ * TierLedgerUnavailableError, so every caller that fails closed on a lost
+ * ledger fails closed here too.
+ */
+export class TierVisibilityNotCurrentError extends TierLedgerUnavailableError {
+  constructor(corpusId: string) {
+    super(corpusId);
+    this.message = `Which copies in ${corpusId} are visible cannot be proven current on this connection yet: `
+      + 'the store\'s saved visibility set is missing or behind its change feed. Try again after the writer\'s next refresh.';
+    this.name = 'TierVisibilityNotCurrentError';
+  }
+}
+
+/** Bits of `tier_visibility_members.flags`. */
+const VISIBILITY_MEMBER_BITS = {
+  hidden: 1, held: 2, heldForJudgment: 4, metadataLayer: 8, metadataLayerContentUnread: 16, moving: 32,
+} as const;
+
+interface SavedVisibilityState {
+  corpus_id: string;
+  ledger_id: string;
+  ledger_cursor: number;
+  store_cursor: number;
+}
+
+function emptyTierVisibilityMemo(
+  ledger: TierLedger,
+  ledgerId: string | undefined,
+  ledgerCursor: number,
+  storeCursor: number,
+  dataVersion: number,
+): TierVisibilityMemo {
+  return {
+    ledger, ledgerId, ledgerCursor, storeCursor, dataVersion,
+    lists: { hidden: new MutablePkList(), held: new MutablePkList(), heldForJudgment: new MutablePkList(), metadataLayer: new MutablePkList(),
+      metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
+    value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
+  };
+}
+
+function visibilityMemberBits(flags: TierCorpusVisibility): number {
+  let value = 0;
+  for (const [flag, bit] of Object.entries(VISIBILITY_MEMBER_BITS)) {
+    if (flags[flag as keyof typeof VISIBILITY_MEMBER_BITS]) value |= bit;
+  }
+  return value;
 }
 
 export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
@@ -2890,6 +3025,13 @@ export class LocalConnectorStore {
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
+      // A read-only open of a store from before v16 has no feed: it keeps the
+      // older rule (any external commit rebuilds the set).
+      this.visibilityFeedPresent = (this.db.query(`SELECT COUNT(*) AS present FROM sqlite_master
+        WHERE (type = 'table' AND name IN ('item_visibility_changes', 'tier_visibility_members', 'tier_visibility_state'))
+          OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`)
+        .get(JSON.stringify(CONNECTOR_STORE_VISIBILITY_TRIGGERS)) as { present: number }).present
+        === 3 + CONNECTOR_STORE_VISIBILITY_TRIGGERS.length;
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
       this.childItemColumnsPresent = tableColumns(this.db, 'items', false).includes('parent_local_item_id');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
@@ -3094,7 +3236,14 @@ export class LocalConnectorStore {
     // by the handle that is kept: check its id, and refuse a different one. A
     // replacement has had its schema migrated by this open before it is
     // checked; that is accepted, since it is closed unused.
-    const opened = new TierLedger({ dbPath: found, now: this.now });
+    // A read-only store reads its ledger read-only too, so a read does not
+    // repair or lock the ledger another process is writing. A ledger from an
+    // older build is opened writable to migrate it, as it always was.
+    let opened = new TierLedger({ dbPath: found, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
+    if (this.readOnly && !opened.hasCurrentSchema()) {
+      opened.close();
+      opened = new TierLedger({ dbPath: found, now: this.now });
+    }
     if (!holdsBoundId(opened)) {
       opened.close();
       throw new TierLedgerUnavailableError(this.corpusId);
@@ -3275,8 +3424,12 @@ export class LocalConnectorStore {
       try {
         const value = await this.tierHiddenItemPksInTurns();
         this.tierHiddenCountsMemo = { at: Date.now(), value };
-      } catch {
+      } catch (error) {
         // A closed or busy store: the older set stands until the next ask.
+        // One that cannot be proven current is not kept either: the next ask
+        // fails closed instead of counting from a set this connection can
+        // no longer bring up to date.
+        if (error instanceof TierVisibilityNotCurrentError) this.tierHiddenCountsMemo = undefined;
       } finally {
         this.tierHiddenCountsRefresh = undefined;
       }
@@ -3302,51 +3455,73 @@ export class LocalConnectorStore {
     return runSteps(this.tierLedgerHiddenSteps());
   }
 
+  /**
+   * Brings this writer's visibility set up to date and saves it in the store,
+   * with a turn between lookups, for read-only connections to start from. A
+   * writer's own reads already do this; a writer that only writes (an import
+   * in another process) calls it between batches so its readers stay within
+   * the change feeds. Does nothing on a read-only store.
+   */
+  async saveVisibilityInTurns(): Promise<void> {
+    if (this.readOnly) return;
+    await runStepsInTurns(this.tierLedgerHiddenSteps());
+  }
+
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
   private visibilityJournal = false;
+  private visibilityFeedPresent = false;
   private visibilitySqlMemo: TierVisibilityMemo | undefined;
 
-  /** Item writes on this connection only; embedding, sync status and other bookkeeping do not invalidate pks. */
+  /** The writer's indexed copy of its own set, for the SQL filters below (temp: this connection only). */
   private createVisibilityJournal(): void {
-    this.db.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
-      CREATE TEMP TABLE item_visibility_changes (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
-      conversation_key TEXT, provider_item_id TEXT
-    );`);
-    const note = (row: 'NEW' | 'OLD') => `
-      INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
-        VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
-      DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);`;
-    this.db.exec(`
-      CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN ${note('NEW')} END;
-      CREATE TEMP TRIGGER item_visibility_delete AFTER DELETE ON main.items BEGIN ${note('OLD')} END;
-      CREATE TEMP TRIGGER item_visibility_update
-        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned ON main.items
-        BEGIN ${note('OLD')} ${note('NEW')} END;
-    `);
+    this.db.exec('CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));');
     this.visibilityJournal = true;
   }
 
+  /**
+   * Item identities written since `after`, from the store's persistent feed,
+   * which every connection's item writes fill in their own transaction.
+   * `identities` is undefined when the feed no longer holds every entry past
+   * `after` (or `after` is unknown or ahead of it): the caller must not treat
+   * an older set as current.
+   */
   private itemVisibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
-    if (!this.visibilityJournal) return { cursor: 0, identities: [] }; // read-only: external writes use data_version
-    const bounds = this.db.query('SELECT (SELECT MIN(seq) FROM item_visibility_changes) AS first, (SELECT MAX(seq) FROM item_visibility_changes) AS last')
-      .get() as { first: number | null; last: number | null };
-    const cursor = bounds.last ?? 0;
-    if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
-    const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-      FROM item_visibility_changes WHERE seq > ?`).all(after) as Array<{
-        provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
-      }>;
-    return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
-      providerItemId: row.provider_item_id, providerConversationId: row.conversation_key })) };
+    if (!this.visibilityFeedPresent) return { cursor: 0, identities: [] }; // older read-only schema: external writes use data_version
+    return this.db.transaction(() => {
+      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_changes) AS first,
+        (SELECT MAX(seq) FROM main.item_visibility_changes) AS last,
+        (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_changes') AS issued`)
+        .get() as { first: number | null; last: number | null; issued: number | null };
+      // AUTOINCREMENT never reuses a number, so an emptied feed still knows its last one.
+      const cursor = bounds.last ?? bounds.issued ?? 0;
+      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+        FROM main.item_visibility_changes WHERE seq > ?`).all(after) as Array<{
+          provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+        }>;
+      return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
+        providerItemId: row.provider_item_id, providerConversationId: row.conversation_key })) };
+    })();
   }
 
   /**
    * Bootstrap once, then refresh only identities touched by copy/item writes.
-   * The bounded feeds include other ledger connections. A retention gap or an
-   * external store commit forces a complete rebuild before a current read.
-   * No partial rebuild is published. Changes during a yielded build remain
-   * after its saved cursors and are picked up by the next current read.
+   * Both feeds are persistent and fed by every connection's writes, so a
+   * commit on another connection is only more feed entries, never a reason
+   * to start again. A connection with no current set of its own starts from
+   * the set the writer saved in the store and applies the feed entries past
+   * its stamp. When a saved set exists but a feed no longer holds the entries
+   * past its stamp (a retention gap), only a writable connection rebuilds
+   * from scratch (and saves the result); a read-only one fails closed
+   * (TierVisibilityNotCurrentError). With nothing saved yet, a connection's
+   * first build is a full one, as before. No partial rebuild is published.
+   * Changes during a yielded build remain after its saved cursors and are
+   * picked up by the next current read.
+   *
+   * The set is what it always was: what counts, aggregates, the vector-lane
+   * check and the embedding work lists leave out. It is never the authority
+   * for a returned row; every row a read returns is still checked against the
+   * current ledger (tierVisibleRows, embeddingBatchRecheck).
    */
   private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
     const ledger = this.visibilityLedger(); // binding verification must precede every cache use
@@ -3356,20 +3531,36 @@ export class LocalConnectorStore {
       this.tierLedgerHiddenMemo = undefined;
       return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
-    const version = (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
+    // Without the persistent feed (an older read-only schema) another
+    // connection's commit shows only as a changed data_version, which forces
+    // the full rebuild it always did.
+    const version = this.visibilityFeedPresent ? 0
+      : (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
     const prior = this.tierLedgerHiddenMemo;
-    const priorLedgerCursor = prior?.ledgerCursor;
-    const priorStoreCursor = prior?.storeCursor;
     const same = prior?.ledger === ledger && prior.dataVersion === version;
-    const ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-    const storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
-    const incremental = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined;
-    const memo: TierVisibilityMemo = incremental ? prior : {
-      ledger, ledgerCursor: ledgerChanges.cursor, storeCursor: storeChanges.cursor, dataVersion: version,
-      lists: { hidden: new MutablePkList(), held: new MutablePkList(), heldForJudgment: new MutablePkList(), metadataLayer: new MutablePkList(),
-        metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
-      value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
-    };
+    let ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+    let storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    let base: TierVisibilityMemo | undefined = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined
+      ? prior : undefined;
+    if (!base && this.visibilityFeedPresent) {
+      const saved = this.savedVisibility(ledger);
+      if (saved === 'gap') {
+        // A saved set the feeds no longer reach: a writer maintains this
+        // store but has fallen behind. A reader serves nothing rather than
+        // rebuild on the request path; the writer rebuilds and saves.
+        if (this.readOnly) throw new TierVisibilityNotCurrentError(this.corpusId);
+      } else if (saved) {
+        ({ memo: base, ledgerChanges, storeChanges } = saved);
+      }
+      // Nothing saved for this ledger and corpus (no writer has built one
+      // since the store was upgraded): this connection's first build is a
+      // full one, as it always was.
+    }
+    const incremental = base !== undefined;
+    const memo: TierVisibilityMemo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor,
+      storeChanges.cursor, version);
+    const startLedgerCursor = memo.ledgerCursor;
+    const startStoreCursor = memo.storeCursor;
     for (const flag of VISIBILITY_PK_FLAGS) memo.value[flag] = memo.lists[flag].values;
     const changed = incremental ? [...new Map([...ledgerChanges.identities!, ...storeChanges.identities!]
       .map(identity => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
@@ -3403,7 +3594,7 @@ export class LocalConnectorStore {
     // Never overwrite its newer state with this older delta: rebuild against
     // that state on the next step instead.
     if (this.tierLedgerHiddenMemo !== prior
-      || (incremental && (memo.ledgerCursor !== priorLedgerCursor || memo.storeCursor !== priorStoreCursor))) {
+      || (incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor))) {
       return yield* this.tierLedgerHiddenSteps();
     }
     try { this.applyVisibilityUpdates(memo, updates); }
@@ -3419,7 +3610,121 @@ export class LocalConnectorStore {
     memo.ledgerCursor = ledgerChanges.cursor;
     memo.storeCursor = storeChanges.cursor;
     this.tierLedgerHiddenMemo = memo;
+    if (!this.readOnly && this.visibilityFeedPresent) {
+      this.saveVisibility(memo, { ledger: startLedgerCursor, store: startStoreCursor }, incremental ? updates : undefined);
+    }
     return memo.value;
+  }
+
+  private ledgerIdOf(ledger: TierLedger): string | undefined {
+    try { return ledger.ledgerId(); } catch { return undefined; }
+  }
+
+  /**
+   * The set the writer saved, as a memo at the saved cursors, with the feed
+   * entries past them. Undefined when none is saved for this ledger and
+   * corpus; 'gap' when one is but either feed no longer holds every entry
+   * past its cursors (a retention gap). The stamp and the members are
+   * read in one transaction, so they always belong together.
+   */
+  private savedVisibility(ledger: TierLedger): {
+    memo: TierVisibilityMemo;
+    ledgerChanges: { cursor: number; identities?: TierLedgerIdentity[] };
+    storeChanges: { cursor: number; identities?: TierLedgerIdentity[] };
+  } | 'gap' | undefined {
+    const ledgerId = this.ledgerIdOf(ledger);
+    if (ledgerId === undefined) return undefined;
+    const saved = this.db.transaction(() => {
+      const state = this.db.query(`SELECT corpus_id, ledger_id, ledger_cursor, store_cursor
+        FROM main.tier_visibility_state WHERE id = 1`).get() as SavedVisibilityState | null;
+      if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      const rows = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members`).all() as Array<{
+          provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+          flags: number; item_pks_json: string;
+        }>;
+      return { state, rows };
+    })();
+    if (!saved) return undefined;
+    // Read after the saved set, so every entry past its stamp is included.
+    const ledgerChanges = ledger.visibilityChangesSince(saved.state.ledger_cursor);
+    const storeChanges = this.itemVisibilityChangesSince(saved.state.store_cursor);
+    if (ledgerChanges.identities === undefined || storeChanges.identities === undefined) return 'gap';
+    const memo = emptyTierVisibilityMemo(ledger, ledgerId, saved.state.ledger_cursor, saved.state.store_cursor, 0);
+    for (const row of saved.rows) {
+      const identity: TierLedgerIdentity = {
+        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+      };
+      const pks = JSON.parse(row.item_pks_json) as number[];
+      const flags: TierCorpusVisibility = { ...identity,
+        hidden: (row.flags & VISIBILITY_MEMBER_BITS.hidden) !== 0,
+        held: (row.flags & VISIBILITY_MEMBER_BITS.held) !== 0,
+        heldForJudgment: (row.flags & VISIBILITY_MEMBER_BITS.heldForJudgment) !== 0,
+        metadataLayer: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayer) !== 0,
+        metadataLayerContentUnread: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayerContentUnread) !== 0,
+        moving: (row.flags & VISIBILITY_MEMBER_BITS.moving) !== 0 };
+      for (const flag of VISIBILITY_PK_FLAGS) if (flags[flag]) for (const pk of pks) memo.lists[flag].add(pk);
+      if (flags.moving) memo.value.moving += 1;
+      memo.members.set(tierLedgerIdentityKey(identity), { pks, flags });
+    }
+    return { memo, ledgerChanges, storeChanges };
+  }
+
+  /**
+   * Saves this writer's set in the store, members and stamp in one
+   * transaction, for every other connection (and this one after a restart)
+   * to start from. `updates` are the identities this build recomputed since
+   * `from`; they are applied to a saved set whose stamp lies between `from`
+   * and the new cursors, because every identity changed in between is among
+   * them. Otherwise the whole set is written, unless the saved one is
+   * already as new. A failure keeps the older saved set, which is still exact
+   * at its own stamp.
+   */
+  private saveVisibility(
+    memo: TierVisibilityMemo,
+    from: { ledger: number; store: number },
+    updates: ReadonlyArray<{ identity: TierLedgerIdentity }> | undefined,
+  ): void {
+    const ledgerId = memo.ledgerId;
+    if (ledgerId === undefined) return;
+    const put = this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_members
+      (provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json) VALUES (?, ?, ?, ?, ?, ?)`);
+    const remove = this.db.query(`DELETE FROM main.tier_visibility_members
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`);
+    const write = (identity: TierLedgerIdentity): void => {
+      const key = [identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId] as const;
+      const member = memo.members.get(tierLedgerIdentityKey(identity));
+      if (member) put.run(...key, visibilityMemberBits(member.flags), JSON.stringify(member.pks));
+      else remove.run(...key);
+    };
+    // Never wait on another writer's lock from a read: a busy store keeps the
+    // older saved set until this connection's next build.
+    const nested = this.db.inTransaction;
+    if (!nested) this.db.exec('PRAGMA busy_timeout = 0');
+    try {
+      this.db.transaction(() => {
+        const state = this.db.query(`SELECT corpus_id, ledger_id, ledger_cursor, store_cursor
+          FROM main.tier_visibility_state WHERE id = 1`).get() as SavedVisibilityState | null;
+        const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
+        if (sameAuthority && state.ledger_cursor >= memo.ledgerCursor && state.store_cursor >= memo.storeCursor) return;
+        if (updates && sameAuthority
+          && state.ledger_cursor >= from.ledger && state.ledger_cursor <= memo.ledgerCursor
+          && state.store_cursor >= from.store && state.store_cursor <= memo.storeCursor) {
+          for (const { identity } of updates) write(identity);
+        } else {
+          this.db.exec('DELETE FROM main.tier_visibility_members');
+          for (const { flags } of memo.members.values()) write(flags);
+        }
+        this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_state (id, corpus_id, ledger_id, ledger_cursor, store_cursor)
+          VALUES (1, ?, ?, ?, ?)`).run(this.corpusId, ledgerId, memo.ledgerCursor, memo.storeCursor);
+      })();
+    } catch {
+      // A busy or failing write keeps the older saved set; this connection's
+      // own result stands and is saved on its next build.
+    } finally {
+      if (!nested) this.db.exec('PRAGMA busy_timeout = 10000');
+    }
   }
 
   private applyVisibilityUpdates(memo: TierVisibilityMemo, updates: ReadonlyArray<{
@@ -16956,10 +17261,21 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 14) {
     validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version === 15 || version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
     validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) validateConnectorStoreVisibilitySchema(db, 'v16');
+}
+
+function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: string): void {
+  assertExactTableColumns(db, 'item_visibility_changes',
+    ['seq', 'provider', 'account_scope', 'conversation_key', 'provider_item_id'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_members',
+    ['provider', 'account_scope', 'conversation_key', 'provider_item_id', 'flags', 'item_pks_json'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_state',
+    ['id', 'corpus_id', 'ledger_id', 'ledger_cursor', 'store_cursor'], false, versionLabel);
+  for (const trigger of CONNECTOR_STORE_VISIBILITY_TRIGGERS) assertTriggerExists(db, trigger, versionLabel);
 }
 
 function validateConnectorStoreV6Schema(db: Database): void {
@@ -16979,6 +17295,7 @@ function validateConnectorStoreSchema(db: Database): void {
   assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
   assertExactTableColumns(db, 'item_text_versions', ['item_pk', 'source_version', 'recorded_at'], false, 'v14');
   assertTriggerExists(db, 'connector_store_item_text_version_capture', 'v14');
+  validateConnectorStoreVisibilitySchema(db, 'v16');
 }
 
 const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [

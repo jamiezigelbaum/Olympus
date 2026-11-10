@@ -3,6 +3,7 @@ export {
   ConnectorStoreLocatorIdentityIndexNotReadyError,
   ConnectorStoreMetadataOnlyViolationError,
   TierLedgerUnavailableError,
+  TierVisibilityNotCurrentError,
   LocalConnectorStore,
   connectorStoreItemPlacement,
   connectorStoreItemText,
