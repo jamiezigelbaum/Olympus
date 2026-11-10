@@ -1,5 +1,6 @@
 import { LocalPeopleIndex, peopleIndexPath, refreshPeopleIndex, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
@@ -6178,6 +6179,9 @@ export async function main(): Promise<void> {
     pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
+    // One item's privacy label (issue #1060): the same stores and ledgers
+    // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
+    ownerTierItems: createOwnerTierItems(),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {

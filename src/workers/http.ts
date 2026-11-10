@@ -649,6 +649,22 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
   '/dashboard/archive-import/stop',
 ];
 
+/**
+ * The owner's one-item privacy change on the Privacy tab
+ * (classification/tier-owner-items.ts): finding any item, with its names, and
+ * setting it Personal or Private or back to the judge. Lowering an item is
+ * the person's call at this computer, so these take the consult routes'
+ * grade too; an agent raises through its own route on the worker bearer.
+ */
+export const DASHBOARD_PRIVACY_ITEM_PATHS: readonly string[] = [
+  '/dashboard/privacy/items/find',
+  '/dashboard/privacy/items/set',
+];
+
+function isDashboardPrivacyItemRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_PRIVACY_ITEM_PATHS.includes(new URL(request.url).pathname);
+}
+
 export const DASHBOARD_MESSAGING_PATHS: readonly string[] = [
   '/dashboard/messaging/start', '/dashboard/messaging/status', '/dashboard/messaging/respond',
   '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
@@ -665,19 +681,23 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
+    || isDashboardPrivacyItemRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
 function dashboardLocalGradeRefusal(request: Request): Response {
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)
+    && !isDashboardPrivacyItemRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
         ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
-        : isDashboardAppsReceivedRoute(request)
-          ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
+        : isDashboardPrivacyItemRoute(request)
+          ? 'One item\'s privacy label is changed only in the dashboard on this computer, in an unlocked browser.'
+          : isDashboardAppsReceivedRoute(request)
+            ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
           : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {
