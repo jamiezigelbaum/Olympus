@@ -126,11 +126,11 @@ export interface ManagedToolPin {
 // clientd-v0.1.6-olympus3 the Linux x64 bundle also carries the `zkapi-confine`
 // launcher (docs/design/linux-zkapi-confinement.md, step 3).
 // zkapi-walletd and share/zkapi-clientd/ are upstream's bytes.
-const ZKAPI_VERSION = '0.1.6-olympus4';
-// The launcher in the clientd-v0.1.6-olympus4 Linux x64 bundle. Pinned here
+const ZKAPI_VERSION = '0.1.6-olympus5';
+// The launcher in the clientd-v0.1.6-olympus5 Linux x64 bundle. Pinned here
 // and cross-checked against the bundle's own build record at install; exported
 // so the Linux supervisor can pin the same bytes it runs.
-export const ZKAPI_CONFINE_SHA256 = 'bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3';
+export const ZKAPI_CONFINE_SHA256 = '875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215';
 /** The launcher's path inside the bundle. Linux x64 requires it. */
 const ZKAPI_CONFINE_PATH = 'bin/zkapi-confine';
 /** The bundle's own build record, which must name the launcher's pinned hash. */
@@ -188,11 +188,13 @@ function torLinuxAsset(name: string, sha256: string, bytes: number): ManagedTool
 
 /**
  * The pinned builds (docs/design/private-answers.md, docs/design/linux-zkapi-confinement.md).
- * zkapi-clientd, pinned 2026-10-13: release clientd-v0.1.6-olympus4 of the
+ * zkapi-clientd, pinned 2026-11-10: release clientd-v0.1.6-olympus5 of the
  * Olympus fork (the asset URLs), Linux custody and the `bin/zkapi-confine`
  * launcher in its Linux x64 bundle with the hash in
- * share/zkapi-clientd/olympus-build.json; this pin carries the locally reproduced bytes prepared for
- * owner publication, and an install verifies the Linux x64 launcher against
+ * share/zkapi-clientd/olympus-build.json. The hashes are the published
+ * release's SHA256SUMS, built by the fork's release workflow from commit
+ * 2164b23c; olympus5 adds one-payment funding and no re-approval when the
+ * network fee moves (#914). An install verifies the Linux x64 launcher against
  * both this pin and the bundle's own record. Tor,
  * verified 2026-10-07: hashes computed and
  * matched to sha256sums-signed-build.txt, whose signature and each archive's
@@ -217,26 +219,32 @@ export const MANAGED_TOOL_PINS: Readonly<Record<ManagedToolName, ManagedToolPin>
     tool: 'zkapi-clientd',
     label: 'zkAPI',
     version: ZKAPI_VERSION,
-    versionLine: /^zkapi-clientd 0\.1\.6-olympus4(\s|$)/,
+    versionLine: /^zkapi-clientd 0\.1\.6-olympus5(\s|$)/,
     assets: {
       // No launcher on the Macs: it is Linux-only.
-      'darwin-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz', 'c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87', 23_233_898),
-      'darwin-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz', 'afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9', 23_924_531),
+      'darwin-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_darwin_arm64.tar.gz', 'a93c602386425bc88d853189fba3018d8e074b9a7878898d176dd39e4de7934e', 23_234_981),
+      'darwin-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_darwin_amd64.tar.gz', '329cb09ce4666fd8168a999e3977110df27690d9aa6ed01fdfafc3e4f3b4a19e', 23_925_134),
       // Linux x64 requires the confinement launcher, verified byte for byte
       // against the pin and against the bundle's own build record.
       'linux-x64': zkapiAsset(
-        'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz',
-        '069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a',
-        25_885_185,
+        'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_linux_amd64.tar.gz',
+        '77c89ec391bd3e70909d436f56984d9ad49e3c753bc7284f7ff3a8d36bf4268a',
+        25_886_188,
         { required: [ZKAPI_CONFINE_PATH], pinnedFiles: [ZKAPI_CONFINE_PIN] },
       ),
       // Linux arm64 is deferred (the launcher refuses on arm64 until it is
       // qualified), so its bundle is carried without the launcher requirement.
-      'linux-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz', 'cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489', 23_923_385),
+      'linux-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_linux_arm64.tar.gz', '60f629eff3df44d32cc2899e6fa7449d971349ce27d39bb500d2ef20fd069106', 23_924_679),
     },
     // Upstream clientd-v0.1.6 (pinned 2026-10-07) and the previous Olympus
     // fork release, each with the hashes Olympus pinned when it installed them.
     replaces: {
+      '0.1.6-olympus4': {
+        'darwin-arm64': 'c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87',
+        'darwin-x64': 'afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9',
+        'linux-x64': '069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a',
+        'linux-arm64': 'cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489',
+      },
       '0.1.6': {
         'darwin-arm64': '0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4',
         'darwin-x64': 'ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12',

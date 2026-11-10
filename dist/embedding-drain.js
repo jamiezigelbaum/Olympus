@@ -8323,7 +8323,37 @@ function blockScalarAccepted(match) {
     return true;
   return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+function isRecoveryCodeEntry(entry) {
+  const code = RECOVERY_CODE_VALUE.exec(entry.trim().replace(LIST_MARKER, "").replace(/^[*_]{0,2}["'\x60]?/, ""))?.[0];
+  if (!code || !/[0-9]/.test(code))
+    return false;
+  if (code.replace(/[^A-Za-z0-9]/g, "").length < 6)
+    return false;
+  return code.split(/[- ]/).every((group) => !(/^[a-z]+$/.test(group) && /[g-z]/.test(group)) && !/^(.)\1+$/.test(group));
+}
+function lineHasRecoveryCode(line) {
+  return line.split(ENTRY_BREAK).some(isRecoveryCodeEntry);
+}
+function recoveryCodeAccepted(match) {
+  if (lineHasRecoveryCode(match.groups?.rest ?? ""))
+    return true;
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const lines = input.slice(end, end + RECOVERY_CODE_LIST_WINDOW).split(/\r?\n|\r/, RECOVERY_CODE_LIST_LINES + 1).slice(1);
+  let started = false;
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (started)
+        break;
+      continue;
+    }
+    started = true;
+    if (lineHasRecoveryCode(line))
+      return true;
+  }
+  return false;
+}
+var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, RECOVERY_CODE_LABEL, RECOVERY_CODE_LIST_WINDOW = 600, RECOVERY_CODE_LIST_LINES = 12, RECOVERY_CODE_VALUE, LIST_MARKER, ENTRY_BREAK, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   init_esm();
   PROSE_WORDS = new Set([
@@ -8535,6 +8565,10 @@ var init_secret_patterns = __esm(() => {
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
   AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  RECOVERY_CODE_VALUE = /^(?:\d{3,5}(?: \d{3,5}){1,3}|[A-Za-z0-9]{2,40}(?:-[A-Za-z0-9]{2,40}){0,7})(?=$|[\s,;.)\]"'\x60*_])/;
+  LIST_MARKER = /^[ \t]*(?:[-*•]|\d{1,2}[.)])[ \t]+/;
+  ENTRY_BREAK = /[,;]|[ \t]{2,}/;
   LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
   SHARED_SECRET_PATTERNS = [
     {
@@ -8654,6 +8688,13 @@ var init_secret_patterns = __esm(() => {
       pattern: AUTHORIZATION_HEADER,
       confidence: 0.9,
       accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "credential_assignment",
+      label: "recovery_code",
+      pattern: RECOVERY_CODE_LABEL,
+      confidence: 0.85,
+      accept: recoveryCodeAccepted
     },
     {
       findingType: "api_secret_token",
@@ -11487,6 +11528,16 @@ var init_linux_engine_service = __esm(() => {
   heldLifecycleLocks = new Set;
 });
 
+// src/core/package-root.ts
+var init_package_root = () => {};
+
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES;
+var init_update_check = __esm(() => {
+  init_package_root();
+  UPDATE_MAX_BYTES = 512 * 1024;
+});
+
 // src/core/log-redaction.ts
 function redactLogLine(line) {
   return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
@@ -11497,9 +11548,6 @@ function boundedLogErrorMessage(error) {
   return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
 }
 var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
-
-// src/core/package-root.ts
-var init_package_root = () => {};
 
 // src/core/first-run-privacy.ts
 var init_first_run_privacy = __esm(() => {
@@ -11553,7 +11601,7 @@ function torLinuxAsset(name, sha256, bytes) {
     launcher: { path: "bin/tor", target: "tor/tor", libraryDir: "tor" }
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS;
+var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS;
 var init_managed_tools = __esm(() => {
   init_file_lease();
   ZKAPI_REQUIRED = [
@@ -11585,14 +11633,20 @@ var init_managed_tools = __esm(() => {
       tool: "zkapi-clientd",
       label: "zkAPI",
       version: ZKAPI_VERSION,
-      versionLine: /^zkapi-clientd 0\.1\.6-olympus4(\s|$)/,
+      versionLine: /^zkapi-clientd 0\.1\.6-olympus5(\s|$)/,
       assets: {
-        "darwin-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz", "c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87", 23233898),
-        "darwin-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz", "afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9", 23924531),
-        "linux-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz", "069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a", 25885185, { required: [ZKAPI_CONFINE_PATH], pinnedFiles: [ZKAPI_CONFINE_PIN] }),
-        "linux-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz", "cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489", 23923385)
+        "darwin-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_darwin_arm64.tar.gz", "a93c602386425bc88d853189fba3018d8e074b9a7878898d176dd39e4de7934e", 23234981),
+        "darwin-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_darwin_amd64.tar.gz", "329cb09ce4666fd8168a999e3977110df27690d9aa6ed01fdfafc3e4f3b4a19e", 23925134),
+        "linux-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_linux_amd64.tar.gz", "77c89ec391bd3e70909d436f56984d9ad49e3c753bc7284f7ff3a8d36bf4268a", 25886188, { required: [ZKAPI_CONFINE_PATH], pinnedFiles: [ZKAPI_CONFINE_PIN] }),
+        "linux-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_linux_arm64.tar.gz", "60f629eff3df44d32cc2899e6fa7449d971349ce27d39bb500d2ef20fd069106", 23924679)
       },
       replaces: {
+        "0.1.6-olympus4": {
+          "darwin-arm64": "c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87",
+          "darwin-x64": "afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9",
+          "linux-x64": "069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a",
+          "linux-arm64": "cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489"
+        },
         "0.1.6": {
           "darwin-arm64": "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4",
           "darwin-x64": "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12",
@@ -11882,6 +11936,7 @@ var init_engine_service = __esm(() => {
   init_file_lease();
   init_linux_engine_layout();
   init_worker_transport();
+  init_update_check();
   init_atomic_file();
   init_engine_children();
   init_operation_error();
@@ -12095,7 +12150,7 @@ function signGoogleServiceAccountJwt(options) {
   }
   const nowSeconds = Math.floor((options.now?.getTime() ?? Date.now()) / 1000);
   const lifetimeSeconds = normalizedLifetimeSeconds(options.lifetimeSeconds);
-  const header = { alg: "RS256", typ: "JWT" };
+  const header2 = { alg: "RS256", typ: "JWT" };
   const claims = {
     iss: options.credential.client_email,
     scope,
@@ -12104,7 +12159,7 @@ function signGoogleServiceAccountJwt(options) {
     exp: nowSeconds + lifetimeSeconds,
     ...subject ? { sub: subject } : {}
   };
-  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
+  const unsigned = `${base64UrlJson(header2)}.${base64UrlJson(claims)}`;
   const signature = createSign("RSA-SHA256").update(unsigned).sign(options.credential.private_key);
   return `${unsigned}.${base64Url(signature)}`;
 }
@@ -12156,7 +12211,7 @@ var init_oauth_relay = __esm(() => {
 });
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { mkdir as mkdir3, readFile as readFile2 } from "node:fs/promises";
 import { dirname as dirname15 } from "node:path";
 function isCredentialProvider(value) {
@@ -12204,7 +12259,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash8("sha256").update(handle).digest("hex");
+    const digest = createHash9("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -12903,7 +12958,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash8("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash9("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -13173,7 +13228,7 @@ function isTerminalServiceAccountAssertionError(error) {
   return isPermanentOAuthClientError(error.providerError);
 }
 function isPermanentOAuthClientError(providerError) {
-  return providerError === "invalid_client" || providerError === "unauthorized_client" || providerError === "access_denied";
+  return providerError === "invalid_client" || providerError === "deleted_client" || providerError === "unauthorized_client" || providerError === "access_denied";
 }
 function serviceAccountDelegationError(handle, capability) {
   return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
@@ -14446,7 +14501,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash9, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash10, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync11, readFileSync as readFileSync17 } from "node:fs";
 import { dirname as dirname17, join as join18 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -14468,7 +14523,7 @@ function connectedSourceScopeAccountGeneration(sourceId, capability, registry, p
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash9("sha256").update(JSON.stringify([
+  const generation = createHash10("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -14623,7 +14678,7 @@ function readState(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash9("sha256").update(raw).digest("hex");
+  const digest = createHash10("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -14679,7 +14734,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash10, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync12, readFileSync as readFileSync18 } from "node:fs";
 import { dirname as dirname18, join as join19 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -14764,7 +14819,7 @@ function assertMailSourceScopeApproved(input) {
 }
 function mailScopeOwnerTierRules(scope) {
   return scope.alwaysPrivateSenders.map((sender) => ({
-    id: `mail-scope-always-private-${createHash10("sha256").update(sender).digest("hex").slice(0, 12)}`,
+    id: `mail-scope-always-private-${createHash11("sha256").update(sender).digest("hex").slice(0, 12)}`,
     source: MAIL_SCOPE_RULE_SOURCE,
     match: { kind: "sender", value: sender },
     tier: "secure",
@@ -14880,7 +14935,7 @@ function readState2(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash10("sha256").update(raw).digest("hex");
+  const digest = createHash11("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -14945,7 +15000,7 @@ var init_mail_source_scope = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function splitScopedLocalItemId(localItemId) {
   const separator = localItemId.indexOf(":");
   if (separator <= 0 || separator === localItemId.length - 1)
@@ -14983,7 +15038,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash11("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash12("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
       if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
@@ -15083,7 +15138,7 @@ function childProviderItemId(parentProviderItemId, key) {
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function isGmailAttachmentPart(part) {
   const type = (part.mimeType ?? "").trim().toLowerCase();
   if (type.startsWith("multipart/"))
@@ -15112,7 +15167,7 @@ function childrenOf(record, build) {
   return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -15284,7 +15339,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -15854,8 +15909,8 @@ class RestGmailApiClient {
   async getMessage(id, options = {}) {
     const params = new URLSearchParams({ format: options.format ?? "full" });
     if (options.format === "metadata") {
-      for (const header of options.metadataHeaders ?? [])
-        params.append("metadataHeaders", header);
+      for (const header2 of options.metadataHeaders ?? [])
+        params.append("metadataHeaders", header2);
     }
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json;
@@ -16057,9 +16112,9 @@ function collectPartText(part, plain, html, children = false) {
 }
 function headersFromPart(part) {
   const headers = new Map;
-  for (const header of part?.headers ?? []) {
-    const name = header.name?.trim().toLowerCase();
-    const value = header.value?.trim();
+  for (const header2 of part?.headers ?? []) {
+    const name = header2.name?.trim().toLowerCase();
+    const value = header2.value?.trim();
     if (name && value)
       headers.set(name, value);
   }
@@ -16098,7 +16153,7 @@ function metadataCount(metadata, key) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString2(value) {
-  return createHash13("sha256").update(value).digest("hex");
+  return createHash14("sha256").update(value).digest("hex");
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
@@ -16114,7 +16169,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -16680,7 +16735,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash14("sha256").update(value).digest("hex");
+  return createHash15("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -17131,7 +17186,7 @@ var init_stopwords_iso = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 function keywordExpansionDisabled() {
   return disabled.getStore() === true;
 }
@@ -17146,10 +17201,10 @@ function withKeywordAlternatives(query, alternatives, run) {
 }
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage;
-  disabled = new AsyncLocalStorage;
-  cachedOnly = new AsyncLocalStorage;
-  requestContext = new AsyncLocalStorage;
+  context = new AsyncLocalStorage2;
+  disabled = new AsyncLocalStorage2;
+  cachedOnly = new AsyncLocalStorage2;
+  requestContext = new AsyncLocalStorage2;
 });
 
 // src/core/source-index/keyword-stopwords.ts
@@ -17709,7 +17764,7 @@ var init_fts = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync13, mkdirSync as mkdirSync10, openSync as openSync7 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 function screenedSecretLocator(locator) {
@@ -17755,7 +17810,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = screenedSecretLocator(input.locator);
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key2) => key2.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash15("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash16("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -17865,10 +17920,10 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationFingerprint(location) {
-  return createHash15("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
+  return createHash16("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
 }
 function secretLocationRef(location) {
-  return `secret:${createHash15("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash16("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -18658,6 +18713,52 @@ class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity));
     return row ? openRejudgeQuestionOf(row) : undefined;
+  }
+  requestRecheck(scope) {
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items
+      WHERE routed = 1 AND (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR account_scope = ?2) AND (?3 IS NULL OR conversation_key = ?3)
+    `).get(scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null).n;
+    if (items > 0)
+      this.writeMeta(recheckRequestKey(scope), JSON.stringify({ scope }));
+    return { items };
+  }
+  recheckRequests() {
+    const requests = [];
+    for (const entry of this.metaEntries(TIER_RECHECK_META_PREFIX)) {
+      try {
+        const parsed = JSON.parse(entry.value);
+        if (!parsed.scope)
+          continue;
+        requests.push({ key: entry.key, scope: parsed.scope, ...parsed.after ? { after: parsed.after } : {} });
+      } catch {
+        this.deleteMeta(entry.key);
+      }
+    }
+    return requests;
+  }
+  recheckScopePage(scope, options) {
+    const limit = Math.max(1, Math.min(options.limit, 5000));
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const rows = this.db.query(`
+      SELECT * FROM tier_items
+      WHERE routed = 1 AND (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR account_scope = ?2) AND (?3 IS NULL OR conversation_key = ?3)
+        AND (?4 IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?5, ?6, ?7, ?8))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?9
+    `).all(scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null, after ? 1 : null, ...after ?? [null, null, null, null], limit);
+    const records = rows.map(recordFromRow);
+    const last = rows.at(-1);
+    return { records, ...rows.length >= limit && last ? { next: identityOfRow(last) } : {} };
+  }
+  advanceRecheck(request, after) {
+    const stored = this.readMeta(request.key);
+    if (stored === undefined || stored !== JSON.stringify({ scope: request.scope, ...request.after ? { after: request.after } : {} }))
+      return;
+    if (after)
+      this.writeMeta(request.key, JSON.stringify({ scope: request.scope, after }));
+    else
+      this.deleteMeta(request.key);
   }
   listAwaitingText(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
@@ -20717,6 +20818,9 @@ function settleStaleEmbedHolds(db, now) {
   `).run(now);
   return db.query("SELECT changes() AS n").get().n;
 }
+function recheckRequestKey(scope) {
+  return `${TIER_RECHECK_META_PREFIX}${JSON.stringify([scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null])}`;
+}
 function settleStoredNamesMark(reasons, askedTier, answeredTier) {
   if (!reasons.includes(STORED_NAMES_ASKED_REASON))
     return [...reasons];
@@ -21194,7 +21298,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -21886,7 +21990,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash16, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash17, randomUUID as randomUUID8 } from "node:crypto";
 import {
   chmodSync as chmodSync6,
   closeSync as closeSync9,
@@ -22118,7 +22222,7 @@ function refsDir(path) {
   return join21(dirname22(path), `${basename4(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash16("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash17("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -23105,8 +23209,8 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { createHash as createHash17 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { createHash as createHash18 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -23868,7 +23972,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString4(value) {
-  return createHash17("sha256").update(value).digest("hex");
+  return createHash18("sha256").update(value).digest("hex");
 }
 var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
@@ -23877,7 +23981,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage2;
+  priorityQueryEmbedding = new AsyncLocalStorage3;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -24036,7 +24140,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash18, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash19, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync20, lstatSync as lstatSync10, mkdirSync as mkdirSync13, statSync as statSync11 } from "node:fs";
 import { dirname as dirname24 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
@@ -24720,7 +24824,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString5(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash18("sha256");
+  const digest = createHash19("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -24810,7 +24914,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash18("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash19("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -26217,7 +26321,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString5(value) {
-  return createHash18("sha256").update(value).digest("hex");
+  return createHash19("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -26361,6 +26465,7 @@ var init_local_index = __esm(() => {
     db;
     readOnly;
     now;
+    controlPath;
     trustReconciliationReadyCursors;
     exclusions;
     reactionsColumnPresent = false;
@@ -26389,6 +26494,7 @@ var init_local_index = __esm(() => {
       this.family = options.family;
       this.trustDomain = options.trustDomain;
       this.now = options.now ?? (() => new Date);
+      this.controlPath = options.controlPath ?? controlPathHeadroom;
       this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
       if (options.tierLedger === null || options.readOnly === true) {
         this.tierLedgerDisabled = true;
@@ -28832,7 +28938,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash18("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash19("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -29728,8 +29834,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash18("sha256");
-      const outputDigest = createHash18("sha256");
+      const inputDigest = createHash19("sha256");
+      const outputDigest = createHash19("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -29799,8 +29905,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash18("sha256");
-      const outputDigest = createHash18("sha256");
+      const inputDigest = createHash19("sha256");
+      const outputDigest = createHash19("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -30187,7 +30293,7 @@ var init_local_index = __esm(() => {
               break;
             }
             itemsSeen += 1;
-            await ingestionTurn();
+            await this.controlPath.ingestionTurn();
             const exclusion = this.exclusions.evaluateMetadata(item.metadata);
             if (exclusion.excluded) {
               tallyExclusion(exclusionTally, exclusion);
@@ -33682,7 +33788,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
@@ -34129,7 +34235,7 @@ function readVerifiedMove(ledger, identity) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash19("sha256").update(JSON.stringify({
+  return createHash20("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -34916,7 +35022,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash20 } from "node:crypto";
+import { createHash as createHash21 } from "node:crypto";
 import { readFileSync as readFileSync21 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname27, join as join26 } from "node:path";
@@ -34986,7 +35092,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash20("sha256").update(JSON.stringify({
+    this.configHash = createHash21("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -35620,7 +35726,8 @@ function emptyTierRejudgeReport() {
     causeJudgeModel: 0,
     causeNamesPrompt: 0,
     causeContentPrompt: 0,
-    builtinPromptSkipped: 0
+    builtinPromptSkipped: 0,
+    rechecked: 0
   };
 }
 async function rejudgeRoutedItemsInTurns(options) {
@@ -35656,10 +35763,41 @@ function* rejudgeSteps(options) {
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key2 = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
+  const recheck = { rules: classification.rules ?? [] };
+  let budget = limit;
+  for (const request of ledger.recheckRequests()) {
+    if (budget <= 0)
+      break;
+    const scoped = ledger.recheckScopePage(request.scope, { ...request.after ? { after: request.after } : {}, limit: budget });
+    for (const record of scoped.records) {
+      yield record;
+      budget -= 1;
+      if (!rechecks(record)) {
+        report.skipped += 1;
+        continue;
+      }
+      report.rechecked += 1;
+      try {
+        rejudgeStoredContent(set, record, {
+          sniffer: classification.sniffer,
+          ...classification.retirePublic ? { retirePublic: true } : {},
+          report,
+          key: key2,
+          autoMoves: options.autoMoves === true,
+          recheck
+        });
+      } catch {
+        report.failed += 1;
+      }
+    }
+    ledger.advanceRecheck(request, scoped.next);
+  }
+  if (budget <= 0)
+    return { report, ...options.after ? { next: options.after } : {} };
   const page = ledger.rejudgeCandidatePage({
     ...key2,
     ...options.after ? { after: options.after } : {},
-    limit
+    limit: budget
   });
   report.builtinPromptSkipped = page.builtinPromptSkipped;
   for (const [index, record] of page.records.entries()) {
@@ -35681,6 +35819,9 @@ function* rejudgeSteps(options) {
     }
   }
   return { report, ...page.next ? { next: page.next } : {} };
+}
+function rechecks(record) {
+  return record.routed && record.contentRead && record.state === "current" && record.contentTier !== "secrets" && record.decidedBy !== "override";
 }
 function rejudgeStoredContent(set, record, options) {
   const { report, key: key2, autoMoves } = options;
@@ -35723,7 +35864,7 @@ function rejudgeStoredContent(set, record, options) {
   const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const parentContext = sniffer ? parentNamesContext(set, identity) : undefined;
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext);
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext, options.recheck);
   const content = classifyContentTier({
     text: text2,
     hasNonTextContent: !record.reasons.includes("content:text_only"),
@@ -35809,10 +35950,11 @@ function rejudgeStoredContent(set, record, options) {
   else
     report.updated += 1;
 }
-function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext) {
+function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext, recheck) {
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
   const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
-  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
+  const judgedAgain = (reason) => reason.startsWith("metadata:sniffer:") && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
+  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !record.reasons.some(judgedAgain))
     return previous;
   const signals = {
     ...names.title ? { title: names.title } : {},
@@ -35821,9 +35963,15 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     folderKeys: names.folderKeys
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
+  if (recheck && recheck.rules.length > 0) {
+    const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
+    if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
+      return previous;
+  }
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  const ownerRecheck = recheck !== undefined && providerReasons.length === 0;
+  const baseline = retiredPrior || fromStoredNames || ownerRecheck ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
@@ -36074,7 +36222,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -36214,7 +36362,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash21("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash22("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState3(raw) {
   if (!raw)
@@ -36432,6 +36580,17 @@ var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-secrets-floor-sweep.ts
+var init_tier_secrets_floor_sweep = __esm(() => {
+  init_secret_patterns();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_stored_names();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
@@ -36453,6 +36612,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  init_tier_secrets_floor_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
@@ -36561,9 +36721,9 @@ var init_connector_store = __esm(() => {
   init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage3;
+  localInferenceGuards ??= new AsyncLocalStorage4;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 var localInferenceGuards, DEFAULT_ANSWER_LEASE_MS;
@@ -36584,7 +36744,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -36593,7 +36753,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage4;
+  analystAbortSignalStorage = new AsyncLocalStorage5;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -36853,10 +37013,10 @@ var init_parent_label = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var storage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage5;
+  storage = new AsyncLocalStorage6;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -36931,10 +37091,10 @@ var init_evidence_pack = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var storage2, withheldAnswers;
 var init_release_manifest = __esm(() => {
-  storage2 = new AsyncLocalStorage6;
+  storage2 = new AsyncLocalStorage7;
   withheldAnswers = new WeakSet;
 });
 
@@ -37743,14 +37903,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash23 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash22("sha256").update(block).digest());
+    blockDigests.push(createHash23("sha256").update(block).digest());
   }
-  return createHash22("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash23("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -42926,7 +43086,7 @@ var init_linux_desktop_opener = __esm(() => {
 });
 
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash23, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash24, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync11, openSync as openSync11, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname32, join as join32 } from "node:path";
 function randomOwnerHostname() {
@@ -42986,7 +43146,7 @@ function safeTarget(value) {
   return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
 }
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash23("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash24("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -43498,7 +43658,7 @@ class LinuxOwnerBridge {
     return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
   }
 }
-var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes3(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash23("sha256").update(value).digest("hex");
+var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes3(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash24("sha256").update(value).digest("hex");
 var init_linux_owner_bridge = __esm(() => {
   init_worker_transport();
   init_linux_desktop_opener();
@@ -43627,7 +43787,7 @@ var init_open_targets = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash24, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash25, randomBytes as randomBytes4 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -43690,7 +43850,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash24("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash25("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -50829,9 +50989,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 `;
 });
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash25 } from "node:crypto";
+import { createHash as createHash26 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash25("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash26("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
@@ -51111,11 +51271,11 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { existsSync as existsSync27, readFileSync as readFileSync24 } from "node:fs";
-import { createHash as createHash26, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash27, randomUUID as randomUUID11 } from "node:crypto";
 import { dirname as dirname36, join as join36 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity = hostIdentity();
-  return identity ? createHash26("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
+  return identity ? createHash27("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
 }
 function readStateForHost(path, hostIdentity) {
   const state = readState5(path);
@@ -54628,10 +54788,10 @@ function isValidJWT(token, algorithm = null) {
     const tokensParts = token.split(".");
     if (tokensParts.length !== 3)
       return false;
-    const [header] = tokensParts;
-    if (!header)
+    const [header2] = tokensParts;
+    if (!header2)
       return false;
-    const parsedHeader = JSON.parse(atob(header));
+    const parsedHeader = JSON.parse(atob(header2));
     if ("typ" in parsedHeader && parsedHeader?.typ !== "JWT")
       return false;
     if (!parsedHeader.alg)
@@ -69563,7 +69723,7 @@ init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 import { existsSync as existsSync34, lstatSync as lstatSync16, mkdirSync as mkdirSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname40, isAbsolute as isAbsolute14 } from "node:path";
 
@@ -69575,6 +69735,125 @@ init_venice_models();
 
 // src/workers/email-source/server.ts
 init_judge_spending();
+
+// src/workers/classification/judge-pacing.ts
+init_sniffer();
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash as createHash8 } from "node:crypto";
+var JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash8("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
+var JUDGE_RATE_LIMIT_RETRIES = 6;
+var FALLBACK_BACKOFF_MS = 1000;
+var MAX_WAIT_MS = 65000;
+var realClock = {
+  now: () => Date.now(),
+  sleep: (ms, signal) => new Promise((resolve7, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve7();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  })
+};
+function header(response, name) {
+  const raw = response.headers.get(name);
+  if (raw === null || raw.trim() === "")
+    return;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+class JudgeRateLimitPacer {
+  clock;
+  remaining;
+  resetAt = 0;
+  lastSeq = 0;
+  reportSeq = 0;
+  blockedUntil = 0;
+  calls = new AsyncLocalStorage;
+  constructor(clock2 = realClock) {
+    this.clock = clock2;
+  }
+  async acquire(signal) {
+    for (;; ) {
+      const now = this.clock.now();
+      if (this.blockedUntil > now) {
+        await this.clock.sleep(Math.min(MAX_WAIT_MS, this.blockedUntil - now), signal);
+        continue;
+      }
+      if (this.remaining !== undefined && this.resetAt > now && this.remaining - (this.lastSeq - this.reportSeq) <= 0) {
+        await this.clock.sleep(Math.min(MAX_WAIT_MS, this.resetAt - now), signal);
+        continue;
+      }
+      if (this.resetAt <= now)
+        this.remaining = undefined;
+      this.lastSeq += 1;
+      return this.lastSeq;
+    }
+  }
+  observeHeaders(response, seq) {
+    const remaining = header(response, "x-ratelimit-remaining-requests");
+    const resetAt = header(response, "x-ratelimit-reset-requests");
+    const now = this.clock.now();
+    if (remaining === undefined || resetAt === undefined || resetAt <= now)
+      return;
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) {
+      this.remaining = Math.min(this.remaining, remaining - (this.reportSeq - seq));
+      return;
+    }
+    this.remaining = remaining;
+    this.resetAt = resetAt;
+    this.reportSeq = seq;
+  }
+  fetch(fetchImpl) {
+    return async (url, init) => {
+      const response = await fetchImpl(url, init);
+      const call = this.calls.getStore();
+      if (call)
+        this.observeHeaders(response, call.seq);
+      if (response.status === 429) {
+        const now = this.clock.now();
+        const reset = header(response, "x-ratelimit-reset-requests");
+        const retryAfter = header(response, "retry-after");
+        const until = reset !== undefined && reset > now ? reset : retryAfter !== undefined ? now + retryAfter * 1000 : undefined;
+        if (call) {
+          call.limited = true;
+          if (until !== undefined)
+            call.retryAt = until;
+        }
+        if (until !== undefined)
+          this.blockedUntil = Math.max(this.blockedUntil, Math.min(until, now + MAX_WAIT_MS));
+        this.remaining = 0;
+      }
+      return response;
+    };
+  }
+  model(model, retries = JUDGE_RATE_LIMIT_RETRIES) {
+    return {
+      complete: async (request) => {
+        for (let attempt = 0;; attempt++) {
+          const call = { seq: await this.acquire(request.signal), limited: false };
+          try {
+            return await this.calls.run(call, () => model.complete(request));
+          } catch (error) {
+            if (!call.limited || attempt >= retries || request.signal?.aborted)
+              throw error;
+            if (call.retryAt === undefined) {
+              await this.clock.sleep(Math.min(MAX_WAIT_MS, FALLBACK_BACKOFF_MS * 2 ** attempt), request.signal);
+            }
+          }
+        }
+      }
+    };
+  }
+}
 
 // src/workers/classification/sniffer-decision.ts
 init_model_transport();
@@ -69602,12 +69881,7 @@ init_source_placement();
 init_vocabulary();
 init_local_private_answers();
 init_linux_owner_bridge_host();
-
-// src/core/update-check.ts
-init_package_root();
-var UPDATE_MAX_BYTES = 512 * 1024;
-
-// src/workers/email-source/server.ts
+init_update_check();
 init_open_targets();
 init_linux_owner_bridge();
 init_linux_desktop_opener();
@@ -70270,6 +70544,7 @@ init_messaging_capture_grant_file();
 init_messaging_runtime();
 init_package_root();
 init_pairing_session_paths();
+init_update_check();
 
 // src/workers/email-source/dashboard-messaging-runner.ts
 var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
@@ -70277,6 +70552,7 @@ var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 // src/workers/email-source/index.ts
 init_source_scope_approval();
 init_release_manifest();
+init_update_check();
 init_google_handle_compatibility();
 init_source_account_binding();
 init_source_registry();
@@ -70285,6 +70561,13 @@ init_analyst();
 init_types();
 init_file_lease();
 init_email_policy();
+
+// src/core/google-pilot-client.ts
+var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+]);
+
+// src/workers/email-source/index.ts
 init_publisher_oauth_client();
 init_oauth_relay();
 init_connect();
@@ -70847,6 +71130,7 @@ var TOOL_BLOCKERS = new Map([
 var OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
 
 // src/workers/dashboard/host-page.ts
+init_update_check();
 init_dashboard_contract();
 init_page();
 init_vocabulary();
@@ -70974,7 +71258,8 @@ init_source_dashboard();
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
-var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
+var CONNECTOR_DIALOG_ID = "build-connector";
+var CONNECTOR_DIALOG_INTRO = "For a source Olympus doesn't have yet. Copy this to your coding agent and " + "replace <SOURCE>. The connector guide is in an Olympus source checkout; CONTRIBUTING.md says how to get one.";
 var CONNECTOR_PROMPT = [
   "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
   "",
@@ -70984,6 +71269,7 @@ var CONNECTOR_PROMPT = [
 var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 var CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
 var MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
+var CONNECTOR_OPENER = `<button class="linkbtn" type="button" data-dialog-open="${CONNECTOR_DIALOG_ID}">Build a connector</button>`;
 var SETTINGS_SECTIONS = [
   { id: "agents", label: "Agents and access" },
   { id: "models", label: "Models on this computer" },
@@ -71045,7 +71331,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash27 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -71129,7 +71415,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash27("sha256").update(value).digest("hex");
+  return createHash28("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -71199,6 +71485,7 @@ init_tier_rules();
 var TIER_CLI_USAGE = {
   "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
   "tier explain": "olympus tier explain <locator>",
+  "tier recheck": "olympus tier recheck chat:<chat id> [--source <provider>] | source:<provider> [--account <account>]",
   "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
   "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
   "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
@@ -71585,7 +71872,7 @@ init_google_connectors();
 init_readwise();
 init_x_bookmarks();
 init_live_control2();
-import { createHash as createHash28 } from "node:crypto";
+import { createHash as createHash29 } from "node:crypto";
 
 // src/workers/whatsapp/index.ts
 init_live_connector();
@@ -72567,7 +72854,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash28("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -73878,7 +74165,7 @@ init_source_ingestion_policy();
 
 // src/workers/local-files/volume-identity.ts
 init_paths();
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { existsSync as existsSync30, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
@@ -74088,7 +74375,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value) {
-  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash30("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -75084,7 +75371,7 @@ init_tier_ledger();
 init_tier_classifier();
 import { chmodSync as chmodSync7, existsSync as existsSync32, lstatSync as lstatSync15, mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
 import { join as join41 } from "node:path";
-import { createHash as createHash30, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash31, randomUUID as randomUUID12 } from "node:crypto";
 
 // src/workers/classification/embedding-logistic.ts
 var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e";
@@ -75277,7 +75564,7 @@ function prefilterVector(copy, reject = () => {
   return mean;
 }
 function copyFingerprint2(copy) {
-  const hash2 = createHash30("sha256").update(JSON.stringify(copy.chunks));
+  const hash2 = createHash31("sha256").update(JSON.stringify(copy.chunks));
   for (const vector of copy.vectors) {
     hash2.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
     hash2.update(vector.embedding);
@@ -75525,7 +75812,7 @@ class EmbeddingPrefilter {
   }
   trainingFingerprint(row) {
     const subject = subjectOf(row);
-    return createHash30("sha256").update(JSON.stringify([
+    return createHash31("sha256").update(JSON.stringify([
       row,
       this.options.ledger.copies(subject),
       this.options.ledger.getOverride(subject),
@@ -76044,13 +76331,14 @@ init_sniffer_lane();
 init_sniffer_store();
 init_tier_classifier();
 init_tier_ledger();
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 import { mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname39 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 30000;
 var SNIFFER_MAX_CONCURRENT_CALLS = 8;
+var SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 var OUTPUT_CHARS_PER_ITEM = 110;
 
@@ -76110,7 +76398,7 @@ var SECRET_SCREEN_CACHE_LIMIT = 20000;
 var secretScreenCache = new Map;
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash31("sha256").update(own3).digest("base64");
+  const key2 = createHash32("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -76407,7 +76695,8 @@ async function runSnifferPass(options) {
       return true;
     });
   }
-  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
+  const maxConcurrent = options.lane.kind === "venice" ? SNIFFER_MAX_CONCURRENT_CLOUD_CALLS : SNIFFER_MAX_CONCURRENT_CALLS;
+  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(maxConcurrent, Math.floor(options.concurrentCalls ?? 1)));
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
@@ -76658,6 +76947,12 @@ class TierSnifferService {
   }
   timers() {
     return this.options.timers ?? GLOBAL_TIMERS;
+  }
+  monotonicNow() {
+    return this.options.monotonicNow?.() ?? performance.now();
+  }
+  ingestionTurn() {
+    return (this.options.ingestionTurn ?? ingestionTurn)();
   }
   start() {
     if (this.timer)
@@ -76921,7 +77216,7 @@ class TierSnifferService {
             break;
           this.addPendingSlice(counts, opened, [lo, hi]);
           lo = hi;
-          await ingestionTurn();
+          await this.ingestionTurn();
           if (this.stopped)
             return;
         }
@@ -76935,7 +77230,7 @@ class TierSnifferService {
               break;
             this.addQuestionSlice(counts, opened.db, [lo, hi]);
             lo = hi;
-            await ingestionTurn();
+            await this.ingestionTurn();
             if (this.stopped)
               return;
           }
@@ -77037,7 +77332,7 @@ class TierSnifferService {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {
       leave();
-      this.lastTickEndedAt = performance.now();
+      this.lastTickEndedAt = this.monotonicNow();
       if (this.fairTurn) {
         this.fairTurn = false;
         this.yieldingSinceMs = undefined;
@@ -77397,12 +77692,12 @@ class TierSnifferService {
     this.pauseTraining();
     await this.trainingJob;
     const { lane } = this.options;
-    const phaseStarted = performance.now();
+    const phaseStarted = this.monotonicNow();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
     let phaseAt = phaseStarted;
     const phaseMs = {};
     const phase = (name) => {
-      const now = performance.now();
+      const now = this.monotonicNow();
       phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
       phaseAt = now;
     };
@@ -77487,19 +77782,19 @@ class TierSnifferService {
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
   async recoverMissingQuestions(signal, allowReask = false) {
-    const deadline = performance.now() + MISSING_QUESTION_RECOVERY_PHASE_MS;
+    const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     const cursorKey = allowReask ? "sniffer_missing_question_reask_cursor_v1" : "sniffer_missing_question_cursor_v1";
     const paths = this.ledgerPaths();
     const offset = (this.recoveryLedgerOffsets.get(cursorKey) ?? 0) % (paths.length || 1);
     for (let n = 0;n < paths.length; n++) {
-      if (signal.aborted || this.stopped || n > 0 && performance.now() >= deadline)
+      if (signal.aborted || this.stopped || n > 0 && this.monotonicNow() >= deadline)
         break;
       const index = (offset + n) % paths.length;
       const ledgerPath = paths[index];
@@ -77524,8 +77819,8 @@ class TierSnifferService {
         let lastProcessed;
         let processed = 0;
         for (const row of rows) {
-          await ingestionTurn();
-          if (signal.aborted || this.stopped || processed > 0 && performance.now() >= deadline)
+          await this.ingestionTurn();
+          if (signal.aborted || this.stopped || processed > 0 && this.monotonicNow() >= deadline)
             break;
           const identity = recordIdentity(row);
           lastProcessed = identity;
@@ -77674,7 +77969,7 @@ class TierSnifferService {
   async settleStoredItems() {
     this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
-      await ingestionTurn();
+      await this.ingestionTurn();
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
@@ -77735,7 +78030,7 @@ class TierSnifferService {
       return total;
     const maxOpen = Math.max(0, this.options.rejudgeMaxOpenQuestions ?? 2 * perPass);
     for (const ledgerPath of this.ledgerPaths()) {
-      await ingestionTurn();
+      await this.ingestionTurn();
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
@@ -77746,7 +78041,7 @@ class TierSnifferService {
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = await rejudgeRoutedItemsInTurns({
           set: set2,
-          turn: ingestionTurn,
+          turn: () => this.ingestionTurn(),
           limit: perPass,
           ...after ? { after } : {},
           autoMoves: this.autoMovesFor(set2)
@@ -77762,10 +78057,10 @@ class TierSnifferService {
       } catch {}
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.rechecked > 0 || logSkipped) {
       if (total.builtinPromptSkipped > 0)
         this.lastBuiltinPromptSkipLogMs = this.clockMs();
-      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}` + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}` + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`);
+      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}` + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}` + `; builtin_prompt_skipped=${total.builtinPromptSkipped}; owner_recheck=${total.rechecked}.`);
     }
     return total;
   }
@@ -77781,7 +78076,7 @@ class TierSnifferService {
   }
   async runAutoMoves(options, signal, direction) {
     const timings = emptyTierMoveTimings();
-    const started = performance.now();
+    const started = this.monotonicNow();
     const paths = this.ledgerPaths();
     const backlog = direction === "lower" ? paths.reduce((n, path) => {
       try {
@@ -77797,7 +78092,7 @@ class TierSnifferService {
     const requestedMs = options.lowerSliceMs ?? adaptiveMs;
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
-    const shouldStop = () => signal.aborted || direction === "lower" && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow());
+    const shouldStop = () => signal.aborted || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date))().getTime();
@@ -77858,7 +78153,7 @@ class TierSnifferService {
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset2 = 0;offset2 < queued.length && budget > 0 && !shouldStop(); ) {
         const pending = [];
-        const batchDeadline = Math.min(deadline, performance.now() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
+        const batchDeadline = Math.min(deadline, this.monotonicNow() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
         for (let n = 0;n < (direction === "raise" ? 1 : batchSize) && offset2 < queued.length && !shouldStop(); n++) {
           const record3 = queued[offset2++];
           budget--;
@@ -77887,7 +78182,7 @@ class TierSnifferService {
           try {
             let copied = 0;
             const results = moveTieredItemsLowering(pending.map((entry) => entry.move), {
-              shouldStop: () => shouldStop() || copied++ > 0 && performance.now() >= batchDeadline
+              shouldStop: () => shouldStop() || copied++ > 0 && this.monotonicNow() >= batchDeadline
             });
             results.forEach((result, index) => {
               if ("error" in result)
@@ -77903,11 +78198,11 @@ class TierSnifferService {
           }
         }
         await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
-        await ingestionTurn();
+        await this.ingestionTurn();
       }
       await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
     }
-    report.elapsedMs = performance.now() - started;
+    report.elapsedMs = this.monotonicNow() - started;
     if (direction === "lower" || report.moved > 0 || report.failed > 0) {
       this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
@@ -78410,7 +78705,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash32("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash33("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -78740,7 +79035,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash32("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash33("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);

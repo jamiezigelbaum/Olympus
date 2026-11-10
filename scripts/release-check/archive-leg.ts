@@ -332,6 +332,8 @@ export interface DrainView {
   last: { messages?: number; judged?: number; waiting?: number };
   privateModel?: string;
   row?: RowView;
+  /** What went wrong reading the row after the drain: the navigation, or the row still missing at the bound. */
+  rowProblem?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -835,7 +837,7 @@ export function drainChecks(id: string, drain: DrainView | undefined, fx: LegFix
   if (drain.drained && (drain.last.waiting !== 0 || drain.last.messages !== fx.expect.messages)) {
     problems.push(`the agent reports ${drain.last.waiting ?? '?'} of ${drain.last.messages ?? '?'} messages waiting, expected 0 of ${fx.expect.messages}`);
   }
-  if (drain.drained && !drain.row) problems.push('the dashboard row could not be read, so the judged count is unproven');
+  if (drain.drained && !drain.row) problems.push(`the dashboard row could not be read (${drain.rowProblem ?? 'no detail'}), so the judged count is unproven`);
   if (drain.drained && drain.row) {
     if (!judged) problems.push('the dashboard row has no judged line');
     else if (judged.held !== 0 || judged.judged !== fx.expect.messages) problems.push(`the dashboard row reads ${judged.judged} judged · ${judged.held} waiting, expected ${fx.expect.messages} judged · 0 waiting`);
