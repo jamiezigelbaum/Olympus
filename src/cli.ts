@@ -1669,6 +1669,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     `  ${TIER_CLI_USAGE['tier set']}`,
     `  ${TIER_CLI_USAGE['tier explain']}`,
+    `  ${TIER_CLI_USAGE['tier recheck']}`,
     `  ${TIER_CLI_USAGE['tier rules']}`,
     `  ${TIER_CLI_USAGE['tier classifier']}`,
     `  ${TIER_CLI_USAGE['tier migrate']}`,

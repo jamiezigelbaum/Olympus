@@ -134,7 +134,7 @@ describe('zkAPI consult transport: a supervised session', () => {
         postStopProbe: 'route_lost',
         settlement: 'confirmed',
         fence: 'clear',
-        daemonVersion: '0.1.6-olympus4',
+        daemonVersion: '0.1.6-olympus5',
         network: 'mainnet',
         listedAllowanceUsd: 1,
         reservedUsd: 1,
@@ -567,10 +567,10 @@ describe('zkAPI consult transport: verification refusals', () => {
   }, SLOW);
 
   test('Linux requires reviewed companion custody while macOS keeps its reviewed versions', async () => {
-    for (const version of ['0.1.5', '0.1.6', '0.1.6-olympus2', '0.1.6-olympus3', '0.1.6-olympus4']) {
+    for (const version of ['0.1.5', '0.1.6', '0.1.6-olympus2', '0.1.6-olympus3', '0.1.6-olympus4', '0.1.6-olympus5']) {
       writePlan({ version });
       const linux = await zkapiConsultReadiness(transport({ platform: 'linux' }));
-      expect(linux.blockers.includes('daemon_version_unsupported'), version).toBe(version !== '0.1.6-olympus4');
+      expect(linux.blockers.includes('daemon_version_unsupported'), version).toBe(!['0.1.6-olympus4', '0.1.6-olympus5'].includes(version));
       const mac = await zkapiConsultReadiness(transport({ platform: 'darwin' }));
       expect(mac.blockers).not.toContain('daemon_version_unsupported');
     }
