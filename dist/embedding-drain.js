@@ -71628,7 +71628,8 @@ dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; 
 .messaging-card .msgactions { flex-wrap: wrap; }
 .messaging-card .msgactions > .btn, .messaging-card .msgactions > form { flex: 1 1 100%; max-width: 100%; }
 .messaging-card .msgactions > .btn, .messaging-card .msgactions > form > .btn { width: 100%; }
-.messaging-card .btn.busy { opacity: .75; cursor: progress; }
+.messaging-card .btn.busy { opacity: .8; cursor: progress; border-style: solid; color: var(--t2); }
+.messaging-card .btn.primary.busy { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
 .messaging-card .btn.busy::before { content: ''; display: inline-block; width: .9em; height: .9em; margin-right: .5em; vertical-align: -.1em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: msgspin .8s linear infinite; }
 @keyframes msgspin { to { transform: rotate(360deg); } }
 .kindpicker { display: grid; gap: 10px; margin: 12px 0 0 !important; }
