@@ -17862,9 +17862,11 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
     versionLabel,
   );
   assertIndexColumns(db, 'idx_connector_store_fts_rows_item', ['item_pk'], versionLabel);
-  const ftsRows = Number((db.query('SELECT COUNT(*) AS count FROM connector_store_fts').get() as { count: number }).count);
-  const mappedRows = Number((db.query('SELECT COUNT(*) AS count FROM connector_store_fts_rows').get() as { count: number }).count);
-  if (ftsRows !== mappedRows) {
+  // One statement, so one snapshot: a read-only open runs beside the writer,
+  // and two separate counts let its commit land between them.
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error('Connector store schema FTS row ownership map is incomplete.');
   }
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();

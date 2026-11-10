@@ -36396,9 +36396,9 @@ function validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkCo
 function validateConnectorStoreFtsOwnership(db, versionLabel) {
   assertExactTableColumns(db, "connector_store_fts_rows", ["fts_rowid", "item_pk", "chunk_pk"], false, versionLabel);
   assertIndexColumns(db, "idx_connector_store_fts_rows_item", ["item_pk"], versionLabel);
-  const ftsRows = Number(db.query("SELECT COUNT(*) AS count FROM connector_store_fts").get().count);
-  const mappedRows = Number(db.query("SELECT COUNT(*) AS count FROM connector_store_fts_rows").get().count);
-  if (ftsRows !== mappedRows) {
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error("Connector store schema FTS row ownership map is incomplete.");
   }
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
