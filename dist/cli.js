@@ -36799,7 +36799,7 @@ var init_local_index = __esm(() => {
       this.now = options.now ?? (() => new Date);
       this.controlPath = options.controlPath ?? controlPathHeadroom;
       this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
-      if (options.tierLedger === null || options.readOnly === true) {
+      if (options.tierLedger === null || options.readOnly === true && !writableStoreOpensForbidden()) {
         this.tierLedgerDisabled = true;
       } else if (options.tierLedger) {
         this.tierLedgerHandle = options.tierLedger;
@@ -36882,7 +36882,10 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       if (!this.tierLedgerHandle) {
-        this.tierLedgerHandle = new TierLedger({ dbPath: tierLedgerPathForStore(this.dbPath), now: this.now });
+        const path = tierLedgerPathForStore(this.dbPath);
+        if (this.readOnly && (path === ":memory:" || !existsSync30(path)))
+          return;
+        this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...this.readOnly ? { readOnly: true } : {} });
         this.tierLedgerOwned = true;
       }
       return this.tierLedgerHandle;
@@ -67536,6 +67539,9 @@ import { existsSync as existsSync50 } from "node:fs";
 function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
 }
+function openSetLedger(dbPath) {
+  return new TierLedger({ dbPath, ...writableStoreOpensForbidden() ? { readOnly: true } : {} });
+}
 
 class TieredStoreSet {
   setId;
@@ -68171,7 +68177,7 @@ class TieredStoreSet {
   }
 }
 function createLaneTieredStoreSet(options) {
-  const ledger = options.ledger ?? options.secureStore.tierLedger() ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath), ...writableStoreOpensForbidden() ? { readOnly: true } : {} });
+  const ledger = options.ledger ?? options.secureStore.tierLedger() ?? openSetLedger(tieredStoreSetLedgerPath(options.secureStore.dbPath));
   return new TieredStoreSet({
     setId: options.setId,
     ledger,
@@ -68211,7 +68217,7 @@ function createTieredLaneSet(options) {
   const secureDbPath = secure.store?.dbPath ?? secure.onDemand?.dbPath;
   if (!secureDbPath)
     throw new Error("A tiered lane needs a secure_local store or a way to create one.");
-  const ledger = options.ledger ?? secure.store?.tierLedger() ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+  const ledger = options.ledger ?? secure.store?.tierLedger() ?? openSetLedger(tieredStoreSetLedgerPath(secureDbPath));
   const legs = [];
   for (const domain of TIER_DOMAIN_ORDER) {
     const leg = options.legs[domain];
@@ -68256,7 +68262,7 @@ function createExistingStoreTierLane(options) {
   const secureDbPath = options.store.trustDomain === "secure_local" ? options.store.dbPath : options.newLegs.secure_local?.dbPath;
   if (!secureDbPath)
     throw new Error("A tiered lane needs a secure_local store or a way to create one.");
-  const ledger = (options.store.trustDomain === "secure_local" ? options.store.tierLedger() : undefined) ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+  const ledger = (options.store.trustDomain === "secure_local" ? options.store.tierLedger() : undefined) ?? openSetLedger(tieredStoreSetLedgerPath(secureDbPath));
   const newStores = {};
   const legs = {};
   for (const domain of TIER_DOMAIN_ORDER) {
@@ -175688,7 +175694,8 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceWatch)
             throw sourceWatchNotSupported();
           const owner2 = authenticatedWatchOwner(request);
-          const create = await parseSourceWatchCreateRequest(request);
+          const recordId = sourceWatch.recordId?.(request);
+          const create = { ...await parseSourceWatchCreateRequest(request), ...recordId ? { watchId: recordId } : {} };
           const watch2 = createSourceWatchPublicView({ store: sourceWatch.store, create, owner: owner2 });
           return json({ kind: "source_watch", watch: watch2, policy: SOURCE_WATCH_POLICY });
         }
@@ -203001,6 +203008,13 @@ function forwardedRequest(kind, value2) {
 function forwardedRequestToRequest(origin, forwarded) {
   return new Request(origin + forwarded.path, { method: "POST", headers: forwarded.headers, body: forwarded.body });
 }
+function tagForwardedRequest(request, commandId) {
+  forwardedRecordIds.set(request, `engine-${commandId}`);
+  return request;
+}
+function forwardedRecordId(request) {
+  return forwardedRecordIds.get(request);
+}
 async function requestToForwarded(request) {
   const headers = {};
   request.headers.forEach((value2, name) => {
@@ -203036,7 +203050,15 @@ function parseEngineCommandEnvelope(value2) {
       if (corpora !== undefined && (!Array.isArray(corpora) || corpora.length > 200 || corpora.some((entry) => typeof entry !== "string" || !SOURCE.test(entry)))) {
         fail("reload corpora must be corpus ids.");
       }
-      return { id, command: { kind, target, ...Array.isArray(corpora) ? { corpora } : {} } };
+      const frontPid = command2.frontPid;
+      if (frontPid !== undefined && (target !== "models" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
+        fail("frontPid is a process id, carried by a models reload.");
+      return { id, command: {
+        kind,
+        target,
+        ...Array.isArray(corpora) ? { corpora } : {},
+        ...frontPid !== undefined ? { frontPid } : {}
+      } };
     }
     case "archive_changed":
       return { id, command: { kind } };
@@ -203068,12 +203090,37 @@ function parseEngineCommandEnvelope(value2) {
         return { id, command: { kind, source } };
       return { id, command: { kind, source, manual: command2.manual === true } };
     }
+    case "tier_set_recorded": {
+      const locator = boundedString2(command2.locator, 2048);
+      const expected = asRecord19(command2.expected);
+      const provider = boundedString2(expected?.provider, 64);
+      const providerItemId = boundedString2(expected?.providerItemId);
+      const conversation = expected?.providerConversationId;
+      if (!locator || !provider || !providerItemId || conversation !== undefined && !boundedString2(conversation)) {
+        fail("tier_set_recorded needs a locator and the recorded provider and item.");
+      }
+      return { id, command: { kind, locator, expected: {
+        provider,
+        providerItemId,
+        ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
+      } } };
+    }
+    case "capture_stop": {
+      const source = command2.source;
+      if (source !== "telegram" && source !== "whatsapp")
+        fail("capture_stop needs telegram or whatsapp.");
+      return { id, command: { kind, source } };
+    }
     case "owner_busy":
     case "owner_idle": {
       const resource = command2.resource;
       if (typeof resource !== "string" || !RESOURCE.test(resource))
         fail(`${kind} needs a resource.`);
-      return { id, command: { kind, resource } };
+      const front = boundedString2(command2.front, 64);
+      const seq = command2.seq;
+      if (!front || !Number.isSafeInteger(seq) || seq < 1)
+        fail(`${kind} needs its front and a sequence number.`);
+      return { id, command: { kind, resource, front, seq } };
     }
     case "judge_boost": {
       const raw = command2.identities;
@@ -203161,7 +203208,7 @@ class EngineCommandLedger {
     try {
       if (!handler)
         throw new Error(`${command2.kind} is not handled by this background.`);
-      const result = await handler(command2);
+      const result = await handler(command2, { id: entry.receipt.id });
       entry.receipt.state = "done";
       if (result !== undefined)
         entry.receipt.result = result;
@@ -203237,7 +203284,7 @@ function createEngineCommandHandler(options) {
     return Response.json({ error: "not_found" }, { status: 404 });
   };
 }
-var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, HOP_HEADERS;
+var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS;
 var init_commands = __esm(() => {
   init_engine_split();
   init_http();
@@ -203247,7 +203294,14 @@ var init_commands = __esm(() => {
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
     tier_override: ["/v1/cli/tier"],
     storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
-    capture: ["/dashboard/messaging/start", "/dashboard/messaging/respond", "/dashboard/messaging/cancel", "/dashboard/messaging/scope"],
+    capture: [
+      "/dashboard/messaging/start",
+      "/dashboard/messaging/status",
+      "/dashboard/messaging/respond",
+      "/dashboard/messaging/cancel",
+      "/dashboard/messaging/chats",
+      "/dashboard/messaging/scope"
+    ],
     embed_chunks: ["/v1/source/index/embed"],
     source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
     extraction_queue: [
@@ -203276,20 +203330,31 @@ var init_commands = __esm(() => {
   ID3 = /^[A-Za-z0-9_-]{8,64}$/;
   SOURCE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
   RESOURCE = /^[\x21-\x7e]{1,200}$/;
+  forwardedRecordIds = new WeakMap;
   HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
 });
 
 // src/workers/engine-split/client.ts
+import { randomUUID as randomUUID36 } from "node:crypto";
+
 class EngineCommandClient {
   options;
   sleep;
   now;
   newId;
+  setTimer;
+  clearTimer;
   constructor(options) {
     this.options = options;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve30) => setTimeout(resolve30, ms)));
     this.now = options.now ?? (() => Date.now());
     this.newId = options.newId ?? newEngineCommandId;
+    this.setTimer = options.setTimeout ?? ((callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      timer.unref?.();
+      return timer;
+    });
+    this.clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer));
   }
   async post(command2, options = {}) {
     const id = options.id ?? this.newId();
@@ -203305,7 +203370,7 @@ class EngineCommandClient {
       if (this.now() >= deadline)
         throw new EngineCommandUnavailableError("The background engine has not finished this command yet.");
       const wait = Math.max(0, Math.min(RESULT_WAIT_MS, deadline - this.now()));
-      const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: "GET" });
+      const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: "GET" }, deadline, wait);
       if (answer?.status === 200) {
         receipt = answer.body;
         attempt = 0;
@@ -203326,7 +203391,7 @@ class EngineCommandClient {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id, command: command2 })
-      });
+      }, deadline);
       if (answer && (answer.status === 200 || answer.status === 202))
         return answer.body;
       if (answer && answer.status >= 400 && answer.status < 500 && answer.status !== 404) {
@@ -203337,20 +203402,36 @@ class EngineCommandClient {
       await this.sleep(RETRY_DELAYS_MS[Math.min(attempt++, RETRY_DELAYS_MS.length - 1)]);
     }
   }
-  async request(path, init) {
+  async request(path, init, deadline, waitMs2 = 0) {
+    const limitMs = Math.max(1, Math.min(waitMs2 + REQUEST_GRACE_MS, deadline - this.now()));
+    const controller = new AbortController;
+    let timedOut;
+    const expired = new Promise((_, reject) => {
+      timedOut = () => reject(new RequestTimedOut);
+    });
+    expired.catch(() => {});
+    const timer = this.setTimer(() => {
+      controller.abort();
+      timedOut();
+    }, limitMs);
     try {
-      const response = await this.options.fetch(ENGINE_BACKGROUND_ORIGIN + path, {
-        ...init,
-        headers: { ...init.headers, Authorization: `Bearer ${this.options.authToken}` }
-      });
-      const body = await response.json().catch(() => {
-        return;
-      });
-      if (typeof body?.instance_id === "string")
-        this.options.onInstance?.(body.instance_id);
-      return { status: response.status, body };
+      return await Promise.race([expired, (async () => {
+        const response = await this.options.fetch(ENGINE_BACKGROUND_ORIGIN + path, {
+          ...init,
+          signal: controller.signal,
+          headers: { ...init.headers, Authorization: `Bearer ${this.options.authToken}` }
+        });
+        const body = await response.json().catch(() => {
+          return;
+        });
+        if (typeof body?.instance_id === "string")
+          this.options.onInstance?.(body.instance_id);
+        return { status: response.status, body };
+      })()]);
     } catch {
       return;
+    } finally {
+      this.clearTimer(timer);
     }
   }
 }
@@ -203359,6 +203440,8 @@ class OwnerBusyRelay {
   client;
   log;
   busyResources = new Set;
+  front;
+  seq = 0;
   instanceId;
   renewal;
   renewEveryMs;
@@ -203367,6 +203450,7 @@ class OwnerBusyRelay {
   constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
+    this.front = options.front ?? randomUUID36();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
     this.setTimer = options.setInterval ?? ((callback, ms) => {
       const timer = setInterval(callback, ms);
@@ -203377,18 +203461,18 @@ class OwnerBusyRelay {
   }
   busy(resource) {
     this.busyResources.add(resource);
-    this.deliver({ kind: "owner_busy", resource });
+    this.deliver("owner_busy", resource);
     if (this.renewal === undefined) {
       this.renewal = this.setTimer(() => {
         for (const busy2 of this.busyResources)
-          this.deliver({ kind: "owner_busy", resource: busy2 });
+          this.deliver("owner_busy", busy2);
       }, this.renewEveryMs);
     }
   }
   idle(resource) {
     if (!this.busyResources.delete(resource))
       return;
-    this.deliver({ kind: "owner_idle", resource });
+    this.deliver("owner_idle", resource);
     if (this.busyResources.size === 0)
       this.stopRenewal();
   }
@@ -203400,7 +203484,7 @@ class OwnerBusyRelay {
     if (!restarted)
       return;
     for (const resource of this.busyResources)
-      this.deliver({ kind: "owner_busy", resource });
+      this.deliver("owner_busy", resource);
   }
   stop() {
     this.stopRenewal();
@@ -203414,13 +203498,14 @@ class OwnerBusyRelay {
   isBusy(resource) {
     return this.busyResources.has(resource);
   }
-  deliver(command2) {
+  deliver(kind, resource) {
+    const command2 = { kind, resource, front: this.front, seq: ++this.seq };
     this.client.post(command2, { timeoutMs: 30000 }).catch(() => {
       this.log(`[engine-split] ${command2.kind} could not reach the background engine; it is sent again when the background is back.`);
     });
   }
 }
-var EngineCommandUnavailableError, RETRY_DELAYS_MS, RESULT_WAIT_MS = 1e4;
+var EngineCommandUnavailableError, RETRY_DELAYS_MS, RESULT_WAIT_MS = 1e4, REQUEST_GRACE_MS = 15000, RequestTimedOut;
 var init_client3 = __esm(() => {
   init_engine_split();
   init_commands();
@@ -203432,6 +203517,8 @@ var init_client3 = __esm(() => {
     }
   };
   RETRY_DELAYS_MS = [100, 250, 500, 1000, 2000];
+  RequestTimedOut = class RequestTimedOut extends Error {
+  };
 });
 
 // src/workers/engine-split/snapshot.ts
@@ -203448,7 +203535,8 @@ function readEngineStatusSnapshot(path, now = () => Date.now()) {
     const written = Date.parse(snapshot2.written_at);
     if (!Number.isFinite(written))
       return;
-    return { snapshot: snapshot2, age_ms: Math.max(0, now() - written) };
+    const age = Math.max(0, now() - written);
+    return { snapshot: snapshot2, age_ms: age, stale: age > ENGINE_STATUS_STALE_MS };
   } catch {
     return;
   }
@@ -203481,14 +203569,14 @@ function startEngineStatusPublisher(options) {
   const timer = setTimer(publish, options.intervalMs ?? ENGINE_STATUS_PUBLISH_INTERVAL_MS);
   return { publish, stop: () => clearTimer(timer) };
 }
-var ENGINE_STATUS_SNAPSHOT_SCHEMA = "olympus.engine.background-status.v1", ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3000;
+var ENGINE_STATUS_SNAPSHOT_SCHEMA = "olympus.engine.background-status.v1", ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3000, ENGINE_STATUS_STALE_MS = 30000;
 var init_snapshot = __esm(() => {
   init_atomic_file();
 });
 
 // src/workers/engine-split/runtime.ts
 import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
-import { randomUUID as randomUUID36 } from "node:crypto";
+import { randomUUID as randomUUID37 } from "node:crypto";
 import { lstatSync as lstatSync54 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -203500,7 +203588,7 @@ function engineStatusSnapshotPath(env) {
   return sharedDataPath("engine-status", env);
 }
 function startEngineBackgroundServer(input) {
-  const instanceId = input.instanceId ?? randomUUID36();
+  const instanceId = input.instanceId ?? randomUUID37();
   prepareEngineBackgroundSocketDirectory(input.socketPath);
   let present = false;
   try {
@@ -203560,24 +203648,33 @@ async function waitForEngineBackground(input) {
 function createEngineFront(input) {
   const now = input.now ?? (() => Date.now());
   let relay;
+  let answering;
   const client = new EngineCommandClient({
     fetch: input.fetch ?? createUnixSocketFetch(input.socketPath),
     authToken: input.authToken,
-    onInstance: (instanceId) => relay?.observeInstance(instanceId)
+    onInstance: (instanceId) => {
+      answering = instanceId;
+      relay?.observeInstance(instanceId);
+    }
   });
   relay = new OwnerBusyRelay(client, (line2) => console.warn(line2));
   const path = engineStatusSnapshotPath(input.env);
   let cached3;
+  const judged = (read, age) => ({
+    ...read,
+    age_ms: age,
+    stale: age > ENGINE_STATUS_STALE_MS || answering !== undefined && answering !== read.snapshot.instance_id
+  });
   const status = () => {
     const at = now();
     if (cached3 && at - cached3.at < 1000) {
-      return cached3.read ? { ...cached3.read, age_ms: cached3.read.age_ms + (at - cached3.at) } : undefined;
+      return cached3.read ? judged(cached3.read, cached3.read.age_ms + (at - cached3.at)) : undefined;
     }
     const read = readEngineStatusSnapshot(path, now);
     cached3 = { at, read };
     if (read)
       relay?.observeInstance(read.snapshot.instance_id);
-    return read;
+    return read ? judged(read, read.age_ms) : undefined;
   };
   const poll = setInterval(() => {
     status();
@@ -203645,19 +203742,25 @@ function tierCommandOnlyReads(body) {
 }
 function createEngineFrontRoutes(input) {
   const pid = input.pid ?? process.pid;
-  const send2 = async (kind, request) => {
+  const exchange2 = async (kind, request) => {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
       receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
     } catch (error2) {
-      return Response.json({ error: { code: "engine_background_unavailable", message: error2 instanceof Error ? error2.message : "The background engine is not answering." } }, { status: 503 });
+      return { unanswered: error2 instanceof Error ? error2.message : "The background engine is not answering." };
     }
-    if (receipt.state !== "done") {
-      return Response.json({ error: { code: "engine_background_failed", message: receipt.error ?? "The background could not run this." } }, { status: 502 });
-    }
-    const answer = receipt.result;
-    return new Response(answer.body, { status: answer.status, headers: answer.headers });
+    if (receipt.state !== "done")
+      return { failed: receipt.error ?? "The background could not run this." };
+    return { answer: receipt.result };
+  };
+  const send2 = async (kind, request) => {
+    const outcome = await exchange2(kind, request);
+    if ("unanswered" in outcome)
+      return Response.json({ error: { code: "engine_background_unavailable", message: outcome.unanswered } }, { status: 503 });
+    if ("failed" in outcome)
+      return Response.json({ error: { code: "engine_background_failed", message: outcome.failed } }, { status: 502 });
+    return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
   };
   return (request) => {
     if (request.method !== "POST")
@@ -203673,13 +203776,17 @@ function createEngineFrontRoutes(input) {
       if (kind !== "delete_source_data")
         return send2(kind, request);
       input.gate.close();
-      let response;
+      let outcome;
       try {
-        response = await send2(kind, request);
-      } catch (error2) {
-        input.gate.reopen();
-        throw error2;
+        outcome = await exchange2(kind, request);
+      } catch {
+        outcome = { unanswered: "The delete could not be sent." };
       }
+      if (!("answer" in outcome)) {
+        input.restartFront();
+        return restartingResponse();
+      }
+      const response = new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
       const restarting2 = response.status === 200 && (await response.clone().json().catch(() => {
         return;
       }))?.worker_restarting === true;
@@ -203710,6 +203817,26 @@ async function waitForProcessExit(pid, options = {}) {
   }
   return true;
 }
+
+class OwnerBusyMarks {
+  marks = new Map;
+  lapseMs;
+  now;
+  constructor(options = {}) {
+    this.lapseMs = options.lapseMs ?? 10 * 60000;
+    this.now = options.now ?? (() => Date.now());
+  }
+  apply(change) {
+    const last = this.marks.get(change.resource);
+    if (last && last.front === change.front && change.seq <= last.seq)
+      return false;
+    this.marks.set(change.resource, { front: change.front, seq: change.seq, busyUntil: change.kind === "owner_busy" ? this.now() + this.lapseMs : 0 });
+    return true;
+  }
+  busy(resource) {
+    return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
+  }
+}
 var init_runtime4 = __esm(() => {
   init_engine_split();
   init_olympus_layout();
@@ -203721,27 +203848,41 @@ var init_runtime4 = __esm(() => {
 });
 
 // src/workers/engine-split/front-state.ts
+function current2(snapshot2) {
+  const read = snapshot2();
+  return read && !read.stale ? read : undefined;
+}
 function isBacklog(value2) {
   return typeof value2 === "object" && value2 !== null && typeof value2.checkingItems === "number" && typeof value2.summary === "string";
 }
 function frontJudgeState(snapshot2) {
   return {
     backlog: () => {
-      const backlog = snapshot2()?.snapshot.judge.backlog;
+      const backlog = current2(snapshot2)?.snapshot.judge.backlog;
       return isBacklog(backlog) ? backlog : undefined;
     },
-    busy: () => snapshot2()?.snapshot.judge.busy === true,
-    archivePrivateModel: () => snapshot2()?.snapshot.judge.archive_private_model ?? "waiting"
+    busy: () => current2(snapshot2)?.snapshot.judge.busy === true,
+    archivePrivateModel: () => current2(snapshot2)?.snapshot.judge.archive_private_model ?? "waiting"
   };
 }
 function frontUnreadableFiles(local, snapshot2) {
   return {
     ...local,
-    recheck: (corpusId) => snapshot2()?.snapshot.unreadable?.[corpusId]
+    recheck: (corpusId) => current2(snapshot2)?.snapshot.unreadable?.[corpusId]
   };
 }
-function frontArchiveViews(local, snapshot2) {
-  const archive = () => snapshot2()?.snapshot.archive;
+function frontArchiveViews(local, snapshot2, changedAt = () => {
+  return;
+}) {
+  const archive = () => {
+    const read = current2(snapshot2);
+    if (!read)
+      return;
+    const changed = changedAt();
+    if (changed !== undefined && Date.parse(read.snapshot.written_at) < changed)
+      return;
+    return read.snapshot.archive;
+  };
   return {
     view: () => archive()?.view ?? local.view(),
     cardViews: () => archive()?.cards ?? local.cardViews(),
@@ -203749,6 +203890,60 @@ function frontArchiveViews(local, snapshot2) {
     archiveSources: () => archive()?.sources ?? local.archiveSources()
   };
 }
+function frontCaptureStop(client) {
+  return async (source) => {
+    const receipt = await client.send({ kind: "capture_stop", source }, { timeoutMs: 30000 });
+    if (receipt.state !== "done")
+      throw new Error(receipt.error ?? `The background did not confirm the ${source} capture stopped.`);
+  };
+}
+function frontSetItemPrivate(client) {
+  return async ({ locator, ...expected }) => {
+    const receipt = await client.send({ kind: "tier_set_recorded", locator, expected }, { timeoutMs: 30000 });
+    if (receipt.state !== "done")
+      throw new Error(receipt.error ?? "The background did not record the override.");
+    return receipt.result ?? {};
+  };
+}
+function frontJudgeBoost(client) {
+  return (identities) => {
+    const top = identities.slice(0, ENGINE_JUDGE_BOOST_MAX_IDS).map((identity2) => ({
+      provider: identity2.provider,
+      accountScope: identity2.accountScope,
+      providerItemId: identity2.providerItemId,
+      ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}
+    }));
+    if (top.length === 0)
+      return;
+    client.post({ kind: "judge_boost", identities: top }, { timeoutMs: 1e4 }).catch(() => {
+      return;
+    });
+  };
+}
+function frontModelReload(options) {
+  const log = options.log ?? (() => {});
+  let pending;
+  return (request) => {
+    if (!options.managed)
+      return false;
+    if (pending)
+      return true;
+    pending = options.client.send({ kind: "reload", target: "models", frontPid: options.pid ?? process.pid }, { timeoutMs: 30000 }).then((receipt) => {
+      if (receipt.state !== "done" || receipt.result?.restarting !== true) {
+        log("[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.");
+      }
+    }, () => {
+      log("[engine-split] the background did not answer the model change; restart Olympus if the new model does not take effect.");
+    }).finally(() => {
+      pending = undefined;
+      options.restartSelf(request);
+    });
+    return true;
+  };
+}
+var init_front_state = __esm(() => {
+  init_commands();
+});
 
 // src/workers/engine-split/front-scheduler.ts
 function emptyStatus2(now) {
@@ -206295,25 +206490,25 @@ function chatgptPrivateAnswerProgram(config2) {
     node.appendChild(row);
     return { card: node, text: text4, line: line2, row };
   }
-  function cardView(current2) {
+  function cardView(current3) {
     const view3 = card(false);
     const line2 = view3.line;
-    if (current2.state === "no_model") {
+    if (current3.state === "no_model") {
       line2.textContent = T.noModel;
       return view3.card;
     }
-    if (current2.state === "model_downloading") {
-      const known = current2.percent >= 0;
-      line2.textContent = known ? fill4(T.downloading, { percent: String(current2.percent) }) : T.downloadingUnknown;
+    if (current3.state === "model_downloading") {
+      const known = current3.percent >= 0;
+      line2.textContent = known ? fill4(T.downloading, { percent: String(current3.percent) }) : T.downloadingUnknown;
       if (known) {
         const bar = el("div", "bar");
         bar.setAttribute("role", "progressbar");
         bar.setAttribute("aria-label", T.downloadingLabel);
         bar.setAttribute("aria-valuemin", "0");
         bar.setAttribute("aria-valuemax", "100");
-        bar.setAttribute("aria-valuenow", String(current2.percent));
+        bar.setAttribute("aria-valuenow", String(current3.percent));
         const fillBar = el("div", "bar-fill");
-        fillBar.style.width = current2.percent + "%";
+        fillBar.style.width = current3.percent + "%";
         bar.appendChild(fillBar);
         view3.text.appendChild(bar);
       }
@@ -206843,14 +207038,14 @@ async function askAnonymously(input, deps) {
     } catch {
       return false;
     }
-    let current2;
+    let current3;
     try {
-      current2 = deps.settings();
+      current3 = deps.settings();
     } catch {
       stale = true;
       return false;
     }
-    stale = askBinding(current2) !== bound;
+    stale = askBinding(current3) !== bound;
     return !stale;
   };
   const sameProviderRefusal = () => ({ ok: false, code: "model_same_provider", message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider });
@@ -207538,7 +207733,7 @@ function chatgptPrivateQuestionProgram(config2) {
     row.appendChild(text4);
     return row;
   }
-  function composeView(current2) {
+  function composeView(current3) {
     const card = el("div", "card");
     card.appendChild(head(phase === "error" ? errorText : T.notSeen, phase === "error"));
     const form = el("div", "q-form");
@@ -207552,7 +207747,7 @@ function chatgptPrivateQuestionProgram(config2) {
     field.value = draft;
     field.setAttribute("data-key", "question");
     const count2 = el("div", "q-count");
-    const limit2 = current2.maxChars;
+    const limit2 = current3.maxChars;
     const recount = () => {
       count2.textContent = fill4(T.count, { n: num(draft.length), max: num(limit2) });
       count2.classList.toggle("over", draft.length > limit2);
@@ -207589,7 +207784,7 @@ function chatgptPrivateQuestionProgram(config2) {
       select.className = "q-select";
       select.id = "q-prep";
       const choices = [["as_written", T.asWritten], ["light_cleanup", T.lightCleanup]];
-      if (current2.customInstruction)
+      if (current3.customInstruction)
         choices.push(["custom", T.custom]);
       for (const [value2, text4] of choices) {
         const option = doc2.createElement("option");
@@ -208625,8 +208820,8 @@ function scopeSavedToolResult(input) {
     structuredContent: structured
   };
 }
-function scopeConflictToolResult(current2) {
-  const copy = copyScopeList(current2);
+function scopeConflictToolResult(current3) {
+  const copy = copyScopeList(current3);
   const summary = scopeSummary(copy);
   return {
     content: [{ type: "text", text: `The choices for ${SOURCE_LABELS[summary.source_id]} changed before this save. Review them again in the Olympus panel.` }],
@@ -209243,12 +209438,12 @@ function privacyRemovedRules(saved, draft) {
   const kept = new Set(draft.map(privacyRuleIdentity));
   return saved.filter((rule) => !kept.has(privacyRuleIdentity(rule)));
 }
-function lowersPrivacy(update, current2) {
-  if (update.description !== undefined && update.description !== current2.description)
+function lowersPrivacy(update, current3) {
+  if (update.description !== undefined && update.description !== current3.description)
     return true;
   if (!update.rules)
     return false;
-  return privacyRemovedRules(current2.rules, update.rules).length > 0;
+  return privacyRemovedRules(current3.rules, update.rules).length > 0;
 }
 function isSecretPrivacyRule(secrets, rule) {
   if (rule.kind === "folder")
@@ -209367,9 +209562,9 @@ async function callSetupTool(name, args, backend) {
             throw new ChatGptSurfaceError("privacy_owner_only");
           if (!backend.choosePrivateAnswers)
             throw new ChatGptSurfaceError("unavailable");
-          const current3 = backend.privacySettings();
-          if (current3.revision !== revision)
-            return privacyToolResult(visiblePrivacy(current3, secretLocations(backend)), "conflict");
+          const current4 = backend.privacySettings();
+          if (current4.revision !== revision)
+            return privacyToolResult(visiblePrivacy(current4, secretLocations(backend)), "conflict");
           const saved2 = backend.choosePrivateAnswers(private_answer_mode);
           spendPrivacyConfirmation(backend, confirmation2);
           return privacyToolResult(visiblePrivacy(saved2, secretLocations(backend)), "saved");
@@ -209383,9 +209578,9 @@ async function callSetupTool(name, args, backend) {
           throw new ChatGptSurfaceError("invalid_params");
         }
         const secrets = secretLocations(backend);
-        const current2 = backend.privacySettings();
-        if (current2.revision !== revision)
-          return privacyToolResult(visiblePrivacy(current2, secrets), "conflict");
+        const current3 = backend.privacySettings();
+        if (current3.revision !== revision)
+          return privacyToolResult(visiblePrivacy(current3, secrets), "conflict");
         const confirmed = confirmation2 !== undefined && privacyConfirmationValid(backend, confirmation2);
         if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
           throw new ChatGptSurfaceError("privacy_owner_only");
@@ -209536,10 +209731,10 @@ async function scopeSet(backend, args) {
   } catch (error2) {
     if (!(error2 instanceof SetupBackendError) || error2.code !== "source_index_policy_violation")
       throw error2;
-    const current2 = sourceId === "gmail.email" ? mailList(await backend.browseMail(), secrets) : sortedFolderPage(await browseWholeLevel(backend, sourceId, undefined), secrets, undefined, undefined);
-    if (current2.account_generation === accountGeneration && current2.scope_revision === expectedRevision)
+    const current3 = sourceId === "gmail.email" ? mailList(await backend.browseMail(), secrets) : sortedFolderPage(await browseWholeLevel(backend, sourceId, undefined), secrets, undefined, undefined);
+    if (current3.account_generation === accountGeneration && current3.scope_revision === expectedRevision)
       throw error2;
-    return scopeConflictToolResult(current2);
+    return scopeConflictToolResult(current3);
   }
 }
 function folderList(browse, secrets, ancestorKeys = []) {
@@ -210269,8 +210464,8 @@ function privateCaller(ctx) {
 }
 function privateRefresh(question, probe, context3, options) {
   return async () => {
-    const current2 = normalizeProbe(await probeWithinDeadline(probe, question, context3(), options, "refresh"));
-    return Object.assign([...current2.evidence], current2.secretMatch ? { secretMatch: true } : {});
+    const current3 = normalizeProbe(await probeWithinDeadline(probe, question, context3(), options, "refresh"));
+    return Object.assign([...current3.evidence], current3.secretMatch ? { secretMatch: true } : {});
   };
 }
 function beginPrivateAnswer(pending, options) {
@@ -210285,8 +210480,8 @@ function beginPrivateAnswer(pending, options) {
       preserveWaiting: match.secretMatch === true,
       refresh,
       ...match.secretMatch && match.evidence.length === 0 ? { secretMatch: async () => {
-        const current2 = await refresh(new AbortController().signal);
-        return current2.secretMatch === true;
+        const current3 = await refresh(new AbortController().signal);
+        return current3.secretMatch === true;
       } } : {},
       detail,
       ...caller ? { caller } : {},
@@ -222137,8 +222332,8 @@ class PrivateAnswerJobs {
       return false;
     const secretCurrent = !job.secretMatch || await job.secretMatch().catch(() => false);
     const ok = await checkPrivateEvidence(this.options.eligible, job.sealedItems ?? []);
-    const current2 = job.outcome?.kind;
-    if (secretCurrent && job.sealedItems !== undefined && ok.every(Boolean) && current2 === kind)
+    const current3 = job.outcome?.kind;
+    if (secretCurrent && job.sealedItems !== undefined && ok.every(Boolean) && current3 === kind)
       return true;
     job.outcome = { kind: "failed" };
     job.sealedItems = undefined;
@@ -222550,7 +222745,7 @@ class PrivateAnswerJobs {
         settle2({ kind: "failed" }, "no_evidence");
         return;
       }
-      const current2 = new Set(evidence.map(privateEvidenceKey).filter((key2) => key2 !== undefined));
+      const current3 = new Set(evidence.map(privateEvidenceKey).filter((key2) => key2 !== undefined));
       for (let attempt = 0;attempt < 2; attempt += 1) {
         let analysis = job.analysis;
         const precomputed = analysis !== undefined;
@@ -222567,7 +222762,7 @@ class PrivateAnswerJobs {
         record8(analysis);
         const result = analysis.state === "done" ? analysis.result : undefined;
         const stillReadable = async () => result !== undefined && (await checkPrivateEvidence(this.options.eligible, result.usedItems)).every(Boolean);
-        if (result && (!precomputed || stillEligible(result.usedKeys, current2)) && await stillReadable()) {
+        if (result && (!precomputed || stillEligible(result.usedKeys, current3)) && await stillReadable()) {
           if (settled)
             return;
           const ack = randomBytes32(32).toString("base64url");
@@ -222761,8 +222956,8 @@ function usedItems(evidence, used) {
   const read = used.map((index) => evidence[index]);
   return read.every((item) => item !== undefined) ? read : evidence;
 }
-function stillEligible(used, current2) {
-  return used !== undefined && used.every((key2) => current2.has(key2));
+function stillEligible(used, current3) {
+  return used !== undefined && used.every((key2) => current3.has(key2));
 }
 function asRecord21(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
@@ -224088,10 +224283,10 @@ function privacyRevision(profile) {
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
   const privacySettings = () => {
-    const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync94(options.sovereignty.path, "utf8"))) : policy;
-    policy = current2;
-    const policyRevision = createHash108("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
-    if (isPendingPrivacyPolicy(current2))
+    const current3 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync94(options.sovereignty.path, "utf8"))) : policy;
+    policy = current3;
+    const policyRevision = createHash108("sha256").update(JSON.stringify(current3)).digest("hex").slice(0, 16);
+    if (isPendingPrivacyPolicy(current3))
       return {
         configured: false,
         description: "",
@@ -224101,7 +224296,7 @@ function createChatGptSetupBackend(options) {
         privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS }
       };
     const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
-    const id = privateAnswerMode(current2);
+    const id = privateAnswerMode(current3);
     return { ...settings, revision: settings.revision + "." + policyRevision, privateAnswerMode: { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id], options: PRIVATE_ANSWER_OPTIONS } };
   };
   const post2 = async (path, body) => {
@@ -224230,7 +224425,7 @@ function createChatGptSetupBackend(options) {
           throw new ModelChoiceRefusal("model_not_configured");
         const update = updateSovereigntyConfigFile({
           path: options.sovereignty.path,
-          patch: (current2) => applyModelChoice(current2, choice, configured).config
+          patch: (current3) => applyModelChoice(current3, choice, configured).config
         });
         if (!update.ok)
           throw new ModelChoiceRefusal("model_not_configured");
@@ -224359,14 +224554,14 @@ function writeConsultSettings(input, location = {}) {
   };
   try {
     return withFileLeaseSync(path, (lease) => {
-      const current2 = readConsultSettings({ path });
-      if (current2.state === "invalid") {
+      const current3 = readConsultSettings({ path });
+      if (current3.state === "invalid") {
         if (input.replaceInvalid !== true)
-          return { ok: false, reason: "invalid_current", current: current2, invalidReason: current2.reason };
+          return { ok: false, reason: "invalid_current", current: current3, invalidReason: current3.reason };
       } else {
-        const currentRevision = current2.state === "absent" ? 0 : current2.settings.revision;
+        const currentRevision = current3.state === "absent" ? 0 : current3.settings.revision;
         if (currentRevision !== input.expectedRevision)
-          return { ok: false, reason: "revision_conflict", current: current2 };
+          return { ok: false, reason: "revision_conflict", current: current3 };
       }
       try {
         lease.commit(() => {
@@ -224709,10 +224904,10 @@ function createDashboardConsultAdapter(options) {
         instruction = raw.replace(/\r\n?/g, `
 `);
       }
-      const current2 = readConsultSettings(location);
-      if (current2.state === "invalid")
+      const current3 = readConsultSettings(location);
+      if (current3.state === "invalid")
         return writeRefusal("invalid_current", 0);
-      const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
+      const base = current3.state === "valid" ? current3.settings : DEFAULT_CONSULT_SETTINGS;
       const result = writeConsultSettings({
         ...writerCarried(base),
         enabled: base.enabled,
@@ -224729,10 +224924,10 @@ function createDashboardConsultAdapter(options) {
       return { ok: true, status_message: MESSAGES3.standardSaved, revision: result.settings.revision };
     },
     async rememberLevel(choice) {
-      const current2 = readConsultSettings(location);
-      if (current2.state === "invalid")
+      const current3 = readConsultSettings(location);
+      if (current3.state === "invalid")
         return { ok: false, message: "The anonymous answers settings file could not be read." };
-      const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
+      const base = current3.state === "valid" ? current3.settings : DEFAULT_CONSULT_SETTINGS;
       const standard = choice.cleanup !== undefined && choice.cleanup !== "custom" ? { standardMode: choice.cleanup } : standardCarried(base);
       const result = writeConsultSettings({
         ...writerCarried(base),
@@ -224755,10 +224950,10 @@ function createDashboardConsultAdapter(options) {
       const revision = update.revision;
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
         return invalid5(MESSAGES3.needsRevision, "needs_revision");
-      const current2 = readConsultSettings(location);
-      if (current2.state === "invalid")
+      const current3 = readConsultSettings(location);
+      if (current3.state === "invalid")
         return writeRefusal("invalid_current", 0);
-      const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
+      const base = current3.state === "valid" ? current3.settings : DEFAULT_CONSULT_SETTINGS;
       let writer = base.writer;
       if (update.writer === null) {
         writer = undefined;
@@ -224781,9 +224976,9 @@ function createDashboardConsultAdapter(options) {
           return invalid5(MESSAGES3.writerInvalid, "writer_invalid");
         writer = parsed;
       }
-      const frontierModel = (raw, current3) => {
+      const frontierModel = (raw, current4) => {
         if (raw === undefined)
-          return { ok: true, model: current3 };
+          return { ok: true, model: current4 };
         if (raw === null || typeof raw === "string" && raw.trim() === "")
           return { ok: true, model: undefined };
         if (typeof raw === "string" && /^\S{1,200}$/.test(raw.trim()))
@@ -224846,8 +225041,8 @@ function createDashboardConsultAdapter(options) {
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
         return invalid5(MESSAGES3.needsRevision, "needs_revision");
       const replaceInvalid = update.replace_invalid === true;
-      const current2 = readConsultSettings(location);
-      const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
+      const current3 = readConsultSettings(location);
+      const base = current3.state === "valid" ? current3.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen = [...base.languages];
       const savingLanguages = update.languages !== undefined && (enabled || update.save_languages === true);
       if (savingLanguages) {
@@ -224858,14 +225053,14 @@ function createDashboardConsultAdapter(options) {
         }
         chosen = [...new Set(update.languages)];
       }
-      let level = current2.state === "invalid" ? CONSULT_LEVEL_FOR_REPAIR : base.level;
+      let level = current3.state === "invalid" ? CONSULT_LEVEL_FOR_REPAIR : base.level;
       if (update.level !== undefined) {
         if (typeof update.level !== "string" || !CONSULT_LEVELS.includes(update.level))
           return invalid5(MESSAGES3.levelUnknown, "level_unknown");
         level = update.level;
       }
       const acknowledgementsComplete = () => acknowledgementsCurrent(zkapiProfile()?.profile.zkapi?.acknowledgements);
-      const turningOn = enabled && !(current2.state === "valid" && current2.settings.enabled);
+      const turningOn = enabled && !(current3.state === "valid" && current3.settings.enabled);
       if (turningOn) {
         if (!await confined())
           return confinementUnavailable();
@@ -224930,8 +225125,8 @@ function createDashboardConsultAdapter(options) {
         zkapi[key2] = raw;
       }
       try {
-        const refused3 = writePolicy((current2) => {
-          const next = structuredClone(current2);
+        const refused3 = writePolicy((current3) => {
+          const next = structuredClone(current3);
           const profile = next.modelProfiles[route.id];
           if (!profile || profile.provider !== "zkapi")
             throw new OperationError("config_error", "The zkAPI route is no longer in the policy file.");
@@ -224958,11 +225153,11 @@ function createDashboardConsultAdapter(options) {
       if (zkapiProfile())
         return { ok: false, httpStatus: 409, code: "route_exists", message: MESSAGES3.routeExists };
       try {
-        const refused3 = writePolicy((current2) => {
-          if (Object.values(current2.modelProfiles).some((profile) => profile.provider === "zkapi")) {
+        const refused3 = writePolicy((current3) => {
+          if (Object.values(current3.modelProfiles).some((profile) => profile.provider === "zkapi")) {
             throw new OperationError("config_error", "A zkAPI route is already in the policy file.");
           }
-          const next = structuredClone(current2);
+          const next = structuredClone(current3);
           next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
             provider: "zkapi",
             trust: "standard_cloud",
@@ -225679,7 +225874,8 @@ function createPrivateAgentListeners(options) {
       connectionRoute: route,
       isRelayed: () => false
     }), { pending: options.privacyPending });
-    return [route, mcp];
+    const gated = options.gate?.(mcp);
+    return [route, gated ? (request) => gated(request, undefined) : mcp];
   }));
   function stop(address) {
     const entry = active.get(address);
@@ -227192,7 +227388,7 @@ async function main() {
     liveness: Object.fromEntries(captureEntries().map(([source, capture]) => [source, capture.liveness?.()])),
     failures: captureFailures
   });
-  const stopMessagingCapture = async (source) => {
+  const stopMessagingCapture = engineFront ? frontCaptureStop(engineFront.client) : async (source) => {
     await captureOwnership.stopForUnpair(source);
   };
   const fileSourceScopeAuthority = connectedHandleRegistryPath ? new FileSourceScopeAuthority({
@@ -227247,16 +227443,17 @@ async function main() {
     if (!profile.secretRef)
       return bootSecretResolver.status().some((failure3) => failure3.affected_profiles?.includes(id)) ? "missing" : "ready";
     const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
-    const current2 = safeModelCredential(profile, storedEnv);
-    if (!current2)
+    const current3 = safeModelCredential(profile, storedEnv);
+    if (!current3)
       return "missing";
-    if (current2 !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure3) => failure3.affected_profiles?.includes(id)))
+    if (current3 !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure3) => failure3.affected_profiles?.includes(id)))
       return "applying";
     return "ready";
   };
   let requestModelReload = () => false;
   let restartForDelete = (request) => requestModelReload(request);
   let deferredReloads;
+  let restartFrontOnly = () => false;
   const withDeferredReloads = async (writes) => {
     if (deferredReloads)
       return writes();
@@ -227489,7 +227686,8 @@ async function main() {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
+  const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities) => judgeBoosts.raise(identities);
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes
@@ -229453,11 +229651,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {}
   }) : undefined;
+  let archiveChangedAt;
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
     refreshScheduler: () => {
       if (engineFront) {
+        archiveChangedAt = Date.now();
         engineFront.client.post({ kind: "archive_changed" }).catch(() => {
           return;
         });
@@ -229466,6 +229666,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     },
     ...engineFront ? { checksElsewhere: () => {
+      archiveChangedAt = Date.now();
       engineFront.client.post({ kind: "archive_changed" }).catch(() => {
         return;
       });
@@ -229475,7 +229676,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   if (!engineFront)
     archiveImportDashboard.resume();
-  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront.status()) : archiveImportDashboard;
+  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront.status(), () => archiveChangedAt) : archiveImportDashboard;
   wireBuiltInTranscriptionAtBoot({
     env: process.env,
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
@@ -229830,7 +230031,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...sourceScheduler ? { sourceScheduler } : {},
     ...sourceWatchPass ? {
       sourceWatch: {
-        store: sourceWatchStore
+        store: sourceWatchStore,
+        recordId: forwardedRecordId
       }
     } : {},
     ...sourceIndexReadEnabled ? {
@@ -229898,15 +230100,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         savePrivateAnswerMode: (choice) => {
           if (sovereigntyEngine.source !== "file" || !sovereigntyEngine.path)
             return { ok: false, message: "This Olympus has no policy file to change." };
-          let current2;
+          let current3;
           try {
-            current2 = validateSovereigntyConfig(JSON.parse(readFileSync96(sovereigntyEngine.path, "utf8")));
+            current3 = validateSovereigntyConfig(JSON.parse(readFileSync96(sovereigntyEngine.path, "utf8")));
           } catch {
             return { ok: false, message: "The privacy policy file cannot be read." };
           }
           let result;
           try {
-            result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current2);
+            result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current3);
           } catch (error2) {
             return { ok: false, message: error2 instanceof Error ? error2.message : "The Private-answer mode could not be saved." };
           }
@@ -230029,13 +230231,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
   dashboardAgentStore = remoteConnections;
   const { openWaitingPrivateQuestionStore: openWaitingPrivateQuestionStore2, waitingPrivateQuestionsDbPath: waitingPrivateQuestionsDbPath2 } = await Promise.resolve().then(() => (init_waiting_private_questions(), exports_waiting_private_questions));
+  const frontOwnsPrivateAnswerQueue = engineRole !== "background";
   {
     const { createAppsReceived: createAppsReceived2 } = await Promise.resolve().then(() => (init_apps_received2(), exports_apps_received));
     const { appReleaseLogDbPath: appReleaseLogDbPath2 } = await Promise.resolve().then(() => (init_app_release_log(), exports_app_release_log));
     const { runTierSetOnRecordedItem: runTierSetOnRecordedItem2 } = await Promise.resolve().then(() => (init_tier_cli(), exports_tier_cli));
     appsReceived = createAppsReceived2({
       dbPath: appReleaseLogDbPath2(resolveRemoteConnectionsDbPath2(process.env)),
-      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem2(locator, "private", expected)
+      setItemPrivate: engineFront ? frontSetItemPrivate(engineFront.client) : async ({ locator, ...expected }) => runTierSetOnRecordedItem2(locator, "private", expected)
     });
   }
   const connectionActive = (connectionId) => {
@@ -230287,7 +230490,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         }
       } : {}
     });
-    localPrivateAnswers.start();
+    if (frontOwnsPrivateAnswerQueue)
+      localPrivateAnswers.start();
   } else {
     const { createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
     localPrivateAnswers = createLocalPrivateAnswers2({
@@ -230299,7 +230503,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       eligible: async (items) => items.map(() => false),
       anonymousAsk: localAnonymousAsk
     });
-    localPrivateAnswers.start();
+    if (frontOwnsPrivateAnswerQueue)
+      localPrivateAnswers.start();
   }
   const privateQuestions = new PrivateQuestionJobs2({
     installId: () => remotePublicUrls()?.installId,
@@ -230426,12 +230631,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     isActive: connectionActive,
     interactiveBusy: () => answerActivity.interactiveInFlight > 0
   });
-  const uncheckedRetry = setInterval(() => {
+  const uncheckedRetry = frontOwnsPrivateAnswerQueue ? setInterval(() => {
     remotePrivateParts.retryUnchecked().catch(() => {
       return;
     });
-  }, 600000);
-  uncheckedRetry.unref?.();
+  }, 600000) : undefined;
+  uncheckedRetry?.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     demoGrant: isDemoGrant2,
@@ -230576,8 +230781,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }
   });
   saveZkapiModel = async (model) => {
-    const current2 = readConsultSettings3();
-    const revision = current2.state === "valid" ? current2.settings.revision : 0;
+    const current3 = readConsultSettings3();
+    const revision = current3.state === "valid" ? current3.settings.revision : 0;
     const result = await dashboardConsult.saveWriter({ revision, chatgpt_frontier_model: model ?? null });
     return result.ok ? { ok: true } : { ok: false, message: "message" in result && typeof result.message === "string" ? result.message : "Olympus could not save the zkAPI model." };
   };
@@ -230725,7 +230930,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     client: engineFront.client,
     gate: frontGate,
     restartFront: () => {
-      if (!requestModelReload())
+      if (!restartFrontOnly())
         console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
     }
   }) : undefined;
@@ -230805,7 +231010,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     privateAgentListeners = createPrivateAgentListeners2({
       connections: remoteConnections,
       mcp: sharedRemoteMcpOptions,
-      privacyPending: () => privacyChoicePending(sovereigntyEngine)
+      privacyPending: () => privacyChoicePending(sovereigntyEngine),
+      ...frontGate ? { gate: (handler) => frontGate.wrap(handler) } : {}
     });
     updateChecker.start();
   }
@@ -230879,8 +231085,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     requestModelReload();
   } });
   const snifferResource = snifferRuntime.source === "built_in" ? "built_in" : snifferLane?.kind === "local" ? localModelResourceKey(snifferLane.profile) : undefined;
-  const remoteOwnerBusyUntil = new Map;
-  const remoteOwnerBusy = (resource) => (remoteOwnerBusyUntil.get(resource) ?? 0) > Date.now();
+  const remoteOwnerMarks = new OwnerBusyMarks;
+  const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
   const tierSniffer = !engineFront && snifferLane && snifferModel ? new TierSnifferService({
     installed: installedTierClassification,
     lane: snifferLane,
@@ -230947,7 +231153,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const refreshSchedulerSources = () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     };
-    const runForwarded = async (request) => responseToForwarded(await worker.fetch(forwardedRequestToRequest("http://olympus-worker.internal", request)));
+    const runForwarded = async (request, commandId) => {
+      const built = forwardedRequestToRequest("http://olympus-worker.internal", request);
+      return responseToForwarded(await worker.fetch(commandId ? tagForwardedRequest(built, commandId) : built));
+    };
     let deleteFromFront;
     const manualSyncRuns = new Map;
     const commands = startEngineBackgroundServer({
@@ -230956,7 +231165,17 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID ? { instanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID } : {},
       log: (line2) => console.warn(line2),
       handlers: {
-        reload: ({ target, corpora }) => {
+        reload: ({ target, corpora, frontPid }) => {
+          if (target === "models") {
+            if (!modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env))
+              return { reloaded: target, restarting: false };
+            if (frontPid === undefined)
+              return { reloaded: target, restarting: requestModelReload() };
+            waitForProcessExit(frontPid).then(() => {
+              requestModelReload();
+            });
+            return { reloaded: target, restarting: true };
+          }
           const invalidated = target === "scope" && fileExtractionRuntime ? (corpora ?? []).reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0) : 0;
           refreshSchedulerSources();
           if (target === "scope" || target === "extraction")
@@ -230995,15 +231214,25 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           startApprovedSourceRun(sourceScheduler, source);
           return { outcome: "ingestion_started" };
         },
-        owner_busy: ({ resource }) => {
-          remoteOwnerBusyUntil.set(resource, Date.now() + 600000);
-          if (resource === snifferResource)
+        tier_set_recorded: async ({ locator, expected }) => {
+          const { runTierSetOnRecordedItem: runTierSetOnRecordedItem2 } = await Promise.resolve().then(() => (init_tier_cli(), exports_tier_cli));
+          return runTierSetOnRecordedItem2(locator, "private", expected);
+        },
+        capture_stop: async ({ source }) => {
+          await captureOwnership.stopForUnpair(source);
+          return { stopped: source };
+        },
+        owner_busy: (change) => {
+          if (!remoteOwnerMarks.apply(change))
+            return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
+          if (change.resource === snifferResource)
             tierSniffer?.preempt();
           return { busy: true };
         },
-        owner_idle: ({ resource }) => {
-          remoteOwnerBusyUntil.delete(resource);
-          if (resource === snifferResource)
+        owner_idle: (change) => {
+          if (!remoteOwnerMarks.apply(change))
+            return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
+          if (change.resource === snifferResource)
             tierSniffer?.wake();
           return { busy: false };
         },
@@ -231019,9 +231248,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
         embed_chunks: ({ request }) => runForwarded(request),
-        source_watch: ({ request }) => runForwarded(request),
+        source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
-        judge_boost: () => ({ applied: false, reason: "matched_first_not_in_build" })
+        judge_boost: ({ identities }) => {
+          judgeBoosts.raise(identities);
+          return { applied: true, raised: identities.length };
+        }
       }
     });
     const status = startEngineBackgroundStatus({
@@ -231102,7 +231334,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
     stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
-    clearInterval(uncheckedRetry);
+    if (uncheckedRetry)
+      clearInterval(uncheckedRetry);
     remotePrivateParts.close();
     localPrivateAnswers?.close();
     waitingStoreClosed = true;
@@ -231122,12 +231355,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     exit: (code) => process.exit(code)
   });
+  const reloadModels = engineFront ? frontModelReload({ client: engineFront.client, restartSelf: reloadNow, managed: workerRestartsItself(workerLaunch, process.env), log: (line2) => console.warn(line2) }) : reloadNow;
+  restartFrontOnly = reloadNow;
   requestModelReload = (request) => {
     if (deferredReloads) {
       deferredReloads.push(request ?? {});
       return workerRestartsItself(workerLaunch, process.env);
     }
-    return reloadNow(request);
+    return reloadModels(request);
   };
   modelReloadInstalled = true;
   modelChoices.refreshStrongest().catch(() => false);
@@ -231945,6 +232180,7 @@ var init_server5 = __esm(async () => {
   init_store_write_guard();
   init_runtime4();
   init_commands();
+  init_front_state();
   init_front_scheduler();
   init_front_history();
   init_agent_connections();

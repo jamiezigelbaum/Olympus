@@ -27594,7 +27594,7 @@ var init_local_index = __esm(() => {
       this.now = options.now ?? (() => new Date);
       this.controlPath = options.controlPath ?? controlPathHeadroom;
       this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
-      if (options.tierLedger === null || options.readOnly === true) {
+      if (options.tierLedger === null || options.readOnly === true && !writableStoreOpensForbidden()) {
         this.tierLedgerDisabled = true;
       } else if (options.tierLedger) {
         this.tierLedgerHandle = options.tierLedger;
@@ -27677,7 +27677,10 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       if (!this.tierLedgerHandle) {
-        this.tierLedgerHandle = new TierLedger({ dbPath: tierLedgerPathForStore(this.dbPath), now: this.now });
+        const path = tierLedgerPathForStore(this.dbPath);
+        if (this.readOnly && (path === ":memory:" || !existsSync21(path)))
+          return;
+        this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...this.readOnly ? { readOnly: true } : {} });
         this.tierLedgerOwned = true;
       }
       return this.tierLedgerHandle;
@@ -80222,6 +80225,7 @@ init_worker_transport();
 
 // src/workers/engine-split/client.ts
 init_engine_split();
+import { randomUUID as randomUUID13 } from "node:crypto";
 
 // src/workers/engine-split/commands.ts
 init_engine_split();
@@ -80236,6 +80240,7 @@ class EngineCommandError extends Error {
     this.name = "EngineCommandError";
   }
 }
+var forwardedRecordIds = new WeakMap;
 var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
 function orderKey(command) {
   return "source" in command ? `source:${command.source}` : `kind:${command.kind}`;
@@ -80296,7 +80301,7 @@ class EngineCommandLedger {
     try {
       if (!handler)
         throw new Error(`${command.kind} is not handled by this background.`);
-      const result = await handler(command);
+      const result = await handler(command, { id: entry.receipt.id });
       entry.receipt.state = "done";
       if (result !== undefined)
         entry.receipt.result = result;
@@ -80328,6 +80333,8 @@ class OwnerBusyRelay {
   client;
   log;
   busyResources = new Set;
+  front;
+  seq = 0;
   instanceId;
   renewal;
   renewEveryMs;
@@ -80336,6 +80343,7 @@ class OwnerBusyRelay {
   constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
+    this.front = options.front ?? randomUUID13();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
     this.setTimer = options.setInterval ?? ((callback, ms) => {
       const timer = setInterval(callback, ms);
@@ -80346,18 +80354,18 @@ class OwnerBusyRelay {
   }
   busy(resource) {
     this.busyResources.add(resource);
-    this.deliver({ kind: "owner_busy", resource });
+    this.deliver("owner_busy", resource);
     if (this.renewal === undefined) {
       this.renewal = this.setTimer(() => {
         for (const busy2 of this.busyResources)
-          this.deliver({ kind: "owner_busy", resource: busy2 });
+          this.deliver("owner_busy", busy2);
       }, this.renewEveryMs);
     }
   }
   idle(resource) {
     if (!this.busyResources.delete(resource))
       return;
-    this.deliver({ kind: "owner_idle", resource });
+    this.deliver("owner_idle", resource);
     if (this.busyResources.size === 0)
       this.stopRenewal();
   }
@@ -80369,7 +80377,7 @@ class OwnerBusyRelay {
     if (!restarted)
       return;
     for (const resource of this.busyResources)
-      this.deliver({ kind: "owner_busy", resource });
+      this.deliver("owner_busy", resource);
   }
   stop() {
     this.stopRenewal();
@@ -80383,7 +80391,8 @@ class OwnerBusyRelay {
   isBusy(resource) {
     return this.busyResources.has(resource);
   }
-  deliver(command) {
+  deliver(kind, resource) {
+    const command = { kind, resource, front: this.front, seq: ++this.seq };
     this.client.post(command, { timeoutMs: 30000 }).catch(() => {
       this.log(`[engine-split] ${command.kind} could not reach the background engine; it is sent again when the background is back.`);
     });
@@ -80392,6 +80401,27 @@ class OwnerBusyRelay {
 
 // src/workers/engine-split/snapshot.ts
 init_atomic_file();
+
+// src/workers/engine-split/runtime.ts
+class OwnerBusyMarks {
+  marks = new Map;
+  lapseMs;
+  now;
+  constructor(options = {}) {
+    this.lapseMs = options.lapseMs ?? 10 * 60000;
+    this.now = options.now ?? (() => Date.now());
+  }
+  apply(change) {
+    const last = this.marks.get(change.resource);
+    if (last && last.front === change.front && change.seq <= last.seq)
+      return false;
+    this.marks.set(change.resource, { front: change.front, seq: change.seq, busyUntil: change.kind === "owner_busy" ? this.now() + this.lapseMs : 0 });
+    return true;
+  }
+  busy(resource) {
+    return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
+  }
+}
 
 // src/workers/engine-split/front-history.ts
 init_store_write_guard();
