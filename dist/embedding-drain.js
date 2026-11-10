@@ -72160,6 +72160,7 @@ init_judge_second_round();
 init_sniffer();
 import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 import { createHash as createHash24 } from "node:crypto";
+var JUDGE_SAMPLING = Object.freeze({ temperature: 0, seed: 883 });
 var JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash24("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
 var JUDGE_RATE_LIMIT_RETRIES = 6;
 var FALLBACK_BACKOFF_MS = 1000;

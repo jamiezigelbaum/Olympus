@@ -27,6 +27,12 @@ export interface VeniceAnalystModelOptions {
   catalog?: VeniceModelCatalogOptions;
   /** Venice `prompt_cache_key`: a routing hint so requests sharing a prefix reach a warm cache. */
   promptCacheKey?: string;
+  /**
+   * Fixed sampling for a call that must repeat (the privacy judge): sent as
+   * `temperature` and `seed`. Absent, Venice's model default applies, which
+   * samples, so the same item can get a different verdict on a second read.
+   */
+  sampling?: { temperature: number; seed?: number };
 }
 
 export const DEFAULT_VENICE_ANALYST_MODEL = 'kimi-k3';
@@ -58,6 +64,8 @@ export function createVeniceAnalystModel(options: VeniceAnalystModelOptions): An
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     extraBody: {
       ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+      ...(options.sampling ? { temperature: options.sampling.temperature } : {}),
+      ...(options.sampling?.seed !== undefined ? { seed: options.sampling.seed } : {}),
       venice_parameters: {
         enable_web_search: 'off',
         enable_web_scraping: false,

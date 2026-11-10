@@ -48,6 +48,7 @@ import {
   snifferTierKey,
 } from '../../src/workers/classification/sniffer.ts';
 import { createVeniceAnalystModel } from '../../src/core/analyst-venice.ts';
+import { JUDGE_SAMPLING } from '../../src/workers/classification/judge-pacing.ts';
 import { privacyOwnerContext } from '../../src/workers/classification/privacy-profile.ts';
 import type { AnalystModel } from '../../src/core/analyst.ts';
 import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, scoredTier, readImportance, readLabels, readSample, type CalibrationSampleItem } from './files.ts';
@@ -130,6 +131,7 @@ function veniceJudge(model: string): AnalystModel {
     reasoningEffort: 'low',
     reasoningHeadroomTokens: 0,
     timeoutMs: 60_000,
+    sampling: JUDGE_SAMPLING,
     async fetchImpl(url, init) {
       if (!url.includes('/chat/completions')) return await fetch(url, init);
       meter.calls += 1;

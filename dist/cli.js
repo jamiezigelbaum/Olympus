@@ -152383,9 +152383,10 @@ class JudgeRateLimitPacer {
     };
   }
 }
-var JUDGE_PROMPT_CACHE_KEY, DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS = 16, JUDGE_RATE_LIMIT_RETRIES = 6, FALLBACK_BACKOFF_MS = 1000, MAX_WAIT_MS = 65000, realClock;
+var JUDGE_SAMPLING, JUDGE_PROMPT_CACHE_KEY, DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS = 16, JUDGE_RATE_LIMIT_RETRIES = 6, FALLBACK_BACKOFF_MS = 1000, MAX_WAIT_MS = 65000, realClock;
 var init_judge_pacing = __esm(() => {
   init_sniffer();
+  JUDGE_SAMPLING = Object.freeze({ temperature: 0, seed: 883 });
   JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash86("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
   realClock = {
     now: () => Date.now(),
@@ -157009,6 +157010,8 @@ function createVeniceAnalystModel(options) {
     ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
     extraBody: {
       ...options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {},
+      ...options.sampling ? { temperature: options.sampling.temperature } : {},
+      ...options.sampling?.seed !== undefined ? { seed: options.sampling.seed } : {},
       venice_parameters: {
         enable_web_search: "off",
         enable_web_scraping: false,
@@ -233939,7 +233942,8 @@ function createTierSnifferModel(input) {
       reasoningEffort: "low",
       reasoningHeadroomTokens: 0,
       timeoutMs: 60000,
-      promptCacheKey: JUDGE_PROMPT_CACHE_KEY
+      promptCacheKey: JUDGE_PROMPT_CACHE_KEY,
+      sampling: JUDGE_SAMPLING
     }));
     return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
   }

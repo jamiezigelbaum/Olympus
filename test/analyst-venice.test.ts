@@ -3,6 +3,7 @@ import { createVeniceAnalystModel } from '../src/core/analyst-venice.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import type { OpenAIAnalystFetch } from '../src/core/analyst-openai.ts';
 import { normalizeVeniceAnalystModelId } from '../src/core/venice-models.ts';
+import { JUDGE_SAMPLING } from '../src/workers/classification/judge-pacing.ts';
 
 const BASE_REQUEST: AnalystModelRequest = {
   system: 'You are an evidence analyst.',
@@ -45,6 +46,20 @@ describe('createVeniceAnalystModel', () => {
       disable_thinking: false,
     });
     expect(completion.modelId).toBe('kimi-k3');
+  });
+
+  test('sends fixed sampling only when asked, so the judge repeats its verdicts', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl: OpenAIAnalystFetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ model: 'kimi-k3', choices: [{ message: { content: '{}' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    await createVeniceAnalystModel({ apiKey: 'venice-test', fetchImpl }).complete(BASE_REQUEST);
+    await createVeniceAnalystModel({ apiKey: 'venice-test', fetchImpl, sampling: JUDGE_SAMPLING }).complete(BASE_REQUEST);
+    expect('temperature' in bodies[0]!).toBe(false);
+    expect('seed' in bodies[0]!).toBe(false);
+    expect(bodies[1]!.temperature).toBe(0);
+    expect(bodies[1]!.seed).toBe(JUDGE_SAMPLING.seed);
   });
 
   test('normalizes owner-facing Venice model labels to provider ids', () => {
