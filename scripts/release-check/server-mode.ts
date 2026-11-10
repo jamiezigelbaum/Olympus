@@ -18,6 +18,14 @@
  *      no key gets 401, and once the key is revoked it is refused (a second key keeps the listener open, so the refusal is the
  *      revoked key's, not a closed port). The keys are kept on the machine and never come back to the harness.
  *
+ * Before any of it, the candidate gets the published, signed Olympus Engine helper, as the site's installer gives it: the release
+ * check installs a local candidate bundle with no helper (the signed, notarized zip is built only on the release Mac), and the
+ * product refuses server mode without one. Inside the VM the leg reads the helper pins from the live installer
+ * (https://olympusplugin.ai/install.sh), downloads that zip from the site's releases, checks its SHA-256 and size, unpacks it with ditto and
+ * runs the candidate's own `olympus engine install-helper --from` with the pinned team id, then needs `engine status` to report the
+ * helper installed and in use. A helper already in use is kept. If the helper cannot be installed, `server-mode.helper` fails with
+ * the reason and the switch and restart are skipped; the second account still runs.
+ *
  * Linux has no server mode: the leg reports one skip there. Every step is a bash script run through the driver's `exec` as the VM's
  * test user (who has passwordless sudo on the Tart image), plus the in-machine agent's `dashboard-json`. Waits take a clock seam so
  * the tests never wait on the real one.
@@ -47,6 +55,11 @@ const ORIGIN = 'http://127.0.0.1:8010';
 /** The second account. Fixed: the machine is thrown away after the run, and a leftover from a retry is removed first. */
 export const SECOND_ACCOUNT = 'rcagent';
 const SECOND_DIR = '$HOME/rc/second-account';
+/** The site's Mac installer: its MACOS_HELPER_* pins name the published, signed helper (scripts/install-macos.sh). */
+export const PUBLISHED_INSTALLER = 'https://olympusplugin.ai/install.sh';
+const RELEASE_BASE = 'https://olympusplugin.ai/releases';
+/** What `engine status` shows once the helper is installed and the engine starts through it (install-macos.sh's own test). */
+export const HELPER_IN_USE = '"helper":{"installed":true,"in_use":true';
 
 export interface ServerModeHost {
   os: 'linux' | 'macos';
@@ -81,6 +94,48 @@ const CONTROL_POST = `control_post() {
   code=$(curl -sS --max-time 60 -o "$out" -w '%{http_code}' -X POST -H "origin: ${ORIGIN}" -H "cookie: $cookie" -H "x-olympus-csrf: $csrf" -H 'content-type: application/json' --data "$2" "${ORIGIN}$1" 2>/dev/null) || code=000
 }
 `;
+
+/**
+ * Gives the installed candidate the published helper, as install-macos.sh does: pins from the live installer, the zip checked
+ * against them, unpacked with ditto, `engine install-helper --from` with the pinned team. Emits `helper.fail` with the reason and
+ * stops at the first thing that goes wrong; a helper already in use is kept (`helper.already 1`).
+ */
+export function helperScript(): string {
+  return marker('helper') + PRELUDE + `support="$HOME/Library/Application Support/Olympus"
+bun="$support/runtime/bun"; cli="$support/app/dist/cli.js"
+fail() { emit helper.fail "$1"; [ -n "\${work:-}" ] && rm -rf "$work"; exit 0; }
+in_use() { "$bun" "$cli" engine status </dev/null 2>/dev/null | tr -d '[:space:]' | grep -Fq '${HELPER_IN_USE}'; }
+[ -x "$bun" ] && [ -f "$cli" ] || fail "Olympus is not installed at $support (no runtime/bun or app/dist/cli.js)"
+if in_use; then emit helper.already 1; exit 0; fi
+work=$(mktemp -d /tmp/rc-helper.XXXXXX) || fail 'a work folder could not be made'
+code=$(curl -sS --proto '=https' --tlsv1.2 --max-time 60 --retry 3 -o "$work/install.sh" -w '%{http_code}' ${PUBLISHED_INSTALLER} 2>/dev/null) || code="\${code:-000}"
+[ "$code" = 200 ] && [ -s "$work/install.sh" ] || fail "${PUBLISHED_INSTALLER} answered $code"
+pin() { sed -n "s/^$1=\\([^[:space:]]*\\)[[:space:]]*$/\\1/p" "$work/install.sh" | head -1; }
+version=$(pin OLYMPUS_VERSION); name=$(pin MACOS_HELPER_NAME); sha=$(pin MACOS_HELPER_SHA256); bytes=$(pin MACOS_HELPER_BYTES); team=$(pin MACOS_HELPER_TEAM_ID)
+[ "$name" = none ] && fail "${PUBLISHED_INSTALLER} (Olympus $version) pins no helper (MACOS_HELPER_NAME=none)"
+printf '%s' "$version" | grep -Eq '^[0-9A-Za-z.+-]+$' || fail "${PUBLISHED_INSTALLER} has no usable OLYMPUS_VERSION ($version)"
+printf '%s' "$name" | grep -Eq '^olympus-engine-helper-[0-9a-f]{16}[.]zip$' || fail "${PUBLISHED_INSTALLER} has no usable MACOS_HELPER_NAME ($name)"
+printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$' || fail "${PUBLISHED_INSTALLER} has no usable MACOS_HELPER_SHA256"
+printf '%s' "$team" | grep -Eq '^[A-Z0-9]{10}$' || fail "${PUBLISHED_INSTALLER} has no usable MACOS_HELPER_TEAM_ID ($team)"
+case "$bytes" in ''|*[!0-9]*|0) fail "${PUBLISHED_INSTALLER} has no usable MACOS_HELPER_BYTES ($bytes)" ;; esac
+emit helper.name "$name"; emit helper.version "$version"; emit helper.team "$team"
+url="${RELEASE_BASE}/$version/$name"
+code=$(curl -sS --proto '=https' --tlsv1.2 --max-time 300 --retry 3 -o "$work/helper.zip" -w '%{http_code}' "$url" 2>/dev/null) || code="\${code:-000}"
+[ "$code" = 200 ] || fail "$url answered $code"
+got_sha=$(shasum -a 256 "$work/helper.zip" | awk '{print $1}'); got_bytes=$(wc -c < "$work/helper.zip" | tr -d ' ')
+[ "$got_sha" = "$sha" ] || fail "$name has SHA-256 $got_sha, not the pinned $sha"
+[ "$got_bytes" = "$bytes" ] || fail "$name is $got_bytes bytes, not the pinned $bytes"
+mkdir "$work/helper"
+ditto -x -k "$work/helper.zip" "$work/helper" && [ -d "$work/helper/Olympus Engine.app" ] || fail "$name did not unpack to Olympus Engine.app (ditto -x -k)"
+OLYMPUS_MACOS_HELPER_TEAM_ID="$team" "$bun" "$cli" engine install-helper --from "$work/helper/Olympus Engine.app" </dev/null > "$work/install.out" 2>&1
+rc=$?
+emit helper.install.code "$rc"
+emit helper.install.out "$(tr -d '\\n\\t' < "$work/install.out" | tail -c 400)"
+if in_use; then emit helper.in_use 1; else emit helper.in_use 0; fi
+rm -rf "$work"
+exit 0
+`;
+}
 
 /** Saves the right as it is, sets it to allow, and checks that osascript's administrator request now runs as root with no dialog. */
 export function standInInstallScript(): string {
@@ -421,6 +476,25 @@ export function switchChecks(enable: boolean, observed: { state?: ServerModeStat
   return out;
 }
 
+/** The helper step's check: installed and in use, or why not. */
+export function helperCheck(lines: Map<string, string[]>, exec: { code: number; stderr: string; timedOut?: boolean }): CheckResult {
+  const title = 'The candidate has the published, signed Olympus Engine helper and the engine starts through it (as install.sh gives it)';
+  const id = 'server-mode.helper';
+  if (first(lines, 'helper.already') === '1') return check(id, title, [], 'a helper was already installed and in use');
+  const problems: string[] = [];
+  const failed = first(lines, 'helper.fail');
+  if (failed) problems.push(failed);
+  else if (exec.timedOut) problems.push('the helper step did not finish in time');
+  else if (!first(lines, 'helper.install.code')) problems.push(`the helper step ended without a result (exit ${exec.code}${exec.stderr.trim() ? `: ${exec.stderr.trim().slice(0, 200)}` : ''})`);
+  else {
+    const code = first(lines, 'helper.install.code');
+    const said = first(lines, 'helper.install.out') ?? '';
+    if (code !== '0') problems.push(`olympus engine install-helper exited ${code}${said ? `: ${said.slice(0, 300)}` : ''}`);
+    if (first(lines, 'helper.in_use') !== '1') problems.push('engine status does not report the helper installed and in use');
+  }
+  return check(id, title, problems, `${first(lines, 'helper.name') ?? 'the helper'} from Olympus ${first(lines, 'helper.version') ?? '?'} (team ${first(lines, 'helper.team') ?? '?'}) installed and in use`);
+}
+
 export interface RestartObservation {
   requested: { ok: boolean; detail: string };
   back: { ok: boolean; detail: string; ms?: number };
@@ -629,7 +703,7 @@ async function runSecondAccount(ctx: LegContext, owner: string): Promise<CheckRe
 }
 
 /**
- * The whole leg: the stand-in, on, a restart while on, off, the second account, the stand-in removed. A step whose
+ * The whole leg: the helper, the stand-in, on, a restart while on, off, the second account, the stand-in removed. A step whose
  * precondition failed is skipped and says why; the failure that caused it is its own check.
  */
 export async function runServerModeLeg(host: ServerModeHost, options: { clock?: ServerModeClock; bounds?: Partial<typeof SERVER_MODE_BOUNDS>; log?: (line: string) => void } = {}): Promise<CheckResult[]> {
@@ -638,6 +712,10 @@ export async function runServerModeLeg(host: ServerModeHost, options: { clock?: 
   const out: CheckResult[] = [];
   const owner = (parseLines((await host.exec(bootScript(), 60_000)).stdout).get('user') ?? [''])[0]!;
   try {
+    const helperRun = await host.exec(helperScript(), 600_000).catch((error: unknown) => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
+    const helper = helperCheck(parseLines(helperRun.stdout), helperRun);
+    out.push(helper);
+    ctx.log(`server-mode helper: ${helper.detail}`);
     const stand = parseLines((await host.exec(standInInstallScript(), 120_000)).stdout);
     const standProblems: string[] = [];
     if (first(stand, 'saved') !== '0') standProblems.push('the administrator right could not be saved first (sudo -n security authorizationdb read)');
@@ -645,7 +723,9 @@ export async function runServerModeLeg(host: ServerModeHost, options: { clock?: 
     if (first(stand, 'uid') !== '0') standProblems.push(`osascript's administrator request answered "${first(stand, 'uid') ?? ''}", not uid 0`);
     out.push(check('server-mode.stand-in', "The stand-in for the administrator's password (osascript runs as root, no dialog) works on the machine", standProblems,
       'osascript ran its administrator request as root'));
-    if (standProblems.length === 0) {
+    if (helper.status !== 'pass') {
+      out.push(skipped('server-mode.switch', 'Server mode on, a restart, and off', `the Olympus Engine helper is not installed: ${helper.detail}`));
+    } else if (standProblems.length === 0) {
       const on = await runSwitch(ctx, true);
       out.push(...on);
       const onFinished = on.find((c) => c.id === 'server-mode.on.finished')?.status === 'pass';
