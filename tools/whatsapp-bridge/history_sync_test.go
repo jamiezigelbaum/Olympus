@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +109,28 @@ func TestHistorySyncNotificationIsKeptForCapture(t *testing.T) {
 	kept := readKeptHistoryNotifications(stateDir, time.Now())
 	if len(kept) != 1 || kept[0].notif.GetDirectPath() != "/v/t62/history" {
 		t.Fatalf("read back %+v", kept)
+	}
+}
+
+// Both capture paths (worker-managed and native) read what pairing kept; the
+// SDK client they need cannot run in a unit test, so this pins the call sites.
+func TestEveryCapturePathDrainsKeptHistory(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, starter := range []string{"func startManualPairing(", "func startNativeCapture("} {
+		body := string(src)
+		start := strings.Index(body, starter)
+		if start < 0 {
+			t.Fatalf("%s not found", starter)
+		}
+		body = body[start:]
+		if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+			body = body[:end+1]
+		}
+		if !strings.Contains(body, "drainKeptHistory(") {
+			t.Errorf("%s does not drain the history pairing kept", starter)
+		}
 	}
 }

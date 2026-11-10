@@ -522,6 +522,8 @@ func startManualPairing(stateDir string, spoolDir string, allowed map[string]str
 		connectWithBackoff(client)
 		// Never put a WhatsApp account identifier into operational logs.
 		log.Print(existingSessionConnectedLogLine())
+		// History the pair-only run kept, now read with the owner's chat choice.
+		go drainKeptHistory(ctx, client, audioStore, writer, allowed, stateDir)
 	}
 	return client, writer, fatalEvents
 }
