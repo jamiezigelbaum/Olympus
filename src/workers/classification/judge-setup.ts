@@ -1,4 +1,4 @@
-import { approveClassifier, isClassifierApproved, readClassificationLedger, revokeClassifier } from '../classification-ledger.ts';
+import { approveClassifier, CLASSIFICATION_LEDGER_OWNER_APPROVAL, isClassifierApproved, readClassificationLedger, revokeClassifier } from '../classification-ledger.ts';
 import { resolveTierSnifferRuntime, type TierSnifferRuntime } from './built-in-sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import { JudgeSpending, judgeCapMicros, judgeChoiceUsesVenice, JUDGE_PRICES, type JudgeChoice, type JudgeObserved } from './judge-spending.ts';
@@ -15,6 +15,30 @@ export async function adoptExistingCloudApproval(spending: JudgeSpending, input:
   if (active.source === 'off' || active.lane.kind !== 'venice') return;
   const { entries } = await readClassificationLedger(ledgerPath);
   if (isClassifierApproved(entries, { lane: active.lane.kind, profileId: active.lane.profileId, modelId: active.lane.modelId, promptVersion })) spending.adoptExistingApproval();
+}
+
+/**
+ * The owner opted in to Venice judging on the judge card; when Olympus then
+ * changes its Venice judge (the default judge model, #1252, or the built-in
+ * prompt), that consent carries to the new exact lane on the same Venice
+ * profile instead of pausing judging behind a fresh approval. It never
+ * carries past a revocation (choosing local revokes), a local choice, a
+ * missing choice record, or to another profile or provider. Returns whether
+ * it recorded an approval.
+ */
+export async function carryCloudJudgeApproval(spending: JudgeSpending, cloud: TierSnifferRuntime, ledgerPath: string, promptVersion: string): Promise<boolean> {
+  if (!spending.hasRecord() || !judgeChoiceUsesVenice(spending.status().choice)) return false;
+  if (cloud.source === 'off' || cloud.lane.kind !== 'venice') return false;
+  const { entries } = await readClassificationLedger(ledgerPath);
+  const lane = cloud.lane;
+  if (isClassifierApproved(entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion })) return false;
+  // The owner's newest word on any Venice judge of this profile must be a yes.
+  const newest = entries.find((entry) => entry.lane === 'venice' && entry.profile_id === lane.profileId
+    && entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL
+    && (entry.kind === 'classifier_model_revoked' || (entry.kind === 'classifier_model_decision' && entry.status === 'complete')));
+  if (!newest || newest.kind !== 'classifier_model_decision') return false;
+  await approveClassifier(ledgerPath, lane, promptVersion, `Carried over from the owner's opt-in to Venice judging (approved ${newest.model_id} with prompt ${newest.prompt_version}): Olympus changed its Venice judge, not the owner's choice.`);
+  return true;
 }
 
 /** The local screen uses the CLI's exact-model approval ledger. Opting out

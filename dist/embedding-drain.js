@@ -7557,473 +7557,6 @@ var init_classification_ledger = __esm(() => {
   init_tier_ledger_path();
 });
 
-// src/core/local-model-policy.ts
-function isCloudForwardingModelId(modelId) {
-  const trimmed = modelId.trim().toLowerCase();
-  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon < 0)
-    return false;
-  const tag = lastSegment.slice(colon + 1);
-  return tag === "cloud" || tag.endsWith("-cloud");
-}
-function assertLocalModelIdNotCloudForwarding(label, modelId) {
-  if (!isCloudForwardingModelId(modelId))
-    return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
-}
-var init_local_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/source-model-policy.ts
-var init_source_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/venice-models.ts
-function normalizeVeniceAnalystModelId(value) {
-  const trimmed = value.trim();
-  if (!trimmed)
-    return trimmed;
-  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
-}
-function venicePrivacyCategoryForModel(value) {
-  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
-}
-async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
-  const resolvedModelId = modelId.trim();
-  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
-  }
-  const category = await resolveCategory(resolvedModelId, signal);
-  if (category !== "private" && category !== "tee") {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
-  }
-}
-var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
-var init_venice_models = __esm(() => {
-  init_operation_error();
-  VENICE_MODEL_ALIASES = Object.freeze({
-    default: "kimi-k3",
-    strong: "kimi-k3",
-    "strong-reasoning": "kimi-k3",
-    reasoning: "kimi-k3",
-    "secure-reasoning": "kimi-k3",
-    kimi: "kimi-k3",
-    "kimi-3": "kimi-k3",
-    "kimi-k-3": "kimi-k3",
-    "kimi-k3": "kimi-k3",
-    normal: "inkling",
-    "normal-reasoning": "inkling",
-    inkling: "inkling",
-    "most-secure": "e2ee-glm-5-2-p",
-    "slower-most-secure": "e2ee-glm-5-2-p",
-    "slow-most-secure": "e2ee-glm-5-2-p",
-    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2-p": "e2ee-glm-5-2-p",
-    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
-    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2": "zai-org-glm-5-2",
-    "fast-reasoning": "inkling",
-    "faster-reasoning": "inkling",
-    "acceptable-reasoning": "inkling",
-    "glm-5-2-fast": "zai-org-glm-5-2",
-    "glm-5-2-acceptable": "zai-org-glm-5-2",
-    "glm-5-1-e2ee": "e2ee-glm-5-1",
-    "glm-5-1-ee2e": "e2ee-glm-5-1",
-    "e2ee-glm-5-1": "e2ee-glm-5-1",
-    "ee2e-glm-5-1": "e2ee-glm-5-1",
-    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
-    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
-    "glm-5-1": "zai-org-glm-5-1",
-    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    vision: "kimi-k3",
-    "secure-vision": "kimi-k3",
-    "most-secure-vision": "kimi-k3",
-    "qwen-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "vision-escalation": "kimi-k3",
-    "private-grok-4-3": "grok-4-3",
-    "grok-4-3-private": "grok-4-3",
-    "grok-4-3-vision": "grok-4-3",
-    multimodal: "kimi-k3",
-    "fast-multimodal": "kimi-k3",
-    "faster-multimodal": "kimi-k3",
-    "acceptable-multimodal": "kimi-k3",
-    "grok-4-3": "grok-4-3",
-    "grok-4-3-multimodal": "grok-4-3",
-    "grok-4-5": "grok-4-5",
-    "grok-4-5-vision": "grok-4-5",
-    "private-grok-4-5": "grok-4-5"
-  });
-  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
-    "kimi-k3": "private",
-    inkling: "private",
-    "e2ee-glm-5-2-p": "e2ee",
-    "zai-org-glm-5-2": "private",
-    "e2ee-glm-5-1": "e2ee",
-    "zai-org-glm-5-1": "private",
-    "e2ee-qwen3-6-35b-a3b": "e2ee",
-    "grok-4-5": "private",
-    "qwen3-vl-235b-a22b": "private",
-    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
-    "grok-4-3": "private",
-    "claude-opus-4-7-fast": "anonymized",
-    "qwen3-6-27b": "private",
-    "tee-qwen3-5-122b-a10b": "tee"
-  });
-});
-
-// src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync14, statSync as statSync7 } from "node:fs";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
-function sovereigntyPolicyPath(env = process.env) {
-  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || defaultSovereigntyConfigPath(env);
-}
-function refreshZkapiPortsFromPolicyFile(env = process.env) {
-  let path;
-  try {
-    path = sovereigntyPolicyPath(env);
-  } catch {
-    policyFile.seen = undefined;
-    policyFile.unreadable = "the sovereignty settings (layout discovery refused)";
-    return;
-  }
-  let stamp;
-  try {
-    const stat2 = statSync7(path);
-    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      policyFile.seen = `${path}:absent`;
-      policyFile.unreadable = undefined;
-    } else {
-      policyFile.seen = undefined;
-      policyFile.unreadable = path;
-    }
-    return;
-  }
-  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
-    return;
-  try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync14(path, "utf8")));
-    for (const port of ports)
-      zkapiDaemonPorts.add(port);
-    policyFile.seen = stamp;
-    policyFile.unreadable = undefined;
-  } catch {
-    policyFile.seen = undefined;
-    policyFile.unreadable = path;
-  }
-}
-function zkapiPortsInPolicy(parsed) {
-  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
-  if (!record)
-    throw new Error("not a policy object");
-  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
-  const profiles = inner.modelProfiles;
-  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
-    throw new Error("policy has no modelProfiles");
-  const ports = [];
-  for (const profile of Object.values(profiles)) {
-    if (!profile || typeof profile !== "object")
-      throw new Error("malformed profile");
-    const entry = profile;
-    if (entry.provider !== "zkapi")
-      continue;
-    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
-    if (port === undefined)
-      throw new Error("zkapi profile without a loopback baseUrl");
-    ports.push(port);
-  }
-  return ports;
-}
-function endpointPort(parsed) {
-  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
-}
-function assertNotZkapiDaemonEndpoint(url, label) {
-  refreshZkapiPortsFromPolicyFile();
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return;
-  const port = endpointPort(parsed);
-  const local = loopbackPort(url) !== undefined;
-  if (local && policyFile.unreadable) {
-    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
-  }
-  if (!zkapiDaemonPorts.has(port))
-    return;
-  if (local) {
-    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-  }
-  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
-    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
-  }
-}
-async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
-  assertNotZkapiDaemonEndpoint(url, label);
-  const unreadable = policyFile.unreadable;
-  if (!unreadable)
-    return;
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return;
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(host))
-    return;
-  const port = endpointPort(parsed);
-  const refuse = () => {
-    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
-  };
-  let addresses;
-  try {
-    addresses = await Promise.race([
-      lookupAll(host),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
-    ]);
-  } catch {
-    return refuse();
-  }
-  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
-    refuse();
-}
-async function defaultLookupAll(hostname) {
-  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
-}
-function refusalSuggestion(reason, policyPath) {
-  if (reason === "policy_unreadable") {
-    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
-  }
-  if (reason === "hostname_on_daemon_port") {
-    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
-  }
-  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
-}
-function isZkapiDaemonEndpointRefusal(error) {
-  return error instanceof ZkapiDaemonEndpointRefusal;
-}
-function loopbackPort(baseUrl) {
-  if (!baseUrl)
-    return;
-  let url;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
-    return;
-  if (url.port)
-    return Number(url.port);
-  return url.protocol === "https:" ? 443 : 80;
-}
-function isLoopbackHost(hostname) {
-  const host = hostname.toLowerCase().replace(/\.$/, "");
-  if (host === "localhost" || host.endsWith(".localhost"))
-    return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (v4)
-    return Number(v4[1]) === 127 || host === "0.0.0.0";
-  if (!host.startsWith("[") || !host.endsWith("]"))
-    return false;
-  const words = ipv6Words(host.slice(1, -1));
-  if (!words)
-    return false;
-  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
-    return true;
-  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
-  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
-}
-function ipv6Words(text2) {
-  let body = text2;
-  const tail = [];
-  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
-  if (dotted) {
-    const bytes = dotted.slice(1).map(Number);
-    if (bytes.some((byte) => byte > 255))
-      return;
-    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
-    body = text2.slice(0, dotted.index);
-    if (!body.endsWith("::"))
-      body = body.replace(/:$/, "");
-  }
-  const halves = body.split("::");
-  if (halves.length > 2)
-    return;
-  const parse2 = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
-  const head = parse2(halves[0] ?? "");
-  const rest = halves.length === 2 ? parse2(halves[1] ?? "") : [];
-  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
-    return;
-  const fill = 8 - head.length - rest.length - tail.length;
-  if (fill < 0 || halves.length === 1 && fill !== 0)
-    return;
-  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
-}
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
-var init_zkapi_consult_settings = __esm(() => {
-  init_owner_config_read();
-  init_operation_error();
-  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
-  DEFAULTS = {
-    tor: "per_consult",
-    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
-    timeoutMs: 6 * 60 * 1000,
-    torBootstrapTimeoutMs: 210 * 1000,
-    daemonReadyTimeoutMs: 120 * 1000,
-    policyWarmTimeoutMs: 180 * 1000,
-    settleTimeoutMs: 300 * 1000,
-    maxResponseBytes: 256 * 1024
-  };
-  INTEGER_BOUNDS = {
-    torSocksPort: [1024, 65535],
-    dailyRequestCap: [1, 1e6],
-    timeoutMs: [30000, 30 * 60000],
-    torBootstrapTimeoutMs: [1e4, 10 * 60000],
-    daemonReadyTimeoutMs: [5000, 10 * 60000],
-    policyWarmTimeoutMs: [5000, 10 * 60000],
-    settleTimeoutMs: [5000, 30 * 60000],
-    maxResponseBytes: [1024, 4 * 1024 * 1024]
-  };
-  SETTINGS_KEYS = new Set([
-    ...Object.keys(INTEGER_BOUNDS),
-    "tor",
-    "fundingDate",
-    "depositUsd",
-    "acknowledgements",
-    "dailySpendCapUsd",
-    "daemonExecutable",
-    "torExecutable"
-  ]);
-  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
-  policyFile = { seen: undefined, unreadable: undefined };
-  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
-    reason;
-    constructor(reason, message2, policyPath) {
-      super("config_error", message2, refusalSuggestion(reason, policyPath));
-      this.name = "ZkapiDaemonEndpointRefusal";
-      this.reason = reason;
-    }
-  };
-});
-
-// src/core/sovereignty.ts
-function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
-  const modelId = normalizeVeniceAnalystModelId(rawModelId);
-  if (modelId.toLowerCase().startsWith("e2ee-")) {
-    throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
-  }
-}
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_PRESETS, SecureAnalystPoolE2EEGateError;
-var init_sovereignty = __esm(() => {
-  init_owner_config_read();
-  init_owner_config_read();
-  init_atomic_file();
-  init_file_lease();
-  init_operation_error();
-  init_local_model_policy();
-  init_config();
-  init_secret_store();
-  init_source_model_policy();
-  init_venice_models();
-  init_manifest();
-  init_zkapi_consult_settings();
-  init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
-  SOVEREIGNTY_PRESETS = ["local-first", "local-only", "private-cloud-only", "no-sensitive"];
-  SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
-    profileId;
-    modelId;
-    constructor(profileId, modelId) {
-      super("source_index_policy_violation", `Secure analyst pool profile "${profileId}" uses gated E2EE model "${modelId}".`, "E2EE secure-pool dispatch remains unavailable until Olympus has local key handling; use a catalog-approved non-E2EE Venice Private/TEE model.");
-      this.name = "SecureAnalystPoolE2EEGateError";
-      this.profileId = profileId;
-      this.modelId = modelId;
-    }
-  };
-});
-
-// src/workers/classification/sniffer-lane.ts
-function assertSnifferProfileAllowed(profileId, profile) {
-  if (profile.trust === "standard_cloud")
-    throw new SnifferLaneRefusedError("standard_cloud", profileId);
-  if (profile.provider === "local-openai-compatible" && profile.trust === "local") {
-    assertLocalModelIdNotCloudForwarding(`Privacy sniffer profile "${profileId}"`, profile.model);
-    return "local";
-  }
-  if (profile.provider === "built-in" && profile.trust === "local" && profileId === "built_in" && profile.purpose === "classification")
-    return "local";
-  if (profile.provider === "venice" && profile.trust === "encrypted_cloud") {
-    assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
-    return "venice";
-  }
-  throw new SnifferLaneRefusedError("unsupported_provider", profileId);
-}
-var SnifferLaneRefusedError;
-var init_sniffer_lane = __esm(() => {
-  init_operation_error();
-  init_local_model_policy();
-  init_sovereignty();
-  SnifferLaneRefusedError = class SnifferLaneRefusedError extends OperationError {
-    reason;
-    profileId;
-    constructor(reason, profileId) {
-      super("source_index_policy_violation", reason === "standard_cloud" ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.` : reason === "unsupported_provider" ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.` : reason === "outside_private_policy" ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.` : "No private model lane is configured for the privacy sniffer.", 'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.');
-      this.name = "SnifferLaneRefusedError";
-      this.reason = reason;
-      this.profileId = profileId;
-    }
-  };
-});
-
-// src/workers/classification/built-in-sniffer.ts
-var BUILT_IN_SNIFFER_PROFILE_ID = "built_in", BUILT_IN_SNIFFER_LANE;
-var init_built_in_sniffer = __esm(() => {
-  init_sniffer_lane();
-  BUILT_IN_SNIFFER_LANE = Object.freeze({
-    kind: "local",
-    modelId: BUILT_IN_SNIFFER_PROFILE_ID,
-    profileId: BUILT_IN_SNIFFER_PROFILE_ID,
-    profile: Object.freeze({ provider: "built-in", trust: "local", model: BUILT_IN_SNIFFER_PROFILE_ID, purpose: "classification" })
-  });
-});
-
 // node_modules/entities/dist/esm/decode-codepoint.js
 function replaceCodePoint(codePoint) {
   var _a2;
@@ -11565,6 +11098,125 @@ var init_sniffer = __esm(() => {
   };
 });
 
+// src/core/venice-models.ts
+function normalizeVeniceAnalystModelId(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    return trimmed;
+  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
+}
+function venicePrivacyCategoryForModel(value) {
+  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
+}
+async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
+  const resolvedModelId = modelId.trim();
+  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
+  }
+  const category = await resolveCategory(resolvedModelId, signal);
+  if (category !== "private" && category !== "tee") {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
+  }
+}
+var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
+var init_venice_models = __esm(() => {
+  init_operation_error();
+  VENICE_MODEL_ALIASES = Object.freeze({
+    default: "kimi-k3",
+    strong: "kimi-k3",
+    "strong-reasoning": "kimi-k3",
+    reasoning: "kimi-k3",
+    "secure-reasoning": "kimi-k3",
+    kimi: "kimi-k3",
+    "kimi-3": "kimi-k3",
+    "kimi-k-3": "kimi-k3",
+    "kimi-k3": "kimi-k3",
+    normal: "inkling",
+    "normal-reasoning": "inkling",
+    inkling: "inkling",
+    "most-secure": "e2ee-glm-5-2-p",
+    "slower-most-secure": "e2ee-glm-5-2-p",
+    "slow-most-secure": "e2ee-glm-5-2-p",
+    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2-p": "e2ee-glm-5-2-p",
+    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
+    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2": "zai-org-glm-5-2",
+    "fast-reasoning": "inkling",
+    "faster-reasoning": "inkling",
+    "acceptable-reasoning": "inkling",
+    "glm-5-2-fast": "zai-org-glm-5-2",
+    "glm-5-2-acceptable": "zai-org-glm-5-2",
+    "glm-5-1-e2ee": "e2ee-glm-5-1",
+    "glm-5-1-ee2e": "e2ee-glm-5-1",
+    "e2ee-glm-5-1": "e2ee-glm-5-1",
+    "ee2e-glm-5-1": "e2ee-glm-5-1",
+    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
+    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
+    "glm-5-1": "zai-org-glm-5-1",
+    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    vision: "kimi-k3",
+    "secure-vision": "kimi-k3",
+    "most-secure-vision": "kimi-k3",
+    "qwen-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "vision-escalation": "kimi-k3",
+    "private-grok-4-3": "grok-4-3",
+    "grok-4-3-private": "grok-4-3",
+    "grok-4-3-vision": "grok-4-3",
+    multimodal: "kimi-k3",
+    "fast-multimodal": "kimi-k3",
+    "faster-multimodal": "kimi-k3",
+    "acceptable-multimodal": "kimi-k3",
+    "grok-4-3": "grok-4-3",
+    "grok-4-3-multimodal": "grok-4-3",
+    "grok-4-5": "grok-4-5",
+    "grok-4-5-vision": "grok-4-5",
+    "private-grok-4-5": "grok-4-5"
+  });
+  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
+    "kimi-k3": "private",
+    "deepseek-v4-flash-0731": "private",
+    inkling: "private",
+    "e2ee-glm-5-2-p": "e2ee",
+    "zai-org-glm-5-2": "private",
+    "e2ee-glm-5-1": "e2ee",
+    "zai-org-glm-5-1": "private",
+    "e2ee-qwen3-6-35b-a3b": "e2ee",
+    "grok-4-5": "private",
+    "qwen3-vl-235b-a22b": "private",
+    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
+    "grok-4-3": "private",
+    "claude-opus-4-7-fast": "anonymized",
+    "qwen3-6-27b": "private",
+    "tee-qwen3-5-122b-a10b": "tee"
+  });
+});
+
 // src/workers/classification/judge-spending.ts
 var JUDGE_PRICES;
 var init_judge_spending = __esm(() => {
@@ -11575,11 +11227,362 @@ var init_judge_spending = __esm(() => {
   init_venice_models();
   init_sniffer();
   JUDGE_PRICES = Object.freeze({
+    "deepseek-v4-flash-0731": { input: 0.13, output: 0.26 },
     "qwen3-6-35b-a3b": { input: 0.1, output: 1 },
     "kimi-k3": { input: 3.75, output: 18.75 },
     "zai-org-glm-5-2": { input: 1.4, output: 4.4 },
     "grok-4-3": { input: 1.42, output: 2.83 },
     "grok-4-5": { input: 2.27, output: 6.8 }
+  });
+});
+
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/source-model-policy.ts
+var init_source_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/zkapi-consult-settings.ts
+import { readFileSync as readFileSync14, statSync as statSync7 } from "node:fs";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+function sovereigntyPolicyPath(env = process.env) {
+  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || defaultSovereigntyConfigPath(env);
+}
+function refreshZkapiPortsFromPolicyFile(env = process.env) {
+  let path;
+  try {
+    path = sovereigntyPolicyPath(env);
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = "the sovereignty settings (layout discovery refused)";
+    return;
+  }
+  let stamp;
+  try {
+    const stat2 = statSync7(path);
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
+    return;
+  }
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
+    return;
+  try {
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync14(path, "utf8")));
+    for (const port of ports)
+      zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
+  }
+}
+function zkapiPortsInPolicy(parsed) {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  if (!record)
+    throw new Error("not a policy object");
+  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
+    throw new Error("policy has no modelProfiles");
+  const ports = [];
+  for (const profile of Object.values(profiles)) {
+    if (!profile || typeof profile !== "object")
+      throw new Error("malformed profile");
+    const entry = profile;
+    if (entry.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
+    if (port === undefined)
+      throw new Error("zkapi profile without a loopback baseUrl");
+    ports.push(port);
+  }
+  return ports;
+}
+function endpointPort(parsed) {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+}
+function assertNotZkapiDaemonEndpoint(url, label) {
+  refreshZkapiPortsFromPolicyFile();
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
+  if (!zkapiDaemonPorts.has(port))
+    return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable)
+    return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host))
+    return;
+  const port = endpointPort(parsed);
+  const refuse = () => {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
+  let addresses;
+  try {
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
+    ]);
+  } catch {
+    return refuse();
+  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
+    refuse();
+}
+async function defaultLookupAll(hostname) {
+  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
+}
+function refusalSuggestion(reason, policyPath) {
+  if (reason === "policy_unreadable") {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === "hostname_on_daemon_port") {
+    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
+  }
+  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
+}
+function isZkapiDaemonEndpointRefusal(error) {
+  return error instanceof ZkapiDaemonEndpointRefusal;
+}
+function loopbackPort(baseUrl) {
+  if (!baseUrl)
+    return;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
+    return;
+  if (url.port)
+    return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
+}
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost"))
+    return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4)
+    return Number(v4[1]) === 127 || host === "0.0.0.0";
+  if (!host.startsWith("[") || !host.endsWith("]"))
+    return false;
+  const words = ipv6Words(host.slice(1, -1));
+  if (!words)
+    return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
+    return true;
+  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
+  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
+}
+function ipv6Words(text2) {
+  let body = text2;
+  const tail = [];
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
+  if (dotted) {
+    const bytes = dotted.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255))
+      return;
+    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+    body = text2.slice(0, dotted.index);
+    if (!body.endsWith("::"))
+      body = body.replace(/:$/, "");
+  }
+  const halves = body.split("::");
+  if (halves.length > 2)
+    return;
+  const parse2 = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
+  const head = parse2(halves[0] ?? "");
+  const rest = halves.length === 2 ? parse2(halves[1] ?? "") : [];
+  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
+    return;
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || halves.length === 1 && fill !== 0)
+    return;
+  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
+}
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var init_zkapi_consult_settings = __esm(() => {
+  init_owner_config_read();
+  init_operation_error();
+  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
+  DEFAULTS = {
+    tor: "per_consult",
+    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
+    timeoutMs: 6 * 60 * 1000,
+    torBootstrapTimeoutMs: 210 * 1000,
+    daemonReadyTimeoutMs: 120 * 1000,
+    policyWarmTimeoutMs: 180 * 1000,
+    settleTimeoutMs: 300 * 1000,
+    maxResponseBytes: 256 * 1024
+  };
+  INTEGER_BOUNDS = {
+    torSocksPort: [1024, 65535],
+    dailyRequestCap: [1, 1e6],
+    timeoutMs: [30000, 30 * 60000],
+    torBootstrapTimeoutMs: [1e4, 10 * 60000],
+    daemonReadyTimeoutMs: [5000, 10 * 60000],
+    policyWarmTimeoutMs: [5000, 10 * 60000],
+    settleTimeoutMs: [5000, 30 * 60000],
+    maxResponseBytes: [1024, 4 * 1024 * 1024]
+  };
+  SETTINGS_KEYS = new Set([
+    ...Object.keys(INTEGER_BOUNDS),
+    "tor",
+    "fundingDate",
+    "depositUsd",
+    "acknowledgements",
+    "dailySpendCapUsd",
+    "daemonExecutable",
+    "torExecutable"
+  ]);
+  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  policyFile = { seen: undefined, unreadable: undefined };
+  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
+    reason;
+    constructor(reason, message2, policyPath) {
+      super("config_error", message2, refusalSuggestion(reason, policyPath));
+      this.name = "ZkapiDaemonEndpointRefusal";
+      this.reason = reason;
+    }
+  };
+});
+
+// src/core/sovereignty.ts
+function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
+  const modelId = normalizeVeniceAnalystModelId(rawModelId);
+  if (modelId.toLowerCase().startsWith("e2ee-")) {
+    throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
+  }
+}
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_PRESETS, SecureAnalystPoolE2EEGateError;
+var init_sovereignty = __esm(() => {
+  init_owner_config_read();
+  init_owner_config_read();
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  init_local_model_policy();
+  init_config();
+  init_secret_store();
+  init_source_model_policy();
+  init_venice_models();
+  init_manifest();
+  init_zkapi_consult_settings();
+  init_source_model_policy();
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
+  SOVEREIGNTY_PRESETS = ["local-first", "local-only", "private-cloud-only", "no-sensitive"];
+  SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
+    profileId;
+    modelId;
+    constructor(profileId, modelId) {
+      super("source_index_policy_violation", `Secure analyst pool profile "${profileId}" uses gated E2EE model "${modelId}".`, "E2EE secure-pool dispatch remains unavailable until Olympus has local key handling; use a catalog-approved non-E2EE Venice Private/TEE model.");
+      this.name = "SecureAnalystPoolE2EEGateError";
+      this.profileId = profileId;
+      this.modelId = modelId;
+    }
+  };
+});
+
+// src/workers/classification/sniffer-lane.ts
+function assertSnifferProfileAllowed(profileId, profile) {
+  if (profile.trust === "standard_cloud")
+    throw new SnifferLaneRefusedError("standard_cloud", profileId);
+  if (profile.provider === "local-openai-compatible" && profile.trust === "local") {
+    assertLocalModelIdNotCloudForwarding(`Privacy sniffer profile "${profileId}"`, profile.model);
+    return "local";
+  }
+  if (profile.provider === "built-in" && profile.trust === "local" && profileId === "built_in" && profile.purpose === "classification")
+    return "local";
+  if (profile.provider === "venice" && profile.trust === "encrypted_cloud") {
+    assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
+    return "venice";
+  }
+  throw new SnifferLaneRefusedError("unsupported_provider", profileId);
+}
+var SnifferLaneRefusedError;
+var init_sniffer_lane = __esm(() => {
+  init_operation_error();
+  init_local_model_policy();
+  init_sovereignty();
+  SnifferLaneRefusedError = class SnifferLaneRefusedError extends OperationError {
+    reason;
+    profileId;
+    constructor(reason, profileId) {
+      super("source_index_policy_violation", reason === "standard_cloud" ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.` : reason === "unsupported_provider" ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.` : reason === "outside_private_policy" ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.` : "No private model lane is configured for the privacy sniffer.", 'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.');
+      this.name = "SnifferLaneRefusedError";
+      this.reason = reason;
+      this.profileId = profileId;
+    }
+  };
+});
+
+// src/workers/classification/built-in-sniffer.ts
+var BUILT_IN_SNIFFER_PROFILE_ID = "built_in", BUILT_IN_SNIFFER_LANE;
+var init_built_in_sniffer = __esm(() => {
+  init_judge_spending();
+  init_sniffer_lane();
+  BUILT_IN_SNIFFER_LANE = Object.freeze({
+    kind: "local",
+    modelId: BUILT_IN_SNIFFER_PROFILE_ID,
+    profileId: BUILT_IN_SNIFFER_PROFILE_ID,
+    profile: Object.freeze({ provider: "built-in", trust: "local", model: BUILT_IN_SNIFFER_PROFILE_ID, purpose: "classification" })
   });
 });
 
@@ -22301,6 +22304,7 @@ function validateConnectorStoreV6Schema(db) {
 }
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -22365,6 +22369,8 @@ function validateConnectorStoreFtsOwnership(db, versionLabel) {
   if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error("Connector store schema FTS row ownership map is incomplete.");
   }
+}
+function validateConnectorStoreForeignKeys(db) {
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
   if (foreignKeyErrors.length > 0) {
     throw new Error("Connector store schema has broken foreign-key references after migration.");
@@ -22797,13 +22803,13 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_store_write_guard();
   init_job_names();
@@ -22837,6 +22843,7 @@ var init_local_index = __esm(() => {
   init_manifest();
   init_media_judge();
   init_types();
+  CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -28997,6 +29004,7 @@ var init_local_index = __esm(() => {
       const bestByItem = new Map;
       let dimensionMismatches = 0;
       let afterChunkPk = 0;
+      let pagesScanned = 0;
       try {
         if (ownsScanDb) {
           scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
@@ -29041,7 +29049,8 @@ var init_local_index = __esm(() => {
           afterChunkPk = page.at(-1).chunkPk;
           if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
             break;
-          await yieldConnectorStoreVectorScan();
+          if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+            await yieldConnectorStoreVectorScan();
         }
       } finally {
         try {
@@ -29210,6 +29219,7 @@ var init_local_index = __esm(() => {
       }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
     closedForPoolReads = false;
+    conceptCountMemo;
     readHere(steps) {
       let step = steps.next();
       while (!step.done) {
@@ -29395,14 +29405,34 @@ var init_local_index = __esm(() => {
       return alternatives.join(" OR ");
     }
     *conceptWeightsSteps(groups, exact) {
-      const items = (yield { mode: "get", sql: "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", params: [] }).count;
+      const memo = this.conceptCountMemo ??= new Map;
+      const remembered = (key2) => {
+        const entry = memo.get(key2);
+        return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+      };
+      const remember = (key2, count) => {
+        if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT)
+          memo.clear();
+        memo.set(key2, { count, at: Date.now() });
+      };
+      const POPULATION = "\x00items";
+      let items = remembered(POPULATION);
+      if (items === undefined) {
+        items = (yield { mode: "get", sql: "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", params: [] }).count;
+        remember(POPULATION, items);
+      }
       const counts = [];
       for (const group of groups) {
-        const { count } = yield {
-          mode: "get",
-          sql: "SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?",
-          params: [sourceIndexFtsGroupQuery(group, exact)]
-        };
+        const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+        let count = remembered(groupQuery);
+        if (count === undefined) {
+          count = (yield {
+            mode: "get",
+            sql: "SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?",
+            params: [groupQuery]
+          }).count;
+          remember(groupQuery, count);
+        }
         counts.push(count);
       }
       const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));

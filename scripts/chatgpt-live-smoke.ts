@@ -78,6 +78,12 @@ export interface SmokeOptions {
   engine: string;
   origin: string;
   stateFile: string;
+  /**
+   * The owner's dashboard control session cookie, sent with the approval:
+   * where no owner socket carries the request (a Mac), a loopback approval
+   * also needs this owner proof (#1186).
+   */
+  ownerCookie?: string;
 }
 
 export function parseSmokeArgs(argv: readonly string[], home = homedir()): SmokeOptions {
@@ -449,7 +455,7 @@ async function registerSmokeClient(engine: string, stateFile: string): Promise<S
  * relay-mode approval path), PKCE code exchange at the public token endpoint.
  * The caller revokes it when done; the access token also expires in an hour.
  */
-export async function obtainSmokeGrant(options: Pick<SmokeOptions, 'engine' | 'relay' | 'stateFile'>): Promise<SmokeGrant> {
+export async function obtainSmokeGrant(options: Pick<SmokeOptions, 'engine' | 'relay' | 'stateFile' | 'ownerCookie'>): Promise<SmokeGrant> {
   const metadata = await (await fetch(`${options.relay}/.well-known/oauth-protected-resource/mcp`)).json() as { resource?: string };
   const asMeta = await (await fetch(`${options.relay}/.well-known/oauth-authorization-server`)).json() as Record<string, string>;
   const resource = metadata.resource;
@@ -484,14 +490,16 @@ export async function obtainSmokeGrant(options: Pick<SmokeOptions, 'engine' | 'r
   const cookie = (page.headers.getSetCookie?.() ?? [page.headers.get('set-cookie') ?? ''])
     .map((line) => line.split(';')[0]!.trim())
     .find((pair) => requestId !== undefined && pair.startsWith(`olympus_consent_${requestId}=`));
+  // Where the page's form posts: on a Mac, /dashboard/connect/authorize, so the owner's session cookie rides along (#1186).
+  const action = /<form method="post" action="(\/[^"?]*)">/.exec(html)?.[1] ?? '/connect/authorize';
   if (!requestId || !csrf || !cookie) throw new Error('the loopback approval page was not the expected form');
 
   const approve = form({ request_id: requestId, csrf, action: 'approve' });
-  const approved = await fetch(`${options.engine}/connect/authorize`, {
+  const approved = await fetch(`${options.engine}${action}`, {
     method: 'POST',
     redirect: 'manual',
     // The consent page accepts approval only as a same-origin form navigation.
-    headers: { ...approve.headers, cookie, origin: options.engine, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' },
+    headers: { ...approve.headers, cookie: [cookie, options.ownerCookie].filter(Boolean).join('; '), origin: options.engine, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' },
     body: approve.body,
   });
   const location = approved.headers.get('location');

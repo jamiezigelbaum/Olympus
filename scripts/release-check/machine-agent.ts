@@ -618,6 +618,18 @@ interface SmokeQuestionIn { id: string; text: string; kind?: string }
 const PRIVATE_WARMUP_S = 300;
 const PRIVATE_WARMUP_POLL_S = 15;
 
+/** The owner's dashboard control session cookie for `origin`, minted with the worker bearer. */
+async function smokeOwnerCookie(origin: string): Promise<string> {
+  const mint = await fetch(`${origin}/dashboard/control/session`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${workerBearer()}`, origin, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  if (mint.status !== 200) throw new Error(`dashboard control session answered ${mint.status}`);
+  await mint.body?.cancel();
+  return (mint.headers.getSetCookie?.() ?? []).map((line) => line.split(';')[0]).join('; ');
+}
+
 async function smoke(questionsFile: string): Promise<never> {
   const config = readConfig();
   const questions = JSON.parse(readFileSync(questionsFile, 'utf8')) as SmokeQuestionIn[];
@@ -632,15 +644,20 @@ async function smoke(questionsFile: string): Promise<never> {
   const startedAt = Date.now();
   /** What each Private question looked like on each attempt: panel state and which fixed note, never text. */
   const attempts: Record<string, Array<{ panelState: string | null; noteKind: string | null; atS: number }>> = {};
+  const engine = `http://127.0.0.1:${config.enginePort}`;
+  // The owner approves the smoke client as the owner does: with the dashboard session open, which on a Mac is the
+  // approval's owner proof (#1186). Minted once, for the approval page's own origin.
+  const ownerCookie = await smokeOwnerCookie(engine).catch(() => undefined);
   const ask = async (batch: SmokeQuestionIn[]): Promise<number> => await runSmoke({
     questions: batch.map((q) => ({ question: q.text, detail: 'summary' as const })),
     quiet: true,
     expectPrivate: false,
     dashboard: false,
     relay: config.relay,
-    engine: `http://127.0.0.1:${config.enginePort}`,
+    engine,
     origin: desktopSandboxOrigin(),
     stateFile: join(WORKDIR, 'smoke-client.json'),
+    ...(ownerCookie ? { ownerCookie } : {}),
   }, {
     onTools: (names) => { tools = [...names]; },
     onQuestion: (obs) => {
