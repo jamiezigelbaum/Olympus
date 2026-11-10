@@ -14,6 +14,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import type { SourceEmbeddingInput } from '../src/workers/source-index/embeddings.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import { fixtureConnector, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -46,7 +47,9 @@ test('the vector lane starts while the keyword lane is still searching', async (
   const search = store.searchItemsDetailedOffThread;
   store.searchItemsDetailedOffThread = async function (...args: Parameters<typeof search>) {
     events.push('keyword:start');
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Hold the keyword search until the vector lane has started; run one
+    // after the other, it never does, and the wait gives up.
+    await waitFor(() => events.includes('vector:start'), { timeoutMs: 2_000 }).catch(() => undefined);
     const result = await search.apply(store, args);
     events.push('keyword:end');
     return result;
