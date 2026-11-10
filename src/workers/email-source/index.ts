@@ -589,6 +589,12 @@ export interface EmailSourceWorkerOptions {
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
     systemReport?: () => SystemSupportFacts;
+    /**
+     * The setup checklist (#1077, core/setup-checklist.ts), built from the
+     * dashboard view and the facts beside it. For `olympus setup status` and
+     * the agent tool, through the `setup-status` CLI route. Names and states only.
+     */
+    setupStatus?: () => Promise<import('../../core/setup-checklist.ts').SetupChecklist>;
     judgeSetup?: {
       status: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
@@ -1264,6 +1270,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'tier': return json(await tierForCli(body));
               case 'pairing-placement': return json(pairingPlacementForCli(body));
               case 'pairing-account': return json(pairingAccountForCli(body));
+              case 'setup-status': {
+                if (!sourceDashboard?.setupStatus) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no setup checklist to show.');
+                return json(await sourceDashboard.setupStatus());
+              }
               case 'settings-propose': {
                 if (!settingsProposal) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to change.');
                 try {
