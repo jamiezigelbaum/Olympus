@@ -255,38 +255,51 @@ export class FileSourceScopeAuthority {
   }
 }
 
-/** The one store call a restored store's carry-over needs (LocalConnectorStore). */
+/** What a restored store's carry-over needs of a store (LocalConnectorStore). */
 export interface RestoredScopeStore {
+  restoredScopeGenerations(provider: string, providerAccountId: string): string[] | undefined;
   rebindRestoredSourceScope(input: { provider: string; accountGeneration: string; revision: string; providerAccountId: string }): number;
+}
+
+/** What it needs of the secret locations beside a tier set's stores (SecretLocationsIndex). */
+export interface RestoredScopeSecrets {
+  rebindScopeGenerations(input: { provider: string; fromGenerations: readonly string[]; accountGeneration: string; revision: string }): number;
 }
 
 /**
  * Once the owner has approved folders for a source restored from a backup,
- * carries the restored items over to that approval (each store's
- * `rebindRestoredSourceScope`), so they are read without waiting for a
- * traversal to list them again. Only for a source bound to a provider
- * account, only for an approval of the account the backup's items came from
- * (each store compares it with the one the restore recorded), and never
- * around the folders: the approval's folder filters still apply to every
- * read. Returns how many items were carried over.
+ * carries the restored items over to that approval, so they are read without
+ * waiting for a traversal to list them again: first the secret locations
+ * beside each tier set's stores, then the stores themselves, whose
+ * restore record goes with it (so a failure part way is retried at the next
+ * approval). Only for a source bound to a provider account, only for an
+ * approval of the account the backup's items came from (each store compares
+ * it with the one the restore recorded), and never around the folders: the
+ * approval's folder filters still apply to every read. Returns how many
+ * items and locations were carried over.
  */
 export function rebindRestoredFileScope(input: {
   approval: FileSourceScopeApprovalSnapshot;
   providerAccountId: string | undefined;
-  stores: Iterable<RestoredScopeStore>;
+  sets: Iterable<{ stores: readonly RestoredScopeStore[]; secretLocations?: RestoredScopeSecrets }>;
 }): number {
   const { approval, providerAccountId } = input;
   if (approval.status !== 'approved' || !approval.accountGeneration || !providerAccountId) return 0;
   const definition = getFileScopeSource(approval.sourceId);
   if (!definition || definition.account !== 'provider_account') return 0;
+  const target = { provider: definition.provider, accountGeneration: approval.accountGeneration, revision: approval.revision };
   let carried = 0;
-  for (const store of new Set(input.stores)) {
-    carried += store.rebindRestoredSourceScope({
-      provider: definition.provider,
-      accountGeneration: approval.accountGeneration,
-      revision: approval.revision,
-      providerAccountId,
-    });
+  const seenStores = new Set<RestoredScopeStore>();
+  const seenSecrets = new Set<RestoredScopeSecrets>();
+  for (const set of input.sets) {
+    const stores = set.stores.filter((store) => !seenStores.has(store));
+    for (const store of stores) seenStores.add(store);
+    const fromGenerations = [...new Set(stores.flatMap((store) => store.restoredScopeGenerations(definition.provider, providerAccountId) ?? []))];
+    if (set.secretLocations && !seenSecrets.has(set.secretLocations) && fromGenerations.length > 0) {
+      seenSecrets.add(set.secretLocations);
+      carried += set.secretLocations.rebindScopeGenerations({ ...target, fromGenerations });
+    }
+    for (const store of stores) carried += store.rebindRestoredSourceScope({ ...target, providerAccountId });
   }
   return carried;
 }

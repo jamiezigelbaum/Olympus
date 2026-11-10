@@ -16,6 +16,8 @@ import {
   type FileSourceScopeApprovalSnapshot,
 } from '../src/core/source-scope-approval.ts';
 import { exportOlympusData, lifecycleHandleRegistryPath } from '../src/data-lifecycle.ts';
+import { SecretLocationsIndex, secretLocationWithinScope } from '../src/workers/classification/secret-locations.ts';
+import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { restoreOlympusData } from '../src/data-restore.ts';
 import {
   LocalConnectorStore,
@@ -59,6 +61,19 @@ function file(id: string, path: string, text: string): RawItem {
   };
 }
 
+const SECRETS = [['id:s1', '/work/keys.txt'], ['id:s2', '/home/keys.txt']] as const;
+
+/** The Secrets whose location a read under `approval` may name. */
+function visibleSecrets(index: SecretLocationsIndex, approval: FileSourceScopeApprovalSnapshot): string[] {
+  const scope = fileSourceScopeContentFilters(approval);
+  if (!scope.allowed) return [];
+  return SECRETS
+    .map(([id]) => index.get({ provider: 'dropbox', accountScope: 'personal', providerItemId: id })!)
+    .filter((location) => secretLocationWithinScope(location, { accountScope: 'personal', ...(scope.filters ? { filters: scope.filters } : {}) }))
+    .map((location) => location.locator ?? '')
+    .sort();
+}
+
 const ITEMS = [file('1', '/work/plan.txt', 'quarterly plan'), file('2', '/home/notes.txt', 'quarterly notes')];
 
 const connector: SourceConnector = {
@@ -74,13 +89,25 @@ async function backUpAndRestore(dir: string, accountId: string): Promise<string>
   const homeB = join(dir, 'b');
   const backup = join(dir, 'backup');
   const store = new LocalConnectorStore({ dbPath: storeOf(homeA), corpusId: CORPUS, family: 'file', trustDomain: 'secure_local' });
+  const secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(storeOf(homeA)) });
   try {
     await store.syncFromConnector(connector, {
       fetchContent: true,
       sourceScopeObservation: () => ({ accountGeneration: OLD_GENERATION, scopeRevision: OLD_REVISION }),
     });
+    // Two Secrets, kept only as where they are: one in each folder.
+    for (const [id, locator] of SECRETS) {
+      secrets.record({
+        identity: { provider: 'dropbox', accountScope: 'personal', providerItemId: id },
+        locator,
+        scopeGeneration: OLD_GENERATION,
+        scopeRevision: OLD_REVISION,
+        findingKinds: ['api_key'],
+      });
+    }
   } finally {
     store.close();
+    secrets.close();
   }
   updateSourceAccountBinding(sourceAccountBindingsPath(lifecycleHandleRegistryPath({ homeDir: homeA })), 'dropbox.files', () => ({
     provider_account_id: accountId,
@@ -135,12 +162,12 @@ describe('restored folder scope', () => {
         expect(same.accountGeneration).not.toBe(OLD_GENERATION);
         // Before the carry-over, the restored items carry the old computer's stamp.
         expect(await visible(store, same)).toEqual([]);
-        expect(rebindRestoredFileScope({ approval: same, providerAccountId: 'account-1', stores: [store] })).toBe(2);
+        expect(rebindRestoredFileScope({ approval: same, providerAccountId: 'account-1', sets: [{ stores: [store] }] })).toBe(2);
         expect(await visible(store, same)).toEqual(['notes.txt', 'plan.txt']);
         // Once only: the record is gone, and a second approval is like any re-approval.
-        expect(rebindRestoredFileScope({ approval: same, providerAccountId: 'account-1', stores: [store] })).toBe(0);
+        expect(rebindRestoredFileScope({ approval: same, providerAccountId: 'account-1', sets: [{ stores: [store] }] })).toBe(0);
         const narrower = approve(statePath, 'account-1', ['/work']);
-        rebindRestoredFileScope({ approval: narrower, providerAccountId: 'account-1', stores: [store] });
+        rebindRestoredFileScope({ approval: narrower, providerAccountId: 'account-1', sets: [{ stores: [store] }] });
         expect(await visible(store, narrower)).not.toContain('notes.txt');
       } finally {
         store.close();
@@ -157,10 +184,33 @@ describe('restored folder scope', () => {
       const store = new LocalConnectorStore({ dbPath: storePath, corpusId: CORPUS, family: 'file', trustDomain: 'secure_local' });
       try {
         const narrower = approve(join(dir, 'scopes.json'), 'account-1', ['/work']);
-        rebindRestoredFileScope({ approval: narrower, providerAccountId: 'account-1', stores: [store] });
+        rebindRestoredFileScope({ approval: narrower, providerAccountId: 'account-1', sets: [{ stores: [store] }] });
         expect(await visible(store, narrower)).toEqual(['plan.txt']);
       } finally {
         store.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('the Secrets\' locations beside the store are carried over too, under the approved folders', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-scope-secrets-'));
+    try {
+      const storePath = await backUpAndRestore(dir, 'account-1');
+      const store = new LocalConnectorStore({ dbPath: storePath, corpusId: CORPUS, family: 'file', trustDomain: 'secure_local' });
+      const secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(storePath) });
+      try {
+        const narrower = approve(join(dir, 'scopes.json'), 'account-1', ['/work']);
+        expect(visibleSecrets(secrets, narrower)).toEqual([]);
+        rebindRestoredFileScope({ approval: narrower, providerAccountId: 'account-1', sets: [{ stores: [store], secretLocations: secrets }] });
+        expect(visibleSecrets(secrets, narrower)).toEqual(['/work/keys.txt']);
+        // Another account's approval carries none over.
+        const other = approve(join(dir, 'other.json'), 'account-2', ['/work', '/home']);
+        expect(rebindRestoredFileScope({ approval: other, providerAccountId: 'account-2', sets: [{ stores: [store], secretLocations: secrets }] })).toBe(0);
+      } finally {
+        store.close();
+        secrets.close();
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -174,7 +224,7 @@ describe('restored folder scope', () => {
       const store = new LocalConnectorStore({ dbPath: storePath, corpusId: CORPUS, family: 'file', trustDomain: 'secure_local' });
       try {
         const other = approve(join(dir, 'scopes.json'), 'account-2', ['/work', '/home']);
-        expect(rebindRestoredFileScope({ approval: other, providerAccountId: 'account-2', stores: [store] })).toBe(0);
+        expect(rebindRestoredFileScope({ approval: other, providerAccountId: 'account-2', sets: [{ stores: [store] }] })).toBe(0);
         expect(await visible(store, other)).toEqual([]);
       } finally {
         store.close();

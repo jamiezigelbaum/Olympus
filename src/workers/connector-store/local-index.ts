@@ -3110,20 +3110,8 @@ export class LocalConnectorStore {
     revision: string;
     providerAccountId: string;
   }): number {
-    const row = this.db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
-      .get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID) as { cursor: string | null } | null;
-    if (!row?.cursor) return 0;
-    let record: { provider?: unknown; generations?: unknown; providerAccountId?: unknown };
-    try {
-      record = JSON.parse(row.cursor) as typeof record;
-    } catch {
-      return 0;
-    }
-    if (record.provider !== input.provider || typeof record.providerAccountId !== 'string') return 0;
-    if (compareProviderAccounts(record.providerAccountId, input.providerAccountId) !== 'same') return 0;
-    const generations = Array.isArray(record.generations)
-      ? record.generations.filter((value): value is string => typeof value === 'string' && value.length > 0)
-      : [];
+    const generations = this.restoredScopeGenerations(input.provider, input.providerAccountId);
+    if (generations === undefined) return 0;
     return this.db.transaction(() => {
       let changed = 0;
       for (const generation of generations) {
@@ -3137,6 +3125,29 @@ export class LocalConnectorStore {
         .run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
       return changed;
     }).immediate();
+  }
+
+  /**
+   * The scope generations this store's restore record names, when it has one
+   * for `provider` and its account is `providerAccountId`; otherwise
+   * undefined. Read without changing anything, so the secret locations beside
+   * the store can be carried over first (`rebindRestoredFileScope`).
+   */
+  restoredScopeGenerations(provider: string, providerAccountId: string): string[] | undefined {
+    const row = this.db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+      .get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID) as { cursor: string | null } | null;
+    if (!row?.cursor) return undefined;
+    let record: { provider?: unknown; generations?: unknown; providerAccountId?: unknown };
+    try {
+      record = JSON.parse(row.cursor) as typeof record;
+    } catch {
+      return undefined;
+    }
+    if (record.provider !== provider || typeof record.providerAccountId !== 'string') return undefined;
+    if (compareProviderAccounts(record.providerAccountId, providerAccountId) !== 'same') return undefined;
+    return Array.isArray(record.generations)
+      ? record.generations.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
   }
 
   /**

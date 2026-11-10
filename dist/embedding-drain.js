@@ -18054,6 +18054,17 @@ class SecretLocationsIndex {
     `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
     return true;
   }
+  rebindScopeGenerations(input) {
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const generation of input.fromGenerations) {
+        if (generation === input.accountGeneration)
+          continue;
+        changed += this.db.query("UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?").run(input.accountGeneration, input.revision, input.provider, generation).changes;
+      }
+      return changed;
+    }).immediate();
+  }
   remove(identity) {
     return this.db.query(`
       DELETE FROM secret_locations
@@ -26977,20 +26988,9 @@ var init_local_index = __esm(() => {
       return findTierSetLedger(this.dbPath, binding);
     }
     rebindRestoredSourceScope(input) {
-      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
-      if (!row?.cursor)
+      const generations = this.restoredScopeGenerations(input.provider, input.providerAccountId);
+      if (generations === undefined)
         return 0;
-      let record;
-      try {
-        record = JSON.parse(row.cursor);
-      } catch {
-        return 0;
-      }
-      if (record.provider !== input.provider || typeof record.providerAccountId !== "string")
-        return 0;
-      if (compareProviderAccounts(record.providerAccountId, input.providerAccountId) !== "same")
-        return 0;
-      const generations = Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
       return this.db.transaction(() => {
         let changed = 0;
         for (const generation of generations) {
@@ -27004,6 +27004,22 @@ var init_local_index = __esm(() => {
         this.db.query("DELETE FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
         return changed;
       }).immediate();
+    }
+    restoredScopeGenerations(provider, providerAccountId) {
+      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+      if (!row?.cursor)
+        return;
+      let record;
+      try {
+        record = JSON.parse(row.cursor);
+      } catch {
+        return;
+      }
+      if (record.provider !== provider || typeof record.providerAccountId !== "string")
+        return;
+      if (compareProviderAccounts(record.providerAccountId, providerAccountId) !== "same")
+        return;
+      return Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
     }
     tierSetBinding() {
       const row = this.db.query(`

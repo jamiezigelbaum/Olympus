@@ -6058,9 +6058,12 @@ export async function main(): Promise<void> {
           rebindRestoredFileScope({
             approval,
             providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
-            stores: definition.corpusIdsToInvalidate.flatMap((corpusId) => {
-              const set = sets.get(corpusId);
-              return set ? TIER_DOMAIN_ORDER.flatMap((domain) => set.store(domain) ?? []) : [];
+            sets: [...new Set(definition.corpusIdsToInvalidate.flatMap((corpusId) => sets.get(corpusId) ?? []))].map((set) => {
+              const secretLocations = set.secrets();
+              return {
+                stores: TIER_DOMAIN_ORDER.flatMap((domain) => set.store(domain) ?? []),
+                ...(secretLocations ? { secretLocations } : {}),
+              };
             }),
           });
         } catch { /* the run lists them again */ }
