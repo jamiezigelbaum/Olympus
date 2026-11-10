@@ -321,6 +321,8 @@ export interface SearchView {
   ok: boolean;
   isError: boolean;
   evidence: Array<{ source: string; hasToken: boolean }>;
+  /** The result said Olympus is still checking new items for privacy (the privacy-backlog note). */
+  stillChecking?: boolean;
   error?: string;
 }
 
@@ -760,7 +762,7 @@ export function searchChecks(
     return [check(`${prefix}.search`, title, withToken.length > 0,
       withToken.length > 0
         ? `${withToken.length} cited item(s) carry the word, labelled "${fx.expect.citationLabel}" (${search.evidence.length} item(s) in all)`
-        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}`)];
+        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}${search.stillChecking ? ' (the result said items were still being checked for privacy)' : ''}`)];
   }
   const leaked = search.evidence.filter((item) => item.hasToken);
   return [check(`${prefix}.search`, title, leaked.length === 0,

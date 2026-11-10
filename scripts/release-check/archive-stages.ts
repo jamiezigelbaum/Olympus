@@ -175,7 +175,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
         }
         obs.stores = host.readStores(formatSpec(fx.format), obs.archiveId, fx.token);
         if (obs.settled && args.drainS !== undefined) obs.drain = await drainWait(host, driver, fx, args.drainS * 1_000, (args.settleS ?? ARCHIVE_BOUNDS.settleS) * 1_000);
-        if (args.search) obs.search = await searchFor(host, fx);
+        if (args.search) obs.search = obs.drain?.drained ? await searchAfterDrain(host, fx) : await searchFor(host, fx);
       } finally {
         if (watch) {
           const seen = watch.stop();
@@ -319,12 +319,34 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
   } catch (error) {
     return { ok: false, isError: true, evidence: [], error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160) };
   }
-  const record = (answer.structured && typeof answer.structured === 'object' ? answer.structured : {}) as { evidence?: unknown };
+  const record = (answer.structured && typeof answer.structured === 'object' ? answer.structured : {}) as { evidence?: unknown; notes?: unknown };
+  const stillChecking = Array.isArray(record.notes)
+    && record.notes.some((note) => typeof note === 'string' && note.startsWith('Olympus is still checking '));
   const evidence = (Array.isArray(record.evidence) ? record.evidence : []).map((entry: any) => ({
     source: typeof entry?.source === 'string' ? entry.source : '',
     hasToken: [entry?.excerpt, entry?.title].some((field) => typeof field === 'string' && field.includes(fx.token)),
   }));
-  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(answer.error ? { error: answer.error } : {}) };
+  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(stillChecking ? { stillChecking } : {}), ...(answer.error ? { error: answer.error } : {}) };
+}
+
+/** How long a search right after the drain may wait while the engine says it is still checking items. */
+const AFTER_DRAIN_CHECKING_BOUND_MS = 120_000;
+
+/**
+ * The search once an archive has drained (nothing waits for the private model): its items can
+ * still be on their way out of Private (a judged item's queued move), and the engine then says
+ * it is still checking (#1054). Asked again every ten seconds while it says so, within a bound;
+ * an empty result that does not say so is judged at once.
+ */
+export async function searchAfterDrain(host: ArchiveHost, fx: LegFixture): Promise<SearchView> {
+  const started = host.now();
+  for (;;) {
+    const search = await searchFor(host, fx);
+    const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
+    if (cited || !search.stillChecking || host.now() - started >= AFTER_DRAIN_CHECKING_BOUND_MS) return search;
+    host.say('search: the engine is still checking items for privacy; asking again in 10 s');
+    await host.sleep(10_000);
+  }
 }
 
 /**
@@ -414,7 +436,7 @@ export async function drainStage(host: ArchiveHost, args: { role: FixtureRole; f
         obs.archiveId = status.archives.find((archive) => archive.name === fx.fileName)?.id;
       }
       obs.stores = host.readStores(formatSpec(fx.format), obs.archiveId, fx.token);
-      if (args.search) obs.search = await searchFor(host, fx);
+      if (args.search) obs.search = obs.drain.drained ? await searchAfterDrain(host, fx) : await searchFor(host, fx);
     });
     obs.ok = true;
   } catch (error) {
