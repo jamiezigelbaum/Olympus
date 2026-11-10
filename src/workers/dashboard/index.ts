@@ -3,8 +3,10 @@
  * 4, owner decision 2026-10-09: the ChatGPT panel is the only dashboard).
  *
  * - `/dashboard` is the computer's host page around the panel (host-page.ts).
- * - `?keys`, `?agents`, `?private-answers`, `?apps-received`, `?connector` are the computer's
+ * - `?keys`, `?connect`, `?agents`, `?private-answers`, `?apps-received` are the computer's
  *   own pages, still rendered here (pages/local.ts, pages/private-answers.ts).
+ *   `?connector`, once its own page, redirects to Sources with the Build a
+ *   connector dialog open (#1087).
  *   `?outside-help`, the Anonymous answers page Private answers absorbed
  *   (2026-10-12), redirects there with that section open.
  * - `?panel-read` is the dashboard tool's result for a locked (dash_) reader.
@@ -26,8 +28,8 @@ import {
   dashboardLocalPageHref,
 } from './host-page.ts';
 import {
+  CONNECTOR_DIALOG_ID,
   renderDashboardAgentsPage,
-  renderDashboardConnectorPage,
   renderDashboardConnectPage,
   renderDashboardKeysPage,
   renderDashboardHelpPage,
@@ -87,9 +89,17 @@ export function dashboardOutsideHelpRedirect(url: URL): string {
   return `${dashboardLocalPageHref('settings', dashboardReadToken(url))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
 }
 
+/**
+ * Where Build a connector's old address goes (#1087): Sources with the Build
+ * a connector dialog open, keeping a dash_ reader's token.
+ */
+export function dashboardConnectorRedirect(url: URL): string {
+  return `${dashboardLocalPageHref('connect', dashboardReadToken(url))}#${CONNECTOR_DIALOG_ID}`;
+}
+
 /** The computer's local pages. `view` is needed by Privacy settings (Keys), Connect a source and Private questions. */
 export function renderDashboardLocalPage(
-  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'apps_received' | 'connector' | 'help' | 'settings',
+  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'apps_received' | 'help' | 'settings',
   input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions },
 ): string {
   const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -108,8 +118,6 @@ export function renderDashboardLocalPage(
       return renderDashboardPrivateAnswersPage(options);
     case 'apps_received':
       return renderDashboardAppsReceivedPage(options);
-    case 'connector':
-      return renderDashboardConnectorPage(options);
     case 'settings':
       return renderDashboardSettingsPage(options);
   }
