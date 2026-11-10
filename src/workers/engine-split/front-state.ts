@@ -16,6 +16,12 @@ import type { EngineStatusRead } from './snapshot.ts';
 
 type Snapshot = () => EngineStatusRead | undefined;
 
+/** The snapshot only while it is a reading of now (snapshot.ts, `stale`). */
+function current(snapshot: Snapshot): EngineStatusRead | undefined {
+  const read = snapshot();
+  return read && !read.stale ? read : undefined;
+}
+
 function isBacklog(value: unknown): value is TierClassificationBacklog {
   return typeof value === 'object' && value !== null
     && typeof (value as TierClassificationBacklog).checkingItems === 'number'
@@ -30,11 +36,11 @@ export function frontJudgeState(snapshot: Snapshot): {
 } {
   return {
     backlog: () => {
-      const backlog = snapshot()?.snapshot.judge.backlog;
+      const backlog = current(snapshot)?.snapshot.judge.backlog;
       return isBacklog(backlog) ? backlog : undefined;
     },
-    busy: () => snapshot()?.snapshot.judge.busy === true,
-    archivePrivateModel: () => (snapshot()?.snapshot.judge.archive_private_model as ArchivePrivateModelState | undefined) ?? 'waiting',
+    busy: () => current(snapshot)?.snapshot.judge.busy === true,
+    archivePrivateModel: () => (current(snapshot)?.snapshot.judge.archive_private_model as ArchivePrivateModelState | undefined) ?? 'waiting',
   };
 }
 
@@ -42,7 +48,7 @@ export function frontJudgeState(snapshot: Snapshot): {
 export function frontUnreadableFiles(local: UnreadableFiles, snapshot: Snapshot): UnreadableFiles {
   return {
     ...local,
-    recheck: (corpusId) => snapshot()?.snapshot.unreadable?.[corpusId],
+    recheck: (corpusId) => current(snapshot)?.snapshot.unreadable?.[corpusId],
   };
 }
 
@@ -50,10 +56,18 @@ export type ArchiveViews = Pick<ArchiveImportDashboard, 'view' | 'cardViews' | '
 
 /**
  * The archive dashboard as the background, which runs the imports, last saw
- * it. Only before any snapshot does the front read the files itself.
+ * it. The front reads the files itself when there is no current snapshot
+ * (none yet, a stale one, or one written before the front's own last archive
+ * change, `changedAt`), so a removed archive is not shown from an old reading.
  */
-export function frontArchiveViews(local: ArchiveViews, snapshot: Snapshot): ArchiveViews {
-  const archive = () => snapshot()?.snapshot.archive;
+export function frontArchiveViews(local: ArchiveViews, snapshot: Snapshot, changedAt: () => number | undefined = () => undefined): ArchiveViews {
+  const archive = () => {
+    const read = current(snapshot);
+    if (!read) return undefined;
+    const changed = changedAt();
+    if (changed !== undefined && Date.parse(read.snapshot.written_at) < changed) return undefined;
+    return read.snapshot.archive;
+  };
   return {
     view: () => (archive()?.view as ReturnType<ArchiveViews['view']> | undefined) ?? local.view(),
     cardViews: () => (archive()?.cards as ReturnType<ArchiveViews['cardViews']> | undefined) ?? local.cardViews(),

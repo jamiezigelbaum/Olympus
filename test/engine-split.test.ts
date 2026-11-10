@@ -3,9 +3,9 @@
 // front's write guard, and the host's background-then-front order. With
 // worker.engineSplit off nothing here changes what runs.
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
 import { engineHostServices } from '../src/core/engine-host.ts';
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_ROLE_ENV, engineRoleFromEnv } from '../src/core/engine-split.ts';
@@ -34,8 +34,10 @@ import { createTrustedSourceWatchOwnerContext, LocalSourceWatchStore } from '../
 import { LocalPeopleIndex } from '../src/core/people-index.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import {
+  createEngineFront,
   createEngineFrontRoutes,
   createFrontGate,
+  engineStatusSnapshotPath,
   OwnerBusyMarks,
   tierCommandOnlyReads,
   waitForProcessExit,
@@ -51,8 +53,8 @@ import {
 } from '../src/workers/engine-split/commands.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
-import { ENGINE_STATUS_SNAPSHOT_SCHEMA, readEngineStatusSnapshot, startEngineStatusPublisher } from '../src/workers/engine-split/snapshot.ts';
-import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { ENGINE_STATUS_SNAPSHOT_SCHEMA, ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher } from '../src/workers/engine-split/snapshot.ts';
+import { createTestClock, DEFAULT_TEST_CLOCK_START, flushMicrotasks } from './helpers/test-clock.ts';
 
 const TOKEN = 'engine-split-test-token';
 const roots: string[] = [];
@@ -652,6 +654,11 @@ describe('the status snapshot', () => {
     expect(readEngineStatusSnapshot(path, clock.now)).toMatchObject({ age_ms: 2_000, snapshot: { judge: { backlog: 5 } } });
     await clock.advance(1_000);
     expect(readEngineStatusSnapshot(path, clock.now)).toMatchObject({ age_ms: 0, snapshot: { judge: { backlog: 3 } } });
+    // Ten missed publishes later the reading is stale.
+    clock.set(clock.now() + ENGINE_STATUS_STALE_MS);
+    expect(readEngineStatusSnapshot(path, clock.now)).toMatchObject({ stale: false });
+    clock.set(clock.now() + 1);
+    expect(readEngineStatusSnapshot(path, clock.now)).toMatchObject({ stale: true, age_ms: ENGINE_STATUS_STALE_MS + 1 });
     publisher.stop();
     expect(readEngineStatusSnapshot(join(root, 'missing.json'))).toBeUndefined();
   });
@@ -662,7 +669,7 @@ describe('the status snapshot', () => {
     const clock = createTestClock();
     const scheduler = createFrontScheduler({
       client: { post: async (command) => { sent.push(command); return { id: 'x', state: 'received', instance_id: 'b' }; } },
-      snapshot: () => ({ age_ms: 10, snapshot: { scheduler: status, manual_syncs: { 'gmail.email': { started_at: clock.date().toISOString(), state: 'done' } } } as never }),
+      snapshot: () => ({ age_ms: 10, stale: false, snapshot: { scheduler: status, manual_syncs: { 'gmail.email': { started_at: clock.date().toISOString(), state: 'done' } } } as never }),
       now: clock.date,
       sleep: clock.sleep,
     });
@@ -683,9 +690,13 @@ describe('the status snapshot', () => {
 describe('state the front shows from the snapshot', () => {
   function snapshotWith(fields: Record<string, unknown>) {
     let current: Record<string, unknown> | undefined = fields;
+    let stale = false;
+    let writtenAt = DEFAULT_TEST_CLOCK_START;
     return {
-      read: () => (current ? { age_ms: 5, snapshot: { judge: { backlog: null, pending: null, spending: null }, ...current } as never } : undefined),
+      read: () => (current ? { age_ms: 5, stale, snapshot: { judge: { backlog: null, pending: null, spending: null }, written_at: new Date(writtenAt).toISOString(), ...current } as never } : undefined),
       set: (next: Record<string, unknown> | undefined) => { current = next; },
+      setStale: (value: boolean) => { stale = value; },
+      setWrittenAt: (value: number) => { writtenAt = value; },
     };
   }
 
@@ -727,6 +738,32 @@ describe('state the front shows from the snapshot', () => {
     expect(sent.map((command) => (command as { manual?: boolean }).manual)).toEqual([true, true, false, true]);
   });
 
+  test('a snapshot from a background other than the one answering commands is stale', async () => {
+    const root = tempRoot();
+    const env = { HOME: root, XDG_DATA_HOME: join(root, 'data') };
+    const clock = createTestClock();
+    const answer = (instance: string) => (async () => Response.json({ id: 'command-0110', state: 'done', instance_id: instance })) as unknown as typeof fetch;
+    let fetchImpl = answer('background-1');
+    const front = createEngineFront({ env, socketPath: join(root, 'engine.sock'), authToken: TOKEN, now: clock.now, fetch: ((input: RequestInfo | URL, init?: RequestInit) => fetchImpl(input, init)) as typeof fetch });
+    try {
+      mkdirSync(dirname(engineStatusSnapshotPath(env)), { recursive: true });
+      const publisher = startEngineStatusPublisher({
+        path: engineStatusSnapshotPath(env), instanceId: 'background-1', now: clock.date,
+        setInterval: clock.setInterval, clearInterval: (timer) => clock.clearInterval(timer as never),
+        collect: () => ({ scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
+      });
+      await front.client.post({ kind: 'archive_changed' });
+      expect(front.status()).toMatchObject({ stale: false });
+      // The background restarted: its successor answers, the old file is still on disk.
+      fetchImpl = answer('background-2');
+      await front.client.post({ kind: 'archive_changed' });
+      expect(front.status()).toMatchObject({ stale: true });
+      publisher.stop();
+    } finally {
+      front.stop();
+    }
+  });
+
   test('judge backlog, unreadable counts and the archive views come from the snapshot', () => {
     const backlog = { checkingItems: 3, remainingQuestions: 2, pendingItems: 3, summary: 'Checking 3 items.', awaitingOwnerApproval: false };
     const snapshot = snapshotWith({
@@ -760,6 +797,23 @@ describe('state the front shows from the snapshot', () => {
     expect(views.cardViews()).toEqual([{ sourceId: 'card' }] as never);
     expect(views.archiveSources()).toEqual([{ sourceId: 'whatsapp' }] as never);
     expect(read).toEqual([]);
+    // A stale snapshot is not shown as current: nothing pending, no counts, and the front's own archive read.
+    snapshot.setStale(true);
+    expect(judge.backlog()).toBeUndefined();
+    expect(judge.busy()).toBe(false);
+    expect(unreadable.recheck('dropbox.files')).toBeUndefined();
+    expect(views.view()).toEqual({ archives: ['local'] } as never);
+    snapshot.setStale(false);
+    // A snapshot written before the front's own last archive change is not shown either.
+    let changedAt: number | undefined = DEFAULT_TEST_CLOCK_START + 1_000;
+    const afterChange = frontArchiveViews({
+      view: () => ({ archives: ['local'] } as never), cardViews: () => [], sourceImports: () => [], archiveSources: () => [],
+    }, snapshot.read, () => changedAt);
+    expect(afterChange.view()).toEqual({ archives: ['local'] } as never);
+    snapshot.setWrittenAt(DEFAULT_TEST_CLOCK_START + 2_000);
+    expect(afterChange.view()).toEqual({ archives: ['from-background'] } as never);
+    changedAt = undefined;
+    read.length = 0;
     // Before any snapshot: nothing pending, and the front's own read of the archives.
     snapshot.set(undefined);
     expect(judge.backlog()).toBeUndefined();

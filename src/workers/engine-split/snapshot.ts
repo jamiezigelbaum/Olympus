@@ -12,6 +12,11 @@ import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 
 export const ENGINE_STATUS_SNAPSHOT_SCHEMA = 'olympus.engine.background-status.v1';
 export const ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3_000;
+/**
+ * A snapshot older than this (ten missed publishes) no longer says how things
+ * are now: the background stopped publishing or cannot write the file.
+ */
+export const ENGINE_STATUS_STALE_MS = 30_000;
 
 export interface EngineStatusSnapshot {
   schema: typeof ENGINE_STATUS_SNAPSHOT_SCHEMA;
@@ -48,6 +53,12 @@ export interface EngineStatusRead {
   snapshot: EngineStatusSnapshot;
   /** How old the snapshot is, for the front to show. */
   age_ms: number;
+  /**
+   * Not a reading of now: older than ENGINE_STATUS_STALE_MS, or written by a
+   * background other than the one answering commands. The front then shows
+   * nothing from it as current.
+   */
+  stale: boolean;
 }
 
 export function writeEngineStatusSnapshot(path: string, snapshot: EngineStatusSnapshot): void {
@@ -61,7 +72,8 @@ export function readEngineStatusSnapshot(path: string, now: () => number = () =>
     if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== 'string') return undefined;
     const written = Date.parse(snapshot.written_at);
     if (!Number.isFinite(written)) return undefined;
-    return { snapshot, age_ms: Math.max(0, now() - written) };
+    const age = Math.max(0, now() - written);
+    return { snapshot, age_ms: age, stale: age > ENGINE_STATUS_STALE_MS };
   } catch {
     return undefined;
   }

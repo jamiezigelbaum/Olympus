@@ -5862,18 +5862,20 @@ export async function main(): Promise<void> {
   // dashboard's own routes approve, and every started or removed import is
   // handed to the scheduler at once. How the private model stands is read off the
   // sniffer, bound once it runs further down.
+  // When the front last changed an archive request or state file: a snapshot older than that is not shown.
+  let archiveChangedAt: number | undefined;
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
     refreshScheduler: () => {
       // The split's front writes the request and state files only; the
       // background resumes checks and runs imports.
-      if (engineFront) { void engineFront.client.post({ kind: 'archive_changed' }).catch(() => undefined); return; }
+      if (engineFront) { archiveChangedAt = Date.now(); void engineFront.client.post({ kind: 'archive_changed' }).catch(() => undefined); return; }
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
         activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
       ).sources);
     },
-    ...(engineFront ? { checksElsewhere: () => { void engineFront!.client.post({ kind: 'archive_changed' }).catch(() => undefined); } } : {}),
+    ...(engineFront ? { checksElsewhere: () => { archiveChangedAt = Date.now(); void engineFront!.client.post({ kind: 'archive_changed' }).catch(() => undefined); } } : {}),
     privateModel: () => archivePrivateModelState(),
     // Without the scheduler, or with a source list that leaves archives out,
     // nothing runs an import or a removal: approving one is refused, and one
@@ -5882,7 +5884,7 @@ export async function main(): Promise<void> {
   });
   if (!engineFront) archiveImportDashboard.resume();
   // The split's front shows the archives as the background, which runs the imports, last published them.
-  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront!.status()) : archiveImportDashboard;
+  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront!.status(), () => archiveChangedAt) : archiveImportDashboard;
   // Built-in transcription installs only when the chosen sources contain
   // audio (each approved extraction lane checks at scheduler start, and each
   // plan pass after a sync), and once ready wakes every extraction task so

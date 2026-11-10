@@ -13,7 +13,7 @@ import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { bindWorkerSocket, createUnixSocketFetch, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineForwardedKind, type EngineForwardedResponse } from './commands.ts';
-import { readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 
 export function engineBackgroundSocketFromEnv(env: Record<string, string | undefined>): string {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -116,23 +116,31 @@ export function createEngineFront(input: {
 }): EngineFront {
   const now = input.now ?? (() => Date.now());
   let relay: OwnerBusyRelay | undefined;
+  // The background instance that last answered a command: a snapshot another
+  // instance wrote is not about the background running now.
+  let answering: string | undefined;
   const client = new EngineCommandClient({
     fetch: input.fetch ?? createUnixSocketFetch(input.socketPath),
     authToken: input.authToken,
-    onInstance: (instanceId) => relay?.observeInstance(instanceId),
+    onInstance: (instanceId) => { answering = instanceId; relay?.observeInstance(instanceId); },
   });
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
   let cached: { at: number; read: EngineStatusRead | undefined } | undefined;
+  const judged = (read: EngineStatusRead, age: number): EngineStatusRead => ({
+    ...read,
+    age_ms: age,
+    stale: age > ENGINE_STATUS_STALE_MS || (answering !== undefined && answering !== read.snapshot.instance_id),
+  });
   const status = (): EngineStatusRead | undefined => {
     const at = now();
     if (cached && at - cached.at < 1_000) {
-      return cached.read ? { ...cached.read, age_ms: cached.read.age_ms + (at - cached.at) } : undefined;
+      return cached.read ? judged(cached.read, cached.read.age_ms + (at - cached.at)) : undefined;
     }
     const read = readEngineStatusSnapshot(path, now);
     cached = { at, read };
     if (read) relay?.observeInstance(read.snapshot.instance_id);
-    return read;
+    return read ? judged(read, read.age_ms) : undefined;
   };
   // Notice a background restart even when no page asks for status, so the
   // owner-busy signal reaches the new judge.
