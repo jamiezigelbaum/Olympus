@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnectorStoreMountDiscovery, parseConnectorStoreMountsFromEnv } from '../src/workers/email-source/server.ts';
@@ -62,6 +62,85 @@ describe('connector-store mount declaration guards', () => {
       for (const mount of made) mount.store.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('discovery retries a store whose mount failed, with bounded backoff and one log per failure kind', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-discovery-retry-'));
+    const dbPath = join(dir, 'reflect.sqlite');
+    const declaration = { dbPath, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' };
+    const stores: ReturnType<typeof parseConnectorStoreMountsFromEnv>[number]['store'][] = [];
+    const failures: string[] = [];
+    let clock = 1_000;
+    let scans = 0;
+    let ownerError: string | undefined = 'account is being deleted';
+    const discover = createConnectorStoreMountDiscovery(JSON.stringify([declaration]), {
+      stores: () => stores, registeredCorpora: () => [], now: () => clock,
+      storeOwner: () => {
+        scans++;
+        return () => { if (ownerError) throw new Error(ownerError); return undefined; };
+      },
+      reportFailure: message => failures.push(message),
+    });
+    let made: ReturnType<typeof parseConnectorStoreMountsFromEnv> = [];
+    try {
+      made = parseConnectorStoreMountsFromEnv(JSON.stringify([declaration]));
+      expect(discover()).toEqual([]);
+      expect(scans).toBe(1);
+      expect(failures).toHaveLength(1);
+      // Repeated reads inside the backoff neither rescan ownership nor log again.
+      for (let i = 0; i < 20; i++) expect(discover()).toEqual([]);
+      expect(scans).toBe(1);
+      // Once the backoff passes it retries; the same failure is not logged twice.
+      clock += 60_000;
+      expect(discover()).toEqual([]);
+      expect(scans).toBe(2);
+      expect(failures).toHaveLength(1);
+      // The backoff grows but stays bounded.
+      clock += 60_000;
+      discover();
+      clock += 60_000;
+      discover();
+      const beforeCap = scans;
+      for (let step = 0; step < 40; step++) { clock += 60_000; discover(); }
+      expect(scans - beforeCap).toBeGreaterThanOrEqual(2);
+      expect(scans - beforeCap).toBeLessThan(40);
+      // A different failure is logged once.
+      ownerError = 'owner unknown';
+      clock += 60 * 60_000;
+      discover();
+      clock += 60 * 60_000;
+      discover();
+      expect(failures).toHaveLength(2);
+      expect(failures[1]).toContain('owner unknown');
+      // The transient cause clears: the store mounts without a roster change or restart.
+      ownerError = undefined;
+      clock += 60 * 60_000;
+      const mounts = discover();
+      expect(mounts).toHaveLength(1);
+      expect(mounts[0]!.store.corpusId).toBe('secure_local.reflect.notes');
+      stores.push(mounts[0]!.store);
+      discover();
+      const afterMount = scans;
+      for (let i = 0; i < 5; i++) { clock += 60 * 60_000; expect(discover()).toEqual([]); }
+      expect(scans).toBe(afterMount);
+      expect(failures).toHaveLength(2);
+    } finally {
+      for (const store of stores) store.close();
+      for (const mount of made) mount.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The worker's entrypoint awaits main() at top level, so module evaluation
+  // pauses there while startup mounts stores. A top-level const, let or class
+  // declared below that line is still in its temporal dead zone during startup,
+  // and the first function that reads it throws ReferenceError.
+  test('worker declares no top-level bindings after its entrypoint', () => {
+    const source = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const entrypoint = source.indexOf('\nif (import.meta.main) {');
+    expect(entrypoint).toBeGreaterThan(0);
+    const late = source.slice(entrypoint).split('\n').filter(line => /^(export )?(const|let|class) /.test(line));
+    expect(late).toEqual([]);
   });
 
   // Every secure gate in the worker is exact equality against 'secure_local',

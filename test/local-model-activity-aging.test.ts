@@ -48,3 +48,35 @@ test('a fresh classification call still waits behind background answers', async 
   await Promise.all([owner, classification, background]);
   expect(order).toEqual(['owner', 'background', 'classification']);
 });
+
+// #1031: the sniffer's fair turn must tell the owner's own calls from others.
+test('ownerInFlight counts only the owner\'s own calls on that resource', async () => {
+  const activity = createLocalModelActivity();
+  const held = () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const model = activity.track('local', {
+      async complete(_request: { signal?: AbortSignal }) { entered(); await gate; return { text: '', modelId: 'm' }; },
+    });
+    return { model, release, started };
+  };
+  const background = held();
+  const backgroundCall = runBackgroundInference(() => background.model.complete({}));
+  await background.started;
+  expect(activity.busy('local')).toBe(true);
+  expect(activity.ownerInFlight('local')).toBe(false);
+  background.release();
+  await backgroundCall;
+  const owner = held();
+  const ownerCall = owner.model.complete({});
+  await owner.started;
+  expect(activity.ownerInFlight('local')).toBe(true);
+  expect(activity.ownerInFlight('other')).toBe(false);
+  owner.release();
+  await ownerCall;
+  expect(activity.ownerInFlight('local')).toBe(false);
+  expect(await runClassificationInference(() => activity.run('local', async () => activity.ownerInFlight('local')))).toBe(false);
+  expect(await activity.run('local', async () => activity.ownerInFlight('local'))).toBe(true);
+});
