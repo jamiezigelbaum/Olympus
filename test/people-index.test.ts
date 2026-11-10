@@ -42,9 +42,22 @@ describe('people index: strong keys', () => {
     expect(normalizePhone('+1 (415) 555-0123')).toBe('+14155550123');
     expect(normalizePhone('415 555 0123')).toBeUndefined();
     expect(strongKeysFromText('Brianna Reyes <Brianna@Example.com>')).toEqual(['email:brianna@example.com']);
-    expect(strongKeysFromText('14155550123@s.example.net')).toEqual(['phone:+14155550123']);
+    expect(strongKeysFromText('14155550123@s.example.net')).toEqual(['email:14155550123@s.example.net', 'phone:+14155550123']);
     expect(strongKeysFromText('777')).toEqual([]);
     expect(strongKeysFromText('123456@lid')).toEqual([]);
+  });
+
+  test('a mailbox whose name is all digits still links by its email address', () => {
+    // A numeric mailbox (123456789@qq.com) is an address first; a phone
+    // number read from it is an extra key, never in place of the address.
+    expect(strongKeysFromText('Wei Zhang <123456789@QQ.com>')).toEqual(['email:123456789@qq.com', 'phone:+123456789']);
+    const people = linkPeople({ observations: [
+      obs('mail', '123456789@qq.com', 'Wei Zhang <123456789@qq.com>'),
+      obs('mail-2', '123456789@QQ.com', undefined),
+    ] });
+    const person = personOf(people, 'sender:mail:123456789@qq.com');
+    expect(person.identities).toHaveLength(2);
+    expect(person.linkedBy).toEqual(['Linked by email address']);
   });
 
   test('the same phone number links on its own, and says why', () => {

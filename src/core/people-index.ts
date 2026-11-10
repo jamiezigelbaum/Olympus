@@ -218,8 +218,12 @@ export function strongKeysFromText(value: string | undefined): string[] {
   const keys = new Set<string>();
   for (const match of value.matchAll(ADDRESS)) {
     const local = match[1]!;
+    // An address is always an email key, even with an all-digit mailbox
+    // (123456789@qq.com). A digit-only local part also reads as a phone
+    // number (a chat id such as 14155550123@s.whatsapp.net); a phone key
+    // shared by two such addresses on different domains is a known limit.
+    keys.add(`email:${match[0]!.toLowerCase()}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith('0')) keys.add(`phone:+${local}`);
-    else keys.add(`email:${match[0]!.toLowerCase()}`);
   }
   if (keys.size === 0) {
     const phone = normalizePhone(value);
