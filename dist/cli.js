@@ -64696,38 +64696,47 @@ async function applyFloor(set, record) {
   const identity2 = identityOf7(record);
   if (set.ledger.getOverride(identity2))
     return "clear";
-  const current2 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
-  if (current2.length === 0)
+  const copies = set.ledger.copies(identity2);
+  if (copies.length === 0)
     return "clear";
-  const serving = copyServingLayer(current2, "content") ?? copyServingLayer(current2, "metadata");
+  const current2 = copies.filter((copy) => copy.state === "current");
+  const serving = copyServingLayer(current2, "content");
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-  const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
+  const exported = (domain ? set.store(domain)?.exportItemCopy(identity2) : undefined) ?? storedCopyOf(set, identity2, copies);
   if (!exported)
     return "failed";
+  const signals = storedSignals(exported);
+  const names = [signals.title, signals.path, signals.sender, ...signals.folderKeys ?? []].filter((value) => typeof value === "string" && value.trim() !== "");
+  const nameKinds = new Set(names.length > 0 ? detectSecretFindingKinds(names.join(`
+`)) : []);
+  if (names.some(hasCredentialUrl))
+    nameKinds.add("credential_assignment");
   const text2 = exported.chunks.map((chunk) => chunk.boundedText).join("");
-  if (!text2.trim())
-    return "clear";
-  if (secretScanReusable(text2))
-    await scanSecretsAhead(text2);
-  const kinds = new Set(detectSecretFindingKinds(text2));
-  if (hasCredentialUrl(text2))
-    kinds.add("credential_assignment");
-  if (kinds.size === 0)
+  const textKinds = new Set;
+  if (text2.trim()) {
+    if (secretScanReusable(text2))
+      await scanSecretsAhead(text2);
+    for (const kind of detectSecretFindingKinds(text2))
+      textKinds.add(kind);
+    if (hasCredentialUrl(text2))
+      textKinds.add("credential_assignment");
+  }
+  if (nameKinds.size === 0 && textKinds.size === 0)
     return "clear";
   const latest = set.ledger.getCurrent(identity2);
   if (!latest?.routed || latest.contentTier === "secrets" || latest.metadataTier === "secrets")
     return "clear";
-  const findingKinds = [...kinds].sort();
+  const findingKinds = [...new Set([...nameKinds, ...textKinds])].sort();
   const decision = {
-    metadataTier: latest.metadataTier,
+    metadataTier: nameKinds.size > 0 ? "secrets" : latest.metadataTier,
     contentTier: "secrets",
     decidedBy: "secret_detector",
     reasons: [
-      ...latest.reasons.filter((reason) => !reason.startsWith("content:")),
-      ...findingKinds.map((kind) => `content:secret:${kind}`)
+      ...nameKinds.size > 0 ? [...nameKinds].sort().map((kind) => `metadata:secret:${kind}`) : latest.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...[...textKinds].sort().map((kind) => `content:secret:${kind}`)
     ],
     state: "current",
-    contentRead: true,
+    contentRead: latest.contentRead || textKinds.size > 0,
     metadataPending: false,
     contentPending: false,
     metadataForced: latest.metadataForced,
@@ -64736,7 +64745,7 @@ async function applyFloor(set, record) {
     mapRevision: latest.mapRevision,
     snifferId: UNDECIDED_TIER_SNIFFER.id
   };
-  return settleRoutedSecrets(set, identity2, decision, exported, { text: text2, findingKinds }) ? "secrets" : "failed";
+  return settleRoutedSecrets(set, identity2, decision, exported, { ...text2 ? { text: text2 } : {}, findingKinds }) ? "secrets" : "failed";
 }
 function readState7(raw) {
   if (!raw)
@@ -64782,6 +64791,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
   init_secret_scan_off_thread();
   init_tier_classifier();
   init_tier_ledger();
+  init_stored_names();
   init_tier_rejudge();
 });
 

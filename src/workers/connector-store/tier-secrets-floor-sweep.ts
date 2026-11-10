@@ -1,12 +1,13 @@
 // The Secrets floor applied to items already stored (#880). Source-agnostic: it
-// reads only the tier ledger and the text each item's store keeps.
+// reads only the tier ledger and the names and text each item's store keeps.
 //
 // An item's text meets the shared secret patterns (src/core/secret-patterns.ts)
 // once, when it lands. A pattern added later (labelled recovery and backup
 // codes, #880) would leave an item stored before it Personal, and Personal
 // content can reach cloud models. When SECRETS_FLOOR_VERSION changes, this
-// pass reads every routed item's stored text once (a bounded page per call,
-// resumed from the ledger) and runs the floor on it, nothing else: no model is
+// pass reads every routed item's stored names and text once (a bounded page
+// per call, resumed from the ledger; mid-move, the copy the move kept) and
+// runs the floor on them, nothing else: no model is
 // asked and no other rule is re-run, so an archive-wide pass costs a regex
 // scan per item, not a classifier-version re-judge (which can ask the model
 // about every item without a cached verdict; see
@@ -25,6 +26,7 @@ import { detectSecretFindingKinds, secretScanReusable } from '../classification/
 import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
 import { UNDECIDED_TIER_SNIFFER, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -127,35 +129,52 @@ async function applyFloor(set: TieredStoreSet, record: TierLedgerRecord): Promis
   if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return 'clear';
   const identity = identityOf(record);
   if (set.ledger.getOverride(identity)) return 'clear';
-  const current = set.ledger.copies(identity).filter((copy) => copy.state === 'current');
-  if (current.length === 0) return 'clear';
-  const serving = copyServingLayer(current, 'content') ?? copyServingLayer(current, 'metadata');
+  const copies = set.ledger.copies(identity);
+  if (copies.length === 0) return 'clear';
+  // The copy that serves the item, or, mid-move (a hide-first raise leaves
+  // every source copy superseded and the destination staged), the copy the
+  // move kept: completing a move never runs the floor again.
+  const current = copies.filter((copy) => copy.state === 'current');
+  const serving = copyServingLayer(current, 'content');
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-  const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedCopyOf(set, identity, copies);
   if (!exported) return 'failed';
+  // The names, exactly as the names pass screens what a store keeps of them
+  // (title, path, sender, folder keys); a raw locator that is not a path is
+  // not a name.
+  const signals = storedSignals(exported);
+  const names = [signals.title, signals.path, signals.sender, ...(signals.folderKeys ?? [])]
+    .filter((value): value is string => typeof value === 'string' && value.trim() !== '');
+  const nameKinds = new Set(names.length > 0 ? detectSecretFindingKinds(names.join('\n')) : []);
+  if (names.some(hasCredentialUrl)) nameKinds.add('credential_assignment');
+  // The text, as the content pass reads it.
   const text = exported.chunks.map((chunk) => chunk.boundedText).join('');
-  // The text, as the content pass reads it. Names are screened when an item
-  // is placed (tiered-store-set.ts), not here.
-  if (!text.trim()) return 'clear';
-  // A large text is scanned off the thread first; the scan below reuses it.
-  if (secretScanReusable(text)) await scanSecretsAhead(text);
-  const kinds = new Set(detectSecretFindingKinds(text));
-  if (hasCredentialUrl(text)) kinds.add('credential_assignment');
-  if (kinds.size === 0) return 'clear';
+  const textKinds = new Set<string>();
+  if (text.trim()) {
+    // A large text is scanned off the thread first; the scan below reuses it.
+    if (secretScanReusable(text)) await scanSecretsAhead(text);
+    for (const kind of detectSecretFindingKinds(text)) textKinds.add(kind);
+    if (hasCredentialUrl(text)) textKinds.add('credential_assignment');
+  }
+  if (nameKinds.size === 0 && textKinds.size === 0) return 'clear';
   // The item may have changed while the scan ran: settle only what is still there.
   const latest = set.ledger.getCurrent(identity);
   if (!latest?.routed || latest.contentTier === 'secrets' || latest.metadataTier === 'secrets') return 'clear';
-  const findingKinds = [...kinds].sort();
+  const findingKinds = [...new Set([...nameKinds, ...textKinds])].sort();
   const decision: TierDecision = {
-    metadataTier: latest.metadataTier,
+    // A secret in the names makes the names Secrets too, so none is released
+    // (the location index keeps no title for it).
+    metadataTier: nameKinds.size > 0 ? 'secrets' : latest.metadataTier,
     contentTier: 'secrets',
     decidedBy: 'secret_detector',
     reasons: [
-      ...latest.reasons.filter((reason) => !reason.startsWith('content:')),
-      ...findingKinds.map((kind) => `content:secret:${kind}`),
+      ...(nameKinds.size > 0
+        ? [...nameKinds].sort().map((kind) => `metadata:secret:${kind}`)
+        : latest.reasons.filter((reason) => !reason.startsWith('content:'))),
+      ...[...textKinds].sort().map((kind) => `content:secret:${kind}`),
     ],
     state: 'current',
-    contentRead: true,
+    contentRead: latest.contentRead || textKinds.size > 0,
     metadataPending: false,
     contentPending: false,
     metadataForced: latest.metadataForced,
@@ -164,7 +183,7 @@ async function applyFloor(set: TieredStoreSet, record: TierLedgerRecord): Promis
     mapRevision: latest.mapRevision,
     snifferId: UNDECIDED_TIER_SNIFFER.id,
   };
-  return settleRoutedSecrets(set, identity, decision, exported, { text, findingKinds }) ? 'secrets' : 'failed';
+  return settleRoutedSecrets(set, identity, decision, exported, { ...(text ? { text } : {}), findingKinds }) ? 'secrets' : 'failed';
 }
 
 function readState(raw: string | undefined): SweepState {

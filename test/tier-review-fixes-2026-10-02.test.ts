@@ -521,6 +521,39 @@ describe('4b. a new secret pattern reaches items already stored (#880)', () => {
     expect(JSON.stringify(install.secure.exportItemCopy(garden) ?? null)).not.toContain('ABCD-EFGH-1234');
   });
 
+  test('a code in the title alone: the names become Secrets too, and no title is kept for it', async () => {
+    const { install, prompts } = await gardenSettledPersonal();
+    const internal = install.lane.internal.current()!;
+    const copy = internal.exportItemCopy(garden)!;
+    internal.importItemCopy({ ...copy, columns: { ...copy.columns, title: 'Recovery code: ABCD-EFGH-1234' } },
+      { trustTier: defaultStoreTrustTier('internal'), syncConnectorId: 'test-resync' });
+    install.lane.ledger.writeMeta('secrets_floor_sweep', JSON.stringify({ done: '2026-10-13' }));
+    const asked = prompts.length;
+    expect(await sweepSecretsFloor({ set: install.lane.set })).toMatchObject({ secrets: 1, complete: true });
+    expect(prompts.length).toBe(asked);
+    const settled = install.lane.ledger.getCurrent(garden)!;
+    expect(settled).toMatchObject({ metadataTier: 'secrets', contentTier: 'secrets', decidedBy: 'secret_detector' });
+    expect(settled.reasons).toContain('metadata:secret:credential_assignment');
+    expect(install.lane.ledger.copies(garden)).toEqual([]);
+    const location = install.secrets.get(garden)!;
+    expect(location).toMatchObject({ namesReleasable: false });
+    expect(JSON.stringify(location)).not.toContain('ABCD-EFGH-1234');
+  });
+
+  test('an item mid hide-first raise is read from the copy the move kept', async () => {
+    const install = await freshInstall();
+    rewriteInternalText(install, 'id:garden', 'Orchard account\nRecovery code: ABCD-EFGH-1234');
+    // An always-Private folder raises it: every copy hidden, the move queued.
+    writePrivacyProfile({ rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/Notes' }] }, { env });
+    sweepOwnerRuleRaises({ set: install.lane.set });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'moving' });
+    expect(install.lane.ledger.copies(garden).some((copy) => copy.state === 'current')).toBe(false);
+    install.lane.ledger.writeMeta('secrets_floor_sweep', JSON.stringify({ done: '2026-10-13' }));
+    expect(await sweepSecretsFloor({ set: install.lane.set })).toMatchObject({ secrets: 1, complete: true });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ contentTier: 'secrets' });
+    expect(install.secrets.get(garden)).toMatchObject({ findingKinds: ['credential_assignment'] });
+  });
+
   test('a bounded page per call, resumed where it stopped', async () => {
     const { install } = await personalWithRecoveryCode();
     const first = await sweepSecretsFloor({ set: install.lane.set, limit: 1 });

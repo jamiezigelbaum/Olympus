@@ -19549,6 +19549,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
   init_secret_scan_off_thread();
   init_tier_classifier();
   init_tier_ledger();
+  init_stored_names();
   init_tier_rejudge();
 });
 
