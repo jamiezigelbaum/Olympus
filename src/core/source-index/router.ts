@@ -284,7 +284,22 @@ export interface RouteSourceIndexSearchOptions {
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
+  // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
+  laneClock?: LaneDeadlineClock;
 }
+
+// The time seam of the lane deadline (runCorpusLaneWithDeadline).
+export interface LaneDeadlineClock {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(timer: unknown): void;
+}
+
+const REAL_LANE_CLOCK: LaneDeadlineClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+};
 
 // Default per-lane retrieval deadline (ms).
 //
@@ -308,6 +323,12 @@ export interface RouteSourceIndexSearchOptions {
 // monopolize the event loop and prevent the timer itself from firing.
 const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 10_000;
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
+// A deadline timer this late means the thread was held past it (see
+// runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
+// up to HELD_THREAD_MAX_DEADLINE_FACTOR times its deadline in all.
+const HELD_THREAD_LATE_TIMER_MS = 500;
+const HELD_THREAD_GRACE_MS = 1_000;
+const HELD_THREAD_MAX_DEADLINE_FACTOR = 6;
 
 const FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   'body',
@@ -414,6 +435,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)),
       laneTimeoutMs,
       corpus.corpusId,
+      options.laneClock ?? REAL_LANE_CLOCK,
     );
     return { corpus, outcome, retrievalState };
   }));
@@ -716,6 +738,7 @@ async function runCorpusLaneWithDeadline(
   run: () => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
   timeoutMs: number,
   corpusId: string,
+  clock: LaneDeadlineClock = REAL_LANE_CLOCK,
 ): Promise<CorpusLaneOutcome> {
   const startedAt = Date.now();
   const runValidated = async (): Promise<SourceIndexCorpusSearchResponse> => {
@@ -746,15 +769,36 @@ async function runCorpusLaneWithDeadline(
     }
   }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: unknown;
   const laneSettled: Promise<
     { kind: 'response'; response: SourceIndexCorpusSearchResponse } | { kind: 'error'; error: unknown }
   > = runValidated().then(
     (response) => ({ kind: 'response' as const, response }),
     (error) => ({ kind: 'error' as const, error }),
   );
+  // A held thread is not a slow lane. When the deadline's timer fires late,
+  // something else held the worker's thread past it (a judging pass, another
+  // lane's synchronous keyword search), so this lane never had its budget of
+  // turns. It gets a short grace instead of being dropped, and is dropped
+  // only when a timer fires on time after the deadline, or at the hard stop.
+  // Sparta, 2026-11-10 (#1079): with the thread held 32-45 s during a
+  // dashboard Ask, every lane missed its 10 s deadline together and the Ask
+  // reported every source as unsearchable, although the lanes had found
+  // candidates.
+  const hardStopAtMs = clock.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise<{ kind: 'timeout' }>((resolve) => {
-    timer = setTimeout(() => resolve({ kind: 'timeout' as const }), timeoutMs);
+    const arm = (delayMs: number) => {
+      const dueAtMs = clock.now() + delayMs;
+      timer = clock.setTimeout(() => {
+        const now = clock.now();
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
+          arm(HELD_THREAD_GRACE_MS);
+          return;
+        }
+        resolve({ kind: 'timeout' as const });
+      }, delayMs);
+    };
+    arm(timeoutMs);
   });
 
   try {
@@ -795,7 +839,7 @@ async function runCorpusLaneWithDeadline(
     });
     return { kind: 'response', response: settled.response, elapsedMs };
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer !== undefined) clock.clearTimeout(timer);
   }
 }
 

@@ -20,6 +20,7 @@
 // Set OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true to include model-planned
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
+import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,6 +168,9 @@ async function main(): Promise<void> {
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
   const queryPlanner = queryPlannerEnabled ? createAnalystQueryPlanner(model) : undefined;
+  // Off unless OLYMPUS_SOURCE_RERANKER=built-in names a reranker model
+  // directory, so one corpus can be measured with and without it (issue #921).
+  const reranker = builtInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const traces: PrecisionTrace[] = [];
@@ -178,6 +182,7 @@ async function main(): Promise<void> {
       const detail = await buildEvidencePackDetailed({
         question: question.question,
         ...(queryPlanner ? { queryPlanner } : {}),
+        ...(reranker ? { reranker } : {}),
         maxResults,
         // Keep local-model prompts bounded for an eval gate. Truncation is
         // reported as a coverage gap; raise this only for targeted diagnosis.
@@ -251,12 +256,14 @@ async function main(): Promise<void> {
         queryPlannerEnabled,
         maxResults,
         maxCharsPerCandidate,
+        reranker: reranker?.id ?? 'off',
       }, { partial: true });
     },
   });
   store.close();
   writeEvalReport(reportPath, datasetPath, report, traces, {
     ...reportConfig,
+    reranker: reranker?.id ?? 'off',
   }, { partial: false });
 
   console.log(JSON.stringify(report, null, 2));
@@ -665,6 +672,7 @@ function writeEvalReport(
     queryPlannerEnabled: boolean;
     maxResults: number;
     maxCharsPerCandidate: number;
+    reranker?: string;
   },
   options: { partial: boolean },
 ): void {
@@ -680,6 +688,7 @@ function writeEvalReport(
       queryPlannerEnabled: config.queryPlannerEnabled,
       maxResults: config.maxResults,
       maxCharsPerCandidate: config.maxCharsPerCandidate,
+      ...(config.reranker ? { reranker: config.reranker } : {}),
       report,
       precision: {
         traces,
