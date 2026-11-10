@@ -134,10 +134,16 @@ describe('a pass through the tier lane', () => {
     expect(next.counts).toMatchObject({ notes_deleted: 1, items_tombstoned: 1 });
   });
 
-  test('a pass that stops after storing some notes still deletes them once they are gone', async () => {
+  // The oldest note rests in the Personal store, or, when its own content makes it Private, in the Private store.
+  // The Private store is the pass's first leg, so only there does a pass that stops leave a row of it; a
+  // deleted item with a row is a tombstone (TieredStoreSet.storedItem), one without a row is nothing at all.
+  test.each([
+    ['Personal', '<en-note>Note 0</en-note>', undefined],
+    ['Private', '<en-note>Transfer to IBAN DE89370400440532013000</en-note>', { hasContent: false, tombstoned: true }],
+  ] as const)('a pass that stops after storing some notes still deletes them once they are gone (%s)', async (_tier, firstBody, deletedState) => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const book = fake.addNotebook('Field work');
-    const notes = Array.from({ length: 55 }, (_, index) => fake!.addNote({ title: `Note ${index}`, created: day(2024, 1, index + 1), notebookId: book.id, body: `<en-note>Note ${index}</en-note>` }));
+    const notes = Array.from({ length: 55 }, (_, index) => fake!.addNote({ title: `Note ${index}`, created: day(2024, 1, index + 1), notebookId: book.id, body: index === 0 ? firstBody : `<en-note>Note ${index}</en-note>` }));
     const { sync, runtime } = await connected(fake);
     const stored = (noteId: string) => runtime.existingLane()?.set.storedItem({ provider: 'evernote', accountScope: 'personal', providerItemId: noteId }, (a, b) => a.localeCompare(b));
 
@@ -154,7 +160,9 @@ describe('a pass through the tier lane', () => {
     for (const note of [notes[0]!, notes[54]!]) fake.notes.splice(fake.notes.indexOf(note), 1);
     const next = await sync.pass();
     expect(next.counts).toMatchObject({ notes_deleted: 1, pass_complete: 1 });
-    expect(stored(storedNote.id)).toBeUndefined();
+    expect(storedNote).toBe(notes[0]!);
+    if (deletedState === undefined) expect(stored(storedNote.id)).toBeUndefined();
+    else expect(stored(storedNote.id)).toEqual({ version: expect.any(String), ...deletedState });
     const after = await sync.pass();
     expect(after.counts).toMatchObject({ notes_deleted: 0, notes_unchanged: 53 });
     // Three passes over 55 notes through the HTTP fake take ~2s alone and pass 5s on a loaded CI runner.
