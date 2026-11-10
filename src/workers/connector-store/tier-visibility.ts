@@ -45,11 +45,21 @@ function childLane(scope: TierVisibilityScope): { ledger: () => TierLedger; stor
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
 
-export function createTierVisibilityGate(scopes: () => readonly TierVisibilityScope[]): SourceIndexVisibilityGate {
+/**
+ * `onHeldMatches` hears, best match first, the items among one query's hits
+ * that are held waiting for their privacy judgment (a copy kept from
+ * embedding), so the judge can ask about them next (judge-boost.ts, #1062).
+ * Order only: the gate hides and keeps exactly the same hits either way.
+ */
+export function createTierVisibilityGate(
+  scopes: () => readonly TierVisibilityScope[],
+  onHeldMatches?: (identities: readonly TierLedgerIdentity[]) => void,
+): SourceIndexVisibilityGate {
   return (hits) => {
     const current = scopes();
     if (current.length === 0 || hits.length === 0) return hits;
     const hidden = new Set<SourceIndexRoutedSearchHit>();
+    const held = new Set<SourceIndexRoutedSearchHit>();
     for (const scope of current) {
       const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
       if (governed.length === 0) continue;
@@ -70,6 +80,7 @@ export function createTierVisibilityGate(scopes: () => readonly TierVisibilitySc
         }
         const key = tierLedgerIdentityKey(hit.sourceItem);
         const itemCopies = copies.get(key);
+        if (itemCopies?.some((copy) => copy.state === 'current' && copy.embedHold)) held.add(hit);
         if (!itemCopies || itemCopies.length === 0) {
           if (routedWithoutCopies.has(key)) hidden.add(hit);
           continue;
@@ -85,6 +96,13 @@ export function createTierVisibilityGate(scopes: () => readonly TierVisibilitySc
         if (orphaned.size > 0) {
           for (const hit of governed) if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem))) hidden.add(hit);
         }
+      }
+    }
+    if (onHeldMatches && held.size > 0) {
+      try {
+        onHeldMatches(hits.filter((hit) => held.has(hit)).map((hit) => hit.sourceItem));
+      } catch {
+        // Ordering the judge is best effort; the search is not affected.
       }
     }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
