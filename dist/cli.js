@@ -42684,7 +42684,7 @@ function dashboardImportLandingToken(sourceId) {
 function dashboardSourceLandingToken(sourceId) {
   return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
 }
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -155306,8 +155306,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.hostLinks = value2.kind === "computer" ? links : {};
     const landing = value2.landing;
     if (value2.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
-      state.landing = landing.sourceId;
-      state.landingImport = landing.import === true;
+      if (landing.sourceId === config2.allSourcesId)
+        state.open["home-all"] = true;
+      else {
+        state.landing = landing.sourceId;
+        state.landingImport = landing.import === true;
+      }
     }
   }
   function onComputer() {
@@ -157059,6 +157063,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const stalled = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label);
     const failing = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "failing");
     const off = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "switched_off");
+    if (!stalled.length)
+      return P.stalled;
     const parts = [];
     if (failing.length)
       parts.push(fill2(P.stalledRetrying, { sources: nameList(failing.map((source) => String(source.label))) }));
@@ -157478,6 +157484,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return row;
   }
   function homeFocusedSources(all) {
+    if (state.open["home-all"]) {
+      const section2 = el("div", "home-sources");
+      add(section2, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+      return section2;
+    }
     const focus = state.landing || (state.landed ? state.landed.id : "");
     const shown = all.filter((source) => {
       const id = String(source && (source.id || source.label));
@@ -157495,7 +157506,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return null;
     const sources = shown.filter((source) => !isArchivesCard(source));
     const archives = all.filter(isArchivesCard)[0];
-    const section = el("section", "section home-sources");
+    const section = el("div", "home-sources");
     if (sources.length)
       add(section, sourcesSection(sources));
     if (archives && (shown.indexOf(archives) >= 0 || archivesMoving()))
@@ -161475,6 +161486,7 @@ function chatgptDashboardPageHtml(options = {}) {
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
+    allSourcesId: DASHBOARD_ALL_SOURCES_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -161545,6 +161557,7 @@ var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESU
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
+  init_open_targets();
   init_shared_privacy_logic();
   init_picker();
   init_privacy();
@@ -162304,6 +162317,8 @@ function hostProgram(input, bridge, mount) {
     const row = wanted.indexOf(input.sourceLanding) === 0 ? wanted.slice(input.sourceLanding.length) : "";
     if (/^[a-z0-9_.]{1,64}$/.test(row))
       landing = { sourceId: row };
+    if (wanted === input.allSourcesLanding.token)
+      landing = { sourceId: input.allSourcesLanding.id };
   }
   function openLocalSession() {
     return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
@@ -162580,6 +162595,7 @@ function renderComputerHostPage(input) {
     landings: panelOpenTargetSources(),
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
+    allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
@@ -164724,7 +164740,7 @@ function renderDashboardConnectPage(view3, options) {
     lockedGate2(options),
     renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml2(dashboardLocalPageHref("connector", token))}">Build a connector</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml2(dashboardLocalPageHref("connector", token))}">Build a connector</a> · <a href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
     rows.map((entry) => entry.dialogs).join(""),
     sheet
   ].filter((block) => block !== "").join(`

@@ -43611,7 +43611,7 @@ function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -44423,8 +44423,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostLinks = value.kind === "computer" ? links : {};
     const landing = value.landing;
     if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
-      state.landing = landing.sourceId;
-      state.landingImport = landing.import === true;
+      if (landing.sourceId === config.allSourcesId)
+        state.open["home-all"] = true;
+      else {
+        state.landing = landing.sourceId;
+        state.landingImport = landing.import === true;
+      }
     }
   }
   function onComputer() {
@@ -46176,6 +46180,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const stalled = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label);
     const failing = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "failing");
     const off = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "switched_off");
+    if (!stalled.length)
+      return P.stalled;
     const parts = [];
     if (failing.length)
       parts.push(fill2(P.stalledRetrying, { sources: nameList(failing.map((source) => String(source.label))) }));
@@ -46595,6 +46601,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return row;
   }
   function homeFocusedSources(all) {
+    if (state.open["home-all"]) {
+      const section2 = el("div", "home-sources");
+      add(section2, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+      return section2;
+    }
     const focus = state.landing || (state.landed ? state.landed.id : "");
     const shown = all.filter((source) => {
       const id = String(source && (source.id || source.label));
@@ -46612,7 +46623,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return null;
     const sources = shown.filter((source) => !isArchivesCard(source));
     const archives = all.filter(isArchivesCard)[0];
-    const section = el("section", "section home-sources");
+    const section = el("div", "home-sources");
     if (sources.length)
       add(section, sourcesSection(sources));
     if (archives && (shown.indexOf(archives) >= 0 || archivesMoving()))
@@ -50592,6 +50603,7 @@ function chatgptDashboardPageHtml(options = {}) {
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
+    allSourcesId: DASHBOARD_ALL_SOURCES_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -50662,6 +50674,7 @@ var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESU
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
+  init_open_targets();
   init_shared_privacy_logic();
   init_picker();
   init_privacy();
