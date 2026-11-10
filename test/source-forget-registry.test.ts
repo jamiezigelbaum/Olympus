@@ -112,7 +112,7 @@ describe('forget registry: one test file per step', () => {
         const stranger = { source_id: 'made.up', slot: '1', corpus_ids: ['internal.made.up'] };
 
         // A source nobody connected has no tier ledger either.
-        expect(stepOf(file).forget(stranger, { ...context, tierLedgerIds: [], tierLedgerPaths: [] }, { dryRun: false })).toEqual([]);
+        expect(stepOf(file).forget(stranger, { ...context, tierLedgerIds: [], tierLedgerPaths: [], tierItemScopes: [] }, { dryRun: false })).toEqual([]);
         expect(treeDigest(root)).toEqual(seeded);
         expect(file.left(layout, file.mine)).toBeGreaterThan(0);
       });

@@ -1075,7 +1075,7 @@ function forgetSharedRows(
   // The ids of the source's tier ledgers, read now while the ledger files
   // still exist: they are the claimants of its Secrets redaction claims.
   const ledgers = only.repeatableOnly === true
-    ? { ids: [], unreadable: [] }
+    ? { ids: [], scopes: [], unreadable: [] }
     : readTierLedgerIds(source.files.stores);
   return runForgetSteps(account, {
     env,
@@ -1083,6 +1083,7 @@ function forgetSharedRows(
     sourceAliases: source.aliases,
     knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
     tierLedgerIds: ledgers.ids,
+    tierItemScopes: ledgers.scopes,
     tierLedgerPaths: source.files.stores.filter((store) => store !== ':memory:').map(tierLedgerPathForStore),
     unreadableTierLedgers: ledgers.unreadable,
   }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
@@ -1126,8 +1127,9 @@ function handleRegistryPathFor(context: LifecyclePathContext): string {
  * no identity yet, never held a claim; one that exists but cannot be read is
  * listed, and its claims are left alone.
  */
-function readTierLedgerIds(storePaths: readonly string[]): { ids: string[]; unreadable: string[] } {
+function readTierLedgerIds(storePaths: readonly string[]): { ids: string[]; scopes: [string, string][]; unreadable: string[] } {
   const ids = new Set<string>();
+  const scopes = new Map<string, [string, string]>();
   const unreadable: string[] = [];
   for (const storePath of storePaths) {
     if (storePath === ':memory:') continue;
@@ -1142,13 +1144,18 @@ function readTierLedgerIds(storePaths: readonly string[]): { ids: string[]; unre
         ? db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() as { value?: unknown } | null
         : null;
       if (typeof row?.value === 'string' && row.value !== '') ids.add(row.value);
+      if (db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_items'").get()) {
+        for (const pair of db.query('SELECT DISTINCT provider, account_scope FROM tier_items').all() as { provider: string; account_scope: string }[]) {
+          scopes.set(JSON.stringify([pair.provider, pair.account_scope]), [pair.provider, pair.account_scope]);
+        }
+      }
     } catch {
       unreadable.push(ledgerPath);
     } finally {
       if (db) closeSqliteStore(db);
     }
   }
-  return { ids: [...ids], unreadable };
+  return { ids: [...ids], scopes: [...scopes.values()], unreadable };
 }
 
 /**

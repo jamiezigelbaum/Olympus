@@ -39,6 +39,7 @@ import {
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
+import { forgetJudgeCheckItems, judgeCheckPath } from '../workers/classification/judge-check.ts';
 import { accountExtractionSpoolRoot, accountFolder, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
 import { forgetSecondRoundCursors, judgeSecondRoundStatePath } from '../workers/classification/judge-second-round.ts';
 import { placedAccount } from './source-placement.ts';
@@ -80,6 +81,12 @@ export interface ForgetContext {
   tierLedgerIds?: readonly string[] | undefined;
   /** The paths of the source's tier ledgers: positions kept by ledger path (the Venice double-check's) go with them. */
   tierLedgerPaths?: readonly string[] | undefined;
+  /**
+   * The (provider, account scope) pairs the source's tier ledgers hold items
+   * under, read with the ledger ids: the item ids the dashboard gave out for
+   * the source's items name these.
+   */
+  tierItemScopes?: readonly (readonly [string, string])[] | undefined;
   /**
    * Tier ledgers that exist but whose id could not be read. Their claims stay
    * (nothing is guessed) and the extraction step says so in its report.
@@ -361,6 +368,16 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const path = tierMigrationStatePath(context.env);
       return line(path, 'migration batch selectors', forgetTierMigrationSelectors(path, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The judge check's saved round and the items earlier rounds asked about: item ids, which name the item's provider, chat and id.
+    id: 'judge-check',
+    file: 'judge-check.json',
+    modules: [],
+    forget(_account, context, { dryRun }) {
+      const path = judgeCheckPath(context.env);
+      return line(path, 'judge check items', forgetJudgeCheckItems(path, context.tierItemScopes ?? [], { dryRun }));
     },
   },
   {

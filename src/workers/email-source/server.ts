@@ -1,7 +1,8 @@
 import { createDashboardPeople } from './dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
-import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
+import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
+import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
@@ -6232,6 +6233,8 @@ export async function main(): Promise<void> {
     runningVersion: runningOlympusVersion(), platform: process.platform,
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
+  // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
+  const ownerTierItemsEngine = createOwnerTierItems();
   // Update now (#1063): only the standalone engine the installer put in place updates itself.
   const selfUpdater = createSelfUpdater({
     platform: process.platform, runningVersion: runningOlympusVersion(),
@@ -6264,7 +6267,9 @@ export async function main(): Promise<void> {
     archiveImportAgent: archiveImportDashboard.agent,
     // One item's privacy label (issue #1060): the same stores and ledgers
     // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
-    ownerTierItems: createOwnerTierItems(),
+    ownerTierItems: ownerTierItemsEngine,
+    // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {

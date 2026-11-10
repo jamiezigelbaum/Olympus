@@ -44,6 +44,16 @@ export function sourceLogoTile(sourceId: string, status?: 'ok' | 'attention' | '
   return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ''}</span>`;
 }
 
+/** Each provider's logo tile (gmail, dropbox, ...), for pages that know an item's provider but not its source id. */
+export function sourceLogoTilesByProvider(): Record<string, string> {
+  const tiles: Record<string, string> = {};
+  for (const id of [...Object.keys(BRANDS), ...Object.keys(GLYPHS), ...Object.keys(LETTERS)]) {
+    const provider = id.split('.')[0]!;
+    if (!(provider in tiles)) tiles[provider] = sourceLogoTile(id);
+  }
+  return tiles;
+}
+
 export const SOURCE_LOGO_CSS = `
 .logotile { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: #fff; }
 .logotile svg { width: 22px; height: 22px; }

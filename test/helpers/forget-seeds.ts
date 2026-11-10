@@ -37,6 +37,7 @@ import { LocalPeopleIndex, peopleIndexPath } from '../../src/core/people-index.t
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
 import { accountFolder, xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
 import { judgeSecondRoundStatePath } from '../../src/workers/classification/judge-second-round.ts';
+import { judgeCheckPath } from '../../src/workers/classification/judge-check.ts';
 import { LocalXBookmarksApiUsageStore } from '../../src/workers/x-bookmarks/live-control.ts';
 
 export interface SeededSource {
@@ -73,7 +74,14 @@ export const tierLedgerIdOf = (source: SeededSource): string => `ledger-of-${sou
 
 /** A context for forgetting `source` (the first seeded source by default): its tier ledger's id is known. */
 export const contextOf = (layout: ForgetLayout, source: SeededSource = MINE): ForgetContext =>
-  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)], tierLedgerPaths: [sweptLedgerOf(layout, source)] });
+  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)], tierLedgerPaths: [sweptLedgerOf(layout, source)], tierItemScopes: [tierItemScopeOf(source)] });
+
+/** The (provider, account scope) the seeds file a source's tier ledger items under. */
+export const tierItemScopeOf = (source: SeededSource): [string, string] => [source.ledger_id, `${source.source_id}-account`];
+
+/** An item id as the dashboard gives one out (tier-owner-items.ts ownerTierItemId). */
+export const ownerItemIdOf = (source: SeededSource, n: number): string =>
+  `oti_${Buffer.from(JSON.stringify([...tierItemScopeOf(source), '', `item-${n}`])).toString('base64url')}`;
 
 /** Where the Venice double-check's sweep position for `source` is keyed. */
 export const sweptLedgerOf = (layout: ForgetLayout, source: SeededSource): string =>
@@ -89,6 +97,11 @@ export function seedTierLedgerBeside(storePath: string, source: SeededSource): s
   const db = new Database(ledgerPath);
   try {
     db.query("UPDATE tier_ledger_meta SET value = ? WHERE key = 'ledger_id'").run(tierLedgerIdOf(source));
+    // One item under the scope the seeded judge-check ids name: the Delete reads it with the id.
+    db.query(`INSERT INTO tier_items (provider, account_scope, provider_item_id, family, metadata_tier, content_tier,
+      generation, decided_by, reasons_json, engine_version, map_revision, state, decided_at)
+      VALUES (?, ?, 'item-1', 'file', 'private', 'private', 1, 'sniffer', '[]', 'test', 'test', 'current', '2026-11-01T00:00:00.000Z')`)
+      .run(...tierItemScopeOf(source));
   } finally {
     db.close();
   }
@@ -537,6 +550,27 @@ export const SEEDED_FILES: readonly SeededFile[] = [
       });
     },
     left: (layout, source) => identifyingSelectors(layout, source),
+  },
+  {
+    // The judge check's round and the items earlier rounds asked about, by item id.
+    stepId: 'judge-check',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => judgeCheckPath(layout.env),
+    seed(layout) {
+      const round = (source: SeededSource) => [1, 2].map((n) => ({ item_id: ownerItemIdOf(source, n), judge: 'Private', answer: 'Private', random: true }));
+      writeJson(judgeCheckPath(layout.env), {
+        v: 1,
+        round: { started_at: '2026-11-01T00:00:00.000Z', items: [...round(MINE), ...round(OTHER)] },
+        seen: [MINE, OTHER].flatMap((source) => [3, 4].map((n) => ownerItemIdOf(source, n))),
+      });
+    },
+    left(layout, source) {
+      const path = judgeCheckPath(layout.env);
+      if (!existsSync(path)) return 0;
+      const text = readFileSync(path, 'utf8');
+      return [1, 2, 3, 4].filter((n) => text.includes(ownerItemIdOf(source, n))).length;
+    },
   },
   {
     // The Venice double-check's sweep positions: the deleted source's in-progress position names an item.
