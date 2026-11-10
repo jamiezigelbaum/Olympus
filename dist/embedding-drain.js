@@ -41771,9 +41771,26 @@ var init_dropbox = __esm(() => {
   init_corpus_adapter3();
 });
 
+// src/core/engine-children.ts
+var LSTART, TABLE_LINE, PS_ENV;
+var init_engine_children = __esm(() => {
+  init_atomic_file();
+  init_remote_access();
+  LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
+  TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
+  PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
+});
+
+// src/core/native-process-service.ts
+var init_native_process_service = __esm(() => {
+  init_engine_children();
+});
+
 // src/workers/file-extraction/extractors/command-runner.ts
 var resolvedCommands;
 var init_command_runner = __esm(() => {
+  init_engine_children();
+  init_native_process_service();
   resolvedCommands = new Map;
 });
 
@@ -44407,16 +44424,6 @@ var init_engine_maintenance = __esm(() => {
   };
 });
 
-// src/core/engine-children.ts
-var LSTART, TABLE_LINE, PS_ENV;
-var init_engine_children = __esm(() => {
-  init_atomic_file();
-  init_remote_access();
-  LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
-  TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
-  PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
-});
-
 // src/core/linux-engine-service.ts
 import { createRequire as createRequire7 } from "node:module";
 var runtimeRequire4, heldLifecycleLocks;
@@ -46756,9 +46763,6 @@ var init_engine_split = __esm(() => {
   init_worker_transport();
 });
 
-// src/core/native-process-service.ts
-var init_native_process_service = () => {};
-
 // src/core/native-worker-service.ts
 var init_native_worker_service = __esm(() => {
   init_worker_cli_launcher();
@@ -46766,6 +46770,7 @@ var init_native_worker_service = __esm(() => {
   init_linux_owner_bridge_host();
   init_worker_transport();
   init_engine_split();
+  init_engine_children();
   init_config();
   init_native_process_service();
   init_olympus_layout();

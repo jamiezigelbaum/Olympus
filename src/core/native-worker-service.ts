@@ -6,6 +6,7 @@ import { createUnixSocketFetch, removeReleasedWorkerSocket, validateWorkerSocket
 import { ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from './engine-split.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { engineDescendantGroupsPath } from './engine-children.ts';
 import { statSync } from 'node:fs';
 import { basename, delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -124,6 +125,10 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
     id: SERVICE_ID,
     label: SERVICE_LABEL,
     retryInitialStartFailure: true,
+    // Under the standalone engine, the extraction commands a worker that died
+    // or restarted itself left running are stopped before its replacement
+    // starts (native-process-service.ts, descendantGroupsPath).
+    ...(options.engineHosted ? { descendantGroupsPath: engineDescendantGroupsPath(SERVICE_ID) } : {}),
     reload: {
       configPrefixes: [
         'plugins.entries.olympus.config.worker',
@@ -589,6 +594,7 @@ export function createNativeEngineBackgroundService(options: NativeEngineBackgro
     id: ENGINE_BACKGROUND_SERVICE_ID,
     label: 'background engine',
     retryInitialStartFailure: true,
+    ...(options.engineHosted ? { descendantGroupsPath: engineDescendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID) } : {}),
     reload: {
       configPrefixes: [
         'plugins.entries.olympus.config.worker',

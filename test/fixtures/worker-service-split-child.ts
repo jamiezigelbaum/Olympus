@@ -3,7 +3,15 @@
 // what it was started as and when it stops, in EVENTS_PATH, one JSON line per
 // event. With the background role it answers the engine readiness probe on
 // its command socket, as the real background does once its boot work is done.
+//
+// Knobs, all optional: SAY prints a line to stdout and stderr at start;
+// READY_DELAY_MS holds the background's readiness back; CRASH_AFTER_MS exits 1
+// that long after start; SPAWN_EXTRACTION has the background start a long
+// extraction command through the real command runner, as a document
+// extraction does (its own detached process group).
 import { appendFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { runExtractionCommand } from '../../src/workers/file-extraction/extractors/command-runner.ts';
 
 const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE ?? 'single';
 const events = process.env.EVENTS_PATH!;
@@ -16,9 +24,13 @@ note('start', {
   socket: process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET ?? null,
   managed: process.env.OLYMPUS_MANAGED_WORKER ?? null,
 });
+if (process.env.SAY) {
+  console.log(`hello from the ${role} on stdout`);
+  console.error(`hello from the ${role} on stderr`);
+}
 
 let server: ReturnType<typeof Bun.serve> | undefined;
-if (role === 'background') {
+const serve = () => {
   const socket = process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET!;
   rmSync(socket, { force: true });
   server = Bun.serve({
@@ -28,7 +40,21 @@ if (role === 'background') {
       return Response.json({ ready: true, schema_current: true, instance_id: process.env.OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID });
     },
   });
+};
+if (role === 'background') {
+  const readyDelay = Number(process.env.READY_DELAY_MS ?? 0);
+  if (readyDelay > 0) setTimeout(serve, readyDelay);
+  else serve();
+  if (process.env.SPAWN_EXTRACTION) {
+    void runExtractionCommand({
+      command: process.execPath,
+      args: [join(import.meta.dir, 'extraction-sleeper.ts')],
+      timeoutMs: 120_000,
+    }).catch(() => undefined);
+  }
 }
+const crashAfter = Number(process.env.CRASH_AFTER_MS ?? 0);
+if (crashAfter > 0) setTimeout(() => process.exit(1), crashAfter);
 
 const stop = (signal: string) => {
   note('stop', { signal });

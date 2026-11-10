@@ -12,12 +12,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runWorkerForeground } from '../src/cli.ts';
 import { engineBackgroundSocketPath } from '../src/core/engine-split.ts';
-import { superviseWorkerServiceSplit, workerServiceSplitApplies } from '../src/core/worker-service-split.ts';
+import { forwardWorkerServiceStop, superviseWorkerServiceSplit, workerServiceSplitApplies } from '../src/core/worker-service-split.ts';
 import { installWorkerService } from '../src/core/worker-service.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
 const CHILD = join(import.meta.dir, 'fixtures', 'worker-service-split-child.ts');
+const SUPERVISOR = join(import.meta.dir, 'fixtures', 'worker-service-split-supervisor.ts');
 const TOKEN = 'worker-service-split-test-token';
+
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 interface ChildEvent { role: string; event: 'start' | 'stop'; pid: number; argv?: string[]; socket?: string | null; managed?: string | null; signal?: string }
 
@@ -48,8 +51,8 @@ function setup() {
   return { root, env, read, signals, exits };
 }
 
-async function supervise(context: ReturnType<typeof setup>) {
-  const handle = await superviseWorkerServiceSplit({
+function superviseOptions(context: ReturnType<typeof setup>, log: (line: string) => void = () => {}) {
+  return {
     env: context.env,
     runtimePath: process.execPath,
     executablePath: CHILD,
@@ -60,14 +63,33 @@ async function supervise(context: ReturnType<typeof setup>) {
     startupTimeoutMs: 10_000,
     stopGraceMs: 5_000,
     signals: { once: (signal, handler) => { context.signals.set(signal, handler); } },
-    exit: (code) => { context.exits.push(code); },
-    log: () => {},
-  });
+    exit: (code: number) => { context.exits.push(code); },
+    log,
+    childStdio: 'ignore' as const,
+  } satisfies Parameters<typeof superviseWorkerServiceSplit>[0];
+}
+
+async function supervise(context: ReturnType<typeof setup>, log?: (line: string) => void) {
+  const handle = await superviseWorkerServiceSplit(superviseOptions(context, log));
   cleanups.push(() => handle.stop());
   return handle;
 }
 
-const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** The unit's process itself, run for real: its own signals, exit and stdio. */
+function superviseAsProcess(context: ReturnType<typeof setup>, extraEnv: Record<string, string> = {}) {
+  const child = childProcess.spawn(process.execPath, [SUPERVISOR], { env: { ...context.env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const output = { stdout: '', stderr: '' };
+  child.stdout!.on('data', (chunk: Buffer) => { output.stdout += chunk.toString(); });
+  child.stderr!.on('data', (chunk: Buffer) => { output.stderr += chunk.toString(); });
+  const exited = new Promise<number | null>((resolveExit) => child.once('exit', (code) => resolveExit(code)));
+  cleanups.push(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await exited;
+    for (const event of context.read()) if (alive(event.pid)) process.kill(event.pid, 'SIGKILL');
+  });
+  return { child, output, exited };
+}
+
 
 describe('the worker service runs the engine split itself', () => {
   test('background first; the front starts once it is ready, told the background\'s socket', async () => {
@@ -113,6 +135,127 @@ describe('the worker service runs the engine split itself', () => {
   }, 30_000);
 });
 
+describe('the unit\'s process stays the supervisor for its whole life', () => {
+  test('it stays up while both children wait out their restart backoff, and starts them again', async () => {
+    const context = setup();
+    const { child, exited } = superviseAsProcess(context, { CRASH_AFTER_MS: '200' });
+    // Both children exit 1 shortly after each start; every one is replaced.
+    await waitFor(() => context.read().filter((e) => e.role === 'background' && e.event === 'start').length >= 3 ? true : undefined);
+    await waitFor(() => context.read().filter((e) => e.role === 'front' && e.event === 'start').length >= 2 ? true : undefined);
+    expect(child.exitCode).toBeNull();
+    child.kill('SIGTERM');
+    expect(await exited).toBe(143);
+  }, 30_000);
+
+  test('what the children print reaches the unit\'s log', async () => {
+    const context = setup();
+    const { child, output, exited } = superviseAsProcess(context, { SAY: '1' });
+    await waitFor(() => output.stdout.includes('hello from the background on stdout') && output.stdout.includes('hello from the front on stdout') ? true : undefined);
+    await waitFor(() => output.stderr.includes('hello from the background on stderr') && output.stderr.includes('hello from the front on stderr') ? true : undefined);
+    child.kill('SIGTERM');
+    expect(await exited).toBe(143);
+  }, 30_000);
+
+  test('a child that fails is reported in the unit\'s log', async () => {
+    const context = setup();
+    const lines: string[] = [];
+    await supervise(context, (line) => lines.push(line));
+    const started = await waitFor(() => context.read().filter((e) => e.event === 'start').length >= 2 ? context.read() : undefined);
+    process.kill(started.find((e) => e.role === 'background')!.pid, 'SIGKILL');
+    await waitFor(() => lines.some((line) => /background engine exited unexpectedly/.test(line)) ? true : undefined);
+  }, 30_000);
+
+  test('a stop while the background is still starting never starts the front', async () => {
+    const context = setup();
+    context.env.READY_DELAY_MS = '1500';
+    const spawnedRoles: string[] = [];
+    const supervising = superviseWorkerServiceSplit({
+      ...superviseOptions(context),
+      spawn: (command, args, options) => {
+        spawnedRoles.push(String(options.env?.OLYMPUS_WORKER_ENGINE_ROLE));
+        return childProcess.spawn(command, args, options);
+      },
+    });
+    await waitFor(() => context.read().some((e) => e.role === 'background' && e.event === 'start') ? true : undefined);
+    context.signals.get('SIGTERM')!();
+    await waitFor(() => context.exits.length > 0 ? true : undefined);
+    const handle = await supervising;
+    cleanups.push(() => handle.stop());
+    expect(context.exits).toEqual([143]);
+    expect(spawnedRoles).toEqual(['background']);
+  }, 30_000);
+
+  test('a background that dies leaves no extraction command of its running', async () => {
+    const context = setup();
+    context.env.SPAWN_EXTRACTION = '1';
+    await supervise(context);
+    const extraction = await waitFor(() => context.read().find((e) => e.role === 'extraction'));
+    const background = context.read().find((e) => e.role === 'background' && e.event === 'start')!;
+    cleanups.push(() => { if (alive(extraction.pid)) process.kill(extraction.pid, 'SIGKILL'); });
+    process.kill(background.pid, 'SIGKILL');
+    // The replacement starts only once the dead background's extraction is gone.
+    await waitFor(() => context.read().filter((e) => e.role === 'background' && e.event === 'start').length >= 2 ? true : undefined);
+    expect(alive(extraction.pid)).toBe(false);
+  }, 30_000);
+});
+
+describe('with the switch off, a stop still reaches every process in the unit', () => {
+  const unitCgroup = '0::/user.slice/user-1000.slice/user@1000.service/app.slice/olympus-worker.service\n';
+  function fakeHost(input: { cgroup?: string; procs?: string; execPid?: string; env?: Record<string, string> } = {}) {
+    const handlers = new Map<string, () => void>();
+    const killed: Array<[number, string]> = [];
+    const raised: string[] = [];
+    const installed = forwardWorkerServiceStop({
+      env: { SYSTEMD_EXEC_PID: input.execPid ?? '100', ...input.env },
+      platform: 'linux',
+      pid: 100,
+      readFile: (path) => {
+        if (path === '/proc/self/cgroup') return input.cgroup ?? unitCgroup;
+        if (path === '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/olympus-worker.service/cgroup.procs') return input.procs ?? '100\n201\n202\n';
+        throw new Error(`unexpected read ${path}`);
+      },
+      kill: (pid, signal) => { killed.push([pid, signal]); },
+      signals: {
+        once: (signal, handler) => { handlers.set(signal, handler); },
+        listenerCount: () => 1,
+        raise: (signal) => { raised.push(signal); },
+      },
+    });
+    return { installed, handlers, killed, raised };
+  }
+
+  test('the unit\'s process passes SIGTERM on to everything else in its control group, as KillMode=control-group did', () => {
+    const host = fakeHost();
+    expect(host.installed).toBe(true);
+    host.handlers.get('SIGTERM')!();
+    expect(host.killed).toEqual([[201, 'SIGTERM'], [202, 'SIGTERM']]);
+  });
+
+  test('only the unit\'s own main process forwards', () => {
+    // A process the worker started inherits the environment, not the pid.
+    expect(fakeHost({ execPid: '555' }).installed).toBe(false);
+    // A worker under another unit (the engine host's) is not this unit.
+    expect(fakeHost({ cgroup: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/olympus-engine.service\n' }).installed).toBe(false);
+    // The split's children have a role and never forward.
+    expect(fakeHost({ env: { OLYMPUS_WORKER_ENGINE_ROLE: 'front' } }).installed).toBe(false);
+  });
+
+  test('a SIGTERM before the worker installed its own handler still ends the process', () => {
+    const handlers = new Map<string, () => void>();
+    const raised: string[] = [];
+    forwardWorkerServiceStop({
+      env: { SYSTEMD_EXEC_PID: '100' },
+      platform: 'linux',
+      pid: 100,
+      readFile: (path) => path === '/proc/self/cgroup' ? unitCgroup : '100\n',
+      kill: () => {},
+      signals: { once: (signal, handler) => { handlers.set(signal, handler); }, listenerCount: () => 0, raise: (signal) => { raised.push(signal); } },
+    });
+    handlers.get('SIGTERM')!();
+    expect(raised).toEqual(['SIGTERM']);
+  });
+});
+
 describe('when it applies', () => {
   test('only the unit\'s own process on Linux, with the switch on', () => {
     const base = { platform: 'linux' as const, managed: false, engineSplit: true, env: {} };
@@ -130,6 +273,7 @@ describe('when it applies', () => {
   test('with the switch off __worker-service-run starts the worker exactly as before', async () => {
     const launches: unknown[] = [];
     let supervised = 0;
+    let forwarded = 0;
     await runWorkerForeground({
       env: {},
       applySetupEnv: () => {},
@@ -137,9 +281,11 @@ describe('when it applies', () => {
       engineSplit: () => false,
       platform: 'linux',
       superviseSplit: async () => { supervised += 1; },
+      forwardUnitStop: () => { forwarded += 1; },
     });
     expect(launches).toEqual([{ nativeServiceSupervised: false }]);
     expect(supervised).toBe(0);
+    expect(forwarded).toBe(1);
     await runWorkerForeground({
       env: {},
       applySetupEnv: () => {},
@@ -147,9 +293,12 @@ describe('when it applies', () => {
       engineSplit: () => true,
       platform: 'linux',
       superviseSplit: async () => { supervised += 1; },
+      forwardUnitStop: () => { forwarded += 1; },
     });
     expect(launches).toHaveLength(1);
     expect(supervised).toBe(1);
+    // The supervisor stops its children in order itself.
+    expect(forwarded).toBe(1);
   });
 });
 

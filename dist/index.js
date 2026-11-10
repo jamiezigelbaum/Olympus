@@ -5324,8 +5324,959 @@ var init_config = __esm(() => {
   ];
 });
 
+// connect-relay/shared/directory-tools.ts
+var DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
+var init_directory_tools = __esm(() => {
+  DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
+  DIRECTORY_TOOL_NAMES = Object.freeze([
+    "olympus_dashboard",
+    "olympus_search",
+    "source_index_status",
+    "source_answer",
+    "source_answer_result",
+    "ask_anonymously",
+    "open_private_question",
+    "olympus_connect_source",
+    "olympus_scope_list",
+    "olympus_scope_set",
+    "olympus_disconnect_source",
+    "olympus_delete_source_data",
+    "olympus_model_set",
+    "olympus_model_retry",
+    "olympus_privacy_get",
+    "olympus_privacy_set",
+    "olympus_privacy_questions",
+    "olympus_privacy_check",
+    "olympus_sync_source"
+  ]);
+  DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
+});
+
+// src/core/remote-public-url.ts
+function parseRemotePublicBaseUrl(value, installId) {
+  const raw = value?.trim();
+  if (!raw)
+    return { enabled: false, reason: "not_configured" };
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
+  }
+  if (url.username || url.password) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
+  }
+  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
+  }
+  const secure = url.protocol === "https:";
+  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
+  }
+  const origin = url.origin;
+  return {
+    enabled: true,
+    urls: {
+      origin,
+      host: url.host.toLowerCase(),
+      issuer: origin,
+      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
+      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
+      secure,
+      ...installId ? { installId } : {}
+    }
+  };
+}
+var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  init_directory_tools();
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/remote-access.ts
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
+import {
+  chmodSync as raChmodSync,
+  lstatSync as raLstatSync,
+  mkdirSync as raMkdirSync,
+  readFileSync as raReadFileSync,
+  renameSync as raRenameSync,
+  statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
+  writeFileSync as raWriteFileSync
+} from "node:fs";
+import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
+function resolveRemoteAccessMode(remote) {
+  if (!remote?.enabled)
+    return { mode: "off" };
+  const { relayHost, publicBaseUrl } = remote;
+  if (relayHost && publicBaseUrl) {
+    return {
+      mode: "error",
+      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
+    };
+  }
+  if (publicBaseUrl) {
+    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
+    if (!parsed.enabled) {
+      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
+    }
+    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
+  }
+  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
+  if (!DNS_NAME.test(host)) {
+    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
+  }
+  return { mode: "relay", relayHost: host };
+}
+function olympusDataDir(env = process.env) {
+  const root = olympusDataRoot(env);
+  if (!raIsAbsolute(root))
+    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
+  return root;
+}
+function remoteAccessDir(env = process.env) {
+  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
+}
+function ensureRemoteAccessDir(dir) {
+  raMkdirSync(dir, { recursive: true, mode: 448 });
+  const stat2 = raLstatSync(dir);
+  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
+    throw new Error("the remote access state directory must be a directory owned by this user");
+  }
+  raChmodSync(dir, 448);
+  return dir;
+}
+function writePrivateText(path, text2) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text2, { mode: 384, flag: "wx" });
+  raChmodSync(temporary, 384);
+  raRenameSync(temporary, path);
+}
+function readPrivateFile(path) {
+  try {
+    const stat2 = raLstatSync(path);
+    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
+      return;
+    return raReadFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function emptyRemoteAccessStatus(mode, now = new Date) {
+  return {
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    updated_at: now.toISOString(),
+    mode,
+    error: null,
+    relay_host: null,
+    local_url: null,
+    public_base_url: null,
+    instance_id: null,
+    pid: null,
+    install_id: null,
+    relay: null,
+    last_connected_at: null
+  };
+}
+function writeRemoteAccessStatus(dir, status) {
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
+`);
+}
+function parseStatus(text2) {
+  try {
+    const value = JSON.parse(text2);
+    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function readRemoteAccessStatus(dir) {
+  const text2 = readPrivateFile(raJoin(dir, STATUS_FILE));
+  return text2 === undefined ? undefined : parseStatus(text2);
+}
+function originOf(value) {
+  if (!value?.trim())
+    return;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function loopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
+}
+function relayProcessRunning(dir, isAlive = processIsAlive) {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", STATUS_FILE = "status.json", DNS_NAME, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai";
+var init_remote_access = __esm(() => {
+  init_olympus_layout();
+  init_remote_public_url();
+  init_worker_auth();
+  DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/engine-children.ts
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync12 } from "node:fs";
+import { dirname as dirname12, join as join16 } from "node:path";
+function engineChildrenPath(env = process.env) {
+  return join16(olympusDataDir(env), "engine", "children.json");
+}
+function engineDescendantGroupsPath(serviceId, env = process.env) {
+  return join16(olympusDataDir(env), "engine", `descendants-${serviceId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+}
+function readEngineChildren(path) {
+  try {
+    const parsed = JSON.parse(readFileSync12(path, "utf8"));
+    if (!Array.isArray(parsed?.children))
+      return;
+    if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
+      return;
+    const legacy = parsed.schema === ENGINE_CHILDREN_SCHEMA_V1;
+    const children = [];
+    for (const child of parsed.children) {
+      if (!child || !Number.isSafeInteger(child.pgid) || child.pgid <= 1)
+        continue;
+      const argv = !legacy && Array.isArray(child.argv) && child.argv.length > 0 && child.argv.every((arg) => typeof arg === "string") ? child.argv : [];
+      children.push({
+        service: typeof child.service === "string" ? child.service : "unknown",
+        pgid: child.pgid,
+        started_at: typeof child.started_at === "string" ? child.started_at : "",
+        process_started: !legacy && typeof child.process_started === "string" && child.process_started ? child.process_started : null,
+        argv
+      });
+    }
+    return {
+      schema: ENGINE_CHILDREN_SCHEMA,
+      host_pid: typeof parsed.host_pid === "number" ? parsed.host_pid : 0,
+      children
+    };
+  } catch {
+    return;
+  }
+}
+function isRecordedLeader(entry, child) {
+  return entry !== undefined && entry.pid === child.pgid && entry.pgid === child.pgid && child.process_started !== null && child.argv.length > 0 && entry.started === child.process_started && entry.command === child.argv.join(" ");
+}
+function verifyGroup(table, child) {
+  if (!table)
+    return { ok: false, reason: "unreadable" };
+  const members = table.filter((entry) => entry.pgid === child.pgid);
+  if (members.length === 0)
+    return { ok: false, reason: "gone" };
+  const leader = members.find((entry) => entry.pid === child.pgid);
+  if (!leader)
+    return { ok: false, reason: "unverified" };
+  if (child.process_started === null || child.argv.length === 0)
+    return { ok: false, reason: "unverified" };
+  return isRecordedLeader(leader, child) ? { ok: true } : { ok: false, reason: "not_ours" };
+}
+function reapRecordedEngineChildren(path, deps = {}) {
+  const result = { stopped: [], skipped: [] };
+  const record = readEngineChildren(path);
+  if (!record) {
+    if (existsSync7(path))
+      removeRecord(path);
+    return result;
+  }
+  if (record.children.length === 0) {
+    removeRecord(path);
+    return result;
+  }
+  const list = deps.listProcesses ?? listProcessTable;
+  const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const sleep2 = deps.sleep ?? sleepSync2;
+  const selfPid = deps.selfPid ?? process.pid;
+  const first = list();
+  if (!first)
+    return result;
+  const selfGroup = first.find((entry) => entry.pid === selfPid)?.pgid;
+  const unsettled = [];
+  const skip = (child, reason) => result.skipped.push({ service: child.service, pgid: child.pgid, reason });
+  const candidates = [];
+  for (const child of record.children) {
+    if (child.pgid === selfPid || child.pgid === selfGroup) {
+      skip(child, "self");
+      continue;
+    }
+    const verdict = verifyGroup(first, child);
+    if (verdict.ok)
+      candidates.push(child);
+    else
+      skip(child, verdict.reason === "unreadable" ? "unverified" : verdict.reason);
+  }
+  const terminated = [];
+  for (const child of candidates) {
+    const verdict = verifyGroup(list(), child);
+    if (!verdict.ok) {
+      if (verdict.reason === "gone")
+        result.stopped.push({ service: child.service, pgid: child.pgid });
+      else if (verdict.reason === "unreadable") {
+        skip(child, "unverified");
+        unsettled.push(child);
+      } else
+        skip(child, verdict.reason);
+      continue;
+    }
+    signalGroup(kill, child.pgid, "SIGTERM");
+    terminated.push(child);
+  }
+  if (terminated.length > 0)
+    sleep2(deps.graceMs ?? DEFAULT_REAP_GRACE_MS);
+  for (const child of terminated) {
+    const verdict = verifyGroup(list(), child);
+    if (verdict.ok) {
+      signalGroup(kill, child.pgid, "SIGKILL");
+      result.stopped.push({ service: child.service, pgid: child.pgid });
+    } else if (verdict.reason === "gone") {
+      result.stopped.push({ service: child.service, pgid: child.pgid });
+    } else {
+      skip(child, "unverified");
+      if (verdict.reason === "unreadable")
+        unsettled.push(child);
+    }
+  }
+  if (deps.retainSettledRecord)
+    writeRecord(path, record);
+  else if (unsettled.length > 0)
+    writeRecord(path, { ...record, children: unsettled });
+  else
+    removeRecord(path);
+  return result;
+}
+function engineChildrenRecorder(input) {
+  const children = new Map;
+  const startTimeOf = input.startTimeOf ?? processStartTime;
+  const write = () => {
+    if (children.size === 0) {
+      removeRecord(input.path);
+      return;
+    }
+    writeRecord(input.path, { schema: ENGINE_CHILDREN_SCHEMA, host_pid: input.hostPid ?? process.pid, children: [...children.values()] });
+  };
+  return {
+    spawned(serviceId, pid, argv) {
+      let started;
+      try {
+        started = startTimeOf(pid);
+      } catch {
+        started = undefined;
+      }
+      children.set(pid, {
+        service: serviceId,
+        pgid: pid,
+        started_at: (input.now?.() ?? new Date).toISOString(),
+        process_started: started ?? null,
+        argv: argv ? [...argv] : []
+      });
+      write();
+    },
+    stopped(_serviceId, pid) {
+      if (children.delete(pid))
+        write();
+    }
+  };
+}
+function parseProcessTable(text2) {
+  const entries = [];
+  for (const line of text2.split(`
+`)) {
+    const match = TABLE_LINE.exec(line);
+    if (!match)
+      continue;
+    entries.push({ pid: Number(match[1]), pgid: Number(match[2]), started: normalizeStart(match[3]), command: decodePsCommand(match[4].trim()) });
+  }
+  return entries;
+}
+function decodePsCommand(command) {
+  if (!/\\[0-7]{3}/.test(command))
+    return command;
+  const bytes = [];
+  for (let index = 0;index < command.length; ) {
+    const escape = /^\\([0-7]{3})/.exec(command.slice(index, index + 4));
+    if (escape) {
+      bytes.push(parseInt(escape[1], 8) & 255);
+      index += 4;
+      continue;
+    }
+    const codePoint = command.codePointAt(index);
+    const char = String.fromCodePoint(codePoint);
+    bytes.push(...Buffer.from(char, "utf8"));
+    index += char.length;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+function normalizeStart(value) {
+  return value.trim().replace(/\s+/g, " ");
+}
+function listProcessTable() {
+  const result = spawnSync5("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
+    encoding: "utf8",
+    timeout: 1e4,
+    maxBuffer: 32 * 1024 * 1024,
+    env: PS_ENV
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string")
+    return;
+  return parseProcessTable(result.stdout);
+}
+function processStartTime(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1)
+    return;
+  const result = spawnSync5("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
+  if (result.status !== 0 || typeof result.stdout !== "string")
+    return;
+  const value = normalizeStart(result.stdout);
+  return new RegExp(`^${LSTART}$`).test(value) ? value : undefined;
+}
+function signalGroup(kill, pgid, signal) {
+  try {
+    kill(-pgid, signal);
+  } catch {}
+}
+function writeRecord(path, file) {
+  try {
+    mkdirSync7(dirname12(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify(file, null, 2)}
+`);
+  } catch {}
+}
+function removeRecord(path) {
+  try {
+    if (existsSync7(path))
+      removeFileDurablySync(path);
+  } catch {}
+}
+function sleepSync2(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2", ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1", DEFAULT_REAP_GRACE_MS = 2000, LSTART, TABLE_LINE, PS_ENV;
+var init_engine_children = __esm(() => {
+  init_atomic_file();
+  init_remote_access();
+  LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
+  TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
+  PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
+});
+
+// src/core/native-process-service.ts
+import { spawn as spawnProcess } from "node:child_process";
+function notifyChildObserver(event, serviceId, pid, argv) {
+  if (!childObserver || !pid || process.platform === "win32")
+    return;
+  try {
+    if (event === "spawned")
+      childObserver.spawned(serviceId, pid, argv);
+    else
+      childObserver.stopped(serviceId, pid);
+  } catch {}
+}
+function backgroundNativeProcessService(service) {
+  return {
+    ...service,
+    async start(context) {
+      service.start(context).catch((error) => {
+        if (error instanceof NativeProcessReportedStartError)
+          return;
+        try {
+          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
+        } catch {}
+      });
+    }
+  };
+}
+function createNativeProcessService(options) {
+  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
+  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
+  const restartOnCleanExit = options.restartOnCleanExit ?? true;
+  const stableUptimeMs = options.stableUptimeMs ?? 0;
+  const descendantSettleMs = options.descendantSettleMs ?? DEFAULT_DESCENDANT_SETTLE_MS;
+  const spawnChild = options.spawn ?? spawnProcess;
+  let generation = 0;
+  let current2;
+  let retiring;
+  let retirement;
+  const isCurrent = (lifetime) => current2 === lifetime && !lifetime.stopping;
+  const reapDescendants = (lifetime) => {
+    if (!options.descendantGroupsPath)
+      return;
+    try {
+      const result = reapRecordedEngineChildren(options.descendantGroupsPath);
+      if (result.stopped.length > 0) {
+        warn(lifetime, `Olympus ${options.label} left ${result.stopped.length} command process group(s) running; stopped them.`);
+      }
+    } catch {}
+  };
+  const stopChild = (lifetime, expectedChild) => terminateChild(lifetime, stopGraceMs, descendantSettleMs, expectedChild, () => reapDescendants(lifetime));
+  const warn = (lifetime, message) => {
+    try {
+      lifetime.context.logger?.warn?.(message);
+    } catch {}
+  };
+  const reportStuckDescendants = (lifetime, message) => {
+    warn(lifetime, message);
+    reportFailure(lifetime, message);
+  };
+  const reportFailure = (lifetime, message) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.reportFailure(new Error(message));
+    } catch {}
+  };
+  const clearFailure = (lifetime) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.clearFailure();
+    } catch {}
+  };
+  const scheduleRestart = (lifetime, deliberate = false) => {
+    if (!isCurrent(lifetime) || lifetime.restartTimer)
+      return;
+    const fast = deliberate && lifetime.fastRestarts < FAST_SELF_RESTARTS;
+    if (fast)
+      lifetime.fastRestarts += 1;
+    const index = fast ? 0 : Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    const delay = restartDelaysMs[index] ?? 30000;
+    if (!fast)
+      lifetime.restartAttempt += 1;
+    lifetime.restartTimer = setTimeout(() => {
+      lifetime.restartTimer = undefined;
+      if (!isCurrent(lifetime))
+        return;
+      launch(lifetime).catch(async (error) => {
+        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
+          return;
+        if (!await stopFailedStart(lifetime))
+          return;
+        reportStartFailure(lifetime, error);
+        if (!(error instanceof NativeProcessConfigurationError))
+          scheduleRestart(lifetime);
+      });
+    }, delay);
+    lifetime.restartTimer.unref?.();
+  };
+  const reportStartFailure = (lifetime, error) => {
+    lifetime.startupFailure = error instanceof NativeProcessRetryableStartError ? error.message : undefined;
+    const message = error instanceof NativeProcessConfigurationError ? error.message : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
+    reportFailure(lifetime, message);
+    return message;
+  };
+  const stopFailedStart = async (lifetime) => {
+    let waitingReported = false;
+    for (let attempt = 0;; attempt += 1) {
+      const child = lifetime.child;
+      try {
+        if (await stopChild(lifetime) === "unconfirmed") {
+          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        }
+        return isCurrent(lifetime);
+      } catch {}
+      if (!isCurrent(lifetime))
+        return false;
+      if (!child || childExited(child)) {
+        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        return true;
+      }
+      if (!waitingReported) {
+        waitingReported = true;
+        reportStuckDescendants(lifetime, `Olympus ${options.label} could not be stopped after a failed start; waiting for it to exit before starting another.`);
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      const index = Math.min(attempt, Math.max(restartDelaysMs.length - 1, 0));
+      await waitForChildExit(child, restartDelaysMs[index] ?? 30000);
+      if (!isCurrent(lifetime))
+        return false;
+    }
+  };
+  const completeCleanExit = (lifetime, child) => {
+    return stopChild(lifetime, child).then((result) => {
+      if (!isCurrent(lifetime))
+        return;
+      if (result === "unconfirmed") {
+        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
+        return;
+      }
+      clearFailure(lifetime);
+      try {
+        lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
+      } catch {}
+    });
+  };
+  const launch = async (lifetime) => {
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    const settings = await options.prepareStart({
+      serviceId: options.id,
+      serviceLabel: options.label,
+      context: lifetime.context,
+      initialConfig: options.initialConfig,
+      previousChildReleased: lifetime.previousChildReleased
+    });
+    lifetime.previousChildReleased = false;
+    if (!settings)
+      return;
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    if (settings.endpointOccupied) {
+      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
+    }
+    if (!lifetime.startupFailure)
+      reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    reapDescendants(lifetime);
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    const child = spawnChild(settings.command, [...settings.args], {
+      env: options.descendantGroupsPath ? { ...settings.env, [DESCENDANT_GROUPS_ENV]: options.descendantGroupsPath } : settings.env,
+      stdio: childStdio === "inherit" ? ["ignore", "inherit", "inherit"] : "ignore",
+      detached: process.platform !== "win32",
+      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
+    });
+    lifetime.child = child;
+    lifetime.childReady = false;
+    notifyChildObserver("spawned", options.id, child.pid, [settings.command, ...settings.args]);
+    let spawnFailed = false;
+    child.once("exit", (code, signal) => {
+      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
+        return;
+      lifetime.childReady = false;
+      if (lifetime.stableTimer) {
+        clearTimeout(lifetime.stableTimer);
+        lifetime.stableTimer = undefined;
+      }
+      if (!restartOnCleanExit && code === 0 && signal === null) {
+        completeCleanExit(lifetime, child).catch(() => {
+          reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
+        });
+        return;
+      }
+      const cleanup = stopChild(lifetime, child);
+      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null ? `Olympus ${options.label} is restarting, as it asked to.` : signal === "SIGTERM" || signal === null && code === 0 ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ""}; starting it again.` : `Olympus ${options.label} exited unexpectedly.`);
+      cleanup.then((result) => {
+        if (result === "unconfirmed") {
+          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
+        }
+      }, () => {
+        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
+      }).then(() => {
+        scheduleRestart(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null);
+      });
+    });
+    child.once("error", () => {
+      spawnFailed = true;
+    });
+    let outcome;
+    try {
+      outcome = await waitForChildReadiness({
+        lifetime,
+        child,
+        settings,
+        isCurrent,
+        startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
+        readinessPollMs,
+        restartOnCleanExit,
+        spawnFailed: () => spawnFailed
+      });
+    } catch (error) {
+      throw settings.startupFailure?.(child) ?? error;
+    }
+    if (!isCurrent(lifetime) || lifetime.child !== child)
+      throw new NativeProcessServiceStoppedError;
+    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
+      await completeCleanExit(lifetime, child);
+      return;
+    }
+    if (spawnFailed || childExited(child))
+      throw new Error(`Olympus ${options.label} exited during startup.`);
+    lifetime.childReady = true;
+    if (stableUptimeMs > 0) {
+      if (lifetime.stableTimer)
+        clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = setTimeout(() => {
+        lifetime.stableTimer = undefined;
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) {
+          lifetime.restartAttempt = 0;
+          lifetime.fastRestarts = 0;
+        }
+      }, stableUptimeMs);
+      lifetime.stableTimer.unref?.();
+    } else {
+      lifetime.restartAttempt = 0;
+      lifetime.fastRestarts = 0;
+    }
+    lifetime.startupFailure = undefined;
+    clearFailure(lifetime);
+    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
+  };
+  return {
+    id: options.id,
+    reload: { configPrefixes: [...options.reload.configPrefixes] },
+    async start(context) {
+      const requestedGeneration = ++generation;
+      const previousChildReleased = await stopCurrent();
+      if (requestedGeneration !== generation)
+        return;
+      const lifetime = {
+        serviceId: options.id,
+        generation: requestedGeneration,
+        context,
+        child: undefined,
+        childReady: false,
+        startupFailure: undefined,
+        stopping: false,
+        restartAttempt: 0,
+        fastRestarts: 0,
+        restartTimer: undefined,
+        stableTimer: undefined,
+        cleanupPromise: undefined,
+        previousChildReleased
+      };
+      current2 = lifetime;
+      try {
+        await launch(lifetime);
+      } catch (error) {
+        if (error instanceof NativeProcessServiceStoppedError)
+          return;
+        if (!options.retryInitialStartFailure) {
+          await stopChild(lifetime);
+          const message2 = reportStartFailure(lifetime, error);
+          if (current2 === lifetime)
+            current2 = undefined;
+          throw new NativeProcessReportedStartError(message2);
+        }
+        if (!await stopFailedStart(lifetime))
+          return;
+        const message = reportStartFailure(lifetime, error);
+        if (error instanceof NativeProcessConfigurationError) {
+          if (current2 === lifetime)
+            current2 = undefined;
+        } else
+          scheduleRestart(lifetime);
+        throw new NativeProcessReportedStartError(message);
+      }
+    },
+    async stop() {
+      generation += 1;
+      await stopCurrent();
+    }
+  };
+  async function stopCurrent() {
+    if (retirement)
+      return await retirement;
+    const lifetime = current2 ?? retiring;
+    if (!lifetime)
+      return false;
+    current2 = undefined;
+    retiring = lifetime;
+    lifetime.stopping = true;
+    if (lifetime.restartTimer) {
+      clearTimeout(lifetime.restartTimer);
+      lifetime.restartTimer = undefined;
+    }
+    if (lifetime.stableTimer) {
+      clearTimeout(lifetime.stableTimer);
+      lifetime.stableTimer = undefined;
+    }
+    const cleanup = stopChild(lifetime).then((result) => {
+      if (result === "unconfirmed") {
+        warn(lifetime, `Olympus ${options.label} descendants could not be confirmed stopped; its process group refused every signal.`);
+      }
+      if (retiring === lifetime)
+        retiring = undefined;
+      return lifetime.previousChildReleased;
+    });
+    retirement = cleanup;
+    try {
+      return await cleanup;
+    } finally {
+      if (retirement === cleanup)
+        retirement = undefined;
+    }
+  }
+}
+async function waitForChildReadiness(input) {
+  const deadline = Date.now() + input.startupTimeoutMs;
+  const acceptsCleanExit = !input.restartOnCleanExit;
+  while (Date.now() < deadline) {
+    if (!input.isCurrent(input.lifetime))
+      throw new NativeProcessServiceStoppedError;
+    if (input.spawnFailed())
+      throw new Error("Child exited during startup.");
+    if (childExited(input.child)) {
+      if (acceptsCleanExit && isCleanExit(input.child) && await readinessReceiptAfterExit(input))
+        return "cleanCompletion";
+      throw new Error("Child exited during startup.");
+    }
+    const ready = await input.settings.readinessProbe(input.child);
+    if (ready) {
+      if (!input.isCurrent(input.lifetime))
+        throw new NativeProcessServiceStoppedError;
+      if (input.spawnFailed())
+        throw new Error("Child exited during startup.");
+      if (childExited(input.child)) {
+        if (acceptsCleanExit && isCleanExit(input.child))
+          return "cleanCompletion";
+        throw new Error("Child exited during startup.");
+      }
+      return "ready";
+    }
+    await delay(input.readinessPollMs);
+  }
+  throw new Error("Child readiness timed out.");
+}
+async function readinessReceiptAfterExit(input) {
+  if (!input.isCurrent(input.lifetime))
+    throw new NativeProcessServiceStoppedError;
+  const ready = await input.settings.readinessProbe(input.child);
+  if (!input.isCurrent(input.lifetime))
+    throw new NativeProcessServiceStoppedError;
+  return ready;
+}
+async function terminateChild(lifetime, graceMs, settleMs, expectedChild, afterGroupStopped) {
+  if (lifetime.cleanupPromise)
+    return await lifetime.cleanupPromise;
+  const child = lifetime.child;
+  if (expectedChild && child !== expectedChild)
+    return "stopped";
+  lifetime.childReady = false;
+  if (!child?.pid) {
+    if (lifetime.child === child)
+      lifetime.child = undefined;
+    return "stopped";
+  }
+  const cleanup = terminateChildProcessGroup(child, graceMs, settleMs);
+  lifetime.cleanupPromise = cleanup;
+  try {
+    const result = await cleanup;
+    notifyChildObserver("stopped", lifetime.serviceId, child.pid);
+    afterGroupStopped?.();
+    lifetime.previousChildReleased = result === "stopped";
+    if (lifetime.child === child)
+      lifetime.child = undefined;
+    return result;
+  } finally {
+    if (lifetime.cleanupPromise === cleanup)
+      lifetime.cleanupPromise = undefined;
+  }
+}
+async function terminateChildProcessGroup(child, graceMs, settleMs) {
+  const processGroupId = child.pid;
+  if (!processGroupId)
+    return "stopped";
+  signalChildTree(child, "SIGTERM");
+  await waitForChildExit(child, graceMs);
+  const forced = signalChildTree(child, "SIGKILL");
+  await waitForChildExit(child, 1000);
+  if (!childExited(child))
+    throw new NativeProcessChildAliveError;
+  if (forced !== "denied")
+    return "stopped";
+  return await settleDeniedGroup(child, settleMs);
+}
+async function settleDeniedGroup(child, settleMs) {
+  const deadline = Date.now() + settleMs;
+  for (;; ) {
+    const probe = signalChildTree(child, 0);
+    if (probe === "gone")
+      return "stopped";
+    if (probe === "sent")
+      signalChildTree(child, "SIGKILL");
+    if (Date.now() >= deadline)
+      return "unconfirmed";
+    await delay(Math.min(DESCENDANT_SETTLE_POLL_MS, Math.max(deadline - Date.now(), 0)));
+  }
+}
+function signalChildTree(child, signal) {
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, signal);
+    else if (signal !== 0)
+      child.kill(signal);
+    return "sent";
+  } catch (error) {
+    const code = error.code;
+    if (code === "ESRCH")
+      return "gone";
+    if (code === "EPERM" && childExited(child))
+      return "denied";
+    throw error;
+  }
+}
+function childExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+function isCleanExit(child) {
+  return child.exitCode === 0 && child.signalCode === null;
+}
+async function waitForChildExit(child, timeoutMs) {
+  if (childExited(child))
+    return;
+  await new Promise((resolve6) => {
+    const timeout = setTimeout(done, timeoutMs);
+    timeout.unref?.();
+    child.once("exit", done);
+    function done() {
+      clearTimeout(timeout);
+      child.removeListener("exit", done);
+      resolve6();
+    }
+  });
+}
+function delay(ms) {
+  return new Promise((resolve6) => {
+    const timeout = setTimeout(resolve6, ms);
+    timeout.unref?.();
+  });
+}
+var DEFAULT_READINESS_POLL_MS = 100, DEFAULT_STOP_GRACE_MS = 2000, DEFAULT_RESTART_DELAYS_MS, SELF_RESTART_EXIT_CODE = 75, FAST_SELF_RESTARTS = 3, DEFAULT_DESCENDANT_SETTLE_MS = 2000, DESCENDANT_SETTLE_POLL_MS = 50, childStdio = "ignore", childObserver, DESCENDANT_GROUPS_ENV = "OLYMPUS_DESCENDANT_GROUPS_FILE", NativeProcessServiceStoppedError, NativeProcessConfigurationError, NativeProcessRetryableStartError, NativeProcessChildAliveError, NativeProcessReportedStartError;
+var init_native_process_service = __esm(() => {
+  init_engine_children();
+  DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
+  NativeProcessServiceStoppedError = class NativeProcessServiceStoppedError extends Error {
+  };
+  NativeProcessConfigurationError = class NativeProcessConfigurationError extends Error {
+  };
+  NativeProcessRetryableStartError = class NativeProcessRetryableStartError extends Error {
+  };
+  NativeProcessChildAliveError = class NativeProcessChildAliveError extends Error {
+    constructor() {
+      super("Olympus child process has not exited after the forced kill.");
+    }
+  };
+  NativeProcessReportedStartError = class NativeProcessReportedStartError extends Error {
+  };
+});
+
 // src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync12, statSync as statSync6 } from "node:fs";
+import { readFileSync as readFileSync13, statSync as statSync6 } from "node:fs";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 function parseZkapiConsultSettings(value, label) {
@@ -5435,7 +6386,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   if (policyFile.seen === stamp && policyFile.unreadable === undefined)
     return;
   try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync12(path, "utf8")));
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync13(path, "utf8")));
     for (const port of ports)
       zkapiDaemonPorts.add(port);
     policyFile.seen = stamp;
@@ -5869,10 +6820,10 @@ var init_source_watch = __esm(() => {
 });
 
 // src/core/worker-cli-launcher.ts
-import { chmodSync as chmodSync3, lstatSync as lstatSync7, readFileSync as readFileSync14 } from "node:fs";
-import { dirname as dirname13, isAbsolute as isAbsolute11, join as join16 } from "node:path";
+import { chmodSync as chmodSync3, lstatSync as lstatSync7, readFileSync as readFileSync15 } from "node:fs";
+import { dirname as dirname14, isAbsolute as isAbsolute11, join as join17 } from "node:path";
 function workerCliLauncherPath(homeDir) {
-  return join16(homeDir, ".local", "bin", "olympus");
+  return join17(homeDir, ".local", "bin", "olympus");
 }
 function readWorkerCliLauncher(homeDir) {
   const path = workerCliLauncherPath(homeDir);
@@ -5887,7 +6838,7 @@ function readWorkerCliLauncher(homeDir) {
   }
   if (!stat2.isFile() || process.getuid && stat2.uid !== process.getuid())
     return null;
-  const text2 = readFileSync14(path, "utf8");
+  const text2 = readFileSync15(path, "utf8");
   return text2.split(`
 `)[1] === WORKER_CLI_LAUNCHER_MARKER ? text2 : null;
 }
@@ -5911,7 +6862,7 @@ function writeWorkerCliLauncher(homeDir, text2) {
   const path = workerCliLauncherPath(homeDir);
   if (previous === text2 && (lstatSync7(path).mode & 511) === 448)
     return false;
-  ensurePrivateDirectoryTreeSync(homeDir, dirname13(path));
+  ensurePrivateDirectoryTreeSync(homeDir, dirname14(path));
   writePrivateFileAtomicSync(path, text2);
   chmodSync3(path, 448);
   return true;
@@ -6445,15 +7396,15 @@ var init_archive_formats = __esm(() => {
 });
 
 // src/core/messaging-capture-grant-file.ts
-import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync8, openSync as openSync5, readFileSync as readFileSync15 } from "node:fs";
+import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync8, openSync as openSync5, readFileSync as readFileSync16 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname16, join as join20 } from "node:path";
+import { dirname as dirname17, join as join21 } from "node:path";
 function captureGrantPathBeside(source, handleRegistryPath) {
-  return join20(dirname16(handleRegistryPath), `messaging-capture.${source}.json`);
+  return join21(dirname17(handleRegistryPath), `messaging-capture.${source}.json`);
 }
 function captureGrantPathFromEnv(source, env) {
   const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
-  return captureGrantPathBeside(source, configured || join20(env.HOME?.trim() || homedir9(), ".config", "olympus", "handles.json"));
+  return captureGrantPathBeside(source, configured || join21(env.HOME?.trim() || homedir9(), ".config", "olympus", "handles.json"));
 }
 function readCaptureGrantFile(path) {
   try {
@@ -6470,7 +7421,7 @@ function readCaptureGrantFile(path) {
     if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
       return { kind: "invalid" };
     }
-    const value = JSON.parse(readFileSync15(descriptor, "utf8"));
+    const value = JSON.parse(readFileSync16(descriptor, "utf8"));
     if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle)
       return { kind: "invalid" };
     if (value.accountProof !== undefined && typeof value.accountProof !== "string")
@@ -6500,7 +7451,7 @@ function captureGrantSessionEvidence(source, grantPath) {
 var init_messaging_capture_grant_file = () => {};
 
 // src/core/source-registry.ts
-import { readFileSync as readFileSync16 } from "node:fs";
+import { readFileSync as readFileSync17 } from "node:fs";
 function sourceAccountMovePending(account) {
   return account.migration?.state === "moving" || account.migration?.state === "reverting";
 }
@@ -6516,7 +7467,7 @@ function findRegistryAccount(registry, sourceId, slot) {
 function readSourceRegistryAt(path) {
   let text2;
   try {
-    text2 = readFileSync16(path, "utf8");
+    text2 = readFileSync17(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT")
       return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
@@ -6722,223 +7673,10 @@ var init_source_placement = __esm(() => {
   init_source_registry();
 });
 
-// connect-relay/shared/directory-tools.ts
-var DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
-var init_directory_tools = __esm(() => {
-  DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
-  DIRECTORY_TOOL_NAMES = Object.freeze([
-    "olympus_dashboard",
-    "olympus_search",
-    "source_index_status",
-    "source_answer",
-    "source_answer_result",
-    "ask_anonymously",
-    "open_private_question",
-    "olympus_connect_source",
-    "olympus_scope_list",
-    "olympus_scope_set",
-    "olympus_disconnect_source",
-    "olympus_delete_source_data",
-    "olympus_model_set",
-    "olympus_model_retry",
-    "olympus_privacy_get",
-    "olympus_privacy_set",
-    "olympus_privacy_questions",
-    "olympus_privacy_check",
-    "olympus_sync_source"
-  ]);
-  DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
-});
-
-// src/core/remote-public-url.ts
-function parseRemotePublicBaseUrl(value, installId) {
-  const raw = value?.trim();
-  if (!raw)
-    return { enabled: false, reason: "not_configured" };
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
-  }
-  if (url.username || url.password) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
-  }
-  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
-  }
-  if (url.pathname !== "/" && url.pathname !== "") {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
-  }
-  const secure = url.protocol === "https:";
-  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
-  }
-  const origin = url.origin;
-  return {
-    enabled: true,
-    urls: {
-      origin,
-      host: url.host.toLowerCase(),
-      issuer: origin,
-      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
-      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
-      secure,
-      ...installId ? { installId } : {}
-    }
-  };
-}
-var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
-var init_remote_public_url = __esm(() => {
-  init_directory_tools();
-  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-});
-
-// src/core/remote-access.ts
-import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
-import {
-  chmodSync as raChmodSync,
-  lstatSync as raLstatSync,
-  mkdirSync as raMkdirSync,
-  readFileSync as raReadFileSync,
-  renameSync as raRenameSync,
-  statSync as raStatSync,
-  unlinkSync as raUnlinkSync,
-  writeFileSync as raWriteFileSync
-} from "node:fs";
-import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
-function resolveRemoteAccessMode(remote) {
-  if (!remote?.enabled)
-    return { mode: "off" };
-  const { relayHost, publicBaseUrl } = remote;
-  if (relayHost && publicBaseUrl) {
-    return {
-      mode: "error",
-      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
-    };
-  }
-  if (publicBaseUrl) {
-    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
-    if (!parsed.enabled) {
-      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
-    }
-    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
-  }
-  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
-  if (!DNS_NAME.test(host)) {
-    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
-  }
-  return { mode: "relay", relayHost: host };
-}
-function olympusDataDir(env = process.env) {
-  const root = olympusDataRoot(env);
-  if (!raIsAbsolute(root))
-    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
-  return root;
-}
-function remoteAccessDir(env = process.env) {
-  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
-}
-function ensureRemoteAccessDir(dir) {
-  raMkdirSync(dir, { recursive: true, mode: 448 });
-  const stat2 = raLstatSync(dir);
-  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
-    throw new Error("the remote access state directory must be a directory owned by this user");
-  }
-  raChmodSync(dir, 448);
-  return dir;
-}
-function writePrivateText(path, text2) {
-  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
-  raWriteFileSync(temporary, text2, { mode: 384, flag: "wx" });
-  raChmodSync(temporary, 384);
-  raRenameSync(temporary, path);
-}
-function readPrivateFile(path) {
-  try {
-    const stat2 = raLstatSync(path);
-    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
-      return;
-    return raReadFileSync(path, "utf8");
-  } catch {
-    return;
-  }
-}
-function emptyRemoteAccessStatus(mode, now = new Date) {
-  return {
-    schema: REMOTE_ACCESS_STATUS_SCHEMA,
-    updated_at: now.toISOString(),
-    mode,
-    error: null,
-    relay_host: null,
-    local_url: null,
-    public_base_url: null,
-    instance_id: null,
-    pid: null,
-    install_id: null,
-    relay: null,
-    last_connected_at: null
-  };
-}
-function writeRemoteAccessStatus(dir, status) {
-  ensureRemoteAccessDir(dir);
-  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
-`);
-}
-function parseStatus(text2) {
-  try {
-    const value = JSON.parse(text2);
-    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
-  } catch {
-    return;
-  }
-}
-function readRemoteAccessStatus(dir) {
-  const text2 = readPrivateFile(raJoin(dir, STATUS_FILE));
-  return text2 === undefined ? undefined : parseStatus(text2);
-}
-function originOf(value) {
-  if (!value?.trim())
-    return;
-  try {
-    const url = new URL(value.trim());
-    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
-  } catch {
-    return;
-  }
-}
-function loopbackWorkerOrigin(value) {
-  const origin = originOf(value);
-  if (!origin)
-    return;
-  const url = new URL(origin);
-  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
-}
-function relayProcessRunning(dir, isAlive = processIsAlive) {
-  const status = readRemoteAccessStatus(dir);
-  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
-}
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", STATUS_FILE = "status.json", DNS_NAME, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai";
-var init_remote_access = __esm(() => {
-  init_olympus_layout();
-  init_remote_public_url();
-  init_worker_auth();
-  DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
-  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
-});
-
 // src/core/openclaw-executable.ts
 import { accessSync as accessSync6, constants as fsConstants4, statSync as statSync12 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
-import { delimiter as delimiter4, isAbsolute as isAbsolute16, join as join25 } from "node:path";
+import { delimiter as delimiter4, isAbsolute as isAbsolute16, join as join26 } from "node:path";
 function resolveOpenClawExecutable(options = {}) {
   const env = options.env ?? process.env;
   const explicit = env.OPENCLAW_BIN?.trim();
@@ -6948,7 +7686,7 @@ function resolveOpenClawExecutable(options = {}) {
     const directory = entry.trim();
     if (!directory || !isAbsolute16(directory))
       continue;
-    const candidate = join25(directory, "openclaw");
+    const candidate = join26(directory, "openclaw");
     if (isExecutableFile(candidate))
       return candidate;
   }
@@ -6967,10 +7705,10 @@ function openClawWellKnownPaths(home) {
   return [
     "/opt/homebrew/bin/openclaw",
     "/usr/local/bin/openclaw",
-    join25(home, ".local", "bin", "openclaw"),
-    join25(home, ".npm-global", "bin", "openclaw"),
-    join25(home, ".openclaw", "bin", "openclaw"),
-    join25(home, ".bun", "bin", "openclaw")
+    join26(home, ".local", "bin", "openclaw"),
+    join26(home, ".npm-global", "bin", "openclaw"),
+    join26(home, ".openclaw", "bin", "openclaw"),
+    join26(home, ".bun", "bin", "openclaw")
   ];
 }
 function isExecutableFile(path) {
@@ -7404,8 +8142,8 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync4, existsSync as existsSync8, mkdirSync as mkdirSync10, readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname19, join as join26, resolve as resolve8 } from "node:path";
+import { chmodSync as chmodSync4, existsSync as existsSync9, mkdirSync as mkdirSync11, readFileSync as readFileSync21 } from "node:fs";
+import { dirname as dirname20, join as join27, resolve as resolve8 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID7 } from "node:crypto";
@@ -7422,7 +8160,7 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
-  if (existsSync8(configPath)) {
+  if (existsSync9(configPath)) {
     const isDefaultPath = (path) => {
       try {
         return resolve8(path) === resolve8(defaultSovereigntyConfigPath(env));
@@ -7440,7 +8178,7 @@ function loadSovereigntyEngine(options = {}) {
         console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
       }
     }
-    const parsed = JSON.parse(readFileSync20(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync21(configPath, "utf8"));
     if (options.migratePrivateMeaning && !standaloneDefault && parsed?.retrieval?.trustDomains?.secure_local?.activationMode === "metadata_only") {
       console.info("Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.");
     }
@@ -7713,16 +8451,16 @@ function migratePrivateMeaningSearch(path) {
       }
     } }
   };
-  if (!existsSync8(path))
+  if (!existsSync9(path))
     return;
   const eligible = (current2) => {
     const config = current2;
     return config?.schemaVersion === 1 && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local) && isDeepStrictEqual(config.modelProfiles?.["built-in-embedding"], legacy.modelProfiles["built-in-embedding"]);
   };
-  if (!eligible(JSON.parse(readFileSync20(path, "utf8"))))
+  if (!eligible(JSON.parse(readFileSync21(path, "utf8"))))
     return;
   return withFileLeaseSync(path, (lease) => {
-    const original = readFileSync20(path, "utf8");
+    const original = readFileSync21(path, "utf8");
     const current2 = JSON.parse(original);
     if (!eligible(current2))
       return;
@@ -7749,10 +8487,10 @@ function migratePrivateMeaningSearch(path) {
   }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join26(dirname19(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join26(dirname19(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
-  const path = existsSync8(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
-  const parsed = JSON.parse(readFileSync20(path, "utf8"));
+  const sourceLayoutPath = join27(dirname20(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join27(dirname20(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
+  const path = existsSync9(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
+  const parsed = JSON.parse(readFileSync21(path, "utf8"));
   return validateSovereigntyConfig(parsed);
 }
 function parseSovereigntyConfig(value, label) {
@@ -8193,7 +8931,7 @@ var init_sovereignty = __esm(() => {
 });
 
 // src/core/mac-engine-daemon.ts
-import { lstatSync as lstatSync10, readFileSync as readFileSync21 } from "node:fs";
+import { lstatSync as lstatSync10, readFileSync as readFileSync22 } from "node:fs";
 function macEngineManager(home, daemonPath = MAC_ENGINE_DAEMON_PLIST) {
   let stat2;
   try {
@@ -8205,7 +8943,7 @@ function macEngineManager(home, daemonPath = MAC_ENGINE_DAEMON_PLIST) {
   }
   if (!stat2.isFile() || stat2.isSymbolicLink())
     throw new OperationError("config_error", "The Olympus server setting could not be read safely. Update Olympus before trying again.");
-  const text2 = readFileSync21(daemonPath, "utf8");
+  const text2 = readFileSync22(daemonPath, "utf8");
   if (daemonPath === MAC_ENGINE_DAEMON_PLIST && (stat2.uid !== 0 || (stat2.mode & 511) !== 420)) {
     throw new OperationError("config_error", "The Olympus server setting has unexpected permissions. Update Olympus before trying again.");
   }
@@ -21068,6 +21806,14 @@ function executableFile(path) {
     return false;
   }
 }
+function commandGroupRecorder() {
+  const path = process.env[DESCENDANT_GROUPS_ENV]?.trim();
+  if (!path || process.platform === "win32")
+    return;
+  if (groupRecorder?.path !== path)
+    groupRecorder = { path, recorder: engineChildrenRecorder({ path }) };
+  return groupRecorder.recorder;
+}
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
@@ -21077,6 +21823,18 @@ async function runExtractionCommand(request, internals = {}) {
       detached: process.platform !== "win32",
       ...request.env ? { env: { ...process.env, ...request.env } } : {}
     });
+    const recorder = commandGroupRecorder();
+    const pid = child.pid;
+    if (recorder && pid) {
+      try {
+        recorder.spawned("extraction", pid, [command, ...request.args]);
+      } catch {}
+      child.once("close", () => {
+        try {
+          recorder.stopped("extraction", pid);
+        } catch {}
+      });
+    }
     const stdout = [];
     const stderr = [];
     let settled = false;
@@ -21126,8 +21884,10 @@ async function runExtractionCommand(request, internals = {}) {
     });
   });
 }
-var ExtractionCommandError, ExtractionCommandTimeoutError, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands;
+var ExtractionCommandError, ExtractionCommandTimeoutError, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
+  init_engine_children();
+  init_native_process_service();
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -26117,500 +26877,10 @@ function openRemoteDetails(payload) {
 
 // src/core/native-transcription-cleanup-service.ts
 init_config();
+init_native_process_service();
 import { tmpdir as tmpdir2 } from "node:os";
 import { isAbsolute as isAbsolute9 } from "node:path";
 import { fileURLToPath } from "node:url";
-
-// src/core/native-process-service.ts
-import { spawn as spawnProcess } from "node:child_process";
-var DEFAULT_READINESS_POLL_MS = 100;
-var DEFAULT_STOP_GRACE_MS = 2000;
-var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
-var SELF_RESTART_EXIT_CODE = 75;
-var FAST_SELF_RESTARTS = 3;
-var DEFAULT_DESCENDANT_SETTLE_MS = 2000;
-var DESCENDANT_SETTLE_POLL_MS = 50;
-var childStdio = "ignore";
-var childObserver;
-function notifyChildObserver(event, serviceId, pid, argv) {
-  if (!childObserver || !pid || process.platform === "win32")
-    return;
-  try {
-    if (event === "spawned")
-      childObserver.spawned(serviceId, pid, argv);
-    else
-      childObserver.stopped(serviceId, pid);
-  } catch {}
-}
-function backgroundNativeProcessService(service) {
-  return {
-    ...service,
-    async start(context) {
-      service.start(context).catch((error) => {
-        if (error instanceof NativeProcessReportedStartError)
-          return;
-        try {
-          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
-        } catch {}
-      });
-    }
-  };
-}
-
-class NativeProcessServiceStoppedError extends Error {
-}
-
-class NativeProcessConfigurationError extends Error {
-}
-
-class NativeProcessRetryableStartError extends Error {
-}
-
-class NativeProcessChildAliveError extends Error {
-  constructor() {
-    super("Olympus child process has not exited after the forced kill.");
-  }
-}
-
-class NativeProcessReportedStartError extends Error {
-}
-function createNativeProcessService(options) {
-  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
-  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
-  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
-  const restartOnCleanExit = options.restartOnCleanExit ?? true;
-  const stableUptimeMs = options.stableUptimeMs ?? 0;
-  const descendantSettleMs = options.descendantSettleMs ?? DEFAULT_DESCENDANT_SETTLE_MS;
-  const spawnChild = options.spawn ?? spawnProcess;
-  let generation = 0;
-  let current2;
-  let retiring;
-  let retirement;
-  const isCurrent = (lifetime) => current2 === lifetime && !lifetime.stopping;
-  const stopChild = (lifetime, expectedChild) => terminateChild(lifetime, stopGraceMs, descendantSettleMs, expectedChild);
-  const warn = (lifetime, message) => {
-    try {
-      lifetime.context.logger?.warn?.(message);
-    } catch {}
-  };
-  const reportStuckDescendants = (lifetime, message) => {
-    warn(lifetime, message);
-    reportFailure(lifetime, message);
-  };
-  const reportFailure = (lifetime, message) => {
-    if (!isCurrent(lifetime))
-      return;
-    try {
-      lifetime.context.serviceHealth?.reportFailure(new Error(message));
-    } catch {}
-  };
-  const clearFailure = (lifetime) => {
-    if (!isCurrent(lifetime))
-      return;
-    try {
-      lifetime.context.serviceHealth?.clearFailure();
-    } catch {}
-  };
-  const scheduleRestart = (lifetime, deliberate = false) => {
-    if (!isCurrent(lifetime) || lifetime.restartTimer)
-      return;
-    const fast = deliberate && lifetime.fastRestarts < FAST_SELF_RESTARTS;
-    if (fast)
-      lifetime.fastRestarts += 1;
-    const index = fast ? 0 : Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
-    const delay = restartDelaysMs[index] ?? 30000;
-    if (!fast)
-      lifetime.restartAttempt += 1;
-    lifetime.restartTimer = setTimeout(() => {
-      lifetime.restartTimer = undefined;
-      if (!isCurrent(lifetime))
-        return;
-      launch(lifetime).catch(async (error) => {
-        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
-          return;
-        if (!await stopFailedStart(lifetime))
-          return;
-        reportStartFailure(lifetime, error);
-        if (!(error instanceof NativeProcessConfigurationError))
-          scheduleRestart(lifetime);
-      });
-    }, delay);
-    lifetime.restartTimer.unref?.();
-  };
-  const reportStartFailure = (lifetime, error) => {
-    lifetime.startupFailure = error instanceof NativeProcessRetryableStartError ? error.message : undefined;
-    const message = error instanceof NativeProcessConfigurationError ? error.message : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
-    reportFailure(lifetime, message);
-    return message;
-  };
-  const stopFailedStart = async (lifetime) => {
-    let waitingReported = false;
-    for (let attempt = 0;; attempt += 1) {
-      const child = lifetime.child;
-      try {
-        if (await stopChild(lifetime) === "unconfirmed") {
-          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
-        }
-        return isCurrent(lifetime);
-      } catch {}
-      if (!isCurrent(lifetime))
-        return false;
-      if (!child || childExited(child)) {
-        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
-        return true;
-      }
-      if (!waitingReported) {
-        waitingReported = true;
-        reportStuckDescendants(lifetime, `Olympus ${options.label} could not be stopped after a failed start; waiting for it to exit before starting another.`);
-      }
-      try {
-        child.kill("SIGKILL");
-      } catch {}
-      const index = Math.min(attempt, Math.max(restartDelaysMs.length - 1, 0));
-      await waitForChildExit(child, restartDelaysMs[index] ?? 30000);
-      if (!isCurrent(lifetime))
-        return false;
-    }
-  };
-  const completeCleanExit = (lifetime, child) => {
-    return stopChild(lifetime, child).then((result) => {
-      if (!isCurrent(lifetime))
-        return;
-      if (result === "unconfirmed") {
-        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
-        return;
-      }
-      clearFailure(lifetime);
-      try {
-        lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
-      } catch {}
-    });
-  };
-  const launch = async (lifetime) => {
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    const settings = await options.prepareStart({
-      serviceId: options.id,
-      serviceLabel: options.label,
-      context: lifetime.context,
-      initialConfig: options.initialConfig,
-      previousChildReleased: lifetime.previousChildReleased
-    });
-    lifetime.previousChildReleased = false;
-    if (!settings)
-      return;
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    if (settings.endpointOccupied) {
-      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
-    }
-    if (!lifetime.startupFailure)
-      reportFailure(lifetime, `Olympus ${options.label} is starting.`);
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    const child = spawnChild(settings.command, [...settings.args], {
-      env: settings.env,
-      stdio: childStdio === "inherit" ? ["ignore", "inherit", "inherit"] : "ignore",
-      detached: process.platform !== "win32",
-      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
-    });
-    lifetime.child = child;
-    lifetime.childReady = false;
-    notifyChildObserver("spawned", options.id, child.pid, [settings.command, ...settings.args]);
-    let spawnFailed = false;
-    child.once("exit", (code, signal) => {
-      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
-        return;
-      lifetime.childReady = false;
-      if (lifetime.stableTimer) {
-        clearTimeout(lifetime.stableTimer);
-        lifetime.stableTimer = undefined;
-      }
-      if (!restartOnCleanExit && code === 0 && signal === null) {
-        completeCleanExit(lifetime, child).catch(() => {
-          reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
-        });
-        return;
-      }
-      const cleanup = stopChild(lifetime, child);
-      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null ? `Olympus ${options.label} is restarting, as it asked to.` : signal === "SIGTERM" || signal === null && code === 0 ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ""}; starting it again.` : `Olympus ${options.label} exited unexpectedly.`);
-      cleanup.then((result) => {
-        if (result === "unconfirmed") {
-          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
-        }
-      }, () => {
-        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
-      }).then(() => {
-        scheduleRestart(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null);
-      });
-    });
-    child.once("error", () => {
-      spawnFailed = true;
-    });
-    let outcome;
-    try {
-      outcome = await waitForChildReadiness({
-        lifetime,
-        child,
-        settings,
-        isCurrent,
-        startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
-        readinessPollMs,
-        restartOnCleanExit,
-        spawnFailed: () => spawnFailed
-      });
-    } catch (error) {
-      throw settings.startupFailure?.(child) ?? error;
-    }
-    if (!isCurrent(lifetime) || lifetime.child !== child)
-      throw new NativeProcessServiceStoppedError;
-    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
-      await completeCleanExit(lifetime, child);
-      return;
-    }
-    if (spawnFailed || childExited(child))
-      throw new Error(`Olympus ${options.label} exited during startup.`);
-    lifetime.childReady = true;
-    if (stableUptimeMs > 0) {
-      if (lifetime.stableTimer)
-        clearTimeout(lifetime.stableTimer);
-      lifetime.stableTimer = setTimeout(() => {
-        lifetime.stableTimer = undefined;
-        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) {
-          lifetime.restartAttempt = 0;
-          lifetime.fastRestarts = 0;
-        }
-      }, stableUptimeMs);
-      lifetime.stableTimer.unref?.();
-    } else {
-      lifetime.restartAttempt = 0;
-      lifetime.fastRestarts = 0;
-    }
-    lifetime.startupFailure = undefined;
-    clearFailure(lifetime);
-    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
-  };
-  return {
-    id: options.id,
-    reload: { configPrefixes: [...options.reload.configPrefixes] },
-    async start(context) {
-      const requestedGeneration = ++generation;
-      const previousChildReleased = await stopCurrent();
-      if (requestedGeneration !== generation)
-        return;
-      const lifetime = {
-        serviceId: options.id,
-        generation: requestedGeneration,
-        context,
-        child: undefined,
-        childReady: false,
-        startupFailure: undefined,
-        stopping: false,
-        restartAttempt: 0,
-        fastRestarts: 0,
-        restartTimer: undefined,
-        stableTimer: undefined,
-        cleanupPromise: undefined,
-        previousChildReleased
-      };
-      current2 = lifetime;
-      try {
-        await launch(lifetime);
-      } catch (error) {
-        if (error instanceof NativeProcessServiceStoppedError)
-          return;
-        if (!options.retryInitialStartFailure) {
-          await stopChild(lifetime);
-          const message2 = reportStartFailure(lifetime, error);
-          if (current2 === lifetime)
-            current2 = undefined;
-          throw new NativeProcessReportedStartError(message2);
-        }
-        if (!await stopFailedStart(lifetime))
-          return;
-        const message = reportStartFailure(lifetime, error);
-        if (error instanceof NativeProcessConfigurationError) {
-          if (current2 === lifetime)
-            current2 = undefined;
-        } else
-          scheduleRestart(lifetime);
-        throw new NativeProcessReportedStartError(message);
-      }
-    },
-    async stop() {
-      generation += 1;
-      await stopCurrent();
-    }
-  };
-  async function stopCurrent() {
-    if (retirement)
-      return await retirement;
-    const lifetime = current2 ?? retiring;
-    if (!lifetime)
-      return false;
-    current2 = undefined;
-    retiring = lifetime;
-    lifetime.stopping = true;
-    if (lifetime.restartTimer) {
-      clearTimeout(lifetime.restartTimer);
-      lifetime.restartTimer = undefined;
-    }
-    if (lifetime.stableTimer) {
-      clearTimeout(lifetime.stableTimer);
-      lifetime.stableTimer = undefined;
-    }
-    const cleanup = stopChild(lifetime).then((result) => {
-      if (result === "unconfirmed") {
-        warn(lifetime, `Olympus ${options.label} descendants could not be confirmed stopped; its process group refused every signal.`);
-      }
-      if (retiring === lifetime)
-        retiring = undefined;
-      return lifetime.previousChildReleased;
-    });
-    retirement = cleanup;
-    try {
-      return await cleanup;
-    } finally {
-      if (retirement === cleanup)
-        retirement = undefined;
-    }
-  }
-}
-async function waitForChildReadiness(input) {
-  const deadline = Date.now() + input.startupTimeoutMs;
-  const acceptsCleanExit = !input.restartOnCleanExit;
-  while (Date.now() < deadline) {
-    if (!input.isCurrent(input.lifetime))
-      throw new NativeProcessServiceStoppedError;
-    if (input.spawnFailed())
-      throw new Error("Child exited during startup.");
-    if (childExited(input.child)) {
-      if (acceptsCleanExit && isCleanExit(input.child) && await readinessReceiptAfterExit(input))
-        return "cleanCompletion";
-      throw new Error("Child exited during startup.");
-    }
-    const ready = await input.settings.readinessProbe(input.child);
-    if (ready) {
-      if (!input.isCurrent(input.lifetime))
-        throw new NativeProcessServiceStoppedError;
-      if (input.spawnFailed())
-        throw new Error("Child exited during startup.");
-      if (childExited(input.child)) {
-        if (acceptsCleanExit && isCleanExit(input.child))
-          return "cleanCompletion";
-        throw new Error("Child exited during startup.");
-      }
-      return "ready";
-    }
-    await delay(input.readinessPollMs);
-  }
-  throw new Error("Child readiness timed out.");
-}
-async function readinessReceiptAfterExit(input) {
-  if (!input.isCurrent(input.lifetime))
-    throw new NativeProcessServiceStoppedError;
-  const ready = await input.settings.readinessProbe(input.child);
-  if (!input.isCurrent(input.lifetime))
-    throw new NativeProcessServiceStoppedError;
-  return ready;
-}
-async function terminateChild(lifetime, graceMs, settleMs, expectedChild) {
-  if (lifetime.cleanupPromise)
-    return await lifetime.cleanupPromise;
-  const child = lifetime.child;
-  if (expectedChild && child !== expectedChild)
-    return "stopped";
-  lifetime.childReady = false;
-  if (!child?.pid) {
-    if (lifetime.child === child)
-      lifetime.child = undefined;
-    return "stopped";
-  }
-  const cleanup = terminateChildProcessGroup(child, graceMs, settleMs);
-  lifetime.cleanupPromise = cleanup;
-  try {
-    const result = await cleanup;
-    notifyChildObserver("stopped", lifetime.serviceId, child.pid);
-    lifetime.previousChildReleased = result === "stopped";
-    if (lifetime.child === child)
-      lifetime.child = undefined;
-    return result;
-  } finally {
-    if (lifetime.cleanupPromise === cleanup)
-      lifetime.cleanupPromise = undefined;
-  }
-}
-async function terminateChildProcessGroup(child, graceMs, settleMs) {
-  const processGroupId = child.pid;
-  if (!processGroupId)
-    return "stopped";
-  signalChildTree(child, "SIGTERM");
-  await waitForChildExit(child, graceMs);
-  const forced = signalChildTree(child, "SIGKILL");
-  await waitForChildExit(child, 1000);
-  if (!childExited(child))
-    throw new NativeProcessChildAliveError;
-  if (forced !== "denied")
-    return "stopped";
-  return await settleDeniedGroup(child, settleMs);
-}
-async function settleDeniedGroup(child, settleMs) {
-  const deadline = Date.now() + settleMs;
-  for (;; ) {
-    const probe = signalChildTree(child, 0);
-    if (probe === "gone")
-      return "stopped";
-    if (probe === "sent")
-      signalChildTree(child, "SIGKILL");
-    if (Date.now() >= deadline)
-      return "unconfirmed";
-    await delay(Math.min(DESCENDANT_SETTLE_POLL_MS, Math.max(deadline - Date.now(), 0)));
-  }
-}
-function signalChildTree(child, signal) {
-  try {
-    if (process.platform !== "win32" && child.pid)
-      process.kill(-child.pid, signal);
-    else if (signal !== 0)
-      child.kill(signal);
-    return "sent";
-  } catch (error) {
-    const code = error.code;
-    if (code === "ESRCH")
-      return "gone";
-    if (code === "EPERM" && childExited(child))
-      return "denied";
-    throw error;
-  }
-}
-function childExited(child) {
-  return child.exitCode !== null || child.signalCode !== null;
-}
-function isCleanExit(child) {
-  return child.exitCode === 0 && child.signalCode === null;
-}
-async function waitForChildExit(child, timeoutMs) {
-  if (childExited(child))
-    return;
-  await new Promise((resolve6) => {
-    const timeout = setTimeout(done, timeoutMs);
-    timeout.unref?.();
-    child.once("exit", done);
-    function done() {
-      clearTimeout(timeout);
-      child.removeListener("exit", done);
-      resolve6();
-    }
-  });
-}
-function delay(ms) {
-  return new Promise((resolve6) => {
-    const timeout = setTimeout(resolve6, ms);
-    timeout.unref?.();
-  });
-}
-
-// src/core/native-transcription-cleanup-service.ts
 var SERVICE_ID = "olympus-transcription-temp-cleanup";
 var RELOAD_PREFIX = "plugins.entries.olympus.config.worker.transcriptionCleanup";
 function createNativeTranscriptionCleanupService(options) {
@@ -26809,8 +27079,8 @@ import { isAbsolute as isAbsolute10 } from "node:path";
 // src/core/provider-credit-status.ts
 init_model_transport();
 init_atomic_file();
-import { existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync13, unlinkSync } from "node:fs";
-import { dirname as dirname12 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync14, unlinkSync } from "node:fs";
+import { dirname as dirname13 } from "node:path";
 var VENICE_BILLING_BASE_URL = "https://api.venice.ai/api/v1";
 var DEFAULT_BASE_URL = VENICE_BILLING_BASE_URL;
 var DEFAULT_TIMEOUT_MS = 15000;
@@ -27165,12 +27435,12 @@ function safeErrorMessage(error) {
   return error instanceof Error && error.name === "AbortError" ? "Venice billing request timed out or was cancelled." : "Venice billing request failed.";
 }
 function writeReport(path, report) {
-  mkdirSync7(dirname12(path), { recursive: true, mode: 448 });
+  mkdirSync8(dirname13(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(report, null, 2)}
 `);
 }
 function writeProviderPause(path, report) {
-  mkdirSync7(dirname12(path), { recursive: true, mode: 448 });
+  mkdirSync8(dirname13(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({
     active: true,
     kind: "venice",
@@ -27193,10 +27463,10 @@ function reconcileProviderPauseFile(path, report) {
   return "left";
 }
 function isVeniceProviderPauseFile(path) {
-  if (!existsSync7(path))
+  if (!existsSync8(path))
     return false;
   try {
-    const raw = JSON.parse(readFileSync13(path, "utf8"));
+    const raw = JSON.parse(readFileSync14(path, "utf8"));
     return raw.kind === "venice";
   } catch {
     return false;
@@ -27367,6 +27637,7 @@ function asRecord7(value) {
 }
 
 // src/native-plugin.ts
+init_native_process_service();
 init_config();
 import { createHash as createHash15 } from "node:crypto";
 
@@ -28764,7 +29035,7 @@ import { homedir as homedir8 } from "node:os";
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
-import { dirname as dirname14, join as join17 } from "node:path";
+import { dirname as dirname15, join as join18 } from "node:path";
 
 // src/workers/remote-request-body.ts
 init_http_timeout();
@@ -29136,7 +29407,7 @@ class LinuxOwnerBridge {
       this.clearTicket(previous);
     const value = secret(), challenge = secret();
     const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join17(dirname14(this.options.socketPath), `owner-ticket-${randomBytes4(16).toString("hex")}.html`);
+    const path = join18(dirname15(this.options.socketPath), `owner-ticket-${randomBytes4(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
@@ -29463,21 +29734,21 @@ var OWNER_BRIDGE_HOST_ENV = "OLYMPUS_OWNER_BRIDGE_HOST_SOCKET";
 
 // src/core/engine-split.ts
 init_olympus_layout();
-import { mkdirSync as mkdirSync8 } from "node:fs";
-import { dirname as dirname15, join as join18 } from "node:path";
+import { mkdirSync as mkdirSync9 } from "node:fs";
+import { dirname as dirname16, join as join19 } from "node:path";
 var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE";
 var ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET";
 var ENGINE_BACKGROUND_ORIGIN = "http://olympus-background";
 var ENGINE_READY_PATH = "/engine/ready";
 function engineBackgroundSocketPath(options = {}) {
   const workerSocket = workerSocketPath(options);
-  const path = workerSocket ? join18(dirname15(workerSocket), "background.sock") : join18(sharedDataPath("engine-run", options.env ?? process.env), "background.sock");
+  const path = workerSocket ? join19(dirname16(workerSocket), "background.sock") : join19(sharedDataPath("engine-run", options.env ?? process.env), "background.sock");
   if (Buffer.byteLength(path) > 103)
     throw new Error("Engine background socket path is too long for a unix socket.");
   return path;
 }
 function prepareEngineBackgroundSocketDirectory(socketPath) {
-  mkdirSync8(dirname15(socketPath), { recursive: true, mode: 448 });
+  mkdirSync9(dirname16(socketPath), { recursive: true, mode: 448 });
 }
 async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
   const controller = new AbortController;
@@ -29507,13 +29778,15 @@ async function probeEngineBackground(fetchBackground, authToken, instanceId, tim
 }
 
 // src/core/native-worker-service.ts
+init_engine_children();
 init_config();
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { statSync as statSync7 } from "node:fs";
-import { basename as basename3, delimiter as delimiter2, isAbsolute as isAbsolute12, join as join19 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+init_native_process_service();
 init_olympus_layout();
 init_worker_auth();
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { statSync as statSync7 } from "node:fs";
+import { basename as basename3, delimiter as delimiter2, isAbsolute as isAbsolute12, join as join20 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.";
 var WORKER_ENDPOINT_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.";
 var WORKER_SOCKET_RETAINED_MESSAGE = "Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.";
@@ -29539,6 +29812,7 @@ function createNativeWorkerService(options) {
     id: SERVICE_ID3,
     label: SERVICE_LABEL,
     retryInitialStartFailure: true,
+    ...options.engineHosted ? { descendantGroupsPath: engineDescendantGroupsPath(SERVICE_ID3) } : {},
     reload: {
       configPrefixes: [
         "plugins.entries.olympus.config.worker",
@@ -29754,8 +30028,8 @@ function resolveBunRuntimePath(configured, env) {
     return assertExecutableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...env.BUN_INSTALL ? [join19(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
-    ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join19(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...env.BUN_INSTALL ? [join20(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join20(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!isAbsolute12(candidate) || !isBunExecutableName(candidate))
@@ -29906,6 +30180,7 @@ function createNativeEngineBackgroundService(options) {
     id: ENGINE_BACKGROUND_SERVICE_ID,
     label: "background engine",
     retryInitialStartFailure: true,
+    ...options.engineHosted ? { descendantGroupsPath: engineDescendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID) } : {},
     reload: {
       configPrefixes: [
         "plugins.entries.olympus.config.worker",
@@ -29975,11 +30250,12 @@ function createNativeEngineBackgroundService(options) {
 init_config();
 init_olympus_layout();
 init_source_placement();
-import { randomUUID as randomUUID4 } from "node:crypto";
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync17, statSync as statSync9 } from "node:fs";
-import { isAbsolute as isAbsolute13, join as join21, resolve as resolve6 } from "node:path";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+init_native_process_service();
 init_worker_auth();
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync18, statSync as statSync9 } from "node:fs";
+import { isAbsolute as isAbsolute13, join as join22, resolve as resolve6 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SERVICE_ID4 = "olympus-telegram-capture";
 var SERVICE_LABEL2 = "Telegram capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS = 30000;
@@ -30139,7 +30415,7 @@ function applyFolderPaths(config, layoutEnv, env) {
   env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR = folder.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR;
   delete env.OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH;
   for (const dir of folderCaptureDirs(account, layoutEnv))
-    mkdirSync9(dir, { recursive: true, mode: 448 });
+    mkdirSync10(dir, { recursive: true, mode: 448 });
 }
 function assertUsableFile(path, label) {
   if (!isAbsolute13(path)) {
@@ -30154,11 +30430,11 @@ function assertUsableFile(path, label) {
 }
 async function telegramReadinessProbe(stateDir, instanceId, approvedChatCount, child) {
   try {
-    const path = join21(stateDir, READINESS_FILE);
+    const path = join22(stateDir, READINESS_FILE);
     const stat2 = statSync9(path);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync17(path, "utf8"));
+    const receipt = JSON.parse(readFileSync18(path, "utf8"));
     return receipt.kind === "telegram_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.authenticated === true && typeof receipt.approved_chats === "number" && Number.isInteger(receipt.approved_chats) && receipt.approved_chats === approvedChatCount;
   } catch {
     return false;
@@ -30175,9 +30451,10 @@ function asRecord10(value) {
 init_config();
 init_olympus_layout();
 init_source_placement();
+init_native_process_service();
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { accessSync as accessSync5, constants as constants3, readFileSync as readFileSync18, statSync as statSync10 } from "node:fs";
-import { isAbsolute as isAbsolute14, join as join22, resolve as resolve7 } from "node:path";
+import { accessSync as accessSync5, constants as constants3, readFileSync as readFileSync19, statSync as statSync10 } from "node:fs";
+import { isAbsolute as isAbsolute14, join as join23, resolve as resolve7 } from "node:path";
 var SERVICE_ID5 = "olympus-whatsapp-capture";
 var SERVICE_LABEL3 = "WhatsApp capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS2 = Number.POSITIVE_INFINITY;
@@ -30218,7 +30495,7 @@ async function prepareWhatsAppStart(input, options) {
   assertExecutableFile2(capture.binaryPath);
   const env = baseEnvironment2();
   const stateDir = captureStateDir(capture.stateDir, env, nativeWorkerEnvironment(config, options.workerEnvPath));
-  assertUsableSession(join22(stateDir, SESSION_FILE));
+  assertUsableSession(join23(stateDir, SESSION_FILE));
   const instanceId = randomUUID5();
   env.OLYMPUS_WHATSAPP_STATE_DIR = stateDir;
   env.OLYMPUS_WHATSAPP_QR_STDOUT = "false";
@@ -30285,11 +30562,11 @@ function assertUsableSession(path) {
 }
 async function whatsappReadinessProbe(stateDir, instanceId, child) {
   try {
-    const path = join22(stateDir, READINESS_FILE2);
+    const path = join23(stateDir, READINESS_FILE2);
     const stat2 = statSync10(path);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync18(path, "utf8"));
+    const receipt = JSON.parse(readFileSync19(path, "utf8"));
     return receipt.kind === "whatsapp_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.paired === true && receipt.connected === true;
   } catch {
     return false;
@@ -30301,15 +30578,16 @@ function asRecord11(value) {
 
 // src/core/native-embedding-drain-service.ts
 init_config();
-import { randomUUID as randomUUID6 } from "node:crypto";
-import { readFileSync as readFileSync19, statSync as statSync11 } from "node:fs";
-import { delimiter as delimiter3, dirname as dirname18, isAbsolute as isAbsolute15, join as join24 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+init_native_process_service();
 init_worker_auth();
+import { randomUUID as randomUUID6 } from "node:crypto";
+import { readFileSync as readFileSync20, statSync as statSync11 } from "node:fs";
+import { delimiter as delimiter3, dirname as dirname19, isAbsolute as isAbsolute15, join as join25 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/workers/dashboard/embedding-runtime.ts
 init_model_transport();
-import { dirname as dirname17, join as join23 } from "node:path";
+import { dirname as dirname18, join as join24 } from "node:path";
 var EMBEDDING_DRAIN_REPORT_PATH_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH";
 var EMBEDDING_DRAIN_REPORT_DIR_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR";
 var EMBEDDING_DRAIN_REPORT_DIR_DEFAULT = "/tmp/olympus-source-processing-supervisor";
@@ -30321,7 +30599,7 @@ function resolveEmbeddingDrainReportPath(env = process.env) {
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join23(dir, "source-embedding-drain-current.json");
+  return join24(dir, "source-embedding-drain-current.json");
 }
 
 // src/core/native-embedding-drain-service.ts
@@ -30439,7 +30717,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   if (!isAbsolute15(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
-  const readinessPath = join24(dirname18(reportPath), READINESS_FILE3);
+  const readinessPath = join25(dirname19(reportPath), READINESS_FILE3);
   const instanceId = randomUUID6();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
@@ -30483,7 +30761,7 @@ function resolveBunRuntimePath2(configured, env) {
     return assertUsableFile2(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...(env.PATH ?? "").split(delimiter3).filter(Boolean).map((dir) => join24(dir, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...(env.PATH ?? "").split(delimiter3).filter(Boolean).map((dir) => join25(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute15(candidate))
@@ -30512,7 +30790,7 @@ async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
     const stat2 = statSync11(readinessPath);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync19(readinessPath, "utf8"));
+    const receipt = JSON.parse(readFileSync20(readinessPath, "utf8"));
     return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.options_validated === true && receipt.content_free === true;
   } catch {
     return false;
@@ -30524,6 +30802,7 @@ function asRecord12(value) {
 
 // src/core/native-relay-service.ts
 init_config();
+init_native_process_service();
 import { randomUUID as relayRandomUUID } from "node:crypto";
 import { statSync as relayStatSync } from "node:fs";
 import { isAbsolute as relayIsAbsolute } from "node:path";
@@ -31189,30 +31468,30 @@ function isPendingPrivacyPolicy(config) {
 
 // src/core/messaging-runtime.ts
 init_atomic_file();
-import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync9, rmSync as rmSync4 } from "node:fs";
+import { spawnSync as spawnSync6 } from "node:child_process";
+import { existsSync as existsSync10, rmSync as rmSync4 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname20, join as join27 } from "node:path";
+import { dirname as dirname21, join as join28 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir11();
-  return join27(env.XDG_CACHE_HOME ?? join27(home, ".cache"), "olympus", "telegram-python");
+  return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
 }
 function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
-  const isolated = join27(telegramPythonVenvDir(options), "bin", "python");
-  if (existsSync9(isolated))
+  const isolated = join28(telegramPythonVenvDir(options), "bin", "python");
+  if (existsSync10(isolated))
     return isolated;
   if (typeof Bun !== "undefined")
     return Bun.which("python3") ?? undefined;
-  const resolved = spawnSync5("which", ["python3"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const resolved = spawnSync6("which", ["python3"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   return resolved.status === 0 ? resolved.stdout.trim() || undefined : undefined;
 }
 function defaultTelegramPython(platform2) {
   const python = telegramPythonExecutable();
-  if (platform2 === "darwin" && python === "/usr/bin/python3" && spawnSync5("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
+  if (platform2 === "darwin" && python === "/usr/bin/python3" && spawnSync6("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
     return;
   return python;
 }
@@ -31220,12 +31499,12 @@ var TELEGRAM_TELETHON_VERSION = "1.45.0";
 var TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
 var TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt";
 var TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt";
-function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync9) {
-  let directory = dirname20(fileURLToPath6(moduleUrl));
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync10) {
+  let directory = dirname21(fileURLToPath6(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
-    if (exists(join27(directory, TELEGRAM_REQUIREMENTS_FILE)))
+    if (exists(join28(directory, TELEGRAM_REQUIREMENTS_FILE)))
       return directory;
-    const parent = dirname20(directory);
+    const parent = dirname21(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -31233,11 +31512,11 @@ function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSy
   return;
 }
 function telegramInstallCommands(input) {
-  const python = join27(input.venvDir, "bin", "python");
+  const python = join28(input.venvDir, "bin", "python");
   const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
   return [
-    [...pip, "-r", join27(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
-    [...pip, "--no-build-isolation", "-r", join27(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+    [...pip, "-r", join28(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join28(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
   ];
 }
 function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
@@ -31253,7 +31532,7 @@ var installing = new Map;
 init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
-import { spawnSync as spawnSync7 } from "node:child_process";
+import { spawnSync as spawnSync8 } from "node:child_process";
 import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync13, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync14, openSync as openSync6, readFileSync as readFileSync30, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync9, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename6, dirname as dirname28, join as join37, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
@@ -31276,22 +31555,22 @@ init_file_lease();
 init_linux_engine_layout();
 
 // src/core/update-check.ts
-import { readFileSync as readFileSync23 } from "node:fs";
-import { join as join29 } from "node:path";
+import { readFileSync as readFileSync24 } from "node:fs";
+import { join as join30 } from "node:path";
 
 // src/core/package-root.ts
-import { readFileSync as readFileSync22 } from "node:fs";
-import { dirname as dirname21, join as join28 } from "node:path";
+import { readFileSync as readFileSync23 } from "node:fs";
+import { dirname as dirname22, join as join29 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 function olympusPackageRoot() {
-  let directory = dirname21(fileURLToPath7(import.meta.url));
+  let directory = dirname22(fileURLToPath7(import.meta.url));
   for (let depth = 0;depth < 6; depth++) {
     try {
-      const manifest = JSON.parse(readFileSync22(join28(directory, "package.json"), "utf8"));
+      const manifest = JSON.parse(readFileSync23(join29(directory, "package.json"), "utf8"));
       if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
         return directory;
     } catch {}
-    const parent = dirname21(directory);
+    const parent = dirname22(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -31303,7 +31582,7 @@ function olympusPackageRoot() {
 var UPDATE_MAX_BYTES = 512 * 1024;
 function runningOlympusVersion() {
   try {
-    const value = JSON.parse(readFileSync23(join29(olympusPackageRoot(), "package.json"), "utf8")).version;
+    const value = JSON.parse(readFileSync24(join30(olympusPackageRoot(), "package.json"), "utf8")).version;
     return typeof value === "string" ? value : "unknown";
   } catch {
     return "unknown";
@@ -31311,59 +31590,14 @@ function runningOlympusVersion() {
 }
 
 // src/core/engine-service.ts
-import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
+import { spawn as spawn3, spawnSync as spawnSync7 } from "node:child_process";
 init_atomic_file();
+init_engine_children();
+init_operation_error();
+init_config();
 import { existsSync as existsSync12, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync29, renameSync as renameSync4, rmSync as rmSync8, statSync as statSync15 } from "node:fs";
 import { homedir as homedir14, platform as osPlatform } from "node:os";
 import { basename as basename5, dirname as dirname27, isAbsolute as isAbsolute20, join as join36, resolve as resolvePath2 } from "node:path";
-
-// src/core/engine-children.ts
-init_atomic_file();
-init_remote_access();
-import { existsSync as existsSync10, mkdirSync as mkdirSync11, readFileSync as readFileSync24 } from "node:fs";
-import { dirname as dirname22, join as join30 } from "node:path";
-var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2";
-var ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1";
-function engineChildrenPath(env = process.env) {
-  return join30(olympusDataDir(env), "engine", "children.json");
-}
-function readEngineChildren(path) {
-  try {
-    const parsed = JSON.parse(readFileSync24(path, "utf8"));
-    if (!Array.isArray(parsed?.children))
-      return;
-    if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
-      return;
-    const legacy = parsed.schema === ENGINE_CHILDREN_SCHEMA_V1;
-    const children = [];
-    for (const child of parsed.children) {
-      if (!child || !Number.isSafeInteger(child.pgid) || child.pgid <= 1)
-        continue;
-      const argv = !legacy && Array.isArray(child.argv) && child.argv.length > 0 && child.argv.every((arg) => typeof arg === "string") ? child.argv : [];
-      children.push({
-        service: typeof child.service === "string" ? child.service : "unknown",
-        pgid: child.pgid,
-        started_at: typeof child.started_at === "string" ? child.started_at : "",
-        process_started: !legacy && typeof child.process_started === "string" && child.process_started ? child.process_started : null,
-        argv
-      });
-    }
-    return {
-      schema: ENGINE_CHILDREN_SCHEMA,
-      host_pid: typeof parsed.host_pid === "number" ? parsed.host_pid : 0,
-      children
-    };
-  } catch {
-    return;
-  }
-}
-var LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
-var TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
-var PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
-
-// src/core/engine-service.ts
-init_operation_error();
-init_config();
 init_remote_access();
 init_sovereignty();
 init_worker_auth();
@@ -31635,7 +31869,7 @@ function boundedDetail(result) {
   return (text2 || `exit ${result.status ?? "unknown"}`).slice(0, 300);
 }
 function defaultExec(command, args) {
-  const result = spawnSync6(command, args, { encoding: "utf8" });
+  const result = spawnSync7(command, args, { encoding: "utf8" });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -31653,10 +31887,11 @@ function absolute2(value, label) {
 }
 
 // src/core/linux-engine-service.ts
+init_engine_children();
 init_linux_secret_backend();
 var SYSTEMD_ENGINE_UNIT = "olympus-engine.service";
 function linuxEngineExec(command, args) {
-  const r = spawnSync7(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
+  const r = spawnSync8(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
 }
 function inspectSystemdEngine(l, exec = linuxEngineExec) {
@@ -31787,7 +32022,7 @@ function linuxEngineCustody(l, facts, options = {}) {
 init_linux_engine_layout();
 init_model_transport();
 init_config();
-import { spawnSync as spawnSync8 } from "node:child_process";
+import { spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync22, readFileSync as readFileSync37 } from "node:fs";
 import { join as join49 } from "node:path";
 
@@ -35399,7 +35634,7 @@ function defaultCommandExists(command) {
   return path.split(":").some((dir) => Boolean(dir) && existsSync22(join49(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
-  const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const proc = spawnSync9(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
 function asRecord17(value) {
