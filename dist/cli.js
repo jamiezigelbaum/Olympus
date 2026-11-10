@@ -147007,7 +147007,7 @@ function createSelfUpdater(options) {
     } catch {
       log = "";
     }
-    if (options.runningVersion === from && RESTORED.test(log))
+    if (options.runningVersion === from && (record6.engine_pid !== pid || RESTORED.test(log)))
       return { state: "rolled_back", from, to };
     return { state: "failed", from, to, reason: "install_failed" };
   }
@@ -147093,7 +147093,7 @@ var init_self_update = __esm(() => {
   init_update_check();
   SELF_UPDATE_STALE_MS = 30 * 60000;
   SELF_UPDATE_SHOWN_MS = 10 * 60000;
-  RESTORED = /previous version was (?:restored|put back)|rollback restored/i;
+  RESTORED = /previous version was (?:restored|put back)|Previous installation restoration proved healthy/i;
 });
 
 // src/core/linux-model-readiness.ts

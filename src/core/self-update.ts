@@ -97,8 +97,13 @@ code=$?
 printf '%s %s\\n' "$code" "$(date +%s)" > "$dir/result.next" && mv -f "$dir/result.next" "$dir/result"
 `;
 
-/** What either installer prints when it put the previous version back. */
-const RESTORED = /previous version was (?:restored|put back)|rollback restored/i;
+/**
+ * What the installers print when the previous version is back and healthy:
+ * install-macos.sh's own lines, and on Linux the lifecycle's
+ * (engine-service.ts) "Previous installation restoration proved healthy."
+ * A failed restoration ("restoration failed") is not a rollback.
+ */
+const RESTORED = /previous version was (?:restored|put back)|Previous installation restoration proved healthy/i;
 
 function defaultLaunch(platform: string, homeDir: string | undefined): (runner: string, runDir: string) => Promise<void> {
   return (runner, runDir) => new Promise((resolve, reject) => {
@@ -197,7 +202,11 @@ export function createSelfUpdater(options: SelfUpdaterOptions) {
     }
     let log = '';
     try { log = readFileSync(join(runDir(record.id), 'install.log'), 'utf8'); } catch { log = ''; }
-    if (options.runningVersion === from && RESTORED.test(log)) return { state: 'rolled_back', from, to };
+    // Structured first: a failed install never restarts the engine before its
+    // swap, so a different engine process running the old version means the
+    // installer swapped, restarted, and put the old version back. The log
+    // wording covers a restore that kept the same process.
+    if (options.runningVersion === from && (record.engine_pid !== pid || RESTORED.test(log))) return { state: 'rolled_back', from, to };
     return { state: 'failed', from, to, reason: 'install_failed' };
   }
 

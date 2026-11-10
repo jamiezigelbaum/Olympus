@@ -203,8 +203,17 @@ describe('Update now in the engine', () => {
     writeFileSync(join(dir, 'result'), `1 ${ended}\n`);
     writeFileSync(join(dir, 'install.log'), 'Olympus 1.5.1 could not be started, so the previous version was restored and is running.\n');
     expect(after('1.5.0').status()).toEqual({ state: 'rolled_back', from: '1.5.0', to: '1.5.1' });
+    // Linux: the lifecycle's restore line, reported through install-linux.sh.
+    writeFileSync(join(dir, 'install.log'), 'Olympus was not installed or upgraded: Lifecycle install failed (status 1). The engine did not prove build abc healthy within 60 s: timeout. Previous installation restoration proved healthy.\n');
+    expect(u.self.status()).toEqual({ state: 'rolled_back', from: '1.5.0', to: '1.5.1' });
+    // In the same engine process, a restore that itself failed is not a rollback.
+    writeFileSync(join(dir, 'install.log'), 'Previous installation restoration failed: timeout.\n');
+    expect(u.self.status()).toEqual({ state: 'failed', from: '1.5.0', to: '1.5.1', reason: 'install_failed' });
+    // Structured: a new engine process on the old version means the old version was put back, whatever the log says.
+    expect(after('1.5.0').status()).toEqual({ state: 'rolled_back', from: '1.5.0', to: '1.5.1' });
+    // The same engine still running after a failure: nothing was swapped.
     writeFileSync(join(dir, 'install.log'), 'Olympus was not installed or upgraded: Release download failed.\n');
-    expect(after('1.5.0').status()).toEqual({ state: 'failed', from: '1.5.0', to: '1.5.1', reason: 'install_failed' });
+    expect(u.self.status()).toEqual({ state: 'failed', from: '1.5.0', to: '1.5.1', reason: 'install_failed' });
     // Once shown long enough, the record goes quiet.
     await u.clock.advance(11 * 60_000);
     expect(createSelfUpdater({ ...u.options, runningVersion: '1.5.0', pid: 200, now: u.clock.now }).status()).toEqual({ state: 'idle' });
