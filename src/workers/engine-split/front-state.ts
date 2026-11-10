@@ -104,3 +104,40 @@ export function frontJudgeBoost(client: Pick<EngineCommandClient, 'post'>): (ide
     void client.post({ kind: 'judge_boost', identities: top }, { timeoutMs: 10_000 }).catch(() => undefined);
   };
 }
+
+/**
+ * A model, judge or policy change saved through the front. Both processes
+ * read the models at boot, so both restart: the background is told first and
+ * the front restarts only once the background has answered that it is
+ * restarting (or the ask ran out, which is logged). The background waits for
+ * this front to end before it restarts, so the answer is never cut off. One ask at a time; a
+ * second change while one is in flight rides along.
+ */
+export function frontModelReload<R>(options: {
+  client: Pick<EngineCommandClient, 'send'>;
+  /** The front's own restart (the single worker's model reload). */
+  restartSelf: (request?: R) => boolean;
+  /** Whether this front restarts itself; the answer the settings page shows. */
+  managed: boolean;
+  log?: (line: string) => void;
+  /** This front's process id: the background restarts after it ends. */
+  pid?: number;
+}): (request?: R) => boolean {
+  const log = options.log ?? (() => {});
+  let pending: Promise<void> | undefined;
+  return (request) => {
+    if (!options.managed) return false;
+    if (pending) return true;
+    pending = options.client.send({ kind: 'reload', target: 'models', frontPid: options.pid ?? process.pid }, { timeoutMs: 30_000 }).then((receipt) => {
+      if (receipt.state !== 'done' || (receipt.result as { restarting?: unknown } | undefined)?.restarting !== true) {
+        log('[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.');
+      }
+    }, () => {
+      log('[engine-split] the background did not answer the model change; restart Olympus if the new model does not take effect.');
+    }).finally(() => {
+      pending = undefined;
+      options.restartSelf(request);
+    });
+    return true;
+  };
+}

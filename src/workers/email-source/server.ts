@@ -552,7 +552,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -2797,6 +2797,8 @@ export async function main(): Promise<void> {
   // delete the front forwarded waits for the front to end first.
   let restartForDelete: (request?: ModelKeyReloadRequest) => boolean = (request) => requestModelReload(request);
   let deferredReloads: ModelKeyReloadRequest[] | undefined;
+  // The front's own restart without the background (after a forwarded delete).
+  let restartFrontOnly: (request?: ModelKeyReloadRequest) => boolean = () => false;
   /** Run `writes` with every reload they request held until they finish, then requested once (#1050). */
   const withDeferredReloads = async <T>(writes: () => Promise<T>): Promise<T> => {
     if (deferredReloads) return writes();
@@ -7384,7 +7386,8 @@ export async function main(): Promise<void> {
     client: engineFront.client,
     gate: frontGate!,
     restartFront: () => {
-      if (!requestModelReload()) console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
+      // Only the front: the background is already restarting for the delete.
+      if (!restartFrontOnly()) console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
     },
   }) : undefined;
   const frontWorkerFetch = frontRoutes
@@ -7647,7 +7650,15 @@ export async function main(): Promise<void> {
       log: (line) => console.warn(line),
       handlers: {
         // A config file the front wrote: re-read it and wake what it governs.
-        reload: ({ target, corpora }) => {
+        reload: ({ target, corpora, frontPid }) => {
+          // A model, judge or policy change: this process read them at boot, so
+          // it restarts, after the front that asked has ended (as a delete does).
+          if (target === 'models') {
+            if (!modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { reloaded: target, restarting: false };
+            if (frontPid === undefined) return { reloaded: target, restarting: requestModelReload() };
+            void waitForProcessExit(frontPid).then(() => { requestModelReload(); });
+            return { reloaded: target, restarting: true };
+          }
           // A scope approval cancels the unsettled jobs it no longer covers.
           const invalidated = target === 'scope' && fileExtractionRuntime
             ? (corpora ?? []).reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0)
@@ -7822,11 +7833,17 @@ export async function main(): Promise<void> {
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); },
     exit: (code) => process.exit(code),
   });
+  // In the split a model change restarts the background too, and the front
+  // restarts once the background has acknowledged (front-state.ts).
+  const reloadModels = engineFront
+    ? frontModelReload({ client: engineFront.client, restartSelf: reloadNow, managed: workerRestartsItself(workerLaunch, process.env), log: (line) => console.warn(line) })
+    : reloadNow;
+  restartFrontOnly = reloadNow;
   requestModelReload = (request) => {
     // While a settings proposal is being applied, every writer's reload waits
     // for the last write, so the restart cannot cut the batch short.
     if (deferredReloads) { deferredReloads.push(request ?? {}); return workerRestartsItself(workerLaunch, process.env); }
-    return reloadNow(request);
+    return reloadModels(request);
   };
   modelReloadInstalled = true;
   // After the reload handler, so a newer strongest model found at boot is

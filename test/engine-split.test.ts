@@ -24,7 +24,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -445,6 +445,45 @@ describe('owner actions the background runs, forwarded from the front', () => {
     void waitForProcessExit(4243, { now: clock.now, sleep: clock.sleep, alive: () => true, timeoutMs: 60_000 }).then((value) => { gaveUp = value; });
     await clock.advance(61_000);
     expect(gaveUp).toBe(false);
+  });
+});
+
+describe('a model change restarts both processes', () => {
+  test('the background is told first; the front restarts once it has answered', async () => {
+    const sent: EngineCommand[] = [];
+    let answer!: (receipt: EngineCommandReceipt) => void;
+    const restarts: unknown[] = [];
+    const logs: string[] = [];
+    const reload = frontModelReload<string>({
+      client: { send: (command) => { sent.push(command); return new Promise((resolve) => { answer = resolve; }); } },
+      restartSelf: (request) => { restarts.push(request); return true; },
+      managed: true, pid: 4242, log: (line) => logs.push(line),
+    });
+    expect(reload('judge')).toBe(true);
+    expect(reload('judge-again')).toBe(true);
+    expect(sent).toEqual([{ kind: 'reload', target: 'models', frontPid: 4242 }]);
+    await flushMicrotasks();
+    expect(restarts).toEqual([]);
+    answer({ id: 'c', state: 'done', instance_id: 'b', result: { reloaded: 'models', restarting: true } });
+    await flushMicrotasks();
+    expect(restarts).toEqual(['judge']);
+    expect(logs).toEqual([]);
+    // No answer: the front still restarts and says so.
+    const away = frontModelReload({ client: { send: async () => { throw new Error('gone'); } }, restartSelf: () => { restarts.push('away'); return true; }, managed: true, pid: 4242, log: (line) => logs.push(line) });
+    away();
+    await flushMicrotasks();
+    expect(restarts).toEqual(['judge', 'away']);
+    expect(logs).toHaveLength(1);
+    // A front that cannot restart itself asks nothing.
+    const unmanaged = frontModelReload({ client: { send: async () => { throw new Error('not sent'); } }, restartSelf: () => true, managed: false });
+    expect(unmanaged()).toBe(false);
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0080', command: { kind: 'reload', target: 'sources', frontPid: 4242 } })).toThrow('models reload');
+    expect(parseEngineCommandEnvelope({ id: 'command-0081', command: { kind: 'reload', target: 'models', frontPid: 4242 } }).command).toEqual({ kind: 'reload', target: 'models', frontPid: 4242 });
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/const reloadModels = engineFront\s*\?\s*frontModelReload\(/);
+    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,400}?waitForProcessExit\(frontPid\)\.then\(\(\) => \{ requestModelReload\(\); \}\)/);
+    // After a delete only the front restarts: the background is already on its way.
+    expect(server).toMatch(/if \(!restartFrontOnly\(\)\) console\.warn/);
   });
 });
 

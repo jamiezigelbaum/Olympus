@@ -83,7 +83,8 @@ export const ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
 export const ENGINE_DASHBOARD_SAMPLES_MAX = 500;
 
 export type EngineCommand =
-  | { kind: 'reload'; target: EngineReloadKind; corpora?: string[] }
+  /** frontPid (models only): the background restarts once that front has ended, so its answer gets through. */
+  | { kind: 'reload'; target: EngineReloadKind; corpora?: string[]; frontPid?: number }
   | { kind: 'archive_changed' }
   | { kind: 'dashboard_samples'; samples: Record<string, unknown>[] }
   | { kind: EngineForwardedKind; request: EngineForwardedRequest; frontPid?: number }
@@ -211,7 +212,13 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       if (corpora !== undefined && (!Array.isArray(corpora) || corpora.length > 200 || corpora.some((entry) => typeof entry !== 'string' || !SOURCE.test(entry)))) {
         fail('reload corpora must be corpus ids.');
       }
-      return { id, command: { kind, target: target as EngineReloadKind, ...(Array.isArray(corpora) ? { corpora: corpora as string[] } : {}) } };
+      const frontPid = command!.frontPid;
+      if (frontPid !== undefined && (target !== 'models' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a models reload.');
+      return { id, command: {
+        kind, target: target as EngineReloadKind,
+        ...(Array.isArray(corpora) ? { corpora: corpora as string[] } : {}),
+        ...(frontPid !== undefined ? { frontPid: frontPid as number } : {}),
+      } };
     }
     case 'archive_changed':
       return { id, command: { kind } };
