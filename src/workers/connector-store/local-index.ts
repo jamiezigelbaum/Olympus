@@ -210,6 +210,12 @@ const MAX_SEARCH_RESULTS = 50;
 // filter serves (#1174). Bounds the work in a store that is mostly superseded
 // copies: at most a handful of page queries per search.
 const KEYWORD_CANDIDATE_SCAN_CAP = 1_000;
+// How many FTS rows the bounded ranked page ranks first (#1242): enough for
+// several matching chunks per item on the page, and never so many that the
+// bound costs what ranking every match does.
+const KEYWORD_RANKED_BOUND_MIN = 256;
+const KEYWORD_RANKED_BOUND_MAX = 8_192;
+const KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8;
 // Store-wide concept counts feed only the rarity weights of the
 // minimum-signal filter, so a recent count serves: every search of a
 // question (plain, content, relaxed) and the next question reuse it.
@@ -13023,8 +13029,16 @@ export class LocalConnectorStore {
     let scanned = 0;
     let pageSize = fetchLimit;
     let exhausted = false;
+    // A bound that could not prove one page will not prove a later, deeper one.
+    let tryBound = true;
     while (true) {
-      const page = (yield { mode: 'all', sql: `
+      const rankedPage = (bound: number | undefined): StoreRead => ({ mode: 'all', sql: `
+        ${bound === undefined ? '' : `WITH top AS MATERIALIZED (
+          SELECT rowid AS fts_rowid, rank FROM connector_store_fts
+          WHERE connector_store_fts MATCH ?
+            AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          ORDER BY rank LIMIT ?
+        )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
           i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -13036,11 +13050,13 @@ export class LocalConnectorStore {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          MIN(connector_store_fts.rank) AS rank
-        FROM connector_store_fts
+          ${bound === undefined ? 'MIN(connector_store_fts.rank) AS rank' : `MIN(top.rank) AS rank,
+          (SELECT COUNT(*) FROM top) AS bound_rows,
+          (SELECT MAX(rank) FROM top) AS bound_rank`}
+        FROM ${bound === undefined ? 'connector_store_fts' : 'top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid'}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ?
-          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+        WHERE ${bound === undefined ? `connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : '1'}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
           ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
@@ -13052,12 +13068,29 @@ export class LocalConnectorStore {
         LIMIT ? OFFSET ?
       `, params: [
         terms,
+        ...(bound === undefined ? [] : [bound]),
         ...(selectedAccount ? [selectedAccount] : []),
         ...selectedFilters.params,
         ...selectedFtsScope.params,
         pageSize,
         scanned,
-      ] }) as ItemRow[];
+      ] });
+      // Rank the best FTS rows first, then read only their items (#1242).
+      // Every match outside those rows ranks at or below the last of them,
+      // so the page is the full ranking's page when the bound held every
+      // match, or when the page filled and its last item ranks strictly
+      // above the bound. Otherwise (ties at the bound, or filters hid too
+      // many of the best rows) the full ranking runs, as it always did.
+      const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
+      const boundedPage = tryBound ? (yield rankedPage(bound)) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
+      const head = boundedPage[0];
+      const last = boundedPage.at(-1);
+      const proved = head !== undefined && last !== undefined && (head.bound_rows! < bound
+        || (boundedPage.length === pageSize && last.rank < head.bound_rank!));
+      if (!proved) tryBound = false;
+      const page = proved
+        ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row as ItemRow)
+        : (yield rankedPage(undefined)) as ItemRow[];
       scanned += page.length;
       exhausted = page.length < pageSize;
       // OFFSET pages over one ordering. On the read pool each page is its own

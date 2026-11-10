@@ -74,3 +74,50 @@ test('store-wide concept counts are read once, not on every search', async () =>
   expect(first[0]!.statements.concept_weight_count?.calls).toBeGreaterThan(0);
   for (const run of [first[1]!, ...second]) expect(run.statements.concept_weight_count).toBeUndefined();
 });
+
+// The ranked page orders a large store's matches by bm25 (#1242). Ranking
+// every match and reading each one's item cost Sparta's stores 5 to 9 s cold
+// on a common word; ranking only the best FTS rows first is the same answer
+// whenever those rows decide the page, and the full ranking stays the
+// fallback when they cannot (ties at the bound).
+async function openStoreWith(items: Array<{ id: string; name: string; text: string }>): Promise<LocalConnectorStore> {
+  const { dir, cleanup } = tempDir('olympus-keyword-bound-');
+  const store = new LocalConnectorStore({
+    dbPath: join(dir, 'internal.sqlite'),
+    corpusId: DROPBOX_TIER_CORPUS_IDS.internal!,
+    family: 'file',
+    trustDomain: 'internal',
+    tierLedger: null,
+  });
+  cleanups.push(cleanup, () => store.close());
+  await store.syncFromConnector(fixtureConnector(() => items), { fetchContent: true });
+  return store;
+}
+
+type TraceRun = { rows: number; statements: Record<string, { calls: number }> };
+
+test('a ranked page decided by the best matches never ranks the rest of the store', async () => {
+  // 600 notes say "kestrel" once, each a word longer than the last, so every
+  // match ranks differently and shorter ranks higher; one says it three times.
+  const store = await openStoreWith([
+    { id: 'answer', name: 'answer.txt', text: 'kestrel kestrel kestrel' },
+    ...Array.from({ length: 600 }, (_, n) => ({ id: `note-${n}`, name: `note-${n}.txt`, text: `kestrel ${'word '.repeat(n + 1)}` })),
+  ]);
+  const runs = traceKeywordSearch(store, 'kestrel', undefined, undefined).runs as TraceRun[];
+  for (const run of runs) {
+    expect(run.statements.ranked_match_page_bounded?.calls).toBe(1);
+    expect(run.statements.ranked_match_page).toBeUndefined();
+  }
+  const rows = store.searchItemsDetailed('kestrel', 50, undefined, undefined, { prefix: false }).rows;
+  expect(rows.map((row) => row.sourceItem.providerItemId)).toEqual(['answer', ...Array.from({ length: 49 }, (_, n) => `note-${n}`)]);
+});
+
+test('ties at the bound fall back to ranking every match, with the same page', async () => {
+  const store = await openStoreWith(Array.from({ length: 600 }, (_, n) => ({ id: `same-${n}`, name: `same-${n}.txt`, text: 'kestrel boatyard note' })));
+  const runs = traceKeywordSearch(store, 'kestrel', undefined, undefined).runs as TraceRun[];
+  for (const run of runs) {
+    expect(run.statements.ranked_match_page_bounded?.calls).toBe(1);
+    expect(run.statements.ranked_match_page?.calls).toBe(1);
+    expect(run.rows).toBe(50);
+  }
+});
