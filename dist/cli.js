@@ -144727,7 +144727,7 @@ function withFirstRunPrivacyGate(handler, options) {
     if (request.method === "GET" && ["/v1/health", "/health"].includes(path)) {
       return Response.json({ reachable: true, status: "ok", privacy_choice_pending: true, dependency_check: "not_run" });
     }
-    if (path.startsWith("/.well-known/") || path.startsWith("/connect/") || path === RELAY_SURFACES_PATH || path === "/openapi.json" || ["/dashboard/launch", "/dashboard/control/launch", "/dashboard/control/launch/redeem", "/dashboard/control/session", "/dashboard/control/session/local"].includes(path) || request.method === "GET" && path === "/v1/service/readiness") {
+    if (path.startsWith("/.well-known/") || path.startsWith("/connect/") || path === RELAY_SURFACES_PATH || path === "/openapi.json" || ["/dashboard/launch", "/dashboard/control/launch", "/dashboard/control/launch/redeem", "/dashboard/control/session", "/dashboard/control/session/local"].includes(path) || request.method === "GET" && path === "/v1/service/readiness" || request.method === "POST" && ["/v1/cli/settings", "/v1/cli/settings-propose"].includes(path)) {
       return handler(request);
     }
     if ((path === "/mcp" || path === "/openai/mcp") && request.method === "POST") {
@@ -148455,19 +148455,22 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
           results.push({ ...row, applied: false, message: error2 instanceof Error ? error2.message : "This setting could not be saved." });
         }
       };
-      for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
-        const value2 = input.models?.[provider];
-        if (value2 !== undefined)
-          await record6(`models.${provider}`, () => targets.saveModel(provider, value2));
-      }
-      if (input.privacy_judge) {
-        const judge3 = input.privacy_judge;
-        await record6("privacy_judge", () => targets.saveJudge(judge3.choice, judge3.spending_limit_dollars));
-      }
-      if (input.computer_use)
-        await record6("computer_use", () => targets.saveComputerUse(input.computer_use));
-      if (input.private_answer_mode)
-        await record6("private_answer_mode", () => targets.saveAnswerMode(input.private_answer_mode));
+      const writes = async () => {
+        for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
+          const value2 = input.models?.[provider];
+          if (value2 !== undefined)
+            await record6(`models.${provider}`, () => targets.saveModel(provider, value2));
+        }
+        if (input.privacy_judge) {
+          const judge3 = input.privacy_judge;
+          await record6("privacy_judge", () => targets.saveJudge(judge3.choice, judge3.spending_limit_dollars));
+        }
+        if (input.computer_use)
+          await record6("computer_use", () => targets.saveComputerUse(input.computer_use));
+        if (input.private_answer_mode)
+          await record6("private_answer_mode", () => targets.saveAnswerMode(input.private_answer_mode));
+      };
+      await (targets.deferReloads ? targets.deferReloads(writes) : writes());
       const result = { ok: results.every((row) => row.applied), rows: results };
       lastApplied = { at: now().getTime(), result };
       return result;
@@ -170117,6 +170120,7 @@ function settingsProposalHolderFor(dashboard) {
       return { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id] };
     },
     ...dashboard.savePrivateAnswerMode ? { saveAnswerMode: dashboard.savePrivateAnswerMode } : {},
+    ...dashboard.deferReloads ? { deferReloads: dashboard.deferReloads } : {},
     ...dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {},
     ...saveComputerUse ? { saveComputerUse: (choice) => ({ ok: true, message: saveComputerUse(choice).status_message }) } : {},
     ...judge3 ? {
@@ -220360,6 +220364,20 @@ async function main() {
     return "ready";
   };
   let requestModelReload = () => false;
+  let deferredReloads;
+  const withDeferredReloads = async (writes) => {
+    if (deferredReloads)
+      return writes();
+    deferredReloads = [];
+    try {
+      return await writes();
+    } finally {
+      const held = deferredReloads;
+      deferredReloads = undefined;
+      for (const request of held)
+        requestModelReload(request);
+    }
+  };
   let modelReloadInstalled = false;
   let modelReloadUnavailable = false;
   const modelSetup = new ModelSetupService({
@@ -222923,6 +222941,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           requestModelReload();
           return true;
         },
+        deferReloads: withDeferredReloads,
         savePrivateAnswerMode: (choice) => {
           if (sovereigntyEngine.source !== "file" || !sovereigntyEngine.path)
             return { ok: false, message: "This Olympus has no policy file to change." };
@@ -223944,7 +223963,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     server.stop();
   };
   shutdownSignals.setShutdown(shutdown);
-  requestModelReload = shutdownSignals.modelReload({
+  const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => {
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
@@ -223952,6 +223971,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     exit: (code) => process.exit(code)
   });
+  requestModelReload = (request) => {
+    if (deferredReloads) {
+      deferredReloads.push(request ?? {});
+      return workerRestartsItself(workerLaunch, process.env);
+    }
+    return reloadNow(request);
+  };
   modelReloadInstalled = true;
   modelChoices.refreshStrongest().catch(() => false);
   setInterval(() => {

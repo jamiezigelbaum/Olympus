@@ -36,6 +36,8 @@ export interface SettingsProposalTargets {
   saveJudge?: (choice: 'local' | 'venice', capDollars: number) => Promise<Saved>;
   modelChoices?: () => Promise<DashboardModelChoices>;
   saveModel?: (provider: 'local' | 'venice' | 'zkapi', value: string) => Promise<Saved>;
+  /** Hold the restarts the writers ask for until every write is done, so a restart cannot cut the batch short. */
+  deferReloads?: <T>(writes: () => Promise<T>) => Promise<T>;
 }
 
 export interface SettingsProposalApplyResult {
@@ -157,16 +159,19 @@ export function createSettingsProposalHolder(targets: SettingsProposalTargets, n
           results.push({ ...row, applied: false, message: error instanceof Error ? error.message : 'This setting could not be saved.' });
         }
       };
-      for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
-        const value = input.models?.[provider];
-        if (value !== undefined) await record(`models.${provider}`, () => targets.saveModel!(provider, value));
-      }
-      if (input.privacy_judge) {
-        const judge = input.privacy_judge;
-        await record('privacy_judge', () => targets.saveJudge!(judge.choice, judge.spending_limit_dollars));
-      }
-      if (input.computer_use) await record('computer_use', () => targets.saveComputerUse!(input.computer_use!));
-      if (input.private_answer_mode) await record('private_answer_mode', () => targets.saveAnswerMode!(input.private_answer_mode!));
+      const writes = async () => {
+        for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
+          const value = input.models?.[provider];
+          if (value !== undefined) await record(`models.${provider}`, () => targets.saveModel!(provider, value));
+        }
+        if (input.privacy_judge) {
+          const judge = input.privacy_judge;
+          await record('privacy_judge', () => targets.saveJudge!(judge.choice, judge.spending_limit_dollars));
+        }
+        if (input.computer_use) await record('computer_use', () => targets.saveComputerUse!(input.computer_use!));
+        if (input.private_answer_mode) await record('private_answer_mode', () => targets.saveAnswerMode!(input.private_answer_mode!));
+      };
+      await (targets.deferReloads ? targets.deferReloads(writes) : writes());
       const result = { ok: results.every((row) => row.applied), rows: results };
       lastApplied = { at: now().getTime(), result };
       return result;

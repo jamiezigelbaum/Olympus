@@ -2724,6 +2724,18 @@ export async function main(): Promise<void> {
     return 'ready';
   };
   let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
+  let deferredReloads: ModelKeyReloadRequest[] | undefined;
+  /** Run `writes` with every reload they request held until they finish, then requested once (#1050). */
+  const withDeferredReloads = async <T>(writes: () => Promise<T>): Promise<T> => {
+    if (deferredReloads) return writes();
+    deferredReloads = [];
+    try { return await writes(); }
+    finally {
+      const held = deferredReloads;
+      deferredReloads = undefined;
+      for (const request of held) requestModelReload(request);
+    }
+  };
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -6189,6 +6201,7 @@ export async function main(): Promise<void> {
               requestModelReload();
               return true;
             },
+            deferReloads: withDeferredReloads,
             savePrivateAnswerMode: (choice) => {
               if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return { ok: false, message: 'This Olympus has no policy file to change.' };
               // The policy on disk, not the boot copy: an earlier change may already be saved.
@@ -7411,11 +7424,17 @@ export async function main(): Promise<void> {
     // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
-  requestModelReload = shutdownSignals.modelReload({
+  const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
+  requestModelReload = (request) => {
+    // While a settings proposal is being applied, every writer's reload waits
+    // for the last write, so the restart cannot cut the batch short.
+    if (deferredReloads) { deferredReloads.push(request ?? {}); return workerRestartsItself(workerLaunch, process.env); }
+    return reloadNow(request);
+  };
   modelReloadInstalled = true;
   // After the reload handler, so a newer strongest model found at boot is
   // applied; then daily, so a long-running worker follows new releases too.

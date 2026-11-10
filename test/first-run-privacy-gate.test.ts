@@ -50,3 +50,15 @@ test('session establishment and static discovery remain available; a chosen poli
   pending = false;
   expect((await guarded(request('/dashboard/dispositions', { Authorization: 'Bearer synthetic' }))).status).toBe(200);
 });
+
+test('pending lets an agent read and propose settings (#1050), and nothing else under /v1/cli', async () => {
+  const reached: string[] = [];
+  const guarded = withFirstRunPrivacyGate((r) => { reached.push(new URL(r.url).pathname); return Response.json({ ok: true }); }, { pending: () => true });
+  for (const path of ['/v1/cli/settings', '/v1/cli/settings-propose']) {
+    expect((await guarded(request(path, { Authorization: 'Bearer synthetic' }))).status).toBe(200);
+  }
+  for (const path of ['/v1/cli/data-export', '/v1/cli/tier', '/v1/cli/ingestion-status']) {
+    expect((await guarded(request(path, { Authorization: 'Bearer synthetic' }))).status).toBe(403);
+  }
+  expect(reached).toEqual(['/v1/cli/settings', '/v1/cli/settings-propose']);
+});

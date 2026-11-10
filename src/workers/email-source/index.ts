@@ -587,6 +587,8 @@ export interface EmailSourceWorkerOptions {
     saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
     /** Change the Private-answer mode after the first run (an applied settings proposal, #1050). */
     savePrivateAnswerMode?: (choice: SovereigntyPresetName) => { ok: true; message?: string } | { ok: false; message: string };
+    /** Hold the reloads the writers request until a whole settings proposal is saved. */
+    deferReloads?: <T>(writes: () => Promise<T>) => Promise<T>;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
      * Outside help (consults): the Mac dashboard card's backend
@@ -878,6 +880,7 @@ function settingsProposalHolderFor(dashboard: NonNullable<EmailSourceWorkerOptio
       return { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id] };
     },
     ...(dashboard.savePrivateAnswerMode ? { saveAnswerMode: dashboard.savePrivateAnswerMode } : {}),
+    ...(dashboard.deferReloads ? { deferReloads: dashboard.deferReloads } : {}),
     ...(dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {}),
     ...(saveComputerUse ? { saveComputerUse: (choice: 'everyday' | 'server') => ({ ok: true as const, message: saveComputerUse(choice).status_message }) } : {}),
     ...(judge ? {

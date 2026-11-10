@@ -77,6 +77,20 @@ describe('the proposal holder', () => {
     expect(await holder.apply(second.id)).toBeUndefined();
   });
 
+  test('every write runs inside one deferred-reload batch', async () => {
+    const order: string[] = [];
+    const { targets: t } = targets({
+      saveModel: async () => { order.push('model'); return { ok: true }; },
+      saveJudge: async () => { order.push('judge'); return { ok: true }; },
+      saveAnswerMode: () => { order.push('mode'); return { ok: true }; },
+      deferReloads: async (writes) => { order.push('hold'); try { return await writes(); } finally { order.push('release'); } },
+    });
+    const holder = createSettingsProposalHolder(t);
+    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } });
+    await holder.apply(proposal.id);
+    expect(order).toEqual(['hold', 'model', 'judge', 'mode', 'release']);
+  });
+
   test('one failing write is reported and the rest still apply', async () => {
     const { calls, targets: t } = targets({ saveJudge: async () => { throw new Error('Set up an allowed Venice model in Private answers first.'); } });
     const holder = createSettingsProposalHolder(t);
