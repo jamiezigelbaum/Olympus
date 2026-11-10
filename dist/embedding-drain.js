@@ -1074,6 +1074,7 @@ var init_olympus_layout = __esm(() => {
     "credential-broker-state": "credential-broker-state.json",
     "waiting-private-questions": "waiting-private-questions.sqlite",
     "tier-migration": "tier-migration",
+    "people-index": "people-index.sqlite",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
     "built-in-reasoning": "models/built-in-reasoning",
@@ -7000,6 +7001,165 @@ var init_worker_transport = __esm(() => {
   init_atomic_file();
 });
 
+// src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var init_sqlite_migrations = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
+
+// src/core/people-index.ts
+function normalizePhone(value) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("+") && !trimmed.startsWith("00"))
+    return;
+  if (/[^\d\s().+-]/.test(trimmed))
+    return;
+  const digits = trimmed.replace(/\D/g, "").replace(/^00/, "");
+  return digits.length >= 8 && digits.length <= 15 && !digits.startsWith("0") ? `+${digits}` : undefined;
+}
+function strongKeysFromText(value) {
+  if (!value)
+    return [];
+  const keys = new Set;
+  for (const match of value.matchAll(ADDRESS)) {
+    const local = match[1];
+    keys.add(`email:${match[0].toLowerCase()}`);
+    if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
+      keys.add(`phone:+${local}`);
+  }
+  if (keys.size === 0) {
+    const phone = normalizePhone(value);
+    if (phone)
+      keys.add(`phone:${phone}`);
+  }
+  return [...keys];
+}
+var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
+var init_people_index = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  PEOPLE_LINK_REASON_TEXT = Object.freeze({
+    owner: "You on every source",
+    phone: "Linked by phone number",
+    email: "Linked by email address",
+    contacts: "Linked by your contacts",
+    name_and_shared_conversation: "Linked by name and a shared conversation",
+    name_and_shared_group: "Linked by name and shared group chat",
+    merged_by_owner: "Merged by you"
+  });
+  ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
+  PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
+});
+
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir2, open as open2, readFile } from "node:fs/promises";
 import { dirname as dirname13 } from "node:path";
@@ -9422,121 +9582,6 @@ var init_delphi_scorer = __esm(() => {
   ].join(`
 `);
 });
-
-// src/core/sqlite-migrations.ts
-function currentStoreMigrations() {
-  return [
-    {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
-    }
-  ];
-}
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-}
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
-    return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
-    };
-  }
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  if (pending.length > 0) {
-    db.transaction(() => {
-      const lockedVersion = readSqliteSchemaVersion(db, storeId);
-      if (lockedVersion > targetVersion) {
-        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-      }
-      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
-        migration.up(db);
-        writeSqliteSchemaVersion(db, storeId, migration.version);
-        applied.push({ version: migration.version, name: migration.name });
-      }
-    }).immediate();
-  }
-  return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
-  };
-}
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
-}
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
-}
-function writeSqliteSchemaVersion(db, storeId, version) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
-  }
-  return ordered;
-}
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
-var init_sqlite_migrations = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
-}
 
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {
@@ -18984,11 +19029,13 @@ var init_embeddings = __esm(() => {
   TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
   TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
     reason;
-    constructor(provider, reason, attempts, budgetMs = 0) {
+    modelStarting;
+    constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
       const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
       super("source_index_error", message2, suggestion);
       this.name = "TransientSourceEmbeddingError";
       this.reason = reason;
+      this.modelStarting = options.modelStarting === true;
     }
   };
 });
@@ -20201,6 +20248,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   if (senderId && senderLabel) {
     throw new Error("Connector store search accepts senderId or senderLabel, not both.");
   }
+  const senderIdentities = normalizeSenderIdentities(value.senderIdentities);
   const authoredAfter = normalizeFilterTimestamp(value.authoredAfter, "authoredAfter");
   const authoredBefore = normalizeFilterTimestamp(value.authoredBefore, "authoredBefore");
   if (authoredAfter && authoredBefore && Date.parse(authoredAfter) > Date.parse(authoredBefore)) {
@@ -20223,6 +20271,7 @@ function normalizeConnectorStoreSearchFilters(value) {
     ...conversationId ? { conversationId } : {},
     ...senderId ? { senderId } : {},
     ...senderLabel ? { senderLabel } : {},
+    ...senderIdentities.length > 0 ? { senderIdentities } : {},
     ...authoredAfter ? { authoredAfter } : {},
     ...authoredBefore ? { authoredBefore } : {},
     ...searchTextExactLines.length > 0 ? { searchTextExactLines } : {},
@@ -20334,9 +20383,25 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.sender_id = ?");
     params.push(normalized.senderId);
   }
+  const senderIdentityMatch = normalized.senderIdentities?.length ? `EXISTS (
+      SELECT 1 FROM json_each(?) person_sender
+      WHERE json_extract(person_sender.value, '$.p') = i.provider
+        AND (json_extract(person_sender.value, '$.s') = i.sender_id
+          OR (i.sender_id IS NULL AND json_extract(person_sender.value, '$.l') = i.sender_label))
+    )` : undefined;
+  const senderIdentityParam = normalized.senderIdentities?.length ? JSON.stringify(normalized.senderIdentities.map((identity) => ({
+    p: identity.provider,
+    ...identity.senderId ? { s: identity.senderId } : {},
+    ...identity.senderLabel ? { l: identity.senderLabel } : {}
+  }))) : undefined;
   if (normalized.senderLabel) {
-    clauses.push("AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
+    clauses.push(senderIdentityMatch ? `AND (LOWER(i.sender_label) LIKE ? ESCAPE '\\' OR ${senderIdentityMatch})` : "AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
     params.push(`%${escapeSqlLike(normalized.senderLabel.toLowerCase())}%`);
+    if (senderIdentityParam)
+      params.push(senderIdentityParam);
+  } else if (senderIdentityMatch && senderIdentityParam) {
+    clauses.push(`AND ${senderIdentityMatch}`);
+    params.push(senderIdentityParam);
   }
   if (normalized.authoredAfter) {
     clauses.push("AND julianday(i.authored_at) >= julianday(?)");
@@ -20507,6 +20572,25 @@ function normalizeFilterTimestamp(value, label) {
     throw new Error(`Connector store ${label} filter must be an ISO timestamp with a timezone.`);
   }
   return new Date(normalized).toISOString();
+}
+function normalizeSenderIdentities(value) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.length > MAX_PERSON_SENDER_IDENTITIES) {
+    throw new Error(`Connector store sender identities must be an array of at most ${MAX_PERSON_SENDER_IDENTITIES}.`);
+  }
+  const safe = (text2) => {
+    const trimmed = typeof text2 === "string" ? text2.trim() : undefined;
+    return trimmed && trimmed.length <= 1000 && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : undefined;
+  };
+  return value.flatMap((identity) => {
+    const provider = safe(identity?.provider);
+    const senderId = safe(identity?.senderId);
+    const senderLabel = safe(identity?.senderLabel);
+    if (!provider || !senderId && !senderLabel)
+      return [];
+    return [{ provider, ...senderId ? { senderId } : { senderLabel } }];
+  });
 }
 function escapeSqlLike(value) {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
@@ -21341,7 +21425,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_job_names();
   init_keyword_context();
@@ -23222,6 +23306,81 @@ var init_local_index = __esm(() => {
         candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
         truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8
       };
+    }
+    setPeopleNames(resolver) {
+      this.peopleNames = resolver;
+    }
+    personCitationName(row) {
+      if (!this.peopleNames || row.senderIsOwner === true)
+        return;
+      if (!row.senderId && !row.authorLabel)
+        return;
+      try {
+        return this.peopleNames(row.sourceItem.provider, row.senderId, row.authorLabel)?.displayName;
+      } catch {
+        return;
+      }
+    }
+    peopleNames;
+    peopleObservations() {
+      const tierHidden = this.tierHiddenItemPks();
+      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
+      const rows = this.db.query(`
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
+      const bySender = new Map;
+      for (const row of rows) {
+        const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;
+        let entry = bySender.get(key2);
+        if (!entry) {
+          entry = {
+            provider: row.provider,
+            ...row.sender_id?.trim() ? { senderId: row.sender_id.trim() } : {},
+            ...row.sender_label?.trim() ? { senderLabel: row.sender_label.trim() } : {},
+            isOwner: false,
+            itemCount: 0,
+            corpusId: this.corpusId,
+            conversations: new Set,
+            anyPublic: false
+          };
+          bySender.set(key2, entry);
+        }
+        entry.isOwner ||= row.is_owner === 1;
+        entry.itemCount += row.item_count;
+        if (row.conversation_id)
+          entry.conversations.add(row.conversation_id);
+        const tier = SOURCE_TRUST_TIERS.find((candidate) => candidate === row.trust_tier);
+        if (tier && !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: tier }))
+          entry.anyPublic = true;
+      }
+      return [...bySender.values()].map(({ conversations, anyPublic, ...observation }) => ({
+        ...observation,
+        ...anyPublic ? {} : { privateOnly: true },
+        ...conversations.size > 0 ? { conversationIds: [...conversations].sort() } : {}
+      }));
+    }
+    authorCoverage() {
+      return this.db.query(`
+      SELECT provider, COUNT(*) AS items,
+        SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
+          THEN 1 ELSE 0 END) AS without_author
+      FROM items
+      WHERE tombstoned = 0 AND parent_local_item_id IS NULL
+      GROUP BY provider
+      ORDER BY provider
+    `).all().map((row) => ({
+        provider: row.provider,
+        items: row.items,
+        itemsWithoutAuthor: row.without_author ?? 0
+      }));
     }
     senderAggregation(options) {
       if (this.family !== "chat") {
@@ -30687,8 +30846,12 @@ var init_vocabulary = __esm(() => {
       itemsOne: "1 item",
       itemsMany: "{n} items",
       checked: "checked {when}",
-      allSources: "All sources",
-      progress: "In progress"
+      progress: "In progress",
+      left: "about {duration} left",
+      openPrivacy: "Open Privacy",
+      waitBudget: "daily {api} API budget used",
+      waitRateLimit: "{api} rate limit reached",
+      resumes: "resumes at {local} ({utc} UTC)"
     },
     needsYou: "Needs you",
     sources: "Sources",
@@ -30776,7 +30939,8 @@ var init_vocabulary = __esm(() => {
     findingItems: "Finding items",
     findingFound: "Finding {unit} · {done} found so far",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
-    stalledSources: "{sources} paused",
+    stalledRetrying: "{sources} retrying",
+    stalledOff: "{sources} switched off",
     stalledAnd: "{first} and {last}",
     stalledMore: "{count} more",
     sourceFailures: DASHBOARD_SOURCE_FAILURE_WORDS,
@@ -34054,6 +34218,12 @@ function childIdentityOf(record, account, attachment) {
     parent: { providerItemId: record.id, localItemId: `${account}:${record.id}` }
   };
 }
+function senderAddress2(from) {
+  if (!from || from.endsWith("…"))
+    return;
+  const emails = strongKeysFromText(from).filter((key2) => key2.startsWith("email:"));
+  return emails.length === 1 ? emails[0].slice("email:".length) : undefined;
+}
 function gmailMessageItem(record, account, fetchedAt = new Date().toISOString()) {
   const subject = record.headers.subject ?? "(no subject)";
   const rawFrom = record.headers.from ?? "";
@@ -34074,6 +34244,8 @@ function gmailMessageItem(record, account, fetchedAt = new Date().toISOString())
       title: subject,
       subject,
       from,
+      ...senderAddress2(from) ? { senderId: senderAddress2(from) } : {},
+      ...record.labelIds.includes("SENT") ? { senderIsOwner: true } : {},
       ...record.headers.to ? { to: record.headers.to } : {},
       ...date ? { authoredAt: date } : {},
       ...record.internalDate ? { internalDate: record.internalDate } : {},
@@ -34143,6 +34315,7 @@ function gmailClassificationSignals(item) {
 }
 var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), GMAIL_CHILD_MAX_DEPTH = 8;
 var init_gmail_mail_record = __esm(() => {
+  init_people_index();
   init_sender_rules();
 });
 
@@ -37487,7 +37660,10 @@ class BuiltInSourceEmbeddingProvider {
         this.load().catch(() => {
           return;
         });
-        throw new BuiltInEmbeddingNotReadyError(this.status());
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
+        });
       }
     }
     const model = await this.ready();
@@ -37944,8 +38120,8 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status, cause) {
-      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
+    constructor(status, cause, options = {}) {
+      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
       this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
@@ -41943,6 +42119,7 @@ var init_status = __esm(() => {
   init_store2();
   init_telegram_messages();
   init_operation_error();
+  init_people_index();
   init_control_path_headroom();
   init_secret_locations();
   STORE_STATUS_REUSE_MS = 5 * 60000;
@@ -42350,6 +42527,7 @@ var init_source_forget_registry = __esm(() => {
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
+  init_people_index();
   init_source_watch();
   init_ingestion_health_state();
   init_source_scope_approval();
@@ -42537,6 +42715,7 @@ var init_worker_service = __esm(() => {
 // src/data-lifecycle.ts
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
+  init_people_index();
   init_mac_engine_daemon();
   init_tier_ledger_path();
   init_olympus_layout();
@@ -44873,7 +45052,7 @@ function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -45479,8 +45658,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostLinks = value.kind === "computer" ? links : {};
     const landing = value.landing;
     if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
-      state.landing = landing.sourceId;
-      state.landingImport = landing.import === true;
+      if (landing.sourceId === config.allSourcesId)
+        state.open["home-all"] = true;
+      else {
+        state.landing = landing.sourceId;
+        state.landingImport = landing.import === true;
+      }
     }
   }
   function onComputer() {
@@ -46166,13 +46349,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const line = add(el("p", "stale"), el("span", "muted", words2));
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
-  function needsYouSection(items) {
+  function needsYouSection(items, extra) {
     const waiting = waitingRow();
-    if (!items.length && !waiting)
+    const more = extra || [];
+    if (!items.length && !waiting && !more.length)
       return null;
     const section = add(el("section", "section"), el("h2", "", P.needsYou));
     const list = el("ul", "rows");
     add(list, waiting);
+    for (const row of more)
+      add(list, row);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
       const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(archiveNeedFix(item), key2, "warn", true, itemSource(item)));
@@ -46429,7 +46615,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    return archiveGroups().some((meta) => !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking"));
+    return archiveGroups().some(archiveMoving);
+  }
+  function archiveMoving(meta) {
+    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking");
   }
   function startArchivePick(key2, sourceId) {
     supersede();
@@ -46555,6 +46744,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function sourceImportsNeed(group) {
     return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
+  }
+  function sourceImportsMoving(group) {
+    return !archiveSetting(group) && group.imports.filter(validArchive).some((entry) => entry.status === "importing");
   }
   function sourceImportList(group) {
     const S = H.copy.archives.inSource;
@@ -47204,7 +47396,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
-      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
+      const names = progress.stalled ? stalledNames() : "";
+      const paused = progressPaused() ? ", " + P.progressPaused : names ? ", " + names : "";
       const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
       return phase + ": " + foundSoFar(first && first.done, progress.unit) + paused;
     }
@@ -47219,15 +47412,25 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill2(P.eta, { duration: duration(progress.etaSeconds) }));
     }
-    if (progress.stalled)
+    if (progress.stalled && stalledNames())
       parts.push(stalledNames());
     return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
   }
   function stalledNames() {
     const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
-    const names = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label).map((source) => String(source.label));
-    if (!names.length)
+    const stalled = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label);
+    const failing = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "failing");
+    const off = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "switched_off");
+    if (!stalled.length)
       return P.stalled;
+    const parts = [];
+    if (failing.length)
+      parts.push(fill2(P.stalledRetrying, { sources: nameList(failing.map((source) => String(source.label))) }));
+    if (off.length)
+      parts.push(fill2(P.stalledOff, { sources: nameList(off.map((source) => String(source.label))) }));
+    return parts.join(", ");
+  }
+  function nameList(names) {
     let list;
     if (names.length === 1)
       list = names[0];
@@ -47235,7 +47438,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       list = fill2(P.stalledAnd, { first: names[0], last: names[1] });
     else
       list = fill2(P.stalledAnd, { first: names[0] + ", " + names[1], last: fill2(P.stalledMore, { count: count(names.length - 2) }) });
-    return fill2(P.stalledSources, { sources: list });
+    return list;
   }
   function progressSection(progress, withDetails) {
     if (!progress || progressFinished(progress))
@@ -47493,32 +47696,182 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const entry = models.transcription;
     if (!entry || typeof entry !== "object")
       return false;
+    if (entry.state === "not_needed")
+      return false;
     return !!entry.download || entry.state === "failed" || entry.state === "load_failed" || entry.state === "interrupted";
   }
   function renderHome(page2, data2) {
+    page2.className += " home-page";
     const all = Array.isArray(data2.sources) ? data2.sources : [];
     const needs = Array.isArray(data2.needsYou) ? data2.needsYou.filter((item) => !!item) : [];
+    const extra = [privacyPendingRow(data2), transcriptionNeedRow(data2.models)].filter((row) => !!row);
     const waiting = waitingRow() ? 1 : 0;
-    add(page2, homeStatus(data2, needs.length + waiting + (data2.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
+    add(page2, homeStatus(data2, needs.length + extra.length + waiting + (data2.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
     add(page2, staleLine());
-    add(page2, needsYouSection(needs));
-    const progress = progressSection(data2.progress, true);
-    if (progress) {
-      const head = progress.querySelector("h2");
-      if (head)
-        head.textContent = P.home.progress;
+    add(page2, homeSetupSlot(data2));
+    add(page2, needsYouSection(needs, extra));
+    add(page2, homeProgressSection(data2));
+    add(page2, homeFocusedSources(all));
+    return page2;
+  }
+  function homeSetupSlot(_data) {
+    return null;
+  }
+  function privacyPendingRow(data2) {
+    const info = data2 && data2.privacy && typeof data2.privacy === "object" ? data2.privacy : null;
+    if (!info || !privacy || info.configured !== true)
+      return null;
+    const pending2 = typeof info.pendingCount === "number" && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    if (pending2 < 1)
+      return null;
+    const W = config.privacy.copy;
+    const blocked = globalReason();
+    const open4 = button(P.home.openPrivacy, "need:privacy-pending", blocked ? null : () => openPrivacy("need:privacy-pending"), "plain");
+    const body = add(el("div", "need-body"), el("p", "row-text", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })), add(el("span", "fix"), open4));
+    const row = add(el("li", "row need"), body);
+    row.setAttribute("data-privacy-pending", String(pending2));
+    return row;
+  }
+  function transcriptionNeedRow(models) {
+    if (!models || !transcriptionNeedsHand(models))
+      return null;
+    const words2 = transcriptionWords(models);
+    const fix = models.transcription && models.transcription.download;
+    if (!words2 || !fix)
+      return null;
+    const body = add(el("div", "need-body"), el("p", "row-text", P.modelTranscription + ": " + words2), fixControl(fix, "models:transcription", "warn", false));
+    return add(el("li", "row need"), body);
+  }
+  function homeProgressSection(data2) {
+    const rows = [];
+    const progress = data2.progress;
+    if (progress && !progressFinished(progress))
+      rows.push(homeIndexRow(progress));
+    if (data2.models) {
+      for (const entry of installLines(data2.models))
+        if (entry.state !== "failed")
+          rows.push(add(el("li", "row home-line"), installLine(entry)));
     }
-    add(page2, progress);
-    if (data2.models && (installLines(data2.models).some((entry) => entry.state !== "failed") || transcriptionNeedsHand(data2.models)))
-      add(page2, modelsSection(data2.models));
-    add(page2, privacySection(data2));
-    if (state.landing || state.landed)
-      state.open["home-sources"] = true;
-    if (state.open["home-sources"] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds)))
-      state.open["home-sources"] = true;
-    const box = details("home-sources", doc.createTextNode(P.home.allSources + " (" + count(all.filter((source) => !isArchivesCard(source)).length) + ")"), "section home-sources");
-    add(box, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
-    return add(page2, box);
+    const waits = Array.isArray(data2.waits) ? data2.waits : [];
+    for (const wait of waits) {
+      const row = waitRow(wait);
+      if (row)
+        rows.push(row);
+    }
+    if (!rows.length)
+      return null;
+    const section = add(el("section", "section home-progress"), el("h2", "", P.home.progress));
+    const list = el("ul", "rows");
+    for (const row of rows)
+      add(list, row);
+    return add(section, list);
+  }
+  function indexingNames() {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const names = sources.filter((source) => {
+      const progress = sourceProgress(source);
+      return !!progress && progress.stage !== "done" && !isArchivesCard(source);
+    }).map((source) => String(source.label || "")).filter((name) => !!name);
+    return names.slice(0, 3).join(", ") + (names.length > 3 ? " " + fill2(P.stalledMore, { count: count(names.length - 3) }) : "");
+  }
+  function homeIndexRow(progress) {
+    const facts = [];
+    const names = indexingNames();
+    if (names)
+      facts.push(names);
+    if (progressPaused())
+      facts.push(P.progressPaused);
+    else if (totalUnknown(progress)) {
+      const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
+      facts.push(foundSoFar(first && first.done, progress.unit));
+    } else {
+      if (progress.percent !== undefined)
+        facts.push(percent(progress.percent) + "%");
+      if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled)
+        facts.push(fill2(P.home.left, { duration: duration(progress.etaSeconds) }));
+    }
+    const stalled = progress.stalled && !progressPaused() ? stalledNames() : "";
+    if (stalled)
+      facts.push(stalled);
+    const line = add(el("p", "row-text home-index"), el("strong", "", progress.phase === "initial" ? P.progressInitial : P.progressRefresh), facts.length ? el("span", "muted", " · " + facts.join(" · ")) : null);
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    const faster = indexFasterControl();
+    const row = add(el("li", "row home-line"), add(el("div", "need-body"), line));
+    row.setAttribute("data-home-index", progress.phase === "initial" ? "initial" : "refresh");
+    if (!stages.length && !faster)
+      return row;
+    const open4 = !!state.open["progress-details"];
+    const toggle = button(P.details, "progress-details", () => {
+      state.open["progress-details"] = !state.open["progress-details"];
+      render("progress-details");
+    }, "plain");
+    toggle.setAttribute("aria-expanded", open4 ? "true" : "false");
+    toggle.setAttribute("aria-controls", "progress-details");
+    add(row.firstChild, toggle);
+    if (!open4)
+      return row;
+    const box = el("div", "home-details");
+    box.id = "progress-details";
+    const list = el("ul", "plain");
+    stages.forEach((stage) => add(list, el("li", "", fill2(P.stageLine, {
+      stage: String(stage.stage || ""),
+      done: count(stage.done),
+      total: count(stage.total),
+      unit: unitWord(stage.unit, Number(stage.total) || 0)
+    }))));
+    return add(row, add(box, stages.length ? list : null, faster));
+  }
+  function resumeWords(iso) {
+    const at = new Date(iso);
+    if (!isFinite(at.getTime()))
+      return "";
+    const two = (value) => (value < 10 ? "0" : "") + String(value);
+    const local = two(at.getHours()) + ":" + two(at.getMinutes());
+    const utc = two(at.getUTCHours()) + ":" + two(at.getUTCMinutes());
+    return fill2(P.home.resumes, { local, utc });
+  }
+  function waitRow(wait) {
+    if (!wait || typeof wait.label !== "string")
+      return null;
+    const api = String(wait.api || wait.label);
+    const facts = [fill2(wait.reason === "rate_limit" ? P.home.waitRateLimit : P.home.waitBudget, { api })];
+    const when = typeof wait.resumesAt === "string" ? resumeWords(wait.resumesAt) : "";
+    if (when)
+      facts.push(when);
+    const line = add(el("p", "row-text"), el("strong", "", wait.label), el("span", "muted", " · " + facts.join(" · ")));
+    const row = add(el("li", "row home-line"), add(el("div", "need-body"), line));
+    row.setAttribute("data-source-wait", String(wait.sourceId || ""));
+    return row;
+  }
+  function homeFocusedSources(all) {
+    if (state.open["home-all"]) {
+      const section2 = el("div", "home-sources");
+      add(section2, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+      return section2;
+    }
+    const focus = state.landing || (state.landed ? state.landed.id : "");
+    const shown = all.filter((source) => {
+      const id = String(source && (source.id || source.label));
+      if (focus && (id === focus || focus.indexOf(id + ":") === 0))
+        state.open["home-focus:" + id] = true;
+      if (state.open["home-focus:" + id])
+        return true;
+      const archives2 = archivesMeta(id);
+      const joined = sourceImportsMeta(id);
+      if (!!archives2 && (archiveNeeds(archives2) || archiveMoving(archives2)) || !!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))
+        state.open["home-focus:" + id] = true;
+      return !!state.open["home-focus:" + id];
+    });
+    if (!shown.length && !archivesMoving())
+      return null;
+    const sources = shown.filter((source) => !isArchivesCard(source));
+    const archives = all.filter(isArchivesCard)[0];
+    const section = el("div", "home-sources");
+    if (sources.length)
+      add(section, sourcesSection(sources));
+    if (archives && (shown.indexOf(archives) >= 0 || archivesMoving()))
+      add(section, otherArchivesSection(archives));
+    return section.childNodes.length ? section : null;
   }
   function renderFull() {
     const page2 = el("main", "page");
@@ -51493,6 +51846,7 @@ function chatgptDashboardPageHtml(options = {}) {
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
+    allSourcesId: DASHBOARD_ALL_SOURCES_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -51563,6 +51917,7 @@ var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESU
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
+  init_open_targets();
   init_shared_privacy_logic();
   init_picker();
   init_privacy();
@@ -51880,6 +52235,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .home-status{display:flex;align-items:center;gap:1rem;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem;margin:0 0 1.5rem;background:var(--surface)}.home-status .home-title{font-weight:600;margin:0}.home-status .muted{margin:0.15rem 0 0}.home-sources>summary{cursor:pointer;color:var(--muted);padding:0.5rem 0}
+.home-page .rows{border-top:0}.home-page .row.need,.home-page .row.home-line{display:block;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:0.875rem 1.25rem;margin:0.5rem 0}.home-page .row.home-line{background:var(--bg)}.home-page .row.need .row-text{font-weight:600}.home-page .need-body{align-items:center}.home-page .btn.warnfill{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.home-page .home-index,.home-page .row.home-line .row-text{margin:0}.home-page .home-details{margin-top:0.75rem}.home-page .home-details ul{margin:0;padding-left:1.25rem}.home-page .model-install p{margin:0}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
@@ -70244,6 +70600,9 @@ import { createHash as createHash33 } from "node:crypto";
 import { existsSync as existsSync34, lstatSync as lstatSync16, mkdirSync as mkdirSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname40, isAbsolute as isAbsolute14 } from "node:path";
 
+// src/workers/email-source/server.ts
+init_people_index();
+
 // src/workers/classification/judge-setup.ts
 init_classification_ledger();
 init_built_in_sniffer();
@@ -71092,6 +71451,11 @@ init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
 init_source_failure();
+
+// src/workers/dashboard/models-on-computer.ts
+var LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
+
+// src/workers/email-source/index.ts
 init_google_own_app();
 init_sovereignty();
 init_first_run_privacy();
@@ -79194,6 +79558,7 @@ var CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityR
   [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
   [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
 ]);
+var PEOPLE_INDEX_REFRESH_MS = 15 * 60000;
 function firstNonEmptyEnv2(env, names) {
   for (const name of names) {
     const value = optionalEnv(env, name);

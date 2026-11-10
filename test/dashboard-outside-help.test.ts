@@ -1,4 +1,5 @@
 import { linuxZkapiConfinement } from '../src/core/zkapi-confinement-linux.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
  * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
@@ -12,7 +13,6 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { Window } from 'happy-dom';
 import { DASHBOARD_REDRAW_EVENT } from '../src/control-ui/browser-controller.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
@@ -850,11 +850,9 @@ async function controlSession(fetcher: (request: Request) => Promise<Response>):
   return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
 }
 
-/** The local-only mint: a loopback browser presenting no bearer. */
+/** The local-only mint: the owner's loopback browser, presenting its session and no bearer. */
 async function localSession(fetcher: (request: Request) => Promise<Response>): Promise<{ cookie: string; csrf: string }> {
-  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-  recordRequestPeer(request, '127.0.0.1');
-  const mint = await fetcher(request);
+  const mint = await ownerLocalMint(fetcher, ORIGIN, 'worker-secret');
   expect(mint.status).toBe(200);
   return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
 }

@@ -637,7 +637,7 @@ async function rowOnPanel(driver: PanelDriver, name: string, waitMs = 5_000): Pr
 }
 
 async function runOn(serve: Serve, journey: Journey): Promise<{ trace: JourneyTrace; driver: PanelDriver }> {
-  const driver = new PanelDriver(async () => (await mountPanel(serve)).win);
+  const driver = new PanelDriver(async (path) => (await mountPanel(serve, path)).win);
   await driver.go();
   return { trace: await runJourney(driver, journey, live), driver };
 }
@@ -819,8 +819,9 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
 
   test('the probe reads a held row as the held evaluators expect it, with the way to set up the private model', async () => {
     const heldEntry = entryFor(heldFx, { judged: 0, held: heldFx.expect.messages });
-    const driver = new PanelDriver(async () => (await mountPanel({ [DASHBOARD_TOOL_NAME]: () => dashboardAnswer([heldEntry], [], 'off') })).win);
-    await driver.go();
+    const driver = new PanelDriver(async (path) => (await mountPanel({ [DASHBOARD_TOOL_NAME]: () => dashboardAnswer([heldEntry], [], 'off') }, path)).win);
+    // Home's "Imported archives and details" landing, where every archive is listed.
+    await driver.go('/dashboard#olympus-open=sources');
     const row = (await rowOnPanel(driver, heldFx.fileName))!;
     expect(row).toBeDefined();
     expect(judgedLineOf(row.text)).toEqual({ judged: 0, held: heldFx.expect.messages });

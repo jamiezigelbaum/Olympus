@@ -44,6 +44,8 @@ export interface ChatGptDashboardClientConfig {
    * (Other archives), for exports that are not from one of the sources above.
    */
   archivesSourceId: string;
+  /** The landing id the Sources tab's Archives and details uses: every source's row on Home (#1085). */
+  allSourcesId: string;
   connection: typeof DASHBOARD_CHATGPT_CONNECTION_COPY;
   page: typeof DASHBOARD_CHATGPT_PAGE_COPY;
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
@@ -328,8 +330,11 @@ export function chatgptDashboardClient(
     // Said once, in the first answer: See why on one source (core/open-targets.ts unreadable/<source>).
     const landing = value.landing;
     if (value.kind === 'computer' && landing && typeof landing.sourceId === 'string' && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
-      state.landing = landing.sourceId;
-      state.landingImport = landing.import === true;
+      if (landing.sourceId === config.allSourcesId) state.open['home-all'] = true;
+      else {
+        state.landing = landing.sourceId;
+        state.landingImport = landing.import === true;
+      }
     }
   }
 
@@ -1117,12 +1122,14 @@ export function chatgptDashboardClient(
       : button(P.checkAgain, 'refresh', refresh, 'plain'));
   }
 
-  function needsYouSection(items: Any[]): HTMLElement | null {
+  function needsYouSection(items: Any[], extra?: HTMLElement[]): HTMLElement | null {
     const waiting = waitingRow();
-    if (!items.length && !waiting) return null;
+    const more = extra || [];
+    if (!items.length && !waiting && !more.length) return null;
     const section = add(el('section', 'section'), el('h2', '', P.needsYou));
     const list = el('ul', 'rows');
     add(list, waiting);
+    for (const row of more) add(list, row);
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
       // A warm box with an orange edge carries the state, so the row has no dot.
@@ -1448,10 +1455,13 @@ export function chatgptDashboardClient(
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group: Any) => !!group && !archiveSetting(group) && Array.isArray(group.imports)
       && group.imports.some((entry: Any) => !!entry && entry.status === 'importing'))) return true;
-    // Imports this computer's settings keep from running are not moving.
-    return archiveGroups().some((meta: Any) =>
-      (!archiveSetting(meta) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
-      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
+    return archiveGroups().some(archiveMoving);
+  }
+
+  /** One list of imports at work: an archive read or removed (unless this computer's settings keep it from running), or a request checked. */
+  function archiveMoving(meta: Any): boolean {
+    return (!archiveSetting(meta) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
+      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking');
   }
 
   /**
@@ -1618,6 +1628,11 @@ export function chatgptDashboardClient(
 
   function sourceImportsNeed(group: Any): boolean {
     return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
+  }
+
+  /** An import that joined a source and is running: In progress, with its own progress and Stop. */
+  function sourceImportsMoving(group: Any): boolean {
+    return !archiveSetting(group) && group.imports.filter(validArchive).some((entry: Any) => entry.status === 'importing');
   }
 
   /**
@@ -2393,7 +2408,8 @@ export function chatgptDashboardClient(
   function progressText(progress: Any): string {
     const phase = progress.phase === 'initial' ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
-      const paused = progressPaused() ? ', ' + P.progressPaused : progress.stalled ? ', ' + stalledNames() : '';
+      const names = progress.stalled ? stalledNames() : '';
+      const paused = progressPaused() ? ', ' + P.progressPaused : names ? ', ' + names : '';
       const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
       return phase + ': ' + foundSoFar(first && first.done, progress.unit) + paused;
     }
@@ -2407,7 +2423,7 @@ export function chatgptDashboardClient(
     if (typeof progress.etaSeconds === 'number' && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill(P.eta, { duration: duration(progress.etaSeconds) }));
     }
-    if (progress.stalled) parts.push(stalledNames());
+    if (progress.stalled && stalledNames()) parts.push(stalledNames());
     return (progress.phase === 'initial' ? P.progressInitial : P.progressRefresh) + ': ' + parts.join(', ');
   }
 
@@ -2418,15 +2434,26 @@ export function chatgptDashboardClient(
    */
   function stalledNames(): string {
     const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
-    const names = sources
-      .filter((source: Any) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === 'string' && source.label)
-      .map((source: Any) => String(source.label));
-    if (!names.length) return P.stalled;
+    const stalled = sources.filter((source: Any) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === 'string' && source.label);
+    // "Paused" is only an owner pause (#1044): a source idle between runs, or
+    // parked on Olympus's own budget (its own In progress line), is not named.
+    const failing = stalled.filter((source: Any) => source.progress.stall && source.progress.stall.cause === 'failing');
+    const off = stalled.filter((source: Any) => source.progress.stall && source.progress.stall.cause === 'switched_off');
+    // No row reports a stop at all: the bare word, as before.
+    if (!stalled.length) return P.stalled;
+    const parts: string[] = [];
+    if (failing.length) parts.push(fill(P.stalledRetrying, { sources: nameList(failing.map((source: Any) => String(source.label))) }));
+    if (off.length) parts.push(fill(P.stalledOff, { sources: nameList(off.map((source: Any) => String(source.label))) }));
+    return parts.join(', ');
+  }
+
+  /** "Dropbox", "Dropbox and Gmail", "Dropbox, Gmail and 2 more". */
+  function nameList(names: string[]): string {
     let list: string;
     if (names.length === 1) list = names[0]!;
     else if (names.length === 2) list = fill(P.stalledAnd, { first: names[0]!, last: names[1]! });
     else list = fill(P.stalledAnd, { first: names[0] + ', ' + names[1], last: fill(P.stalledMore, { count: count(names.length - 2) }) });
-    return fill(P.stalledSources, { sources: list });
+    return list;
   }
 
   function progressSection(progress: Any, withDetails: boolean): HTMLElement | null {
@@ -2699,31 +2726,200 @@ export function chatgptDashboardClient(
   function transcriptionNeedsHand(models: DashboardModels): boolean {
     const entry = models.transcription;
     if (!entry || typeof entry !== 'object') return false;
+    // Not needed yet: it downloads when audio arrives, so its Download now is optional (Settings), not a Needs you line.
+    if (entry.state === 'not_needed') return false;
     return !!entry.download || entry.state === 'failed' || entry.state === 'load_failed' || entry.state === 'interrupted';
   }
 
+  /**
+   * Home on the computer (owner, 2026-11-07 final-6; 2026-11-10 lane 4
+   * mockup 7, #1085): the status line, the setup card slot, Needs you, In
+   * progress and nothing else. No models call-out (Settings › Models on this
+   * computer), no Privacy box (the Privacy tab; waiting items are one Needs
+   * you line) and no source list (the Sources tab is the list). A source an
+   * open link lands on, or an archive that is at work or waiting on the
+   * owner, still shows its own row here, so no fix or landing vanishes.
+   */
   function renderHome(page: HTMLElement, data: Any): HTMLElement {
+    page.className += ' home-page';
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
+    const extra = [privacyPendingRow(data), transcriptionNeedRow(data.models)].filter((row) => !!row) as HTMLElement[];
     const waiting = waitingRow() ? 1 : 0;
-    add(page, homeStatus(data, needs.length + waiting + (data.blocker ? 1 : 0), all.filter((source: Any) => !isArchivesCard(source))));
+    add(page, homeStatus(data, needs.length + extra.length + waiting + (data.blocker ? 1 : 0), all.filter((source: Any) => !isArchivesCard(source))));
     add(page, staleLine());
-    add(page, needsYouSection(needs));
-    const progress = progressSection(data.progress, true);
-    if (progress) { const head = progress.querySelector('h2'); if (head) head.textContent = P.home.progress; }
-    add(page, progress);
-    // Models live on Settings; Home shows them only while one installs or
-    // transcription needs a hand (its recovery has no Needs you item).
-    if (data.models && (installLines(data.models).some((entry) => entry.state !== 'failed') || transcriptionNeedsHand(data.models))) add(page, modelsSection(data.models));
-    // The privacy rules editor opens from here once privacy is set up.
-    add(page, privacySection(data));
-    // A landing or a highlighted row needs its source visible.
-    if (state.landing || state.landed) state.open['home-sources'] = true;
-    // An archive at work shows its progress there, and one waiting on the owner its buttons, so it starts open (until the owner folds it).
-    if (state.open['home-sources'] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds))) state.open['home-sources'] = true;
-    const box = details('home-sources', doc.createTextNode(P.home.allSources + ' (' + count(all.filter((source: Any) => !isArchivesCard(source)).length) + ')'), 'section home-sources');
-    add(box, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
-    return add(page, box);
+    add(page, homeSetupSlot(data));
+    add(page, needsYouSection(needs, extra));
+    add(page, homeProgressSection(data));
+    add(page, homeFocusedSources(all));
+    return page;
+  }
+
+  /**
+   * The setup checklist card's place on Home, between the status line and
+   * Needs you (lane 4 mockup 7, box 2). Its data comes with the setup-status
+   * work (branch claude/lane4-setup-status); until the view model carries it,
+   * Home renders nothing here.
+   */
+  function homeSetupSlot(_data: Any): HTMLElement | null {
+    return null;
+  }
+
+  /** Privacy items waiting to be checked: one Needs you line that opens Privacy (#1085). */
+  function privacyPendingRow(data: Any): HTMLElement | null {
+    const info = data && data.privacy && typeof data.privacy === 'object' ? data.privacy : null;
+    if (!info || !privacy || info.configured !== true) return null;
+    const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    if (pending < 1) return null;
+    const W = config.privacy.copy;
+    const blocked = globalReason();
+    const open = button(P.home.openPrivacy, 'need:privacy-pending', blocked ? null : () => openPrivacy('need:privacy-pending'), 'plain');
+    const body = add(el('div', 'need-body'), el('p', 'row-text', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })), add(el('span', 'fix'), open));
+    const row = add(el('li', 'row need'), body);
+    row.setAttribute('data-privacy-pending', String(pending));
+    return row;
+  }
+
+  /**
+   * Transcription that needs a hand (a download to start or retry): its own
+   * Needs you line with that one fix (#1043); its status is on Settings.
+   */
+  function transcriptionNeedRow(models: DashboardModels | undefined): HTMLElement | null {
+    if (!models || !transcriptionNeedsHand(models)) return null;
+    const words = transcriptionWords(models);
+    const fix = models.transcription && models.transcription.download;
+    if (!words || !fix) return null;
+    const body = add(el('div', 'need-body'), el('p', 'row-text', P.modelTranscription + ': ' + words), fixControl(fix, 'models:transcription', 'warn', false));
+    return add(el('li', 'row need'), body);
+  }
+
+  /**
+   * In progress on Home: the first index (or catching up) as one line with a
+   * Details button, a model download, and each source Olympus parked on its
+   * own budget with its reason and when it resumes (#1044). Absent when
+   * nothing is in progress.
+   */
+  function homeProgressSection(data: Any): HTMLElement | null {
+    const rows: HTMLElement[] = [];
+    const progress = data.progress;
+    if (progress && !progressFinished(progress)) rows.push(homeIndexRow(progress));
+    if (data.models) for (const entry of installLines(data.models)) if (entry.state !== 'failed') rows.push(add(el('li', 'row home-line'), installLine(entry)));
+    const waits = Array.isArray(data.waits) ? data.waits : [];
+    for (const wait of waits) { const row = waitRow(wait); if (row) rows.push(row); }
+    if (!rows.length) return null;
+    const section = add(el('section', 'section home-progress'), el('h2', '', P.home.progress));
+    const list = el('ul', 'rows');
+    for (const row of rows) add(list, row);
+    return add(section, list);
+  }
+
+  /** The sources still on their first index (or catching up), by name. */
+  function indexingNames(): string {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const names = sources
+      .filter((source: Any) => { const progress = sourceProgress(source); return !!progress && progress.stage !== 'done' && !isArchivesCard(source); })
+      .map((source: Any) => String(source.label || ''))
+      .filter((name: string) => !!name);
+    return names.slice(0, 3).join(', ') + (names.length > 3 ? ' ' + fill(P.stalledMore, { count: count(names.length - 3) }) : '');
+  }
+
+  /** "First index · Gmail, Google Drive · 62% · about 40 min left", and Details. */
+  function homeIndexRow(progress: Any): HTMLElement {
+    const facts: string[] = [];
+    const names = indexingNames();
+    if (names) facts.push(names);
+    if (progressPaused()) facts.push(P.progressPaused);
+    else if (totalUnknown(progress)) {
+      const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
+      facts.push(foundSoFar(first && first.done, progress.unit));
+    } else {
+      if (progress.percent !== undefined) facts.push(percent(progress.percent) + '%');
+      if (typeof progress.etaSeconds === 'number' && progress.etaSeconds > 0 && !progress.stalled) facts.push(fill(P.home.left, { duration: duration(progress.etaSeconds) }));
+    }
+    const stalled = progress.stalled && !progressPaused() ? stalledNames() : '';
+    if (stalled) facts.push(stalled);
+    const line = add(el('p', 'row-text home-index'), el('strong', '', progress.phase === 'initial' ? P.progressInitial : P.progressRefresh),
+      facts.length ? el('span', 'muted', ' · ' + facts.join(' · ')) : null);
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    const faster = indexFasterControl();
+    const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), line));
+    row.setAttribute('data-home-index', progress.phase === 'initial' ? 'initial' : 'refresh');
+    if (!stages.length && !faster) return row;
+    const open = !!state.open['progress-details'];
+    const toggle = button(P.details, 'progress-details', () => {
+      state.open['progress-details'] = !state.open['progress-details'];
+      render('progress-details');
+    }, 'plain');
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.setAttribute('aria-controls', 'progress-details');
+    add(row.firstChild as HTMLElement, toggle);
+    if (!open) return row;
+    const box = el('div', 'home-details');
+    box.id = 'progress-details';
+    const list = el('ul', 'plain');
+    stages.forEach((stage: Any) => add(list, el('li', '', fill(P.stageLine, {
+      stage: String(stage.stage || ''),
+      done: count(stage.done),
+      total: count(stage.total),
+      unit: unitWord(stage.unit, Number(stage.total) || 0),
+    }))));
+    return add(row, add(box, stages.length ? list : null, faster));
+  }
+
+  /** "15:00 (14:00 UTC)": the resume time in this computer's time, then UTC. */
+  function resumeWords(iso: string): string {
+    const at = new Date(iso);
+    if (!isFinite(at.getTime())) return '';
+    const two = (value: number) => (value < 10 ? '0' : '') + String(value);
+    const local = two(at.getHours()) + ':' + two(at.getMinutes());
+    const utc = two(at.getUTCHours()) + ':' + two(at.getUTCMinutes());
+    return fill(P.home.resumes, { local, utc });
+  }
+
+  /** "X bookmarks · daily X API budget used · resumes at 01:00 (00:00 UTC)": no button (#1044). */
+  function waitRow(wait: Any): HTMLElement | null {
+    if (!wait || typeof wait.label !== 'string') return null;
+    const api = String(wait.api || wait.label);
+    const facts = [fill(wait.reason === 'rate_limit' ? P.home.waitRateLimit : P.home.waitBudget, { api })];
+    const when = typeof wait.resumesAt === 'string' ? resumeWords(wait.resumesAt) : '';
+    if (when) facts.push(when);
+    const line = add(el('p', 'row-text'), el('strong', '', wait.label), el('span', 'muted', ' · ' + facts.join(' · ')));
+    const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), line));
+    row.setAttribute('data-source-wait', String(wait.sourceId || ''));
+    return row;
+  }
+
+  /**
+   * The only source rows Home keeps: the one an open link landed on, and an
+   * archive at work or waiting on the owner (their buttons live on the row).
+   */
+  function homeFocusedSources(all: Any[]): HTMLElement | null {
+    // The Sources tab's Archives and details: every row, with the imported archives.
+    if (state.open['home-all']) {
+      const section = el('div', 'home-sources');
+      add(section, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+      return section;
+    }
+    const focus = state.landing || (state.landed ? state.landed.id : '');
+    const shown = all.filter((source: Any) => {
+      const id = String(source && (source.id || source.label));
+      // A landed row stays for the rest of the visit, after its outline fades.
+      if (focus && (id === focus || focus.indexOf(id + ':') === 0)) state.open['home-focus:' + id] = true;
+      if (state.open['home-focus:' + id]) return true;
+      const archives = archivesMeta(id);
+      const joined = sourceImportsMeta(id);
+      // Shown once for an archive that needs the owner or is still moving (Reflect, Roam, Evernote: their progress
+      // and Stop), or an import that joined it and is still moving, it stays for the visit, so its result is seen too.
+      if ((!!archives && (archiveNeeds(archives) || archiveMoving(archives))) || (!!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))) state.open['home-focus:' + id] = true;
+      return !!state.open['home-focus:' + id];
+    });
+    if (!shown.length && !archivesMoving()) return null;
+    const sources = shown.filter((source: Any) => !isArchivesCard(source));
+    const archives = all.filter(isArchivesCard)[0];
+    const section = el('div', 'home-sources');
+    if (sources.length) add(section, sourcesSection(sources));
+    if (archives && (shown.indexOf(archives) >= 0 || archivesMoving())) add(section, otherArchivesSection(archives));
+    return section.childNodes.length ? section : null;
   }
 
   function renderFull(): HTMLElement {

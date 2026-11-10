@@ -1,4 +1,5 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
@@ -151,12 +152,14 @@ import {
 } from '../../core/source-index/corpus.ts';
 import { FileLeaseBusyError, withFileLease } from '../../core/file-lease.ts';
 import {
+  awaitStartingQueryEmbedding,
   cosineSimilarity,
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  type QueryEmbeddingWaitTimers,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -2552,6 +2555,12 @@ export interface ConnectorStoreSearchFilters {
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
+  /**
+   * The senders of the people a person filter names (#1076), from the shared
+   * people index. With `senderLabel`, an item matches either; alone, an item
+   * must come from one of them.
+   */
+  senderIdentities?: readonly PeopleSenderIdentity[];
   authoredAfter?: string;
   authoredBefore?: string;
   /**
@@ -2575,6 +2584,13 @@ export interface ConnectorStoreSearchFilters {
   /** These approved folder identities are searchable by metadata rows only. */
   metadataOnlySourceScopeFolderKeys?: readonly string[];
 }
+
+/** The people index's answer for one sender (see LocalConnectorStore.setPeopleNames). */
+export type ConnectorStorePeopleNames = (
+  provider: string,
+  senderId: string | undefined,
+  senderLabel: string | undefined,
+) => PeopleCitationName | undefined;
 
 export interface ConnectorStoreSenderAggregationOptions {
   accountScope: string;
@@ -5332,6 +5348,109 @@ export class LocalConnectorStore {
       candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
       truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8,
     };
+  }
+
+  /**
+   * Who sent what in this store, for the shared people index (#1076): one
+   * row per sender and label, with the conversations it spoke in. Names and
+   * ids only, never text. A label seen only on rows Private by their own tier
+   * is marked `privateOnly`, so the index never shows it as a citation name.
+   */
+  /**
+   * Where a citation finds the person behind a sender (#1076): the shared
+   * people index, set once by the worker that owns it. Unset, citations keep
+   * each item's own label.
+   */
+  setPeopleNames(resolver: ConnectorStorePeopleNames | undefined): void {
+    this.peopleNames = resolver;
+  }
+
+  /** The person's display name for a non-owner sender linked to one, when it may be shown. */
+  personCitationName(row: Pick<ConnectorStoreSearchRow, 'sourceItem' | 'senderId' | 'authorLabel' | 'senderIsOwner'>): string | undefined {
+    if (!this.peopleNames || row.senderIsOwner === true) return undefined;
+    if (!row.senderId && !row.authorLabel) return undefined;
+    try {
+      return this.peopleNames(row.sourceItem.provider, row.senderId, row.authorLabel)?.displayName;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private peopleNames: ConnectorStorePeopleNames | undefined;
+
+  peopleObservations(): PeopleSenderObservation[] {
+    // A copy the tier ledger keeps out of view (superseded, staged, or held
+    // for classification) never names anyone: an old Personal copy of an item
+    // now judged Private must not make its sender's name shareable.
+    const tierHidden = this.tierHiddenItemPks();
+    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
+    const rows = this.db.query(`
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
+      provider: string;
+      sender_id: string | null;
+      sender_label: string | null;
+      conversation_id: string | null;
+      trust_tier: string;
+      is_owner: number;
+      item_count: number;
+    }>;
+    const bySender = new Map<string, PeopleSenderObservation & { conversations: Set<string>; anyPublic: boolean }>();
+    for (const row of rows) {
+      const key = `${row.provider}\u0000${row.sender_id ?? ''}\u0000${row.sender_label ?? ''}`;
+      let entry = bySender.get(key);
+      if (!entry) {
+        entry = {
+          provider: row.provider,
+          ...(row.sender_id?.trim() ? { senderId: row.sender_id.trim() } : {}),
+          ...(row.sender_label?.trim() ? { senderLabel: row.sender_label.trim() } : {}),
+          isOwner: false,
+          itemCount: 0,
+          corpusId: this.corpusId,
+          conversations: new Set(),
+          anyPublic: false,
+        };
+        bySender.set(key, entry);
+      }
+      entry.isOwner ||= row.is_owner === 1;
+      entry.itemCount += row.item_count;
+      if (row.conversation_id) entry.conversations.add(row.conversation_id);
+      const tier = SOURCE_TRUST_TIERS.find((candidate) => candidate === row.trust_tier);
+      if (tier && !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: tier })) entry.anyPublic = true;
+    }
+    return [...bySender.values()].map(({ conversations, anyPublic, ...observation }) => ({
+      ...observation,
+      ...(anyPublic ? {} : { privateOnly: true }),
+      ...(conversations.size > 0 ? { conversationIds: [...conversations].sort() } : {}),
+    }));
+  }
+
+  /**
+   * Author coverage (#1076): per provider, how many active items carry no
+   * author (no sender id and no sender label). Counts only.
+   */
+  authorCoverage(): Array<{ provider: string; items: number; itemsWithoutAuthor: number }> {
+    return (this.db.query(`
+      SELECT provider, COUNT(*) AS items,
+        SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
+          THEN 1 ELSE 0 END) AS without_author
+      FROM items
+      WHERE tombstoned = 0 AND parent_local_item_id IS NULL
+      GROUP BY provider
+      ORDER BY provider
+    `).all() as Array<{ provider: string; items: number; without_author: number | null }>).map((row) => ({
+      provider: row.provider,
+      items: row.items,
+      itemsWithoutAuthor: row.without_author ?? 0,
+    }));
   }
 
   /**
@@ -13471,6 +13590,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   filters?: ConnectorStoreSearchFilters;
   /** Optional declared projection applied only to final eligible hits. */
   resultProjector?: ConnectorStoreResultProjector;
+  /** Time seams for waiting on a starting embedding model; tests pass a test clock. */
+  timers?: QueryEmbeddingWaitTimers;
 }
 
 // Membrane-safe routed search: hits carry identity + provenance with a
@@ -13734,6 +13855,19 @@ export function createConnectorStoreCorpusAdapter(
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
+  // A local model that is still starting gets the router's preparation budget
+  // to finish before the vector lane runs (#1172). Only when this adapter will
+  // run the vector lane for the request, and without reading the store: the
+  // router asks only after hybridAvailability said the lane is servable. Only
+  // a local provider can report a starting model; a cloud one is never waited
+  // for, so a stalled remote call cannot hold every lane for the budget.
+  if (
+    embeddingProvider
+    && embeddingProvider.backend === 'local'
+    && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+  ) {
+    expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
+  }
   return expanded;
 }
 
@@ -13785,7 +13919,7 @@ function connectorStoreHitFromRow(
   return {
     ...(projection ?? {}),
     sourceItem: row.sourceItem,
-    provenance: provenanceFromSearchRow(store.corpusId, row),
+    provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
     // Every lane's hit (keyword, semantic, recency, pinned) is built here.
@@ -14254,7 +14388,10 @@ function assertConnectorStoreCorpusRequest(store: LocalConnectorStore, request: 
   }
 }
 
-function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow): SourceIndexProvenance {
+function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow, personName?: string): SourceIndexProvenance {
+  // The owner reads as "You" (#1073); anyone else as their one linked name
+  // across sources when there is one (#1076), else the item's own label.
+  const authorLabel = row.senderIsOwner === true ? citationAuthorLabel(row) : (personName ?? row.authorLabel);
   return {
     sourceItem: row.sourceItem,
     // The frozen provenance shape has carried an optional `chunk` since the
@@ -14288,11 +14425,25 @@ function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow)
       ...(row.title ? { title: row.title } : {}),
       sourceLabel: row.sourceItem.provider,
       ...(row.conversationLabel ? { conversationLabel: row.conversationLabel } : {}),
-      ...(row.authorLabel ? { authorLabel: row.authorLabel } : {}),
+      ...(authorLabel ? { authorLabel } : {}),
       ...(row.authoredAt ? { authoredAt: row.authoredAt } : {}),
       ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
     },
   };
+}
+
+/**
+ * Who a citation says wrote the item. The owner's own messages read "You"
+ * whatever name or id the source recorded for the owner's account (#1073):
+ * the answer is written to the owner, and a stored label (a profile name, a
+ * phone id) next to a chat titled with the other person's name let the owner's
+ * words be attributed to someone else.
+ */
+export const OWNER_AUTHOR_LABEL = 'You';
+
+function citationAuthorLabel(row: ConnectorStoreSearchRow): string | undefined {
+  if (row.senderIsOwner === true) return OWNER_AUTHOR_LABEL;
+  return row.authorLabel;
 }
 
 function connectorStoreKeywordLaneAudit(
@@ -15827,6 +15978,7 @@ interface NormalizedConnectorStoreSearchFilters {
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
+  senderIdentities?: readonly PeopleSenderIdentity[];
   authoredAfter?: string;
   authoredBefore?: string;
   searchTextExactLines?: readonly string[];
@@ -15852,6 +16004,7 @@ export function normalizeConnectorStoreSearchFilters(
   if (senderId && senderLabel) {
     throw new Error('Connector store search accepts senderId or senderLabel, not both.');
   }
+  const senderIdentities = normalizeSenderIdentities(value.senderIdentities);
   const authoredAfter = normalizeFilterTimestamp(value.authoredAfter, 'authoredAfter');
   const authoredBefore = normalizeFilterTimestamp(value.authoredBefore, 'authoredBefore');
   if (authoredAfter && authoredBefore && Date.parse(authoredAfter) > Date.parse(authoredBefore)) {
@@ -15879,6 +16032,7 @@ export function normalizeConnectorStoreSearchFilters(
     ...(conversationId ? { conversationId } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderLabel ? { senderLabel } : {}),
+    ...(senderIdentities.length > 0 ? { senderIdentities } : {}),
     ...(authoredAfter ? { authoredAfter } : {}),
     ...(authoredBefore ? { authoredBefore } : {}),
     ...(searchTextExactLines.length > 0 ? { searchTextExactLines } : {}),
@@ -16013,9 +16167,30 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.sender_id = ?');
     params.push(normalized.senderId);
   }
+  const senderIdentityMatch = normalized.senderIdentities?.length
+    ? `EXISTS (
+      SELECT 1 FROM json_each(?) person_sender
+      WHERE json_extract(person_sender.value, '$.p') = i.provider
+        AND (json_extract(person_sender.value, '$.s') = i.sender_id
+          OR (i.sender_id IS NULL AND json_extract(person_sender.value, '$.l') = i.sender_label))
+    )`
+    : undefined;
+  const senderIdentityParam = normalized.senderIdentities?.length
+    ? JSON.stringify(normalized.senderIdentities.map((identity) => ({
+      p: identity.provider,
+      ...(identity.senderId ? { s: identity.senderId } : {}),
+      ...(identity.senderLabel ? { l: identity.senderLabel } : {}),
+    })))
+    : undefined;
   if (normalized.senderLabel) {
-    clauses.push("AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
+    clauses.push(senderIdentityMatch
+      ? `AND (LOWER(i.sender_label) LIKE ? ESCAPE '\\' OR ${senderIdentityMatch})`
+      : "AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
     params.push(`%${escapeSqlLike(normalized.senderLabel.toLowerCase())}%`);
+    if (senderIdentityParam) params.push(senderIdentityParam);
+  } else if (senderIdentityMatch && senderIdentityParam) {
+    clauses.push(`AND ${senderIdentityMatch}`);
+    params.push(senderIdentityParam);
   }
   if (normalized.authoredAfter) {
     clauses.push('AND julianday(i.authored_at) >= julianday(?)');
@@ -16212,6 +16387,28 @@ function normalizeFilterTimestamp(value: string | undefined, label: string): str
     throw new Error(`Connector store ${label} filter must be an ISO timestamp with a timezone.`);
   }
   return new Date(normalized).toISOString();
+}
+
+const MAX_PERSON_SENDER_IDENTITIES = 500;
+
+function normalizeSenderIdentities(value: readonly PeopleSenderIdentity[] | undefined): PeopleSenderIdentity[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_PERSON_SENDER_IDENTITIES) {
+    throw new Error(`Connector store sender identities must be an array of at most ${MAX_PERSON_SENDER_IDENTITIES}.`);
+  }
+  // A stored label can carry characters a typed filter may not; such a
+  // sender is left out of the expansion rather than failing the search.
+  const safe = (text: string | undefined): string | undefined => {
+    const trimmed = typeof text === 'string' ? text.trim() : undefined;
+    return trimmed && trimmed.length <= 1_000 && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : undefined;
+  };
+  return value.flatMap((identity) => {
+    const provider = safe(identity?.provider);
+    const senderId = safe(identity?.senderId);
+    const senderLabel = safe(identity?.senderLabel);
+    if (!provider || (!senderId && !senderLabel)) return [];
+    return [{ provider, ...(senderId ? { senderId } : { senderLabel: senderLabel! }) }];
+  });
 }
 
 function escapeSqlLike(value: string): string {
