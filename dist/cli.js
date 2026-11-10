@@ -10040,7 +10040,7 @@ function isTerminalServiceAccountAssertionError(error) {
   return isPermanentOAuthClientError(error.providerError);
 }
 function isPermanentOAuthClientError(providerError) {
-  return providerError === "invalid_client" || providerError === "unauthorized_client" || providerError === "access_denied";
+  return providerError === "invalid_client" || providerError === "deleted_client" || providerError === "unauthorized_client" || providerError === "access_denied";
 }
 function serviceAccountDelegationError(handle, capability) {
   return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
@@ -149785,6 +149785,13 @@ p.small a { color: var(--accent); }
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
+import { createHash as createHash84 } from "node:crypto";
+function isRetiredGooglePilotClientId(clientId) {
+  const trimmed2 = clientId?.trim();
+  if (!trimmed2)
+    return false;
+  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash84("sha256").update(trimmed2).digest("hex"));
+}
 function resolveGooglePilotClientId(packaged, shipped) {
   const substituted = packaged.trim();
   if (substituted !== "" && substituted !== GOOGLE_PILOT_CLIENT_ID_SENTINEL)
@@ -149795,7 +149802,12 @@ function resolveGooglePilotClientId(packaged, shipped) {
 function packagedGooglePilotClientId() {
   return resolveGooglePilotClientId(PACKAGED_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID);
 }
-var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
+var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256, PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
+var init_google_pilot_client = __esm(() => {
+  RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+    "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+  ]);
+});
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes27 } from "node:crypto";
@@ -174760,6 +174772,8 @@ async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
   }
 }
 async function dashboardStoredClientIdIsPublisherOwned(source, clientId, clientIdKey, secretStore) {
+  if (dashboardGoogleOAuthSource(source) && isRetiredGooglePilotClientId(clientId))
+    return true;
   const provenance = await secretStore.get(dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey));
   if (provenance === "publisher")
     return true;
@@ -175295,6 +175309,7 @@ var init_email_source = __esm(() => {
   init_types();
   init_file_lease();
   init_email_policy();
+  init_google_pilot_client();
   init_publisher_oauth_client();
   init_oauth_relay();
   init_connect();
