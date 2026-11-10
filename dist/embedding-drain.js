@@ -39142,6 +39142,9 @@ class BuiltInSourceEmbeddingProvider {
   imageSupportWarned = false;
   pictureFaults;
   waiting = { query: [], document: [] };
+  runsOnThisComputer() {
+    return this.remote === undefined;
+  }
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
     this.env = options.env ?? process.env;
@@ -55074,7 +55077,7 @@ var init_file_mime = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync30, mkdirSync as mkdirSync17, opendirSync, readFileSync as readFileSync26 } from "node:fs";
+import { existsSync as existsSync31, mkdirSync as mkdirSync17, opendirSync, readFileSync as readFileSync27 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname40, join as join39 } from "node:path";
 function folderAccessMemoryPath() {
@@ -55301,9 +55304,9 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync30(this.memoryPath)) {
+    if (this.memoryPath && existsSync31(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync26(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync27(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -71894,7 +71897,7 @@ init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
 import { createHash as createHash33 } from "node:crypto";
-import { existsSync as existsSync35, lstatSync as lstatSync17, mkdirSync as mkdirSync20, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync36, lstatSync as lstatSync17, mkdirSync as mkdirSync20, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname42, isAbsolute as isAbsolute16 } from "node:path";
 
 // src/workers/email-source/dashboard-people.ts
@@ -74198,6 +74201,182 @@ init_transcription();
 init_telegram_messages();
 init_source_scheduler_state();
 init_credential_broker();
+
+// src/workers/local-pacing.ts
+import { execFile as execFile3, spawn as spawn3 } from "node:child_process";
+import { existsSync as existsSync30, readdirSync as readdirSync4, readFileSync as readFileSync26 } from "node:fs";
+init_atomic_file();
+var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
+var GO_EASY_REFRESH_MS = 30000;
+var GO_EASY_NIGHT = { fromHour: 22, toHour: 7 };
+var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
+var GO_EASY_TRICKLE_GAP_MS = 20000;
+function readGoEasySetting(path) {
+  try {
+    const value = JSON.parse(readFileSync26(path, "utf8")).go_easy;
+    return typeof value === "boolean" ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function saveGoEasySetting(path, on) {
+  writePrivateFileAtomicSync(path, `${JSON.stringify({ go_easy: on })}
+`);
+}
+
+class LocalWorkPacer {
+  options;
+  reading;
+  readAtMs = Number.NEGATIVE_INFINITY;
+  reading$;
+  setting;
+  timer;
+  assertion;
+  stopped = false;
+  lastPace;
+  localWorkAtMs = Number.NEGATIVE_INFINITY;
+  constructor(options) {
+    this.options = options;
+    this.setting = options.settingPath ? readGoEasySetting(options.settingPath) : undefined;
+  }
+  get trickleGapMs() {
+    return this.options.trickleGapMs ?? GO_EASY_TRICKLE_GAP_MS;
+  }
+  start() {
+    if (this.timer || this.stopped)
+      return;
+    this.refresh();
+    const every = this.options.setInterval ?? ((callback, ms) => setInterval(callback, ms));
+    this.timer = every(() => {
+      this.refresh();
+    }, this.options.refreshMs ?? GO_EASY_REFRESH_MS);
+    this.timer.unref?.();
+  }
+  stop() {
+    this.stopped = true;
+    if (this.timer)
+      (this.options.clearInterval ?? ((timer) => clearInterval(timer)))(this.timer);
+    this.timer = undefined;
+    this.release();
+  }
+  goEasy() {
+    if (this.setting !== undefined)
+      return this.setting;
+    return this.reading?.power !== "no_battery";
+  }
+  save(on) {
+    if (this.options.settingPath)
+      saveGoEasySetting(this.options.settingPath, on);
+    this.setting = on;
+    return { ok: true, status_message: on ? "Saved. Olympus sorts at full speed when you're away or it's plugged in overnight." : "Saved. Olympus sorts at full speed whenever it has work." };
+  }
+  pace() {
+    const nowMs = this.nowMs();
+    if (!this.stopped && nowMs - this.readAtMs >= (this.options.refreshMs ?? GO_EASY_REFRESH_MS))
+      this.refresh();
+    const pace = this.decide(nowMs);
+    if (pace !== this.lastPace) {
+      this.lastPace = pace;
+      this.options.log?.(`Olympus local work: ${pace === "full" ? "full speed" : "going easy while this computer is in use"}.`);
+    }
+    return pace;
+  }
+  trickle() {
+    return this.pace() === "trickle";
+  }
+  noteLocalWork() {
+    this.localWorkAtMs = this.nowMs();
+    if (!this.assertion)
+      this.updateAssertion();
+  }
+  refresh() {
+    if (this.reading$)
+      return this.reading$;
+    this.reading$ = (async () => {
+      try {
+        this.reading = await this.options.probe.read();
+      } catch {
+        this.reading = {};
+      }
+      this.readAtMs = this.nowMs();
+      this.updateAssertion();
+    })().finally(() => {
+      this.reading$ = undefined;
+    });
+    return this.reading$;
+  }
+  decide(nowMs) {
+    const reading = this.reading;
+    if (!reading)
+      return "full";
+    const on = this.setting ?? reading.power !== "no_battery";
+    if (!on)
+      return "full";
+    if (reading.idleSeconds !== undefined && reading.idleSeconds * 1000 >= (this.options.idleFullSpeedMs ?? GO_EASY_IDLE_FULL_SPEED_MS))
+      return "full";
+    if (reading.power === "ac" && isNight(new Date(nowMs)))
+      return "full";
+    if (reading.idleSeconds === undefined && reading.power !== "ac" && reading.power !== "battery")
+      return "full";
+    return "trickle";
+  }
+  updateAssertion() {
+    if ((this.options.platform ?? process.platform) !== "darwin")
+      return;
+    let pending = false;
+    try {
+      pending = this.options.pendingLocalWork?.() === true;
+    } catch {
+      pending = false;
+    }
+    pending ||= this.nowMs() - this.localWorkAtMs < GO_EASY_LOCAL_WORK_RECENT_MS;
+    const mains = this.reading?.power === "ac" || this.reading?.power === "no_battery";
+    const hold = !this.stopped && pending && mains && this.reading?.lidOpen !== false;
+    if (hold && !this.assertion) {
+      try {
+        const child = (this.options.spawnAssertion ?? spawnCaffeinate)();
+        if (!child)
+          return;
+        this.assertion = child;
+        child.once("exit", () => {
+          if (this.assertion === child)
+            this.assertion = undefined;
+        });
+      } catch {
+        this.assertion = undefined;
+      }
+    } else if (!hold) {
+      this.release();
+    }
+  }
+  holdingAssertion() {
+    return this.assertion !== undefined;
+  }
+  release() {
+    const child = this.assertion;
+    this.assertion = undefined;
+    try {
+      child?.kill();
+    } catch {}
+  }
+  nowMs() {
+    return (this.options.now?.() ?? new Date).getTime();
+  }
+}
+function isNight(at) {
+  const hour = at.getHours();
+  return GO_EASY_NIGHT.fromHour > GO_EASY_NIGHT.toHour ? hour >= GO_EASY_NIGHT.fromHour || hour < GO_EASY_NIGHT.toHour : hour >= GO_EASY_NIGHT.fromHour && hour < GO_EASY_NIGHT.toHour;
+}
+function spawnCaffeinate() {
+  const child = spawn3("/usr/bin/caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore", detached: false });
+  child.on("error", () => {
+    return;
+  });
+  child.unref();
+  return child;
+}
+
+// src/workers/source-scheduler.ts
 var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1000;
 var SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000;
 var SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS";
@@ -76510,7 +76689,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash30 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync31, lstatSync as lstatSync14, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
+import { existsSync as existsSync32, lstatSync as lstatSync14, readFileSync as readFileSync28, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -76688,7 +76867,7 @@ class VolumeResolver {
 function probeIgnoresCaseIn(dir) {
   let names;
   try {
-    names = readdirSync4(dir);
+    names = readdirSync5(dir);
   } catch {
     return;
   }
@@ -76726,7 +76905,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync27("/proc/self/mountinfo", "utf8");
+  return readFileSync28("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -76743,9 +76922,9 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync31(dir))
+    if (!existsSync32(dir))
       return result;
-    for (const name of readdirSync4(dir)) {
+    for (const name of readdirSync5(dir)) {
       try {
         result.set(realpathSync7(`${dir}/${name}`), name);
       } catch {}
@@ -76796,7 +76975,7 @@ init_local_open();
 init_connector_source();
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync15, readdirSync as readdirSync5, realpathSync as realpathSync8 } from "node:fs";
+import { lstatSync as lstatSync15, readdirSync as readdirSync6, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { join as join41 } from "node:path";
 
@@ -77028,8 +77207,8 @@ init_scope();
 
 // src/workers/local-files/mac-settings.ts
 init_mac_permissions();
-import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync32 } from "node:fs";
+import { spawn as spawn4 } from "node:child_process";
+import { existsSync as existsSync33 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { join as join40 } from "node:path";
 function helperAppPathForHome(home = homedir17()) {
@@ -77037,10 +77216,10 @@ function helperAppPathForHome(home = homedir17()) {
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run = deps.run ?? ((command, args) => {
-    spawn3(command, args, { stdio: "ignore", detached: true }).unref();
+    spawn4(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync32)(helper))
+  if ((deps.exists ?? existsSync33)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -77081,7 +77260,7 @@ function localFilesListing(options) {
     home,
     volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
   };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync6(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
     memoryPath: folderAccessMemoryPath()
@@ -77777,7 +77956,7 @@ init_control_path_headroom();
 init_sniffer();
 init_tier_ledger();
 init_tier_classifier();
-import { chmodSync as chmodSync8, existsSync as existsSync33, lstatSync as lstatSync16, mkdirSync as mkdirSync18, readFileSync as readFileSync28 } from "node:fs";
+import { chmodSync as chmodSync8, existsSync as existsSync34, lstatSync as lstatSync16, mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
 import { join as join42 } from "node:path";
 import { createHash as createHash31, randomUUID as randomUUID12 } from "node:crypto";
 
@@ -78175,10 +78354,10 @@ class EmbeddingPrefilter {
       this.control.deleteMeta(TRAINING);
     }
     try {
-      if (existsSync33(this.path) && !lstatSync16(this.path).isSymbolicLink() && lstatSync16(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync16(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
+      if (existsSync34(this.path) && !lstatSync16(this.path).isSymbolicLink() && lstatSync16(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync16(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
         chmodSync8(embeddingPrefilterDirectory(this.control.dbPath), 448);
         chmodSync8(this.path, 384);
-        this.saved = JSON.parse(readFileSync28(this.path, "utf8"));
+        this.saved = JSON.parse(readFileSync29(this.path, "utf8"));
       }
     } catch {
       this.saved = undefined;
@@ -78325,8 +78504,8 @@ class EmbeddingPrefilter {
     let stage = "scan_failed";
     try {
       const revisions = this.revisions();
-      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync33(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
-        if (existsSync33(this.path))
+      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync34(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
+        if (existsSync34(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
         if (attempt?.outcome === "trained")
@@ -78496,7 +78675,7 @@ class EmbeddingPrefilter {
                 if (this.control.dbPath === ":memory:")
                   throw new Error;
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
-                if (existsSync33(directory) && (!lstatSync16(directory).isDirectory() || lstatSync16(directory).isSymbolicLink()))
+                if (existsSync34(directory) && (!lstatSync16(directory).isDirectory() || lstatSync16(directory).isSymbolicLink()))
                   throw new Error;
                 mkdirSync18(directory, { recursive: true, mode: 448 });
                 chmodSync8(directory, 448);
@@ -78511,7 +78690,7 @@ class EmbeddingPrefilter {
         }
       }
       if (attempt.revisions !== this.revisions()) {
-        if (existsSync33(this.path))
+        if (existsSync34(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
@@ -78580,7 +78759,7 @@ class EmbeddingPrefilter {
       return skip("model_missing");
     if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt))
       return skip("model_invalid");
-    if (!existsSync33(this.path))
+    if (!existsSync34(this.path))
       return skip("weights_missing");
     if (this.saved.revisions !== this.revisions())
       return skip("revisions_changed");
@@ -78736,7 +78915,7 @@ init_answer_activity();
 init_atomic_file();
 init_sniffer();
 import { createHash as createHash32 } from "node:crypto";
-import { mkdirSync as mkdirSync19, readFileSync as readFileSync29 } from "node:fs";
+import { mkdirSync as mkdirSync19, readFileSync as readFileSync30 } from "node:fs";
 import { dirname as dirname41 } from "node:path";
 init_sniffer_lane();
 init_sniffer_store();
@@ -78764,7 +78943,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync29(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync30(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -79172,7 +79351,7 @@ async function runSnifferPass(options) {
           }
         }
         const batch = [group];
-        const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+        const stop = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
         if (stop) {
           report.stoppedBy = stop;
           return;
@@ -79322,7 +79501,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync34 } from "node:fs";
+import { existsSync as existsSync35 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
@@ -79382,6 +79561,7 @@ class TierSnifferService {
   yieldingSinceMs;
   fairTurn = false;
   notAnsweringUntilMs = 0;
+  pacedUntilMs = 0;
   notAnsweringPasses = 0;
   overrunReported = false;
   overrunAbortedAtMs = 0;
@@ -79439,6 +79619,8 @@ class TierSnifferService {
   }
   async scheduledRun() {
     if (this.notAnsweringUntilMs > this.clockMs())
+      return { state: "skipped_running" };
+    if (this.pacedUntilMs > this.clockMs() && this.trickle())
       return { state: "skipped_running" };
     return this.runOnce();
   }
@@ -79604,7 +79786,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync34(path);
+      const hasQueue = existsSync35(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -79861,6 +80043,8 @@ class TierSnifferService {
       if (backlog.checkingItems > 0)
         this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
     }
+    if (tick.state === "ran" && tick.report.calls > 0 && this.trickle())
+      this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
     if (this.stopped)
       this.closeLedgers();
     else if (this.timer && tick.state === "ran" && !this.yieldNow() && tick.report.stoppedBy !== "daily_budget" && tick.report.stoppedBy !== "transport_failures" && tick.report.stoppedBy !== "cloud_stopped" && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0 || tick.report.stoppedBy === "preempted"))
@@ -79872,6 +80056,15 @@ class TierSnifferService {
   }
   clockMs() {
     return (this.options.now?.() ?? new Date).getTime();
+  }
+  trickle() {
+    if (!this.options.pacing || !isBuiltInLane(this.options.lane))
+      return false;
+    try {
+      return this.options.pacing.trickle();
+    } catch {
+      return false;
+    }
   }
   reportWaiting(tick, overran = false) {
     let reason;
@@ -79995,14 +80188,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync34(bound)) {
+        if (bound && bound !== ":memory:" && existsSync35(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync34(own3))
+      if (existsSync35(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -80281,6 +80474,7 @@ class TierSnifferService {
       passTimeMs: this.options.passTimeMs,
       ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
       shouldYield: () => this.yieldNow(),
+      ...this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {},
       signal
     });
     phase("pass");
@@ -81301,7 +81495,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config2) => {
-    if (!config2.dbPath || !existsSync35(config2.dbPath))
+    if (!config2.dbPath || !existsSync36(config2.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config2), { ...config2, dbPath: config2.dbPath, readOnly: true }, env);
     try {
