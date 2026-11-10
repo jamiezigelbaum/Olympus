@@ -83,6 +83,10 @@ describe('People page (#1076)', () => {
       expect(index.personForSender('telegram', '777')?.identities).toHaveLength(1);
       expect(people.handle({ op: 'merge', identity_a: 'sender:telegram:nobody', identity_b: 'sender:telegram:777' }).status).toBe(400);
       expect(people.handle({ op: 'drop_table' }).status).toBe(400);
+      // The owner's own accounts are always You: refused, and nothing is kept.
+      const refused = people.handle({ op: 'split', identity: 'sender:gmail:jamie@example.com' });
+      expect(refused.status).toBe(400);
+      expect(refused.body).toMatchObject({ ok: false, error: { code: 'owner_is_you' } });
       expect(refreshes).toBe(4);
     } finally {
       index.close();

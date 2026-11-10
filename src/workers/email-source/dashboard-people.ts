@@ -5,6 +5,7 @@
  * people list is Private and stays on this computer.
  */
 import {
+  PeopleCorrectionRefusedError,
   type LocalPeopleIndex,
   type PeopleCorrection,
   type PeoplePerson,
@@ -43,7 +44,12 @@ export function createDashboardPeople(input: {
       if (!correction) {
         return { status: 400, body: { ok: false, error: { code: 'invalid_request', message: 'That change could not be read. Reload and try again.' } } };
       }
-      input.index.correct(correction);
+      try {
+        input.index.correct(correction);
+      } catch (error) {
+        if (!(error instanceof PeopleCorrectionRefusedError)) throw error;
+        return { status: 400, body: { ok: false, error: { code: 'owner_is_you', message: error.message } } };
+      }
       input.refresh();
       return { status: 200, body: { ok: true } };
     },
