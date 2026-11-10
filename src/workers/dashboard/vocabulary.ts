@@ -3723,3 +3723,90 @@ export function privateAnswerFailure(reason: unknown, mapping = PRIVATE_ANSWER_F
   return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(mapping, reason)
     ? mapping[reason as keyof typeof mapping] : { message: 'Olympus could not answer this.', action: 'Try again.' };
 }
+
+/**
+ * Privacy › Your items (issues #1060, #887; mockups release-1.5/l3/v2 L3-1 to
+ * L3-3, L3-6): find one item and change its label, Personal or Private, for
+ * that item only. Lowering to Personal asks first; raising never does.
+ */
+export const DASHBOARD_PRIVACY_ITEMS_COPY = {
+  tab: 'Your items',
+  title: 'Your items',
+  intro: 'Olympus judges each item on its own. If it got one wrong, change it here.',
+  searchLabel: 'Search your items',
+  searchPlaceholder: 'Search by title, sender or file name',
+  recentHeading: 'Recently sorted',
+  resultsHeading: 'Matching items',
+  loading: 'Loading…',
+  empty: 'Nothing sorted yet. Items show here once Olympus has read them.',
+  noMatch: 'No items match. Try part of a title, a sender or a file name.',
+  apps: 'An AI app can ask to make an item Private. Only you, here on this computer, can make one Personal.',
+  changedByYou: 'Changed by you',
+  notSorted: 'Not sorted yet',
+  moving: 'Moving to {tier}',
+  untitled: 'Untitled item',
+  close: 'Close',
+  previewCaption: 'What it says · shown only on this computer',
+  noPreview: 'Olympus has not read this item\'s text yet.',
+  whoCaption: 'Who can read this item',
+  personalLine: 'Your AI apps and agents can read it.',
+  privateLine: 'Only your private model reads it.',
+  judgeChose: 'The judge chose {tier}:',
+  judgeMarked: 'The judge marked this {tier}.',
+  youChose: 'You chose {tier}',
+  justNow: 'just now',
+  judgeSaid: 'The judge said {tier}.',
+  undo: 'Undo',
+  promise: 'Your choice changes this one item. It never becomes a rule for {group}, and re-judging leaves it alone.',
+  promiseGroup: '{sender} or your other items',
+  promiseGroupNoSender: 'its sender, chat or folder',
+  afterPersonal: 'Search and answers in your AI apps now include this item.',
+  afterPrivate: 'Your AI apps no longer see this item.',
+  afterNextPass: 'Olympus is moving it now; search and answers catch up within a few minutes.',
+  undoGivesBack: 'Undo gives it back to the judge.',
+  confirmTitle: 'Make this item Personal?',
+  now: 'now',
+  after: 'after',
+  afterPersonalLine: 'Your AI apps and agents can read it and quote it in answers.',
+  confirmOnly: 'Only this item changes. Everything else stays as the judge sorted it. You can undo this at any time.',
+  cancel: 'Cancel',
+  makePersonal: 'Make Personal',
+  toastPersonal: 'Made Personal. Your AI apps can now read it.',
+  toastPrivate: 'Made Private. Your AI apps no longer see it.',
+  toastJudge: 'Back to the judge\'s label.',
+  failed: 'That did not change. Try again.',
+  unreachable: 'Olympus is not responding. Try again in a moment.',
+  locked: 'Open dashboard controls to see and change your items.',
+  openControls: 'Open dashboard controls →',
+  unlockIntro: 'Your items need a session opened here, not by an agent or the launch link.',
+  unlock: 'Unlock on this computer',
+} as const;
+
+/**
+ * The judge's stored reason is a code (`<category>:<confidence>`, sniffer.ts
+ * snifferReasonCode, sometimes led by `record_held:`); the page shows a short
+ * phrase for the category. One table, no per-question logic; an unknown code
+ * falls back to the judge's label alone (DASHBOARD_PRIVACY_ITEMS_COPY.judgeMarked).
+ */
+export const JUDGE_REASON_PHRASES: Readonly<Record<string, string>> = {
+  health: 'it is about health.',
+  therapy: 'it is about therapy or mental health.',
+  financial: 'it has money details, like amounts or account numbers.',
+  legal: 'it is about a legal matter.',
+  identity: 'it has identity details, like ID or account numbers.',
+  intimate: 'it is intimate.',
+  family: 'it is about family.',
+  work: 'it is work material.',
+  reference: 'it is reference material.',
+  ordinary: 'it is everyday material with nothing sensitive in it.',
+  injection: 'it held instructions aimed at the judge, so it was kept Private to be safe.',
+  unresolved: 'the judge could not decide, so it was kept Private to be safe.',
+};
+
+/** The phrase for a stored judge reason code, or undefined when the table has none. */
+export function judgeReasonPhrase(code: string | null | undefined): string | undefined {
+  if (!code) return undefined;
+  const bare = code.startsWith('record_held:') ? code.slice('record_held:'.length) : code;
+  const category = bare.split(':')[0] ?? '';
+  return Object.prototype.hasOwnProperty.call(JUDGE_REASON_PHRASES, category) ? JUDGE_REASON_PHRASES[category] : undefined;
+}

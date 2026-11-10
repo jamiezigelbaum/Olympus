@@ -11,6 +11,7 @@ import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts'
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
+  DASHBOARD_PRIVACY_ITEMS_COPY,
   dashboardRelativeFromMs,
   PRIVATE_ANSWER_FAILURES,
   privateAnswerFailure,
@@ -133,14 +134,15 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
   });
 }
 
-/** The tab bar the Privacy page's two halves share: Private questions first, then Privacy settings (?keys). */
-export function dashboardPrivacyTabs(active: 'questions' | 'settings', token?: string): string {
-  const tab = (id: 'questions' | 'settings', href: string, label: string) => id === active
+/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), then Your items (?privacy-items). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'items', token?: string): string {
+  const tab = (id: 'questions' | 'settings' | 'items', href: string, label: string) => id === active
     ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
     : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
     + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
     + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
+    + tab('items', dashboardLocalPageHref('privacyItems', token), DASHBOARD_PRIVACY_ITEMS_COPY.tab)
     + '</nav>';
 }
 

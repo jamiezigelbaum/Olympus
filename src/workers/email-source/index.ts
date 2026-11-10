@@ -1578,6 +1578,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
+          if (page === 'privacy_items') {
+            // Privacy › Your items: the page reads its items through the
+            // dashboard's local routes, so it carries no item here; it only
+            // needs to know whether the session was minted on this computer.
+            return html(renderDashboardLocalPage('privacy_items', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+              },
+            }));
+          }
           if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
           if (page === 'json' || page === 'keys' || page === 'connect' || page === 'help') {
             if (!sourceIndexStatus || !sourceDashboard) {
@@ -3289,6 +3301,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(query !== undefined ? { query } : {}),
               ...(recent !== undefined ? { recent } : {}),
               ...(limit !== undefined ? { limit } : {}),
+              // The owner reads what the item says before deciding, on this computer only.
+              withPreview: true,
             }) });
           }
           if (url.pathname === '/dashboard/privacy/items/set') {

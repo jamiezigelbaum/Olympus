@@ -19,7 +19,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=<name>  that preview state, in one load
 //   /dashboard?state=inbox-failed&private-answers&controls  settled Inbox failure
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
-//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?connector
+//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?privacy-items | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
 //   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth.
@@ -1980,6 +1980,50 @@ export function previewWaitingQuestions(count: number, state = '') {
 }
 
 /** The inbox's real client actions against synthetic, in-memory fixture state. */
+// Privacy › Your items (#1060): the mockup's items (L3-1), held in memory so
+// the find, the change, the confirm and Undo can be walked. Nothing is written.
+interface PreviewPrivacyItem {
+  item_id: string; source: string; family: string; title: string; sender: string | null; location: string | null;
+  tier: string; names_tier: string; decided_by: string; owner_set: boolean; judge_reason: string | null; decided_at: string;
+  preview: string; judge: string;
+}
+function previewPrivacyItemsFixture(): PreviewPrivacyItem[] {
+  const item = (id: string, source: string, family: string, title: string, sender: string | null, location: string | null, tier: string, judge_reason: string | null, decided_at: string, preview: string, owner?: string): PreviewPrivacyItem => ({
+    item_id: `oti_preview_${id}`, source, family, title, sender, location, tier: owner ?? tier, names_tier: 'Personal',
+    decided_by: owner ? 'override' : 'sniffer', owner_set: owner !== undefined, judge_reason: owner ? null : judge_reason, decided_at, preview, judge: tier,
+  });
+  return [
+    item('appt', 'gmail', 'email', 'Appointment confirmed: Leo, Saturday 8 November', 'Clínica Sorriso', null, 'Personal', 'ordinary:0.93', '2026-11-06T09:12:00.000Z',
+      'Clínica Sorriso <marcacoes@clinicasorriso.example>\nHello, this confirms Leo\'s appointment on Saturday 8 November at 10:30 with Dr. Marta Reis, Rua da Escola Politécnica 42, Lisbon. Please arrive 10 minutes early. To change it, reply to this email.'),
+    item('flat', 'telegram', 'message', '“Here are the numbers for the flat in Alfama…”', 'Tiago Ferreira', null, 'Private', 'financial:0.88', '2026-11-04T18:40:00.000Z',
+      'Here are the numbers for the flat in Alfama: rent €1,450 a month, two months\' deposit, and the agency fee on top.', 'Personal'),
+    item('inv', 'dropbox', 'file', 'Invoice_2026-014_Northwind_Labs.pdf', null, '/Money/Invoices/Invoice_2026-014_Northwind_Labs.pdf', 'Private', 'financial:0.90', '2026-11-02T11:05:00.000Z',
+      'Invoice 2026-014 · Northwind Labs, Lda.\nDesign sprint, October 2026 · €4,200.00 + VAT\nPay by 30 November to IBAN PT50 •••• •••• 4471'),
+    item('gate', 'whatsapp', 'message', '“See you at the school gate at 1”', 'Ana', null, 'Private', 'family:0.71', '2026-11-07T12:02:00.000Z',
+      'See you at the school gate at 1. Leo has his bag, I\'ll bring the permission slip.'),
+    item('fair', 'gmail', 'email', 'Escola Azul: autumn fair on 22 November', 'Escola Azul', null, 'Personal', 'reference:0.95', '2026-11-05T08:30:00.000Z',
+      'Dear parents, the autumn fair is on Saturday 22 November from 10:00 in the school garden. Stalls, games and a cake sale for the library fund.'),
+  ];
+}
+let previewPrivacyItems = previewPrivacyItemsFixture();
+function previewPrivacyItemsAction(path: string, body: Record<string, unknown>): Response {
+  const shown = ({ judge: _judge, ...item }: PreviewPrivacyItem) => item;
+  if (path.endsWith('/find')) {
+    const words = typeof body.query === 'string' ? body.query.trim().toLowerCase() : '';
+    const found = words ? previewPrivacyItems.filter((item) => [item.title, item.sender ?? '', item.location ?? ''].some((field) => field.toLowerCase().includes(words))) : previewPrivacyItems;
+    return Response.json({ ok: true, items: found.map(shown) });
+  }
+  const item = previewPrivacyItems.find((candidate) => candidate.item_id === body.item_id);
+  if (!item) return Response.json({ ok: false, code: 'not_found', message: 'Olympus no longer holds that item.' });
+  if (body.tier === 'judge') {
+    if (!item.owner_set) return Response.json({ ok: false, code: 'not_owner_set', message: 'This item already has the judge\'s label: nobody changed it by hand.' });
+    Object.assign(item, { tier: item.judge, owner_set: false, decided_by: 'sniffer' });
+    return Response.json({ ok: true, item: shown(item), changed: 'cleared', applies: 'next_pass', results: [] });
+  }
+  Object.assign(item, { tier: body.tier === 'personal' ? 'Personal' : 'Private', owner_set: true, decided_by: 'override', judge_reason: null });
+  return Response.json({ ok: true, item: shown(item), changed: 'set', applies: 'now', results: [] });
+}
+
 function previewPrivateAnswersAction(body: Record<string, unknown>, count: number, state: string): Response {
   const answered = {
     ok: true,
@@ -2087,6 +2131,10 @@ if (import.meta.main) {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
       return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount, state);
     }
+    if (request.method === 'POST' && url.pathname.startsWith('/dashboard/privacy/items/')) {
+      if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
+      return previewPrivacyItemsAction(url.pathname, await request.json().catch(() => ({})) as Record<string, unknown>);
+    }
     // One file of an upload: the body is read (slowly in archives-upload-slow, so progress and Cancel can be seen) and only its size kept.
     if (request.method === 'POST' && url.pathname === '/dashboard/archive-import/upload-file') {
       const slow = state === 'archives-upload-slow';
@@ -2173,6 +2221,7 @@ if (import.meta.main) {
       const namedState = url.searchParams.get('state') ?? '';
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
+      if (dashboardHtmlRoutePage(url) === 'privacy_items' && request.headers.get('sec-fetch-dest') !== 'iframe') previewPrivacyItems = previewPrivacyItemsFixture();
       if (stateOverride?.startsWith('privacy-')) { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [

@@ -38,6 +38,8 @@ export type OwnerItemChoice = 'personal' | 'private' | 'judge';
 export const OWNER_ITEM_DEFAULT_LIMIT = 20;
 export const OWNER_ITEM_MAX_LIMIT = 50;
 const OWNER_ITEM_QUERY_MAX = 200;
+/** How much of an item's text its preview shows. */
+export const OWNER_ITEM_PREVIEW_MAX = 600;
 const ITEM_ID_PREFIX = 'oti_';
 
 export interface OwnerTierItem {
@@ -63,6 +65,11 @@ export interface OwnerTierItem {
   /** The judge's stored reason code (its category and confidence), where the judge decided it. */
   judge_reason: string | null;
   decided_at: string | null;
+  /**
+   * The start of what the item says, for the owner to read before deciding.
+   * Only when the dashboard on this computer asks (`withPreview`); never for an agent.
+   */
+  preview?: string | null;
 }
 
 export interface OwnerTierItemFindInput {
@@ -76,6 +83,11 @@ export interface OwnerTierItemFindInput {
    * (and every item with nothing recorded yet), so no Private name is shown.
    */
   personalNamesOnly?: boolean;
+  /**
+   * The dashboard on this computer: add the start of each item's stored text.
+   * Ignored with `personalNamesOnly`, so an agent never reads an item's text from here.
+   */
+  withPreview?: boolean;
 }
 
 export interface OwnerTierItemSetInput {
@@ -171,7 +183,9 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
     const state = readItemState(identity, context);
     if (state.secret) continue;
     if (input.personalNamesOnly && namesAbovePersonal(state)) continue;
-    items.push(view(row, state));
+    const item = view(row, state);
+    if (input.withPreview && !input.personalNamesOnly) item.preview = previewOf(identity, context);
+    items.push(item);
   }
   return { items };
 }
@@ -264,6 +278,22 @@ function recentRows(limit: number, context: TierCliContext): StoredItemRow[] {
     }
   }
   return rows;
+}
+
+/** The start of the item's stored text (its first chunk), from the first store that holds it; null when none does. */
+function previewOf(identity: TierLedgerIdentity, context: TierCliContext): string | null {
+  for (const dbPath of knownStorePaths(context)) {
+    const text = withStore<string | undefined>(dbPath, undefined, (db) => (db.query(`
+      SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+      ORDER BY c.chunk_index
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? '') as { text: string } | null)?.text);
+    const trimmed = text?.trim();
+    if (trimmed) return trimmed.length > OWNER_ITEM_PREVIEW_MAX ? `${trimmed.slice(0, OWNER_ITEM_PREVIEW_MAX).trimEnd()}…` : trimmed;
+  }
+  return null;
 }
 
 function identityOfRow(row: StoredItemRow): TierLedgerIdentity {

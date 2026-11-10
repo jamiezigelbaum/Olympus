@@ -225,6 +225,13 @@ describe('finding an item', () => {
     expect(() => parseOwnerTierItemId('oti_bm9wZQ')).toThrow('item_id');
   });
 
+  test('the dashboard reads the start of what the item says; an agent never does', async () => {
+    await judged();
+    expect(ownerItems().find({ query: 'bank letter', withPreview: true }).items[0]?.preview).toBe(FILES[1].text);
+    expect(ownerItems().find({ query: 'bank letter' }).items[0]).not.toHaveProperty('preview');
+    expect(ownerItems().find({ query: 'bank', withPreview: true, personalNamesOnly: true }).items[0]).not.toHaveProperty('preview');
+  });
+
   test('for an agent, an item whose names are Private is left out', async () => {
     await judged();
     // The bank letter's names stay Personal (only its text is Private): listed.

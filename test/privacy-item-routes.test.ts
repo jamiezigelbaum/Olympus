@@ -172,7 +172,7 @@ describe('the dashboard\'s routes', () => {
     const found = await f.guarded(post('/dashboard/privacy/items/find', session, { query: 'bank' }));
     expect(found.status).toBe(200);
     expect(await found.json()).toEqual({ ok: true, items: [] });
-    expect(f.finds).toEqual([{ query: 'bank' }]);
+    expect(f.finds).toEqual([{ query: 'bank', withPreview: true }]);
     for (const tier of ['personal', 'private', 'judge']) {
       expect((await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier }))).status).toBe(200);
     }
