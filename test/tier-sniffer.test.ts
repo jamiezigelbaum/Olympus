@@ -217,6 +217,34 @@ describe('batching, cache and threshold', () => {
     }
   });
 
+  test('a cloud judge may keep more calls in flight than a local model (#884)', async () => {
+    for (const [lane, peakWanted] of [[VENICE_LANE, 16], [LOCAL_LANE, 8]] as const) {
+      const ledger = new TierLedger({ dbPath: ':memory:' });
+      const store = new TierSnifferStore({ dbPath: ':memory:' });
+      try {
+        for (let n = 0; n < 40; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
+        let inFlight = 0;
+        let peak = 0;
+        const model: AnalystModel = {
+          async complete(request) {
+            inFlight += 1;
+            peak = Math.max(peak, inFlight);
+            await flushMicrotasks();
+            inFlight -= 1;
+            const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
+            return { text: verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }), modelId: lane.modelId };
+          },
+        };
+        const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane, model, maxCallsPerPass: 100, concurrentCalls: 16 });
+        expect(peak).toBe(peakWanted);
+        expect(report.calls).toBe(40);
+      } finally {
+        ledger.close();
+        store.close();
+      }
+    }
+  });
+
   test('every flagged name is asked on its own call, with localOnly set', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });
@@ -594,7 +622,7 @@ describe('bounds and the owner-approval gate', () => {
       const inputTokens = model.requests.reduce((sum, request) => sum + Math.ceil(((request.system?.length ?? 0) + request.prompt.length) / 4), 0);
       expect(passLine).toContain(`promptChars=${promptChars} mean_promptChars=${Math.round(promptChars / model.requests.length)} estimatedInputTokens=${inputTokens} mean_estimatedInputTokens=${Math.round(inputTokens / model.requests.length)};`);
       expect(passLine).toMatch(/promptChars=\d+ mean_promptChars=\d+ estimatedInputTokens=\d+ mean_estimatedInputTokens=\d+;/);
-      expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ targets=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ pass=\d+ moves=\d+ idle_before=\d+\.$/);
+      expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ targets=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ pass=\d+ moves=\d+ idle_before=\d+ wait_before=(idle|yield) after_prev_ms=\d+; pass_ms=\d+ setup_ms=\d+ dispatch_ms=\d+ slot_wait_ms=\d+ model_ms=\d+ pass_switches=\d+\.$/);
 
       // A pass whose model call never returns: the next tick past the bound aborts it.
       recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');

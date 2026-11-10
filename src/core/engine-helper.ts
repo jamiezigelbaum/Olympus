@@ -20,9 +20,13 @@ import {
   ENGINE_HELPER_APP_NAME,
   ENGINE_HELPER_BUNDLE_ID,
   ENGINE_HELPER_EXECUTABLE,
+  ENGINE_HELPER_ASIDE_NAME,
+  ENGINE_HELPER_STAGING_PREFIX,
   enginePaths,
+  recoverInterruptedHelperSwap,
   type EngineExec,
   type EngineExecResult,
+  type HelperRecoveryDeps,
 } from './engine-service.ts';
 import { OperationError } from './operation-error.ts';
 import { olympusPackageRoot } from './package-root.ts';
@@ -44,6 +48,8 @@ export interface EngineHelperInstallOptions {
   exec?: EngineExec;
   /** Test seam for the rename steps of the swap. */
   rename?: (from: string, to: string) => void;
+  /** Test seams for putting back a helper an earlier, interrupted run left aside. */
+  helperRecovery?: HelperRecoveryDeps;
   /** Where the checkout's scripts live; defaults to the Olympus package root. */
   packageRoot?: string;
 }
@@ -87,7 +93,10 @@ export function installEngineHelper(options: EngineHelperInstallOptions = {}): E
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath!;
   mkdirSync(paths.appSupportDir, { recursive: true, mode: 0o700 });
-  const staging = mkdtempSync(join(paths.appSupportDir, '.helper-'));
+  recoverInterruptedHelperSwap(paths, options.helperRecovery);
+  // The pid in the name tells a later run whether this one is still going.
+  const staging = mkdtempSync(join(paths.appSupportDir, `${ENGINE_HELPER_STAGING_PREFIX}${process.pid}-`));
+  const aside = join(staging, ENGINE_HELPER_ASIDE_NAME);
   try {
     let built = false;
     let candidate: string;
@@ -162,7 +171,6 @@ export function installEngineHelper(options: EngineHelperInstallOptions = {}): E
     // Move the old app aside, move the new one in, and put the old one back
     // if that fails; the old app is deleted only once the new one is in place.
     const rename = options.rename ?? renameSync;
-    const aside = join(staging, 'previous.app');
     if (replaced) rename(target, aside);
     try {
       rename(copy, target);
@@ -181,6 +189,7 @@ export function installEngineHelper(options: EngineHelperInstallOptions = {}): E
       replaced,
     };
   } finally {
-    rmSync(staging, { recursive: true, force: true });
+    // If the old app could not be put back, keep it for the next run to recover.
+    if (existsSync(target) || !existsSync(aside)) rmSync(staging, { recursive: true, force: true });
   }
 }

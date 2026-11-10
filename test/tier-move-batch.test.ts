@@ -11,6 +11,7 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import type { EmbeddingPrefilter } from '../src/workers/classification/embedding-prefilter.ts';
 import { flushTierMoveNotes, moveTieredItem, moveTieredItemsLowering, type TierMoveOptions } from '../src/workers/connector-store/tier-move.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
@@ -184,6 +185,33 @@ for (const retry of ['batch', 'single'] as const) {
   });
 }
 
+/**
+ * The service's own synthetic time: a test clock (from 0) behind its slice
+ * deadlines and timers, and an event-loop turn that runs what the test queued
+ * for "while the slice yields". Nothing here reaches performance.now(), the
+ * worker's shared control-path clock or a real timer, so machine load cannot
+ * change a count. (A global performance.now() mock also drove the shared
+ * control-path heartbeat: its synthetic jumps read as multi-second freezes,
+ * so every turn rested 25 ms on the real clock.)
+ */
+function syntheticTime() {
+  const clock = createTestClock(0);
+  const atTurn: Array<() => void> = [];
+  let interval: (() => void) | undefined;
+  return {
+    now: () => clock.now(),
+    spend(ms: number) { clock.set(clock.now() + ms); },
+    atNextTurn(work: () => void) { atTurn.push(work); },
+    /** Runs the start() timer's own callback, as if it fired. */
+    pulse() { interval!(); },
+    seams: {
+      monotonicNow: () => clock.now(),
+      ingestionTurn: async () => { for (const work of atTurn.splice(0)) work(); },
+      timers: { ...clock, setInterval: (callback: () => void, ms: number) => { interval = callback; return clock.setInterval(callback, ms); } },
+    },
+  };
+}
+
 function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorParameters<typeof TierSnifferService>[0]['autoMoves']>> = {}, otherSets: TierFixture[] = [], serviceOptions: Partial<ConstructorParameters<typeof TierSnifferService>[0]> = {}) {
   const installed = new InstalledTierClassification({ env: {} });
   const lines: string[] = [];
@@ -353,17 +381,16 @@ test('a lowering deadline expires without consuming the next queued item', async
 
 test('the service stops its lowering slice at the deadline after an indivisible copy', async () => {
   const f = await fixture();
-  const { service, lines } = serviceFor(f.f, { lowerSliceMs: 50, lowerBatchMs: 1000 });
-  let clock = 0;
+  const time = syntheticTime();
+  const { service, lines } = serviceFor(f.f, { lowerSliceMs: 50, lowerBatchMs: 1000 }, [], time.seams);
   let imports = 0;
-  const time = spyOn(performance, 'now').mockImplementation(() => clock);
   const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
     imports++;
-    clock += 60;
+    time.spend(60);
     return original(...args);
   });
-  try { await service.runOnce(); } finally { copy.mockRestore(); time.mockRestore(); }
+  try { await service.runOnce(); } finally { copy.mockRestore(); }
   expect(imports).toBe(1);
   expect(f.f.ledger.listMoving().length).toBe(3);
   expect(lines.some(line => line.includes('direction=lower elapsed_ms=60'))).toBe(true);
@@ -410,41 +437,47 @@ test('raise and lower drains rotate stores independently under a one-item budget
   expect(second.f.ledger.listMoving().length).toBe(2);
 });
 
-for (const [passMs, fail] of [[18_000, false], [18_000, true], [300_000, false]] as const) test(`large backlog gets a capped adaptive slice; judge=${passMs}, failed copy=${fail}`, async () => {
-  const f = await fixture(500, true);
+// Each backlog asks for more than the cap (25 ms per item): 300 -> 7.5 s over
+// an 18 s judge's 6 s, 500 -> 12.5 s over the 10 s ceiling.
+for (const [passMs, fail, backlog] of [[18_000, false, 300], [18_000, true, 300], [300_000, false, 500]] as const) test(`large backlog gets a capped adaptive slice; judge=${passMs}, failed copy=${fail}`, async () => {
+  const f = await fixture(backlog, true);
+  const time = syntheticTime();
   const { service, lines } = serviceFor(f.f, {}, [], {
-    passTimeMs: passMs, modelAvailable: () => true, autoApproveBuiltIn: true, rejudgePerPass: 0,
+    passTimeMs: passMs, modelAvailable: () => true, autoApproveBuiltIn: true, rejudgePerPass: 0, ...time.seams,
   });
-  let clock = 0;
   let imports = 0;
-  const time = spyOn(performance, 'now').mockImplementation(() => clock);
   const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
   const pass = spyOn(resolver, 'runSnifferPass').mockImplementation(async options => {
     expect(options.passTimeMs).toBe(passMs);
     expect(imports).toBe(0);
-    clock += passMs;
-    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+    time.spend(passMs);
+    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0,
+      timing: { passMs, setupMs: passMs, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 } } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
+  // Each copy costs one synthetic second, so the slice is a handful of real
+  // copies: at 100 ms each the 300 s case ran 100 real lowering batches,
+  // which outlasted the 15 s test budget on a loaded runner.
+  const copyMs = 1000;
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
-    clock += 100;
+    time.spend(copyMs);
     if (++imports === 3 && fail) throw new Error('Synthetic copy failure');
     return original(...args);
   });
   try { await service.runOnce(); expect(pass).toHaveBeenCalledTimes(1); }
-  finally { copy.mockRestore(); time.mockRestore(); pass.mockRestore(); }
-  // 6 s is one quarter of an 18 s judge + 6 s moves tick. The old 1 s
-  // slice only starts ten copies at this synthetic cost.
-  const expectedCopies = passMs === 18_000 ? 60 : 100;
-  const expectedSlice = expectedCopies * 100;
+  finally { copy.mockRestore(); pass.mockRestore(); }
+  // 6 s is one quarter of an 18 s judge + 6 s moves tick; a 300 s judge
+  // hits the 10 s cap. The old 1 s slice only starts one copy at this cost.
+  const expectedSlice = passMs === 18_000 ? 6000 : 10_000;
+  const expectedCopies = expectedSlice / copyMs;
   expect(imports).toBe(expectedCopies);
-  expect(clock).toBe(passMs + expectedSlice);
-  expect(f.f.ledger.listMoving({ limit: 1000 })).toHaveLength(500 - expectedCopies + Number(fail));
+  expect(time.now()).toBe(passMs + expectedSlice);
+  expect(f.f.ledger.listMoving({ limit: 1000 })).toHaveLength(backlog - expectedCopies + Number(fail));
   if (fail) {
     expect(f.f.ledger.moveAttempts(identityOf('synthetic-2'))).toBe(1);
     expect(f.f.stores.internal!.localContent(localId('synthetic-2'))?.chunks ?? []).toEqual([]);
     expect(f.f.stores.secure_local!.localContent(localId('synthetic-2'))?.chunks.join('')).toBe(body);
   }
-  expect(lines.some(line => line.includes(`direction=lower elapsed_ms=${expectedSlice} backlog=500 slice_ms=${expectedSlice}`))).toBe(true);
+  expect(lines.some(line => line.includes(`direction=lower elapsed_ms=${expectedSlice} backlog=${backlog} slice_ms=${expectedSlice}`))).toBe(true);
   expect(lines.some(line => line.includes('clearing: tried=3 cleared=0 spot_checks=0 skipped{disabled=2,model_missing=1}'))).toBe(true);
   expect(lines.every(line => !line.includes('synthetic-') && !line.includes(body))).toBe(true);
 }, 15_000);
@@ -504,47 +537,40 @@ test('failed grouped note fsync keeps obligations, and malformed notes do not bl
 });
 
 for (const state of ['none', 'new', 'ineligible'] as const) test(`timer preempts lowerings only for eligible new raises: ${state}`, async () => {
-  const f = await fixture(100, true);
+  const f = await fixture(20, true);
   const raising = state === 'ineligible' ? await fixture(0) : f;
   const raised = { id: 'synthetic-timer-raise', name: 'Synthetic', text: body };
   await raising.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-timer-new' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, state === 'ineligible' ? [raising.f] : [], { passTimeMs: 18_000 });
+  const time = syntheticTime();
+  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, state === 'ineligible' ? [raising.f] : [], { passTimeMs: 18_000, ...time.seams });
   const authority = state === 'ineligible'
     ? spyOn(raising.f.stores.secure_local!, 'embeddingAuthorities').mockReturnValue([
       { provider: 'synthetic-external', modelId: 'synthetic', backend: 'local', dimension: 1, epochId: 'synthetic' },
     ]) : undefined;
-  let pulse!: () => void;
-  const originalInterval = globalThis.setInterval;
-  const interval = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void) => {
-    pulse = callback;
-    return originalInterval(() => {}, 60_000);
-  }) as typeof setInterval);
-  try { service.start(); } finally { interval.mockRestore(); }
-  let clock = 0;
+  service.start();
   let imports = 0;
   let pulsed = false;
-  const time = spyOn(performance, 'now').mockImplementation(() => clock);
   const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
-    clock += 100;
-    if (++imports === 1) setTimeout(() => {
+    time.spend(1000);
+    if (++imports === 1) time.atNextTurn(() => {
       if (state !== 'none') raising.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, raising.f.set.placementFor(high));
       pulsed = true;
-      pulse(); // Run the real start() timer callback while the slice yields.
-    }, 0);
+      time.pulse(); // Run the real start() timer callback while the slice yields.
+    });
     return original(...args);
   });
   try {
     await service.runOnce();
     // Wait for the timer's raise request too, if it preempted the lowering.
     await (service as unknown as { drainMoves(): Promise<unknown> }).drainMoves();
-  } finally { service.stop(); copy.mockRestore(); time.mockRestore(); authority?.mockRestore(); }
+  } finally { service.stop(); copy.mockRestore(); authority?.mockRestore(); }
   expect(pulsed).toBe(true);
   if (state === 'new') {
-    expect(imports).toBeLessThan(60);
+    expect(imports).toBeLessThan(6);
     expect(f.f.ledger.getCurrent(identityOf(raised.id))).toMatchObject({ state: 'current', contentTier: 'secure' });
   } else {
-    expect(imports).toBe(60);
+    expect(imports).toBe(6);
     if (state === 'ineligible') expect(raising.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
   }
 }, 15_000);
@@ -587,43 +613,35 @@ test('a failed backlog count does not block other ledgers', async () => {
 
 for (const passTimeMs of [0, NaN]) test(`disabled or invalid judge budget keeps moves bounded: ${passTimeMs}`, async () => {
   const f = await fixture(100, true);
-  const { service } = serviceFor(f.f, { lowerSliceMs: NaN }, [], { passTimeMs });
-  let clock = 0;
+  const time = syntheticTime();
+  const { service } = serviceFor(f.f, { lowerSliceMs: NaN }, [], { passTimeMs, ...time.seams });
   let imports = 0;
-  const time = spyOn(performance, 'now').mockImplementation(() => clock);
   const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
     imports++;
-    clock += 100;
+    time.spend(100);
     return original(...args);
   });
-  try { await service.runOnce(); } finally { copy.mockRestore(); time.mockRestore(); }
+  try { await service.runOnce(); } finally { copy.mockRestore(); }
   expect(imports).toBe(25);
-  expect(clock).toBe(2500);
+  expect(time.now()).toBe(2500);
 });
 
 test('a failed raise is retried ahead of lowerings without repeatedly cutting their slice', async () => {
-  const f = await fixture(100, true);
+  const f = await fixture(20, true);
   const raised = { id: 'synthetic-stuck-raise', name: 'Synthetic', text: body };
   await f.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-stuck-new' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   f.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, f.f.set.placementFor(high));
-  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, [], { passTimeMs: 18_000 });
-  let pulse!: () => void;
-  const originalInterval = globalThis.setInterval;
-  const interval = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void) => {
-    pulse = callback;
-    return originalInterval(() => {}, 60_000);
-  }) as typeof setInterval);
-  try { service.start(); } finally { interval.mockRestore(); }
-  let clock = 0;
+  const time = syntheticTime();
+  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, [], { passTimeMs: 18_000, ...time.seams });
+  service.start();
   let imports = 0;
   let raises = 0;
-  const time = spyOn(performance, 'now').mockImplementation(() => clock);
   const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
     expect(raises).toBeGreaterThan(0);
-    clock += 100;
-    if (++imports === 1) setTimeout(pulse, 0);
+    time.spend(1000);
+    if (++imports === 1) time.atNextTurn(() => time.pulse());
     return original(...args);
   });
   const raiseCopy = spyOn(f.f.stores.secure_local!, 'importItemCopy').mockImplementation(() => {
@@ -631,8 +649,8 @@ test('a failed raise is retried ahead of lowerings without repeatedly cutting th
     throw new Error('Synthetic stuck raise');
   });
   try { await service.runOnce(); }
-  finally { service.stop(); copy.mockRestore(); raiseCopy.mockRestore(); time.mockRestore(); }
-  expect(imports).toBe(60);
+  finally { service.stop(); copy.mockRestore(); raiseCopy.mockRestore(); }
+  expect(imports).toBe(6);
   expect(f.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
   expect(f.f.stores.internal!.localContent(localId(raised.id))?.chunks ?? []).toEqual([]);
 }, 15_000);

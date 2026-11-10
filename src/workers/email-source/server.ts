@@ -1,5 +1,7 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
@@ -537,6 +539,7 @@ import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudg
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
@@ -2020,16 +2023,19 @@ function createTierSnifferModel(input: {
       bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
     );
     if (!apiKey) return undefined;
-    const model = createVeniceAnalystModel({
+    // Paced to the key's per-model request limit; a 429 waits and retries (#884).
+    const pacer = new JudgeRateLimitPacer();
+    const model = pacer.model(createVeniceAnalystModel({
       apiKey,
       model: profile.model,
       ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-      ...(input.judgeFetch ? { fetchImpl: input.judgeFetch } : {}),
+      fetchImpl: pacer.fetch(input.judgeFetch ?? ((url, init) => fetch(url, init))),
       thinking: 'disabled',
       reasoningEffort: 'low',
       reasoningHeadroomTokens: 0,
       timeoutMs: 60_000,
-    });
+      promptCacheKey: JUDGE_PROMPT_CACHE_KEY,
+    }));
     return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
   }
   return undefined;
@@ -4773,6 +4779,8 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+      // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
+      const sourceReranker = builtInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
@@ -4781,6 +4789,7 @@ export async function main(): Promise<void> {
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
+        ...(sourceReranker ? { reranker: sourceReranker } : {}),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
           const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');
@@ -7314,7 +7323,8 @@ export async function main(): Promise<void> {
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: 'tier_sniffer' }).complete(request)),
+          // The completion says how long it waited for the model slot (#893).
+          complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -7331,7 +7341,8 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
-        ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
+        ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls }
+          : snifferLane.kind === 'venice' ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {}),
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
