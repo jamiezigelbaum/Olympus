@@ -64,6 +64,18 @@ export function olympusCommandHint(input: { env?: Record<string, string | undefi
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
 
+/** `http://localhost:<port>` as `http://127.0.0.1:<port>`; any other origin unchanged. */
+export function loopbackCanonicalOrigin(origin: string): string {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'http:' || url.hostname !== 'localhost') return origin;
+    url.hostname = '127.0.0.1';
+    return url.origin;
+  } catch {
+    return origin;
+  }
+}
+
 /** The worker ROOT: the configured base without its /v1 API suffix. */
 export function workerRootBaseUrl(baseUrl: string): string {
   let url: URL;
@@ -120,14 +132,31 @@ export async function mintDashboardOpeningUrl(
     );
   }
   const fetchImpl = dependencies.fetchImpl ?? workerFetch;
+  const mint = (origin: string): Promise<Response> => fetchImpl(`${origin}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, Origin: origin },
+    redirect: 'error',
+    signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
+  });
   let response: Response;
   try {
-    response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, Origin: base },
-      redirect: 'error',
-      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
-    });
+    // The session the link opens is bound to its origin, and the approval
+    // page for connecting an app is always at http://127.0.0.1:<port>
+    // (connect-relay/server/authorize-bridge.ts). A configured `localhost`
+    // would open the dashboard on an origin whose session that page never
+    // sees (#1186), so the same port on 127.0.0.1 is asked first; only a
+    // worker that does not answer there keeps the configured name.
+    const canonical = loopbackCanonicalOrigin(base);
+    if (canonical !== base) {
+      try {
+        response = await mint(canonical);
+        base = canonical;
+      } catch {
+        response = await mint(base);
+      }
+    } else {
+      response = await mint(base);
+    }
   } catch {
     throw new OperationError(
       'email_unreachable',

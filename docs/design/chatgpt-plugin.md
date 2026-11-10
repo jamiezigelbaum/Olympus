@@ -1420,6 +1420,11 @@ Decision (2026-11-10): the approve POST also needs an owner proof.
   page's own consent cookie is scoped to `/dashboard/connect` to match. The
   page sends `Origin: null` under its `no-referrer` policy, so the engine
   checks the cookie's origin tag against the page's own loopback origin.
+  The bridge always sends the browser to `http://127.0.0.1:<port>`, so an
+  opening link minted from a configured `http://localhost:<port>` is minted
+  for `127.0.0.1` on the same port instead (`core/dashboard-opening.ts`),
+  keeping the dashboard session and the approval page on one origin; a
+  worker that does not answer on `127.0.0.1` keeps the configured name.
 - **Without the session**, Connect does not approve: the page stays, says
   "Open the Olympus dashboard in this browser first, then click Connect
   again", links `olympus://open/dashboard` on a Mac, and spends nothing, so

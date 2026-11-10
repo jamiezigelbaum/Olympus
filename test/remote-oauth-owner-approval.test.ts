@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DashboardLaunchTickets, DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH } from '../src/core/dashboard-launch.ts';
+import { mintDashboardOpeningUrl } from '../src/core/dashboard-opening.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { parseRemotePublicBaseUrl } from '../src/core/remote-public-url.ts';
 import { withRequestPeer } from '../src/core/request-peer.ts';
@@ -170,20 +171,32 @@ describe('relay mode with no owner socket (a Mac, or a server reached through a 
     const { client_id: clientId } = await registered.json() as { client_id: string };
     const page = await openPage(program, authorizePath(clientId, 'http://127.0.0.1:43123/callback'));
     expect(page.status).toBe(200);
-    // The form's own action, and the page's own path, both refuse.
-    for (const action of [page.action, '/connect/authorize']) {
-      const refused = await clickConnect(program, page, action);
-      expect(refused.status, action).toBe(403);
-      expect(refused.headers.get('location'), action).toBeNull();
-    }
-    // A session cookie another install signed is no proof either.
-    const forged = await browse(program, page.action, {
+    // The page's consent cookie, which the program read and now sends wherever it likes.
+    const consent = program.header(page.action);
+    expect(consent).toContain('olympus_consent_');
+    const post = (action: string, cookie: string) => fetch(new URL(action, base), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...NAVIGATION, Cookie: `${program.header(page.action)}; ${foreign}` },
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...NAVIGATION, Cookie: cookie },
       body: new URLSearchParams({ request_id: page.requestId, csrf: page.csrf, action: 'approve' }).toString(),
     });
-    expect(forged.status).toBe(403);
+    /** Refused by the owner check itself: every earlier check (peer, CSRF, consent cookie) passed. */
+    const refusedAsNotOwner = async (response: Response, label: string) => {
+      expect(response.status, label).toBe(403);
+      expect(response.headers.get('location'), label).toBeNull();
+      expect(await response.text(), label).toContain('Open the Olympus dashboard in this browser first');
+    };
+    // The form's own action, and the page's own path, both refuse, with the consent cookie sent to each.
+    await refusedAsNotOwner(await post(page.action, consent), page.action);
+    await refusedAsNotOwner(await post('/connect/authorize', consent), '/connect/authorize');
+    // A session cookie another install signed, sent with the consent cookie, is no proof either.
+    await refusedAsNotOwner(await post(page.action, `${consent}; ${foreign}`), 'foreign session');
     expect(store.list()).toEqual([]);
+    // Control: the same request with this engine's own session approves, so each refusal above was the owner check.
+    const owner = new Jar();
+    await openDashboard(owner);
+    const approved = await post(page.action, `${consent}; ${owner.header(page.action)}`);
+    expect(approved.status).toBe(303);
   });
 
   test('the owner, with the dashboard open in this browser, approves in one click and the app connects', async () => {
@@ -237,6 +250,41 @@ describe('relay mode with no owner socket (a Mac, or a server reached through a 
     if (!resolved.enabled) throw new Error('tunnel urls');
     const tunnel = createRemoteOAuthHandler({ publicUrls: resolved.urls, connections: () => store });
     expect((await tunnel(new Request(`${base}/dashboard/connect/authorize`, { method: 'POST' }))).status).toBe(404);
+  });
+});
+
+describe('a configured localhost worker URL (#1186 review)', () => {
+  test('the dashboard opening lands on 127.0.0.1, where the approval page is, so "open the dashboard first" recovers', async () => {
+    const browser = new Jar();
+    // The relay bridge always sends the browser to http://127.0.0.1:<port>.
+    const page = await openPage(browser, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI));
+    const first = await clickConnect(browser, page);
+    expect(first.status).toBe(403);
+    // `olympus dashboard` (and olympus://open/dashboard) with OLYMPUS_EMAIL_BASE_URL=http://localhost:<port>.
+    const configured = `http://localhost:${server.port}`;
+    const link = new URL(await mintDashboardOpeningUrl(configured, TOKEN, { fetchImpl: fetch }));
+    expect(link.origin).toBe(base);
+    const ticket = new URLSearchParams(link.hash.slice(1)).get('olympus_launch_ticket')!;
+    const redeemed = await browse(browser, DASHBOARD_LAUNCH_REDEEM_PATH, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: link.origin }, body: JSON.stringify({ ticket }),
+    });
+    expect(redeemed.status).toBe(200);
+    const again = await clickConnect(browser, page);
+    expect(again.status).toBe(303);
+  });
+
+  test('a worker that does not answer on 127.0.0.1 keeps the configured name', async () => {
+    const asked: string[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      asked.push(url.origin);
+      if (url.hostname === '127.0.0.1') throw new TypeError('connection refused');
+      expect(new Headers(init?.headers).get('Origin')).toBe(url.origin);
+      return Response.json({ ticket: 'a'.repeat(43) });
+    };
+    const link = await mintDashboardOpeningUrl('http://localhost:8010', TOKEN, { fetchImpl });
+    expect(asked).toEqual(['http://127.0.0.1:8010', 'http://localhost:8010']);
+    expect(new URL(link).origin).toBe('http://localhost:8010');
   });
 });
 

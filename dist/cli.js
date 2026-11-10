@@ -43583,6 +43583,17 @@ function olympusCommandHint(input = {}) {
     return own3;
   return OLYMPUS_PLUGIN_BIN_HINT;
 }
+function loopbackCanonicalOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== "http:" || url.hostname !== "localhost")
+      return origin;
+    url.hostname = "127.0.0.1";
+    return url.origin;
+  } catch {
+    return origin;
+  }
+}
 function workerRootBaseUrl(baseUrl) {
   let url;
   try {
@@ -43608,14 +43619,25 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
     throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${hint} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   const fetchImpl = dependencies.fetchImpl ?? workerFetch;
+  const mint = (origin) => fetchImpl(`${origin}/dashboard/control/launch${dependencies.remote === true ? "?purpose=remote" : ""}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, Origin: origin },
+    redirect: "error",
+    signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
+  });
   let response;
   try {
-    response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? "?purpose=remote" : ""}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, Origin: base },
-      redirect: "error",
-      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
-    });
+    const canonical = loopbackCanonicalOrigin(base);
+    if (canonical !== base) {
+      try {
+        response = await mint(canonical);
+        base = canonical;
+      } catch {
+        response = await mint(base);
+      }
+    } else {
+      response = await mint(base);
+    }
   } catch {
     throw new OperationError("email_unreachable", `The Olympus worker at ${base} did not answer the opening request.`, `Start the worker (${hint} worker status) and run this again.`);
   }
