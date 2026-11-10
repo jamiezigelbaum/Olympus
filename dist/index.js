@@ -30149,6 +30149,11 @@ init_linux_desktop_entry();
 init_engine_maintenance();
 init_file_lease();
 init_linux_engine_layout();
+
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES = 512 * 1024;
+
+// src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
 import { existsSync as existsSync12, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync27, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
