@@ -10,7 +10,8 @@ import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
  *   any source whose own app registration is needed). The panel's Connect
  *   and Change models open this page at the right sheet.
  * - Agents (`?agents`): remote access and connected agents.
- * - Build a connector (`?connector`): the prompt for a coding agent.
+ * - Build a connector (`?connector`): now a dialog on Sources; the address
+ *   redirects to `?connect#build-connector`, which opens it (#1087).
  *
  * Anonymous model settings live here in Models (outside-help.ts). Each page holds the
  * "Open dashboard controls" gate while the controls are locked, so a page
@@ -123,16 +124,15 @@ export interface DashboardWaitingQuestion {
   failureReason?: string;
 }
 
-const CONNECTOR_SHEET_ID = 'connector-sheet';
-const CONNECTOR_SHEET_HEADING = 'Build a connector with your agent';
+/** The Build a connector dialog's id on Sources; `?connector` lands on `?connect#build-connector`. */
+export const CONNECTOR_DIALOG_ID = 'build-connector';
+const CONNECTOR_DIALOG_HEADING = 'Build a connector with your agent';
 // The playbook the prompt names is a contributor guide: it is deliberately
 // outside the published package, so an install alone cannot satisfy the
-// prompt's own first clause. The sheet says that here rather than letting the
+// prompt's own first clause. The dialog says that here rather than letting the
 // agent go looking for a file the managed plugin root does not contain.
-const CONNECTOR_SHEET_INTRO = 'Copy this prompt, replace the source name, and paste it into your coding '
-  + 'agent. The connector playbook it names lives in an Olympus source checkout, not in the installed '
-  + 'package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any '
-  + 'built-in.';
+const CONNECTOR_DIALOG_INTRO = 'For a source Olympus doesn\'t have yet. Copy this to your coding agent and '
+  + 'replace <SOURCE>. The connector guide is in an Olympus source checkout; CONTRIBUTING.md says how to get one.';
 
 /** The prompt the owner pastes into their own coding tool. */
 export const CONNECTOR_PROMPT = [
@@ -355,15 +355,16 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>'
     + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">`
     + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`)
-    + '<p class="pnote">Sources you\'ve already connected aren\'t listed.</p></div>'
+    + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>`
     + panels + '</dialog>';
   const body = [
     lockedGate(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml(dashboardLocalPageHref('connector', token))}">Build a connector</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER}</span></div>`,
     rows.map((entry) => entry.dialogs).join(''),
     sheet,
+    connectorDialog(),
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: 'Sources',
@@ -400,6 +401,9 @@ const SOURCES_CSS = `
 .srctile[hidden] { display: none; }
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
+.linkbtn { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
+#build-connector > .pnote { margin: 12px 0 0; }
+#build-connector .promptbox { margin: 12px 0 0; word-break: normal; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
 `;
 
@@ -423,19 +427,23 @@ export function renderDashboardAgentsPage(options?: DashboardPageOptions): strin
   return localShell({ crumb: W.agents.title, tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS], options });
 }
 
-/** Build a connector: the prompt, open. Nothing on it calls a control route. */
-export function renderDashboardConnectorPage(options?: DashboardPageOptions): string {
-  const body = [
-    `<div class="sect">${escapeHtml(CONNECTOR_SHEET_HEADING)}</div>`,
-    connectorSheet({
-      id: CONNECTOR_SHEET_ID,
-      heading: W.connector.line,
-      intro: CONNECTOR_SHEET_INTRO,
-      promptText: CONNECTOR_PROMPT,
-      copyButtonLabel: 'Copy prompt',
-    }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"'),
-  ].join('\n');
-  return localShell({ crumb: W.connector.title, tab: 'sources', meta: '', body, styles: [], options });
+const CONNECTOR_OPENER = `<button class="linkbtn" type="button" data-dialog-open="${CONNECTOR_DIALOG_ID}">Build a connector</button>`;
+
+/**
+ * Build a connector (#1087, owner 2026-11-10, mockup 9): a dialog over
+ * Sources with the prompt and Copy prompt. ✕, Close, Esc or a click outside
+ * closes it; `?connector` opens Sources with it open. Nothing in it calls a
+ * control route.
+ */
+function connectorDialog(): string {
+  const id = CONNECTOR_DIALOG_ID;
+  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">`
+    + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`
+    + `<p class="pnote">${escapeHtml(CONNECTOR_DIALOG_INTRO)}</p>`
+    + `<div class="promptbox" id="${id}-prompt">${escapeHtml(CONNECTOR_PROMPT)}</div>`
+    + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>`
+    + '<button class="btn" type="button" data-dialog-close>Close</button>'
+    + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
 }
 
 /**
