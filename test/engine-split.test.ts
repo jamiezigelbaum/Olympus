@@ -594,6 +594,16 @@ describe('the private-answer queue has one consumer', () => {
   });
 });
 
+describe('in-process callers go through the forwarding layer', () => {
+  test('remote agents, the ChatGPT surface and the panel tools reach routes as the listener does', () => {
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    // No in-process caller is handed the bare worker: privacy_item_set over MCP would hit the front's write guard.
+    expect(server).not.toMatch(/workerFetch: worker\.fetch\b/);
+    expect(server.match(/workerFetch: workerFetchInProcess,/g)?.length).toBe(3);
+    expect(server).toMatch(/const frontWorkerFetch = frontRoutes[\s\S]{0,200}?\n  inProcessFetch = frontWorkerFetch;/);
+  });
+});
+
 describe('Make Private from the front', () => {
   test('the recorded item goes to the background with its identity; a refusal marks nothing', async () => {
     const seen: EngineCommand[] = [];

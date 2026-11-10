@@ -6301,6 +6301,13 @@ export async function main(): Promise<void> {
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available(),
   });
+  // In-process callers (remote agents' operations over MCP and OpenAPI, the
+  // ChatGPT surface, the dashboard panel tools) reach routes as the listener
+  // does: in the split's front that is through the forwarding layer, so a
+  // write the background owns (a privacy item raise, a watch) goes there.
+  // Bound to the front's routes once they exist, below.
+  let inProcessFetch: (request: Request) => Promise<Response> = (request) => worker.fetch(request);
+  const workerFetchInProcess = (request: Request): Promise<Response> => inProcessFetch(request);
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
     ...(isStandaloneEngineProcess(process.env) ? { selfUpdate: selfUpdater } : {}),
@@ -7123,7 +7130,7 @@ export async function main(): Promise<void> {
       ...createInProcessOperationContext({
         config: olympusConfig,
         sourceIndexReadEnabled,
-        workerFetch: worker.fetch,
+        workerFetch: workerFetchInProcess,
         caller,
         signal,
         sourceAnswerJobs,
@@ -7197,7 +7204,7 @@ export async function main(): Promise<void> {
       } };
     } }),
     pendingClassificationCount,
-    workerFetch: worker.fetch,
+    workerFetch: workerFetchInProcess,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
     ...(fileSourceScopes ? { scopeSummaries: () => fileSourceScopes.summaries() as ReadonlyArray<Record<string, unknown>> } : {}),
@@ -7448,7 +7455,7 @@ export async function main(): Promise<void> {
     setupChecklist: (view) => setupChecklistFromView(view, setupWorkerFacts()),
     surface: () => chatgptSurface,
     setup: chatgptSetup,
-    workerFetch: worker.fetch,
+    workerFetch: workerFetchInProcess,
     makeContext: (signal) => remoteAgentOptions.makeOperationContext({ surface: 'native', displayName: 'Olympus dashboard' }, signal),
     indexFasterState: async () => {
       const runtime = await readEmbeddingRuntime({ env: process.env });
@@ -7491,6 +7498,7 @@ export async function main(): Promise<void> {
   const frontWorkerFetch = frontRoutes
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
     : worker.fetch;
+  inProcessFetch = frontWorkerFetch;
   if (listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
   const socketPath = listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
