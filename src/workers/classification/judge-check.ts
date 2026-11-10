@@ -306,7 +306,10 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
         throw new JudgeCheckError('not_current', 'That is not the item waiting for an answer.');
       }
       current.answer = answer;
-      if (answer !== 'not_sure' && answer !== current.judge) {
+      // Agreement is measured against the judge's label at the start; whether the answer needs
+      // applying is decided by the item's label now, which the owner may have changed since.
+      const now = answer === 'not_sure' ? undefined : options.get(itemId)?.tier ?? current.judge;
+      if (answer !== 'not_sure' && answer !== now) {
         const choice: OwnerItemChoice = answer === 'Personal' ? 'personal' : 'private';
         // The owner's answer settles this one item, on this computer.
         const result = options.items.set({ itemId, choice, allowLower: true });

@@ -146219,7 +146219,8 @@ function createJudgeCheck(options) {
         throw new JudgeCheckError("not_current", "That is not the item waiting for an answer.");
       }
       current2.answer = answer;
-      if (answer !== "not_sure" && answer !== current2.judge) {
+      const now = answer === "not_sure" ? undefined : options.get(itemId)?.tier ?? current2.judge;
+      if (answer !== "not_sure" && answer !== now) {
         const choice = answer === "Personal" ? "personal" : "private";
         const result = options.items.set({ itemId, choice, allowLower: true });
         current2.changed = result.ok;

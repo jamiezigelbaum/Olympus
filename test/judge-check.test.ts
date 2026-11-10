@@ -142,6 +142,21 @@ describe('a round', () => {
     expect(next.range).toMatchObject({ from: 2 * JUDGE_CHECK_RANDOM_PICKS, agreed: random.agreed + JUDGE_CHECK_RANDOM_PICKS });
   });
 
+  test('an answer is applied against the item\'s label now, if the owner changed it since the round began', () => {
+    const items = pool();
+    const { check, sets } = fixture(items);
+    const view = check.start();
+    const id = view.current!.item_id;
+    const judge = items.find((candidate) => candidate.item_id === id)!.tier as 'Personal' | 'Private';
+    const other = judge === 'Personal' ? 'Private' : 'Personal';
+    // Changed in Your items while the round waited.
+    items.find((candidate) => candidate.item_id === id)!.tier = other;
+    const after = check.answer(id, judge);
+    // Counted as agreeing with the judge, and the item is set back to the owner's answer.
+    expect(after.agreed).toBe(1);
+    expect(sets).toEqual([{ itemId: id, choice: judge === 'Personal' ? 'personal' : 'private', allowLower: true }]);
+  });
+
   test('putting it away keeps the answers, and it picks up where it stopped', () => {
     const { check, path } = fixture(pool());
     let view = check.start();
