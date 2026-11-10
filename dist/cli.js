@@ -165492,7 +165492,12 @@ function updateNoticeProgram(config2) {
   const button = q("[data-update-now]");
   const resumeKey = "olympus-update-now";
   const followKey = "olympus-update-follow";
-  const here = () => window.location.pathname + window.location.search;
+  const here = () => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("token");
+    const rest = params.toString();
+    return window.location.pathname + (rest ? "?" + rest : "");
+  };
   function take(key2) {
     try {
       if (window.location.hash !== "#" + key2)
