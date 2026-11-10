@@ -171,8 +171,8 @@ interface QuestionResult {
   anyAt: Record<number, boolean>;
   allAt: Record<number, boolean>;
   latencyMs: number;
-  // A hybrid run whose semantic lane skipped this question (for example the
-  // query embedding timed out) scored it on keywords alone.
+  // A hybrid run whose semantic lane failed to run for this question (for
+  // example the query embedding timed out) scored it on keywords alone.
   semanticSkipped?: string;
 }
 
@@ -215,7 +215,9 @@ async function scoreQuestion(
     allAt[k] = [...evidence].every((id) => top.has(id));
   }
   const skip = provider
-    ? response.laneAudits?.find((audit) => audit.laneType === 'semantic' && audit.skippedReason)?.skippedReason
+    ? response.laneAudits?.find((audit) => audit.laneType === 'semantic' && audit.skippedReason
+      // Nothing above the model's relevance bar is a normal result, not a failure.
+      && audit.skippedReason !== 'semantic_below_relevance_bar')?.skippedReason
     : undefined;
   return {
     ...(skip ? { semanticSkipped: skip } : {}),
