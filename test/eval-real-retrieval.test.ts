@@ -149,7 +149,7 @@ describe('the real eval report says where an expected value was lost (#1234)', (
 
 describe('the real eval fails a question whose search was incomplete (#1242)', () => {
   const audit = (overrides: Record<string, unknown>) => ({
-    packCandidates: 5, lanes: [], skippedCorpora: [], degradations: [], policyDeniedCandidates: 0,
+    packCandidates: 5, packCandidateSources: [], lanes: [], skippedCorpora: [], degradations: [], policyDeniedCandidates: 0,
     unreadCandidates: 0, namesOnlyCandidates: 0, contentPrivateCandidates: 0, corpusReadabilityGaps: 0,
     secureExclusion: 'not_applied' as const, corpusTimings: [], ...overrides,
   });
