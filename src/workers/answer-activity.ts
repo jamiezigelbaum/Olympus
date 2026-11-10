@@ -198,22 +198,44 @@ export function createLocalModelActivity() {
       }
     };
     const kind = localInferencePriority?.getStore() ?? 'owner';
+    // An owner call that must wait for a busy resource preempts at once, not
+    // when its own call starts: a classification call already running would
+    // otherwise finish first, 30-100 s on a 4-core CPU (#1033). Preempting
+    // cancels it (llama-server stops a cancelled prompt within a 64-token
+    // batch) and no new one starts ahead of this call (owner-first order).
+    if (kind === 'owner' && pending.running.length > 0) notifyBusy(key);
     pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
-      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key).run(work)) : get(key).run(work))); } catch (error) { reject(error); }
+      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key, work)) : lease(key, work))); } catch (error) { reject(error); }
     } });
     // Gather simultaneous dispatches before choosing owner-first.
     queueMicrotask(pump);
   });
   const taggedRunning = new Map<string, number>();
+  // The owner's own calls in flight per resource (every call not run as
+  // background or maintenance), so a fair turn never outlasts one (#1031).
+  const ownerRunning = new Map<string, number>();
+  const lease = async <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const store = localInferencePriority?.getStore();
+    const owner = store !== 'background' && store !== 'maintenance';
+    if (owner) ownerRunning.set(key, (ownerRunning.get(key) ?? 0) + 1);
+    try {
+      return await get(key).run(work);
+    } finally {
+      if (owner) ownerRunning.set(key, (ownerRunning.get(key) ?? 1) - 1);
+    }
+  };
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
+  const notifyBusy = (key: string): void => {
+    for (const listener of busyListeners.get(key) ?? []) {
+      try { listener(); } catch { /* Preempting background work never fails an answer. */ }
+    }
+  };
   const get = (key: string) => {
     let activity = resources.get(key);
     if (!activity) {
       activity = createAnswerActivity(() => {
-        if (localInferencePriority?.getStore() !== 'background' && localInferencePriority?.getStore() !== 'maintenance') {
-          for (const listener of busyListeners.get(key) ?? []) listener();
-        }
+        if (localInferencePriority?.getStore() !== 'background' && localInferencePriority?.getStore() !== 'maintenance') notifyBusy(key);
       });
       resources.set(key, activity);
     }
@@ -223,7 +245,9 @@ export function createLocalModelActivity() {
     busy: (key: string) => get(key).busy,
     // Busy with calls other than the ones tracked under `tag`.
     busyExcept: (key: string, tag: string) => get(key).inFlight > (taggedRunning.get(`${key}\u0000${tag}`) ?? 0),
-    run: <T>(key: string, work: () => Promise<T>) => get(key).run(work),
+    // True while one of the owner's own calls runs on this resource.
+    ownerInFlight: (key: string) => (ownerRunning.get(key) ?? 0) > 0,
+    run: <T>(key: string, work: () => Promise<T>) => lease(key, work),
     onBusy(key: string, listener: () => void) {
       const listeners = busyListeners.get(key) ?? new Set<() => void>();
       busyListeners.set(key, listeners);
@@ -238,7 +262,7 @@ export function createLocalModelActivity() {
     track<T extends import('../core/analyst.ts').AnalystModel & { prepareSniffer?(signal?: AbortSignal): Promise<void> }>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
       const coordinate = <R>(work: () => Promise<R>, signal?: AbortSignal, limit = options.concurrency ?? 1): Promise<R> => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? <V>(work: () => Promise<V>) => get(key).run(work) : <V>(work: () => Promise<V>) => dispatch(key, work, limit);
+        const run = options.serialize === false ? <V>(work: () => Promise<V>) => lease(key, work) :<V>(work: () => Promise<V>) => dispatch(key, work, limit);
         return run(async () => {
           const tagKey = options.tag === undefined ? undefined : `${key}\u0000${options.tag}`;
           if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);

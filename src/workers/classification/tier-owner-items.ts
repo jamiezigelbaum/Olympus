@@ -16,15 +16,14 @@
 // for the owner's own dashboard, or, for an agent, only when the item's names
 // are Personal or less, the tier its names would be cited at anyway.
 
-import { Database } from 'bun:sqlite';
 import { OperationError } from '../../core/operation-error.ts';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   applyTierSet,
   knownStorePaths,
   knownTierLedgers,
   locateTierItemByIdentity,
   withLedgerAt,
+  withStore,
   type LocatedItem,
   type TierCliContext,
 } from './tier-cli.ts';
@@ -235,21 +234,6 @@ function likePattern(words: string): string {
   return `%${words.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
 }
 
-function withStore<T>(dbPath: string, fallback: T, run: (db: Database, columns: Set<string>) => T): T {
-  let db: Database | undefined;
-  try {
-    db = new Database(dbPath, { readonly: true });
-    db.exec('PRAGMA busy_timeout = 10000;');
-    const columns = new Set((db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name));
-    if (!columns.has('provider_item_id')) return fallback;
-    return run(db, columns);
-  } catch {
-    // A store that cannot be read holds nothing to list.
-    return fallback;
-  } finally {
-    if (db) closeSqliteStore(db, { checkpoint: false });
-  }
-}
 
 function selectColumns(columns: Set<string>): string {
   const sender = columns.has('sender_label') ? 'sender_label, sender_id' : 'NULL AS sender_label, NULL AS sender_id';

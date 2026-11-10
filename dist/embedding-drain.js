@@ -8329,7 +8329,37 @@ function blockScalarAccepted(match) {
     return true;
   return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+function isRecoveryCodeEntry(entry) {
+  const code = RECOVERY_CODE_VALUE.exec(entry.trim().replace(LIST_MARKER, "").replace(/^[*_]{0,2}["'\x60]?/, ""))?.[0];
+  if (!code || !/[0-9]/.test(code))
+    return false;
+  if (code.replace(/[^A-Za-z0-9]/g, "").length < 6)
+    return false;
+  return code.split(/[- ]/).every((group) => !(/^[a-z]+$/.test(group) && /[g-z]/.test(group)) && !/^(.)\1+$/.test(group));
+}
+function lineHasRecoveryCode(line) {
+  return line.split(ENTRY_BREAK).some(isRecoveryCodeEntry);
+}
+function recoveryCodeAccepted(match) {
+  if (lineHasRecoveryCode(match.groups?.rest ?? ""))
+    return true;
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const lines = input.slice(end, end + RECOVERY_CODE_LIST_WINDOW).split(/\r?\n|\r/, RECOVERY_CODE_LIST_LINES + 1).slice(1);
+  let started = false;
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (started)
+        break;
+      continue;
+    }
+    started = true;
+    if (lineHasRecoveryCode(line))
+      return true;
+  }
+  return false;
+}
+var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, RECOVERY_CODE_LABEL, RECOVERY_CODE_LIST_WINDOW = 600, RECOVERY_CODE_LIST_LINES = 12, RECOVERY_CODE_VALUE, LIST_MARKER, ENTRY_BREAK, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   init_esm();
   PROSE_WORDS = new Set([
@@ -8541,6 +8571,10 @@ var init_secret_patterns = __esm(() => {
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
   AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  RECOVERY_CODE_VALUE = /^(?:\d{3,5}(?: \d{3,5}){1,3}|[A-Za-z0-9]{2,40}(?:-[A-Za-z0-9]{2,40}){0,7})(?=$|[\s,;.)\]"'\x60*_])/;
+  LIST_MARKER = /^[ \t]*(?:[-*•]|\d{1,2}[.)])[ \t]+/;
+  ENTRY_BREAK = /[,;]|[ \t]{2,}/;
   LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
   SHARED_SECRET_PATTERNS = [
     {
@@ -8660,6 +8694,13 @@ var init_secret_patterns = __esm(() => {
       pattern: AUTHORIZATION_HEADER,
       confidence: 0.9,
       accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "credential_assignment",
+      label: "recovery_code",
+      pattern: RECOVERY_CODE_LABEL,
+      confidence: 0.85,
+      accept: recoveryCodeAccepted
     },
     {
       findingType: "api_secret_token",
@@ -10919,6 +10960,12 @@ function snifferReasonCode(verdict) {
 function cachedSnifferVerdictHolds(verdict) {
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
 }
+function schemaReference(text2, verb, field) {
+  if (SCHEMA_ONLY_FIELD.test(field[0]))
+    return true;
+  const tail = text2.slice(field.index + field[0].length);
+  return SCHEMA_VALUE.test(tail) || ASSIGN_VERBS.has(verb) && /^\s+to\b/.test(tail);
+}
 function hasClassifierInstruction(text2) {
   const words = [...text2.matchAll(/[a-z][a-z0-9_]*/g)];
   for (let i = 0;i < words.length; i++) {
@@ -10930,24 +10977,27 @@ function hasClassifierInstruction(text2) {
         continue;
       const left = Math.min(verb.index, words[j].index);
       const right = Math.max(verb.index, words[j].index);
-      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)))
+      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)) && schemaReference(text2, verb[0], words[j]))
         return true;
     }
+    let outputShaped = !SETTING_VERBS.has(verb[0]);
     for (let j = i + 1;j < Math.min(words.length, i + 13); j++) {
       const object = words[j];
       if (object.index - verb.index > 100 || /[.!?;]/.test(text2.slice(verb.index, object.index)))
         break;
       if (TIER_WORD.test(object[0])) {
         const tail = text2.slice(object.index + object[0].length);
-        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
+        if (outputShaped && /^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
           return true;
         break;
       }
       if (!OBJECT_GLUE.has(object[0]))
         break;
+      if (object[0] === "with" || object[0] === "as")
+        outputShaped = true;
     }
   }
-  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text2);
+  return /\byour verdict\b(?:\s+(?:for|on)\s+[^.!?;:]{0,40})?\s*(?:[:=]|\bis\b|\bshould be\b|\bmust be\b)\s*["'`]?(?:personal|private|public)\b/.test(text2);
 }
 function normalizeSnifferMaterial(material) {
   return normalizeSnifferSurface(canonicalizeScreeningText(material));
@@ -11158,7 +11208,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -11187,16 +11237,23 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+  TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+  TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
   INJECTION_RULES = [
-    ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
-    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
-    ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-    ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
+    ["role_boundary", ROLE_TAG],
+    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+    ["forged_verdict", new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+    ["cross_item_steering", new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)]
   ];
   INSTRUCTION_VERBS = new Set(["reply", "answer", "respond", "output", "return", "mark", "set", "label", "classify", "treat", "tag", "rate", "assign", "choose", "use", "emit", "produce", "make"]);
   VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
   TIER_WORD = /^(?:personal|public|private)$/;
   OBJECT_GLUE = new Set(["only", "with", "as", "to", "be", "is", "the", "a", "an", "this", "that", "it", "these", "them", "every", "each", "all", "item", "items", "file", "files", "document", "documents", "message", "messages", "entry", "entries", "list", "batch", "not"]);
+  SCHEMA_ONLY_FIELD = /^(?:ownrecord|privatekind)$/;
+  SCHEMA_VALUE = /^["'`]?\s*(?:[:=]|\b(?:of|as|at|is|be|to)\b)?\s*["'`({[]*\s*(?:(?:0?[.,]\d+|1(?:[.,]0+)?|0)(?![\d.,]*\d)|(?:personal|private|public|ordinary|true|false|none|null)\b)/;
+  ASSIGN_VERBS = new Set(["set", "assign"]);
+  SETTING_VERBS = new Set(["set", "make", "use", "choose"]);
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy classifier. Judge the ONE item independently.",
     "PERSONAL means the owner permits their trusted cloud assistant to read it.",
@@ -13059,6 +13116,7 @@ class TierLedger {
     const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
     const key2 = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const nowIso = this.now().toISOString();
     const rows = this.db.query(`
       WITH win AS (
         SELECT * FROM tier_items
@@ -13075,16 +13133,17 @@ class TierLedger {
           -- resting on a retired prior: a prior replayed after a completed
           -- re-judge is a new decision and invalidates the old stamp, while a
           -- re-read that changed nothing (no text) stays settled (markRejudged).
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
-            WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || i.generation || char(0) || i.decided_at
-            ELSE ? END)
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
           -- Settled by a verdict under this classifier and sniffer (markJudged):
           -- not re-asked while its decision stays settled under this
           -- classifier. A later decision that left it owed a verdict (fail-safe,
           -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
             AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
@@ -13138,9 +13197,13 @@ class TierLedger {
           WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
           ELSE 'content_prompt'
         END AS rejudge_cause
-      FROM win i
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key2, key2, key2, key2, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "", key2, key2, key2, key2);
     const records = [];
     const causes = [];
     let builtinPromptSkipped = 0;
@@ -13148,6 +13211,8 @@ class TierLedger {
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1)
+        continue;
+      if (rejudgeUnavailableUntil(row, key2) > nowIso)
         continue;
       const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
       if (cause === "builtin_prompt_skipped") {
@@ -13184,6 +13249,25 @@ class TierLedger {
         THEN ?1 || char(0) || 'prior' || char(0) || generation || char(0) || decided_at ELSE ?1 END
       WHERE provider = ?2 AND account_scope = ?3 AND conversation_key = ?4 AND provider_item_id = ?5
     `).run(rejudgeKey(key2.engineVersion, key2.snifferId), ...idParams(identity));
+  }
+  markRejudgeUnavailable(record, key2) {
+    const id = [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
+    const row = this.db.query(`
+      SELECT rejudged_key FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).get(...id, record.generation, record.decidedAt);
+    if (!row)
+      return;
+    const stampKey = rejudgeKey(key2.engineVersion, key2.snifferId);
+    const split = splitRejudgeStamp(row.rejudged_key);
+    const previous = split.unavailable?.split("\x01");
+    const misses = previous && previous[0] === stampKey && previous[1] === String(record.generation) && previous[2] === record.decidedAt ? (Number(previous[4]) || 0) + 1 : 0;
+    const wait = Math.min(REJUDGE_UNAVAILABLE_RETRY_MS * 2 ** Math.min(misses, 16), REJUDGE_UNAVAILABLE_MAX_RETRY_MS);
+    const retryAt = new Date(this.now().getTime() + wait).toISOString();
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).run([split.settled ?? "", stampKey, String(record.generation), record.decidedAt, retryAt, String(misses)].join("\x01"), ...id, record.generation, record.decidedAt);
   }
   markJudged(identity, key2) {
     this.db.query(`
@@ -13229,6 +13313,52 @@ class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity));
     return row ? openRejudgeQuestionOf(row) : undefined;
+  }
+  requestRecheck(scope) {
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items
+      WHERE routed = 1 AND (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR account_scope = ?2) AND (?3 IS NULL OR conversation_key = ?3)
+    `).get(scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null).n;
+    if (items > 0)
+      this.writeMeta(recheckRequestKey(scope), JSON.stringify({ scope }));
+    return { items };
+  }
+  recheckRequests() {
+    const requests = [];
+    for (const entry of this.metaEntries(TIER_RECHECK_META_PREFIX)) {
+      try {
+        const parsed = JSON.parse(entry.value);
+        if (!parsed.scope)
+          continue;
+        requests.push({ key: entry.key, scope: parsed.scope, ...parsed.after ? { after: parsed.after } : {} });
+      } catch {
+        this.deleteMeta(entry.key);
+      }
+    }
+    return requests;
+  }
+  recheckScopePage(scope, options) {
+    const limit = Math.max(1, Math.min(options.limit, 5000));
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const rows = this.db.query(`
+      SELECT * FROM tier_items
+      WHERE routed = 1 AND (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR account_scope = ?2) AND (?3 IS NULL OR conversation_key = ?3)
+        AND (?4 IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?5, ?6, ?7, ?8))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?9
+    `).all(scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null, after ? 1 : null, ...after ?? [null, null, null, null], limit);
+    const records = rows.map(recordFromRow);
+    const last = rows.at(-1);
+    return { records, ...rows.length >= limit && last ? { next: identityOfRow(last) } : {} };
+  }
+  advanceRecheck(request, after) {
+    const stored = this.readMeta(request.key);
+    if (stored === undefined || stored !== JSON.stringify({ scope: request.scope, ...request.after ? { after: request.after } : {} }))
+      return;
+    if (after)
+      this.writeMeta(request.key, JSON.stringify({ scope: request.scope, after }));
+    else
+      this.deleteMeta(request.key);
   }
   listAwaitingText(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
@@ -15132,6 +15262,18 @@ function copyFromRow(row) {
 function rejudgeKey(engineVersion, snifferId2) {
   return `${engineVersion}\x00${snifferId2 ?? ""}`;
 }
+function rejudgeUnavailableUntil(row, key2) {
+  const mark = splitRejudgeStamp(row.rejudged_key).unavailable?.split("\x01");
+  return mark && mark[0] === key2 && mark[1] === String(row.generation) && mark[2] === row.decided_at ? mark[3] ?? "" : "";
+}
+function splitRejudgeStamp(value) {
+  if (!value)
+    return {};
+  const at = value.indexOf("\x01");
+  if (at < 0)
+    return { settled: value };
+  return { ...at > 0 ? { settled: value.slice(0, at) } : {}, unavailable: value.slice(at + 1) };
+}
 function identityOfRow(row) {
   return {
     provider: row.provider,
@@ -15248,7 +15390,7 @@ function settledSnifferRejudgeCause(row, cause, id) {
     return cause;
   const reasons = JSON.parse(row.reasons_json);
   const previous = [];
-  const stamp = row.rejudged_key?.split("\x00");
+  const stamp = splitRejudgeStamp(row.rejudged_key).settled?.split("\x00");
   if (stamp?.[0] === row.engine_version && (stamp.length === 2 || stamp.length === 3 && stamp[2] === "judged" && !reasons.some((reason) => reason.includes(":fail_safe:")))) {
     previous.push(stamp[1]);
   } else {
@@ -15326,6 +15468,9 @@ function settleStaleEmbedHolds(db, now) {
       )
   `).run(now);
   return db.query("SELECT changes() AS n").get().n;
+}
+function recheckRequestKey(scope) {
+  return `${TIER_RECHECK_META_PREFIX}${JSON.stringify([scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null])}`;
 }
 function settleStoredNamesMark(reasons, askedTier, answeredTier) {
   if (!reasons.includes(STORED_NAMES_ASKED_REASON))
@@ -15804,11 +15949,13 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
   init_tier_ledger_path();
+  REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
+  REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
   TierLedgerGenerationConflictError = class TierLedgerGenerationConflictError extends Error {
     constructor(message2 = "Tier ledger generation changed; re-read the row before flipping.") {
       super(message2);
@@ -32211,7 +32358,7 @@ function isTerminalServiceAccountAssertionError(error) {
   return isPermanentOAuthClientError(error.providerError);
 }
 function isPermanentOAuthClientError(providerError) {
-  return providerError === "invalid_client" || providerError === "unauthorized_client" || providerError === "access_denied";
+  return providerError === "invalid_client" || providerError === "deleted_client" || providerError === "unauthorized_client" || providerError === "access_denied";
 }
 function serviceAccountDelegationError(handle, capability) {
   return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
@@ -35348,18 +35495,33 @@ async function appendEmbeddingLedgerEntries(path, entries) {
   const line = entries.map((entry) => `${JSON.stringify(entry)}
 `).join("");
   await mkdir4(dirname26(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
+  const handle = await open3(path, "a+", 384);
   try {
     await handle.chmod(384);
+    await restoreLineBoundary(handle);
     await handle.appendFile(line, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
+async function restoreLineBoundary(handle) {
+  const { size } = await handle.stat();
+  if (size === 0)
+    return;
+  const last = Buffer.alloc(1);
+  await handle.read(last, 0, 1, size - 1);
+  if (last[0] !== 10)
+    await handle.appendFile(`
+`, "utf8");
+}
 async function appendEmbeddingLedgerEntriesOnce(path, entries) {
   if (!entries.length)
     return 0;
+  if (!entries.some((entry) => entry.entry_id?.trim())) {
+    await appendEmbeddingLedgerEntries(path, entries);
+    return entries.length;
+  }
   const known = await recordedEntryIds(path);
   const pendingIds = new Set;
   const pending = entries.filter((entry) => {
@@ -37560,7 +37722,8 @@ function emptyTierRejudgeReport() {
     causeJudgeModel: 0,
     causeNamesPrompt: 0,
     causeContentPrompt: 0,
-    builtinPromptSkipped: 0
+    builtinPromptSkipped: 0,
+    rechecked: 0
   };
 }
 async function rejudgeRoutedItemsInTurns(options) {
@@ -37596,10 +37759,41 @@ function* rejudgeSteps(options) {
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key2 = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
+  const recheck = { rules: classification.rules ?? [] };
+  let budget = limit;
+  for (const request of ledger.recheckRequests()) {
+    if (budget <= 0)
+      break;
+    const scoped = ledger.recheckScopePage(request.scope, { ...request.after ? { after: request.after } : {}, limit: budget });
+    for (const record of scoped.records) {
+      yield record;
+      budget -= 1;
+      if (!rechecks(record)) {
+        report.skipped += 1;
+        continue;
+      }
+      report.rechecked += 1;
+      try {
+        rejudgeStoredContent(set, record, {
+          sniffer: classification.sniffer,
+          ...classification.retirePublic ? { retirePublic: true } : {},
+          report,
+          key: key2,
+          autoMoves: options.autoMoves === true,
+          recheck
+        });
+      } catch {
+        report.failed += 1;
+      }
+    }
+    ledger.advanceRecheck(request, scoped.next);
+  }
+  if (budget <= 0)
+    return { report, ...options.after ? { next: options.after } : {} };
   const page = ledger.rejudgeCandidatePage({
     ...key2,
     ...options.after ? { after: options.after } : {},
-    limit
+    limit: budget
   });
   report.builtinPromptSkipped = page.builtinPromptSkipped;
   for (const [index, record] of page.records.entries()) {
@@ -37622,6 +37816,9 @@ function* rejudgeSteps(options) {
   }
   return { report, ...page.next ? { next: page.next } : {} };
 }
+function rechecks(record) {
+  return record.routed && record.contentRead && record.state === "current" && record.contentTier !== "secrets" && record.decidedBy !== "override";
+}
 function rejudgeStoredContent(set, record, options) {
   const { report, key: key2, autoMoves } = options;
   const ledger = set.ledger;
@@ -37640,7 +37837,7 @@ function rejudgeStoredContent(set, record, options) {
   const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join("") ?? "";
   if (!exported || !text2.trim()) {
     if (key2)
-      ledger.markRejudged(identity, key2);
+      ledger.markRejudgeUnavailable(record, key2);
     report.skipped += 1;
     return;
   }
@@ -37663,7 +37860,7 @@ function rejudgeStoredContent(set, record, options) {
   const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const parentContext = sniffer ? parentNamesContext(set, identity) : undefined;
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext);
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext, options.recheck);
   const content = classifyContentTier({
     text: text2,
     hasNonTextContent: !record.reasons.includes("content:text_only"),
@@ -37749,10 +37946,11 @@ function rejudgeStoredContent(set, record, options) {
   else
     report.updated += 1;
 }
-function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext) {
+function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext, recheck) {
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
   const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
-  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
+  const judgedAgain = (reason) => reason.startsWith("metadata:sniffer:") && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
+  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !record.reasons.some(judgedAgain))
     return previous;
   const signals = {
     ...names.title ? { title: names.title } : {},
@@ -37761,9 +37959,15 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     folderKeys: names.folderKeys
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
+  if (recheck && recheck.rules.length > 0) {
+    const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
+    if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
+      return previous;
+  }
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  const ownerRecheck = recheck !== undefined && providerReasons.length === 0;
+  const baseline = retiredPrior || fromStoredNames || ownerRecheck ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
@@ -38441,6 +38645,17 @@ var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-secrets-floor-sweep.ts
+var init_tier_secrets_floor_sweep = __esm(() => {
+  init_secret_patterns();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_stored_names();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
@@ -38462,6 +38677,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  init_tier_secrets_floor_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
@@ -42305,6 +42521,13 @@ var init_linux_engine_service = __esm(() => {
 // src/core/package-root.ts
 var init_package_root = () => {};
 
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES;
+var init_update_check = __esm(() => {
+  init_package_root();
+  UPDATE_MAX_BYTES = 512 * 1024;
+});
+
 // src/core/first-run-privacy.ts
 var init_first_run_privacy = __esm(() => {
   init_atomic_file();
@@ -42337,7 +42560,7 @@ function torLinuxAsset(name, sha256, bytes) {
     launcher: { path: "bin/tor", target: "tor/tor", libraryDir: "tor" }
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus4", ZKAPI_CONFINE_SHA256 = "bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS;
+var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS;
 var init_managed_tools = __esm(() => {
   init_file_lease();
   ZKAPI_REQUIRED = [
@@ -42369,14 +42592,20 @@ var init_managed_tools = __esm(() => {
       tool: "zkapi-clientd",
       label: "zkAPI",
       version: ZKAPI_VERSION,
-      versionLine: /^zkapi-clientd 0\.1\.6-olympus4(\s|$)/,
+      versionLine: /^zkapi-clientd 0\.1\.6-olympus5(\s|$)/,
       assets: {
-        "darwin-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz", "c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87", 23233898),
-        "darwin-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz", "afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9", 23924531),
-        "linux-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz", "069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a", 25885185, { required: [ZKAPI_CONFINE_PATH], pinnedFiles: [ZKAPI_CONFINE_PIN] }),
-        "linux-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz", "cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489", 23923385)
+        "darwin-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_darwin_arm64.tar.gz", "a93c602386425bc88d853189fba3018d8e074b9a7878898d176dd39e4de7934e", 23234981),
+        "darwin-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_darwin_amd64.tar.gz", "329cb09ce4666fd8168a999e3977110df27690d9aa6ed01fdfafc3e4f3b4a19e", 23925134),
+        "linux-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_linux_amd64.tar.gz", "77c89ec391bd3e70909d436f56984d9ad49e3c753bc7284f7ff3a8d36bf4268a", 25886188, { required: [ZKAPI_CONFINE_PATH], pinnedFiles: [ZKAPI_CONFINE_PIN] }),
+        "linux-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_linux_arm64.tar.gz", "60f629eff3df44d32cc2899e6fa7449d971349ce27d39bb500d2ef20fd069106", 23924679)
       },
       replaces: {
+        "0.1.6-olympus4": {
+          "darwin-arm64": "c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87",
+          "darwin-x64": "afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9",
+          "linux-x64": "069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a",
+          "linux-arm64": "cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489"
+        },
         "0.1.6": {
           "darwin-arm64": "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4",
           "darwin-x64": "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12",
@@ -42666,6 +42895,7 @@ var init_engine_service = __esm(() => {
   init_file_lease();
   init_linux_engine_layout();
   init_worker_transport();
+  init_update_check();
   init_atomic_file();
   init_engine_children();
   init_operation_error();
@@ -43564,7 +43794,7 @@ var init_linux_desktop_opener = __esm(() => {
 });
 
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash24, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash25, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync12, openSync as openSync12, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname33, join as join33 } from "node:path";
 function randomOwnerHostname() {
@@ -43624,7 +43854,7 @@ function safeTarget(value) {
   return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
 }
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash24("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash25("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -44136,7 +44366,7 @@ class LinuxOwnerBridge {
     return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
   }
 }
-var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes3(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash24("sha256").update(value).digest("hex");
+var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes3(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash25("sha256").update(value).digest("hex");
 var init_linux_owner_bridge = __esm(() => {
   init_worker_transport();
   init_linux_desktop_opener();
@@ -44265,7 +44495,7 @@ var init_open_targets = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash25, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash26, randomBytes as randomBytes4 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -44328,7 +44558,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash25("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash26("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -44430,10 +44660,40 @@ var init_dashboard_opening = __esm(() => {
 import { existsSync as existsSync25, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname34, join as join34 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir12();
   return join34(env.XDG_CACHE_HOME ?? join34(home, ".cache"), "olympus", "telegram-python");
+}
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync25) {
+  let directory = dirname34(fileURLToPath4(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    if (exists(join34(directory, TELEGRAM_REQUIREMENTS_FILE)))
+      return directory;
+    const parent = dirname34(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function telegramInstallCommands(input) {
+  const python = join34(input.venvDir, "bin", "python");
+  const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
+  return [
+    [...pip, "-r", join34(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join34(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+  ];
+}
+function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
+  const venv = "~/.cache/olympus/telegram-python";
+  const root = packageRoot ?? "<Olympus package>";
+  const [build, telethon] = telegramInstallCommands({ venvDir: venv, packageRoot: root }).map((argv) => argv.filter((arg) => arg !== "--quiet").map((arg) => arg.includes(" ") ? `"${arg}"` : arg).join(" "));
+  return `Use a private virtual environment: python3 -m venv ${venv}, then ${build}, then ${telethon}. Re-run olympus connect telegram --pair.`;
+}
+function telegramDependencyRefusedMessage(packageRoot) {
+  return `Olympus refused to install Telethon for Telegram: a downloaded package did not match the SHA-256 pinned in ${join34(packageRoot, TELEGRAM_REQUIREMENTS_FILE)}, so it may have been tampered with or substituted on the way. Nothing was installed. Check any pip mirror or proxy this computer uses, then re-run olympus connect telegram --pair; if it happens again, report it to the Olympus maintainers.`;
 }
 async function readyTelegramPython(options = {}) {
   if (options.pythonExecutable)
@@ -44462,35 +44722,49 @@ async function pythonImportsTelethon(python) {
   const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   return await child.exited === 0;
 }
-async function provisionTelegramPython(input) {
-  const run = async (argv) => {
-    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    let timeout;
-    const result = await Promise.race([
-      child.exited,
-      new Promise((resolve10) => {
-        timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
-      })
-    ]);
-    if (timeout)
-      clearTimeout(timeout);
-    if (result === "timeout")
-      child.kill("SIGKILL");
-    return result === 0;
-  };
+async function provisionTelegramPython(input, seams = {}) {
+  const packageRoot = seams.packageRoot ?? telegramRequirementsRoot();
+  if (!packageRoot)
+    throw new Error(`Olympus could not find its pinned Telethon list (${TELEGRAM_REQUIREMENTS_FILE}); reinstall Olympus, then re-run olympus connect telegram --pair.`);
+  const run = seams.run ?? runPip;
   const cacheHome = dirname34(dirname34(input.venvDir));
   ensurePrivateRootDirectorySync(cacheHome);
   ensurePrivateDirectoryTreeSync(cacheHome, dirname34(input.venvDir));
   const python = join34(input.venvDir, "bin", "python");
-  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
-  if (!ok)
+  const steps = [[input.python3, "-m", "venv", input.venvDir], ...telegramInstallCommands({ venvDir: input.venvDir, packageRoot }), [python, "-c", "import telethon"]];
+  for (const argv of steps) {
+    const result = await run(argv);
+    if (result.code === 0)
+      continue;
     rmSync6(input.venvDir, { recursive: true, force: true });
-  return ok;
+    if (PIP_HASH_MISMATCH.test(result.stderr))
+      throw new Error(telegramDependencyRefusedMessage(packageRoot));
+    return false;
+  }
+  return true;
 }
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0", TELEGRAM_DEPENDENCY_HINT, installing;
+async function runPip(argv) {
+  const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  const stderr = new Response(child.stderr).text().catch(() => "");
+  let timeout;
+  const result = await Promise.race([
+    child.exited,
+    new Promise((resolve10) => {
+      timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  if (result === "timeout")
+    child.kill("SIGKILL");
+  return { code: result, stderr: result === "timeout" ? "" : await stderr };
+}
+var TELEGRAM_TELETHON_VERSION = "1.45.0", TELEGRAM_TELETHON_REQUIREMENT, TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt", TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt", TELEGRAM_DEPENDENCY_HINT, PIP_HASH_MISMATCH, installing;
 var init_messaging_runtime = __esm(() => {
   init_atomic_file();
-  TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+  TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
+  TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
+  PIP_HASH_MISMATCH = /DO NOT MATCH THE HASHES|hashes are required in --require-hashes mode/i;
   installing = new Map;
 });
 
@@ -51217,9 +51491,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 `;
 });
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash26 } from "node:crypto";
+import { createHash as createHash27 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash26("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash27("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
@@ -54635,10 +54909,10 @@ function isValidJWT(token, algorithm = null) {
     const tokensParts = token.split(".");
     if (tokensParts.length !== 3)
       return false;
-    const [header] = tokensParts;
-    if (!header)
+    const [header2] = tokensParts;
+    if (!header2)
       return false;
-    const parsedHeader = JSON.parse(atob(header));
+    const parsedHeader = JSON.parse(atob(header2));
     if ("typ" in parsedHeader && parsedHeader?.typ !== "JWT")
       return false;
     if (!parsedHeader.alg)
@@ -69570,7 +69844,7 @@ init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 import { existsSync as existsSync34, lstatSync as lstatSync16, mkdirSync as mkdirSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname40, isAbsolute as isAbsolute14 } from "node:path";
 
@@ -69605,6 +69879,7 @@ init_tier_rules();
 var TIER_CLI_USAGE = {
   "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
   "tier explain": "olympus tier explain <locator>",
+  "tier recheck": "olympus tier recheck chat:<chat id> [--source <provider>] | source:<provider> [--account <account>]",
   "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
   "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
   "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
@@ -69621,6 +69896,125 @@ init_owner_config_read();
 
 // src/workers/email-source/server.ts
 init_judge_spending();
+
+// src/workers/classification/judge-pacing.ts
+init_sniffer();
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { createHash as createHash24 } from "node:crypto";
+var JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash24("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
+var JUDGE_RATE_LIMIT_RETRIES = 6;
+var FALLBACK_BACKOFF_MS = 1000;
+var MAX_WAIT_MS = 65000;
+var realClock = {
+  now: () => Date.now(),
+  sleep: (ms, signal) => new Promise((resolve10, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve10();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  })
+};
+function header(response, name) {
+  const raw = response.headers.get(name);
+  if (raw === null || raw.trim() === "")
+    return;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+class JudgeRateLimitPacer {
+  clock;
+  remaining;
+  resetAt = 0;
+  lastSeq = 0;
+  reportSeq = 0;
+  blockedUntil = 0;
+  calls = new AsyncLocalStorage7;
+  constructor(clock2 = realClock) {
+    this.clock = clock2;
+  }
+  async acquire(signal) {
+    for (;; ) {
+      const now = this.clock.now();
+      if (this.blockedUntil > now) {
+        await this.clock.sleep(Math.min(MAX_WAIT_MS, this.blockedUntil - now), signal);
+        continue;
+      }
+      if (this.remaining !== undefined && this.resetAt > now && this.remaining - (this.lastSeq - this.reportSeq) <= 0) {
+        await this.clock.sleep(Math.min(MAX_WAIT_MS, this.resetAt - now), signal);
+        continue;
+      }
+      if (this.resetAt <= now)
+        this.remaining = undefined;
+      this.lastSeq += 1;
+      return this.lastSeq;
+    }
+  }
+  observeHeaders(response, seq) {
+    const remaining = header(response, "x-ratelimit-remaining-requests");
+    const resetAt = header(response, "x-ratelimit-reset-requests");
+    const now = this.clock.now();
+    if (remaining === undefined || resetAt === undefined || resetAt <= now)
+      return;
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) {
+      this.remaining = Math.min(this.remaining, remaining - (this.reportSeq - seq));
+      return;
+    }
+    this.remaining = remaining;
+    this.resetAt = resetAt;
+    this.reportSeq = seq;
+  }
+  fetch(fetchImpl) {
+    return async (url, init) => {
+      const response = await fetchImpl(url, init);
+      const call = this.calls.getStore();
+      if (call)
+        this.observeHeaders(response, call.seq);
+      if (response.status === 429) {
+        const now = this.clock.now();
+        const reset = header(response, "x-ratelimit-reset-requests");
+        const retryAfter = header(response, "retry-after");
+        const until = reset !== undefined && reset > now ? reset : retryAfter !== undefined ? now + retryAfter * 1000 : undefined;
+        if (call) {
+          call.limited = true;
+          if (until !== undefined)
+            call.retryAt = until;
+        }
+        if (until !== undefined)
+          this.blockedUntil = Math.max(this.blockedUntil, Math.min(until, now + MAX_WAIT_MS));
+        this.remaining = 0;
+      }
+      return response;
+    };
+  }
+  model(model, retries = JUDGE_RATE_LIMIT_RETRIES) {
+    return {
+      complete: async (request) => {
+        for (let attempt = 0;; attempt++) {
+          const call = { seq: await this.acquire(request.signal), limited: false };
+          try {
+            return await this.calls.run(call, () => model.complete(request));
+          } catch (error) {
+            if (!call.limited || attempt >= retries || request.signal?.aborted)
+              throw error;
+            if (call.retryAt === undefined) {
+              await this.clock.sleep(Math.min(MAX_WAIT_MS, FALLBACK_BACKOFF_MS * 2 ** attempt), request.signal);
+            }
+          }
+        }
+      }
+    };
+  }
+}
 
 // src/workers/classification/sniffer-decision.ts
 init_model_transport();
@@ -69648,12 +70042,7 @@ init_source_placement();
 init_vocabulary();
 init_local_private_answers();
 init_linux_owner_bridge_host();
-
-// src/core/update-check.ts
-init_package_root();
-var UPDATE_MAX_BYTES = 512 * 1024;
-
-// src/workers/email-source/server.ts
+init_update_check();
 init_open_targets();
 init_linux_owner_bridge();
 init_linux_desktop_opener();
@@ -69687,7 +70076,7 @@ init_connected_handles();
 import { existsSync as existsSync26, mkdirSync as mkdirSync14, rmSync as rmSync7 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname35, join as join35 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -69846,7 +70235,7 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join35(dirname35(fileURLToPath4(import.meta.url)), "..", "..");
+    const packageRoot = options.packageRoot ?? join35(dirname35(fileURLToPath5(import.meta.url)), "..", "..");
     return { executable, args: [join35(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -70316,6 +70705,7 @@ init_messaging_capture_grant_file();
 init_messaging_runtime();
 init_package_root();
 init_pairing_session_paths();
+init_update_check();
 
 // src/workers/email-source/dashboard-messaging-runner.ts
 var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
@@ -70323,6 +70713,7 @@ var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 // src/workers/email-source/index.ts
 init_source_scope_approval();
 init_release_manifest();
+init_update_check();
 init_google_handle_compatibility();
 init_source_account_binding();
 init_source_registry();
@@ -70331,6 +70722,13 @@ init_analyst();
 init_types();
 init_file_lease();
 init_email_policy();
+
+// src/core/google-pilot-client.ts
+var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+]);
+
+// src/workers/email-source/index.ts
 init_publisher_oauth_client();
 init_oauth_relay();
 init_connect();
@@ -70893,6 +71291,7 @@ var TOOL_BLOCKERS = new Map([
 var OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
 
 // src/workers/dashboard/host-page.ts
+init_update_check();
 init_dashboard_contract();
 init_page();
 init_vocabulary();
@@ -71025,7 +71424,8 @@ init_source_dashboard();
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
-var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
+var CONNECTOR_DIALOG_ID = "build-connector";
+var CONNECTOR_DIALOG_INTRO = "For a source Olympus doesn't have yet. Copy this to your coding agent and " + "replace <SOURCE>. The connector guide is in an Olympus source checkout; CONTRIBUTING.md says how to get one.";
 var CONNECTOR_PROMPT = [
   "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
   "",
@@ -71035,6 +71435,7 @@ var CONNECTOR_PROMPT = [
 var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 var CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
 var MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
+var CONNECTOR_OPENER = `<button class="linkbtn" type="button" data-dialog-open="${CONNECTOR_DIALOG_ID}">Build a connector</button>`;
 var SETTINGS_SECTIONS = [
   { id: "agents", label: "Agents and access" },
   { id: "models", label: "Models on this computer" },
@@ -71099,7 +71500,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash27 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -71183,7 +71584,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash27("sha256").update(value).digest("hex");
+  return createHash28("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -71610,7 +72011,7 @@ init_google_connectors();
 init_readwise();
 init_x_bookmarks();
 init_live_control2();
-import { createHash as createHash28 } from "node:crypto";
+import { createHash as createHash29 } from "node:crypto";
 
 // src/workers/whatsapp/index.ts
 init_live_connector();
@@ -71681,6 +72082,7 @@ class SourceScheduler {
   lastAfterTickAt;
   afterTickTimer;
   timer;
+  stops = 0;
   fastWakeTimers = new Map;
   continueAfterMs;
   setTimeoutImpl;
@@ -71751,6 +72153,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.stops += 1;
     this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
@@ -72077,6 +72480,7 @@ class SourceScheduler {
     const cadenceAnchor = state.nextRunAt;
     const attemptedAt = this.now().toISOString();
     state.lastAttemptAt = attemptedAt;
+    const stopsAtStart = this.stops;
     try {
       if (this.stateStore) {
         if (state.pendingUnpark && this.stateStore.claimUnparkAttempt) {
@@ -72107,7 +72511,7 @@ class SourceScheduler {
           }));
         }
       }
-      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance);
+      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
@@ -72176,6 +72580,10 @@ class SourceScheduler {
         this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
+      if (this.stops !== stopsAtStart) {
+        this.recordShutdownInterruption(state);
+        return;
+      }
       const message2 = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
       const errorHash = hash(message2);
@@ -72208,6 +72616,21 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind, error)}`);
     }
   }
+  recordShutdownInterruption(state) {
+    const interruptedAt = this.now().toISOString();
+    if (this.stateStore?.recordInterruption) {
+      try {
+        this.applyPersistedState(state, this.stateStore.recordInterruption({
+          ...schedulerTaskStateKey(state.source, state.task),
+          interruptedAt
+        }));
+      } catch (stateError) {
+        console.error(`[olympus:source-scheduler] state_persist_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${safeSchedulerErrorKind(stateError)}`);
+      }
+    }
+    state.nextRunAt = Date.parse(interruptedAt);
+    console.info(`[olympus:source-scheduler] task_interrupted_by_shutdown source_id=${state.source.sourceId} task_id=${state.task.id}`);
+  }
   applyPendingUnparks(dueAt) {
     if (!this.stateStore?.pendingUnparks)
       return;
@@ -72225,7 +72648,7 @@ ${request.taskId}`);
       state.nextRunAt = Math.min(state.nextRunAt, dueAt);
     }
   }
-  async runWithTransientRetries(state, task, attemptedAt, provenance) {
+  async runWithTransientRetries(state, task, attemptedAt, provenance, stopsAtStart) {
     let lastError;
     for (let attempt = 1;attempt <= this.maxTransientRetries; attempt += 1) {
       try {
@@ -72243,7 +72666,11 @@ ${request.taskId}`);
         lastError = error;
         if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries)
           break;
+        if (this.stops !== stopsAtStart)
+          break;
         await this.sleep(this.errorBackoffMs);
+        if (this.stops !== stopsAtStart)
+          break;
       }
     }
     throw lastError;
@@ -72566,7 +72993,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash28("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -73877,7 +74304,7 @@ init_source_ingestion_policy();
 
 // src/workers/local-files/volume-identity.ts
 init_paths();
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { existsSync as existsSync30, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
@@ -74087,7 +74514,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value) {
-  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash30("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -75083,7 +75510,7 @@ init_tier_ledger();
 init_tier_classifier();
 import { chmodSync as chmodSync7, existsSync as existsSync32, lstatSync as lstatSync15, mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
 import { join as join41 } from "node:path";
-import { createHash as createHash30, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash31, randomUUID as randomUUID12 } from "node:crypto";
 
 // src/workers/classification/embedding-logistic.ts
 var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e";
@@ -75276,7 +75703,7 @@ function prefilterVector(copy, reject = () => {
   return mean;
 }
 function copyFingerprint2(copy) {
-  const hash2 = createHash30("sha256").update(JSON.stringify(copy.chunks));
+  const hash2 = createHash31("sha256").update(JSON.stringify(copy.chunks));
   for (const vector of copy.vectors) {
     hash2.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
     hash2.update(vector.embedding);
@@ -75524,7 +75951,7 @@ class EmbeddingPrefilter {
   }
   trainingFingerprint(row) {
     const subject = subjectOf(row);
-    return createHash30("sha256").update(JSON.stringify([
+    return createHash31("sha256").update(JSON.stringify([
       row,
       this.options.ledger.copies(subject),
       this.options.ledger.getOverride(subject),
@@ -76043,13 +76470,14 @@ init_sniffer_lane();
 init_sniffer_store();
 init_tier_classifier();
 init_tier_ledger();
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 import { mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname39 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 30000;
 var SNIFFER_MAX_CONCURRENT_CALLS = 8;
+var SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 var OUTPUT_CHARS_PER_ITEM = 110;
 
@@ -76109,7 +76537,7 @@ var SECRET_SCREEN_CACHE_LIMIT = 20000;
 var secretScreenCache = new Map;
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash31("sha256").update(own3).digest("base64");
+  const key2 = createHash32("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -76406,7 +76834,8 @@ async function runSnifferPass(options) {
       return true;
     });
   }
-  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
+  const maxConcurrent = options.lane.kind === "venice" ? SNIFFER_MAX_CONCURRENT_CLOUD_CALLS : SNIFFER_MAX_CONCURRENT_CALLS;
+  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(maxConcurrent, Math.floor(options.concurrentCalls ?? 1)));
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
@@ -76580,6 +77009,15 @@ import { existsSync as existsSync33 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
+var GLOBAL_TIMERS = {
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (timer) => clearInterval(timer),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+function unrefTimer(timer) {
+  timer?.unref?.();
+}
 var MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 var DEFAULT_AUTO_MOVES_PER_PASS = 1000;
 var DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
@@ -76644,24 +77082,27 @@ class TierSnifferService {
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
   }
+  timers() {
+    return this.options.timers ?? GLOBAL_TIMERS;
+  }
   start() {
     if (this.timer)
       return;
-    this.timer = setInterval(() => {
+    this.timer = this.timers().setInterval(() => {
       this.drainMoves();
       this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
-    this.timer.unref?.();
+    unrefTimer(this.timer);
     this.wake();
   }
   wake() {
     if (this.stopped || this.continuation)
       return;
-    this.continuation = setTimeout(() => {
+    this.continuation = this.timers().setTimeout(() => {
       this.continuation = undefined;
       this.scheduledRun();
     }, 0);
-    this.continuation.unref?.();
+    unrefTimer(this.continuation);
   }
   async scheduledRun() {
     if (this.notAnsweringUntilMs > this.clockMs())
@@ -76675,7 +77116,7 @@ class TierSnifferService {
     const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
     if (!filters.length)
       return;
-    this.trainingTimer = setTimeout(() => {
+    this.trainingTimer = this.timers().setTimeout(() => {
       this.trainingTimer = undefined;
       const shouldYield = () => this.stopped || this.trainingJudge !== judge2 || this.yieldNow();
       const job = (async () => {
@@ -76698,12 +77139,12 @@ class TierSnifferService {
         this.scheduleTraining(judge2, !this.yieldNow() && filters.some((filter) => filter.trainingPending) ? 0 : 1000);
       });
     }, delay);
-    this.trainingTimer.unref?.();
+    unrefTimer(this.trainingTimer);
   }
   pauseTraining() {
     this.trainingJudge = undefined;
     if (this.trainingTimer)
-      clearTimeout(this.trainingTimer);
+      this.timers().clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
   }
   async finishTrainingValidation(signal) {
@@ -76729,10 +77170,10 @@ class TierSnifferService {
     this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation)
-      clearTimeout(this.continuation);
+      this.timers().clearTimeout(this.continuation);
     this.continuation = undefined;
     if (this.timer)
-      clearInterval(this.timer);
+      this.timers().clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running)
@@ -77117,6 +77558,11 @@ class TierSnifferService {
       if (!this.fairTurn)
         this.yieldingSinceMs = undefined;
       return false;
+    }
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
     }
     if (this.fairTurn)
       return false;
@@ -77541,17 +77987,26 @@ class TierSnifferService {
     }
   }
   newRaisesQueued() {
-    return this.ledgerPaths().some((path) => {
+    const paths = this.ledgerPaths();
+    let budget = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+    const offset = this.moveLedgerOffsets.raise % Math.max(1, paths.length);
+    for (const path of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0)
+        return false;
       try {
         const set2 = tierSetForLedger(path);
         if (!set2 || !setEmbedsWithBuiltInOnly(set2))
-          return false;
-        const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
-        return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
+          continue;
+        for (const record3 of set2.ledger.listMoving({ limit: budget, direction: "raise" }).filter(isAutoMoveCandidate)) {
+          budget--;
+          if (!this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`))
+            return true;
+        }
       } catch {
         return true;
       }
-    });
+    }
+    return false;
   }
   async drainMoves(direction = "raise") {
     try {
@@ -77582,6 +78037,13 @@ class TierSnifferService {
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
       return;
+    }
+  }
+  ownerAnswering() {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
   answering() {
@@ -77678,10 +78140,10 @@ class TierSnifferService {
       } catch {}
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.rechecked > 0 || logSkipped) {
       if (total.builtinPromptSkipped > 0)
         this.lastBuiltinPromptSkipLogMs = this.clockMs();
-      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}` + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}` + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`);
+      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}` + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}` + `; builtin_prompt_skipped=${total.builtinPromptSkipped}; owner_recheck=${total.rechecked}.`);
     }
     return total;
   }
@@ -78326,7 +78788,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash32("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash33("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -78656,7 +79118,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash32("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash33("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);

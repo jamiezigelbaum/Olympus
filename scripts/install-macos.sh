@@ -129,7 +129,15 @@ sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 bytes_of() { wc -c < "$1" | tr -d ' '; }
 
 # fetch <url> <file>: HTTPS only, TLS 1.2 or later, fail on HTTP errors.
-fetch() { curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "$2" "$1"; }
+# Retries a dropped connection or a 5xx answer six times, five seconds apart
+# (#1038), and leaves the last HTTP status in FETCH_STATUS for download_advice.
+fetch() { FETCH_STATUS=$(curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-delay 5 -w '%{http_code}' -o "$2" "$1"); }
+download_advice() {
+  case "${FETCH_STATUS:-000}" in
+    5??) printf 'The download server returned an error (HTTP %s). Try again in a few minutes. Nothing was changed on this Mac.' "$FETCH_STATUS" ;;
+    *) printf 'Check the internet connection and run this again. Nothing was changed on this Mac.' ;;
+  esac
+}
 
 check_mac() {
   [ "$(uname -s)" = "Darwin" ] || die "this installer is for macOS."
@@ -339,7 +347,7 @@ download_bun() {
   [ ! -f "$WORK/bun-darwin-aarch64/bun" ] || return 0
   step "Downloading Bun $BUN_VERSION, the runtime Olympus uses ($(megabytes "$BUN_BYTES_DARWIN_AARCH64"))..."
   fetch "$BUN_BASE/bun-v$BUN_VERSION/bun-darwin-aarch64.zip" "$WORK/bun.zip" \
-    || die "Bun could not be downloaded." "Check the internet connection and run this again. Nothing was changed on this Mac."
+    || die "Bun could not be downloaded." "$(download_advice)"
   if [ "$(sha256_of "$WORK/bun.zip")" != "$BUN_SHA256_DARWIN_AARCH64" ] || [ "$(bytes_of "$WORK/bun.zip")" != "$BUN_BYTES_DARWIN_AARCH64" ]; then
     die "the Bun download did not match its checksum, so it was not used." "Nothing was changed on this Mac. Run this again; if it happens again, email $SUPPORT_EMAIL."
   fi
@@ -439,7 +447,7 @@ main() {
 
   step "Downloading Olympus $OLYMPUS_VERSION ($(megabytes "$OLYMPUS_BYTES"))..."
   fetch "$ARTIFACT_URL" "$WORK/$ARTIFACT" \
-    || die "Olympus could not be downloaded from $ARTIFACT_URL." "Check the internet connection and run this again. Nothing was changed on this Mac."
+    || die "Olympus could not be downloaded from $ARTIFACT_URL." "$(download_advice)"
   if [ "$(sha256_of "$WORK/$ARTIFACT")" != "$OLYMPUS_SHA256" ] || [ "$(bytes_of "$WORK/$ARTIFACT")" != "$OLYMPUS_BYTES" ]; then
     die "the Olympus download did not match its checksum, so it was not used." "Nothing was changed on this Mac. Run this again; if it happens again, email $SUPPORT_EMAIL."
   fi
@@ -451,7 +459,7 @@ main() {
   if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
     step "Downloading the WhatsApp bridge ($(megabytes "$WHATSAPP_BRIDGE_BYTES"))..."
     fetch "$RELEASE_BASE/$OLYMPUS_VERSION/$WHATSAPP_BRIDGE_NAME-darwin-arm64" "$WORK/whatsapp-bridge" \
-      || die "the WhatsApp bridge could not be downloaded." "Check the internet connection and run this again. Nothing was changed on this Mac."
+      || die "the WhatsApp bridge could not be downloaded." "$(download_advice)"
     if [ "$(sha256_of "$WORK/whatsapp-bridge")" != "$WHATSAPP_BRIDGE_SHA256" ] || [ "$(bytes_of "$WORK/whatsapp-bridge")" != "$WHATSAPP_BRIDGE_BYTES" ]; then
       die "the WhatsApp bridge download did not match its checksum, so it was not used." "Nothing was changed on this Mac. Run this again; if it happens again, email $SUPPORT_EMAIL."
     fi
@@ -506,6 +514,11 @@ main() {
     else
       say "Desktop, Documents, Downloads and iCloud need the Olympus helper. Retry: curl -fsSL https://olympusplugin.ai/install.sh | sh, or run olympus engine install-helper --from <signed app> if you have the app."
     fi
+  elif [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -x "$SUPPORT/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" ] \
+    && "$BUN" "$RELEASE/dist/cli.js" engine status > "$WORK/helper-status" 2>> "$LOG" </dev/null 8>&- \
+    && tr -d '[:space:]' < "$WORK/helper-status" | grep -Fq '"helper":{"installed":true,"in_use":true'; then
+    # An earlier release installed the helper and the engine still starts through it.
+    say "This release has no new Olympus helper; the one already installed stays in use for Desktop, Documents, Downloads and iCloud."
   else
     say "Desktop, Documents, Downloads and iCloud are not available in this release."
   fi

@@ -35,7 +35,9 @@
 //   recorded, and the copies handed to the one Secrets policy
 //   (secrets-disposition.ts).
 // - A row the pass leaves as it was is stamped (`markRejudged`), so it is not
-//   re-read on every tick; a page reads a bounded window of the ledger.
+//   re-read on every tick; a page reads a bounded window of the ledger. A row
+//   whose serving text cannot be read is not settled: it is retried after a
+//   backoff (`markRejudgeUnavailable`).
 // - Runs only with a sniffer configured (the sniffer service calls it): with
 //   no private lane, recorded decisions stand exactly as before.
 
@@ -58,6 +60,7 @@ import {
   RETIRED_SOURCE_PRIOR_REASON,
   restsOnRetiredSourcePrior,
   TIER_CLASSIFIER_VERSION,
+  type OwnerTierRule,
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
@@ -115,6 +118,8 @@ export interface TierRejudgeReport {
   causeContentPrompt: number;
   /** Settled items in the scanned window whose only stale input is built-in wording. */
   builtinPromptSkipped: number;
+  /** Items the owner asked to check again (`olympus tier recheck`) that this pass re-judged. */
+  rechecked: number;
 }
 
 const CAUSE_FIELD: Record<TierRejudgeCause, keyof TierRejudgeReport> = {
@@ -146,7 +151,7 @@ export function emptyTierRejudgeReport(): TierRejudgeReport {
   return {
     heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0,
     causeHeld: 0, causeRetiredPrior: 0, causeMissingQuestion: 0, causeClassifier: 0, causeOwnerWords: 0, causeJudgeModel: 0,
-    causeNamesPrompt: 0, causeContentPrompt: 0, builtinPromptSkipped: 0,
+    causeNamesPrompt: 0, causeContentPrompt: 0, builtinPromptSkipped: 0, rechecked: 0,
   };
 }
 
@@ -203,10 +208,41 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord,
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
+  // The owner's re-check requests come first, from the same budget.
+  const recheck = { rules: classification.rules ?? [] };
+  let budget = limit;
+  for (const request of ledger.recheckRequests()) {
+    if (budget <= 0) break;
+    const scoped = ledger.recheckScopePage(request.scope, { ...(request.after ? { after: request.after } : {}), limit: budget });
+    for (const record of scoped.records) {
+      yield record;
+      budget -= 1;
+      if (!rechecks(record)) {
+        report.skipped += 1;
+        continue;
+      }
+      report.rechecked += 1;
+      try {
+        rejudgeStoredContent(set, record, {
+          sniffer: classification.sniffer,
+          ...(classification.retirePublic ? { retirePublic: true } : {}),
+          report,
+          key,
+          autoMoves: options.autoMoves === true,
+          recheck,
+        });
+      } catch {
+        // The item keeps its recorded decision; the owner can ask again.
+        report.failed += 1;
+      }
+    }
+    ledger.advanceRecheck(request, scoped.next);
+  }
+  if (budget <= 0) return { report, ...(options.after ? { next: options.after } : {}) };
   const page = ledger.rejudgeCandidatePage({
     ...key,
     ...(options.after ? { after: options.after } : {}),
-    limit,
+    limit: budget,
   });
   report.builtinPromptSkipped = page.builtinPromptSkipped;
   for (const [index, record] of page.records.entries()) {
@@ -228,6 +264,16 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord,
     }
   }
   return { report, ...(page.next ? { next: page.next } : {}) };
+}
+
+/**
+ * Whether an item in a re-check's scope is judged again: a settled, routed
+ * item whose text was read. Secrets, items mid-move or waiting on a question,
+ * and items the owner set are left exactly as they are.
+ */
+function rechecks(record: TierLedgerRecord): boolean {
+  return record.routed && record.contentRead && record.state === 'current'
+    && record.contentTier !== 'secrets' && record.decidedBy !== 'override';
 }
 
 /**
@@ -253,6 +299,12 @@ export function rejudgeStoredContent(
      * holds must not stay visible outside Private).
      */
     hideRaises?: boolean;
+    /**
+     * The owner asked to check this item's chat or source again (#638): its
+     * names are judged again by the model whatever judged them before, and
+     * may come out lower. The owner's rules decide first.
+     */
+    recheck?: { rules: readonly OwnerTierRule[] };
   },
 ): void {
   const { report, key, autoMoves } = options;
@@ -270,9 +322,11 @@ export function rejudgeStoredContent(
   const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
   const text = exported?.chunks.map((chunk) => chunk.boundedText).join('') ?? '';
   if (!exported || !text.trim()) {
-    // Nothing to read back: the decision stands, and the row is not re-read
-    // until the classifier or the sniffer changes again.
-    if (key) ledger.markRejudged(identity, key);
+    // Nothing to read back: the decision stands, but it was not re-judged, so
+    // the row is not stamped settled (#1002: an owner-words change would never
+    // be applied once the text came back). It is tried again after a backoff,
+    // or at once after a newer decision (markRejudgeUnavailable).
+    if (key) ledger.markRejudgeUnavailable(record, key);
     report.skipped += 1;
     return;
   }
@@ -302,7 +356,7 @@ export function rejudgeStoredContent(
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   // A child is judged again with its parent's names as context, as it was at listing and landing.
   const parentContext = sniffer ? parentNamesContext(set, identity) : undefined;
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext);
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext, options.recheck);
   const content = classifyContentTier(
     {
       text,
@@ -411,13 +465,17 @@ function rejudgeMetadata(
   subject: TierLedgerIdentity,
   holdUntilJudged = false,
   parentContext?: string,
+  recheck?: { rules: readonly OwnerTierRule[] },
 ): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
   const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
   // Names resting on a retired whole-source prior were never judged at all:
   // they are judged now, and may come out lower than the prior held them.
   const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
+  // A re-check the owner asked for judges any model verdict on the names again, the current judge's too.
+  const judgedAgain = (reason: string) => reason.startsWith('metadata:sniffer:')
+    && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
   if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
-    || (!retiredPrior && !record.reasons.some(reason => reason.startsWith('metadata:sniffer:') && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))) return previous;
+    || (!retiredPrior && !record.reasons.some(judgedAgain))) return previous;
   const signals = {
     ...(names.title ? { title: names.title } : {}),
     ...(names.path ? { path: names.path } : {}),
@@ -425,6 +483,12 @@ function rejudgeMetadata(
     folderKeys: names.folderKeys,
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
+  // An owner rule that matches the names now decides them, not this re-check:
+  // the owner-rule sweep (tier-rules-sweep.ts) applies it.
+  if (recheck && recheck.rules.length > 0) {
+    const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
+    if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons)) return previous;
+  }
   // The store retains scope folder keys but not labels (nor all provider
   // facts). An old model verdict may have relied on those missing signals.
   // Re-judging may raise it, but only a connector relist with complete signals
@@ -434,7 +498,12 @@ function rejudgeMetadata(
   // nothing this one has, so a better prompt may lower it (1.2.1 canary: names
   // a re-judge held Private by mistake otherwise stayed Private for good).
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  // The owner's re-check may lower names a model held higher (#638: a chat held
+  // Private by verdicts of builds that read its numeric id as an identity).
+  // A provider floor or prior recorded on the names is a fact the store does
+  // not keep the tier of, so names resting on one are never lowered here.
+  const ownerRecheck = recheck !== undefined && providerReasons.length === 0;
+  const baseline = retiredPrior || fromStoredNames || ownerRecheck ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
