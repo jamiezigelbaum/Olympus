@@ -29,7 +29,6 @@ export const JUDGE_CHECK_RANGE_MIN_ANSWERS = 30;
 export const JUDGE_CHECK_POOL = 50;
 /** How far back a new round pages for items no round has asked about yet. */
 export const JUDGE_CHECK_MAX_PAGES = 20;
-export const JUDGE_CHECK_PATH_ENV = 'OLYMPUS_JUDGE_CHECK_PATH';
 
 export type JudgeLabel = 'Personal' | 'Private';
 export type JudgeCheckAnswer = JudgeLabel | 'not_sure';
@@ -139,7 +138,8 @@ export class JudgeCheckError extends Error {
 }
 
 export function judgeCheckPath(env: Record<string, string | undefined> = process.env): string {
-  return env[JUDGE_CHECK_PATH_ENV]?.trim() || defaultOwnerConfigPath('judge-check.json', env);
+  // Beside the owner's other privacy settings, under the folders `delete --all` removes; no override can move it elsewhere.
+  return defaultOwnerConfigPath('judge-check.json', env);
 }
 
 /**

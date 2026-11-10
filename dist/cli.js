@@ -104568,7 +104568,7 @@ var init_source_scheduler_state = __esm(() => {
 import { existsSync as existsSync67, mkdirSync as mkdirSync43, readFileSync as readFileSync50 } from "node:fs";
 import { dirname as dirname71 } from "node:path";
 function judgeCheckPath(env = process.env) {
-  return env[JUDGE_CHECK_PATH_ENV]?.trim() || defaultOwnerConfigPath("judge-check.json", env);
+  return defaultOwnerConfigPath("judge-check.json", env);
 }
 function wilsonInterval(agreed, compared, z = 1.96) {
   if (compared <= 0)
@@ -104819,7 +104819,7 @@ function forgetJudgeCheckItems(path, scopes, { dryRun = false } = {}) {
 `);
   return count;
 }
-var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_RANGE_MIN_ANSWERS = 30, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_MAX_PAGES = 20, JUDGE_CHECK_PATH_ENV = "OLYMPUS_JUDGE_CHECK_PATH", JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
+var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_RANGE_MIN_ANSWERS = 30, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_MAX_PAGES = 20, JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
 var init_judge_check = __esm(() => {
   init_atomic_file();
   init_owner_config_read();
