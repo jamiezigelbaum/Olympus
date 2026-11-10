@@ -221,6 +221,10 @@ function rawItemFromMessageRow(row: AppleMessageRow, account: string, fetchedAt:
     content: text === undefined ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
       sender,
+      // Who sent it, as the shared people index reads it (#1076): the
+      // handle (a phone number or an email address) and the owner's own.
+      ...(row.is_from_me !== 1 && row.sender_handle ? { senderId: row.sender_handle } : {}),
+      ...(row.is_from_me === 1 || row.is_from_me === 0 ? { senderIsOwner: row.is_from_me === 1 } : {}),
       ...(row.chat_identifier ? { chat_identifier: row.chat_identifier } : {}),
       ...(sentAt ? { sent_at: sentAt } : {}),
       ...(row.service ? { service: row.service } : {}),

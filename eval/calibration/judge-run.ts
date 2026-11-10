@@ -48,8 +48,9 @@ import {
   snifferTierKey,
 } from '../../src/workers/classification/sniffer.ts';
 import { createVeniceAnalystModel } from '../../src/core/analyst-venice.ts';
+import { privacyOwnerContext } from '../../src/workers/classification/privacy-profile.ts';
 import type { AnalystModel } from '../../src/core/analyst.ts';
-import { CALIBRATION_DIR_DEFAULT, readImportance, readLabels, readSample, type CalibrationSampleItem } from './files.ts';
+import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, scoredTier, readImportance, readLabels, readSample, type CalibrationSampleItem } from './files.ts';
 import { judgeInput } from './judge-input.ts';
 import {
   confusion,
@@ -362,8 +363,14 @@ async function runPass(asked: readonly Asked[], shape: Awaited<ReturnType<typeof
   return { answers, itemsPerMinute: minutes > 0 ? modelItems / minutes : 0 };
 }
 
-function splitOf(id: string): 'dev' | 'test' {
-  return createHash('sha256').update(id).digest()[0]! % 2 === 0 ? 'dev' : 'test';
+/** A whole-item sample fixes each item's half by its related group; older samples split by a hash of the id. */
+function splitOf(item: Pick<CalibrationSampleItem, 'id' | 'split'>): 'dev' | 'test' {
+  return item.split ?? (createHash('sha256').update(item.id).digest()[0]! % 2 === 0 ? 'dev' : 'test');
+}
+
+/** The SHA-256 of the sample file, so a scorer can refuse a result run on another sample. */
+function sampleSha256(): string {
+  return createHash('sha256').update(readFileSync(join(dir, SAMPLE_FILE))).digest('hex');
 }
 
 function stratumSizes(recipe: unknown): StratumSizes | undefined {
@@ -385,7 +392,7 @@ async function main(): Promise<void> {
   if (!modelName) throw new Error('--model NAME is required, so a result always says what produced it.');
   const wordsFile = flag('--owner-words');
   if (!wordsFile && !argv.includes('--no-owner-words')) throw new Error('Pass --owner-words FILE, or --no-owner-words to run without them.');
-  const ownerContext = wordsFile ? readFileSync(wordsFile, 'utf8').trim() || undefined : undefined;
+  const ownerContext = ownerWordsFrom(wordsFile);
   const split = flag('--split');
   if (split !== undefined && split !== 'dev' && split !== 'test') throw new Error('--split is dev or test.');
 
@@ -394,8 +401,8 @@ async function main(): Promise<void> {
   const excluded = new Set((flag('--exclude') ?? '').split(',').filter(Boolean));
   const labeled = sample.items
     .filter((item) => !excluded.has(item.id))
-    .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
-    .filter((item) => split === undefined || splitOf(item.id) === split)
+    .filter((item) => scoredTier(labels[item.id]?.label) !== undefined)
+    .filter((item) => split === undefined || splitOf(item) === split)
     .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
   if (labeled.length === 0) throw new Error('No Personal or Private labels to score.');
   const asked = labeled.map(ask);
@@ -432,10 +439,10 @@ async function main(): Promise<void> {
 
   const rows: ScoredRow[] = labeled.map((item) => ({
     id: item.id,
-    owner: labels[item.id]!.label as Tier,
+    owner: scoredTier(labels[item.id]!.label)!,
     judge: warm.answers.get(item.id)!.judge,
     source: item.source ?? 'files',
-    split: splitOf(item.id),
+    split: splitOf(item),
     ...(item.stratum ? { stratum: item.stratum } : {}),
   }));
   const answers = [...warm.answers.values()];
@@ -446,6 +453,7 @@ async function main(): Promise<void> {
 
   const importance = readImportance(dir).labels;
   const result = {
+    sampleSha256: sampleSha256(),
     // First, because a missed Important item is the mistake that matters most.
     privateMissed: Object.keys(importance).length > 0 ? privateByImportance(rows, importance) : undefined,
     at: new Date().toISOString(),
@@ -490,17 +498,24 @@ function selectLabeled() {
   const excluded = new Set((flag('--exclude') ?? '').split(',').filter(Boolean));
   const labeled = sample.items
     .filter((item) => !excluded.has(item.id))
-    .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
-    .filter((item) => split === undefined || splitOf(item.id) === split)
+    .filter((item) => scoredTier(labels[item.id]?.label) !== undefined)
+    .filter((item) => split === undefined || splitOf(item) === split)
     .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
   if (labeled.length === 0) throw new Error('No Personal or Private labels to score.');
   return { sample, labels, labeled, excluded: excluded.size };
 }
 
+/** `--owner-words saved` reads this machine's saved privacy words, as the live engine (and score.ts) does. */
+function ownerWordsFrom(wordsFile: string | undefined): string | undefined {
+  if (!wordsFile) return undefined;
+  if (wordsFile === 'saved') return privacyOwnerContext();
+  return readFileSync(wordsFile, 'utf8').trim() || undefined;
+}
+
 function readOwnerContext(): string | undefined {
   const wordsFile = flag('--owner-words');
   if (!wordsFile && !argv.includes('--no-owner-words')) throw new Error('Pass --owner-words FILE, or --no-owner-words to run without them.');
-  return wordsFile ? readFileSync(wordsFile, 'utf8').trim() || undefined : undefined;
+  return ownerWordsFrom(wordsFile);
 }
 
 async function mainVenice(): Promise<void> {
@@ -522,16 +537,17 @@ async function mainVenice(): Promise<void> {
 
   const rows: ScoredRow[] = labeled.map((item) => ({
     id: item.id,
-    owner: labels[item.id]!.label as Tier,
+    owner: scoredTier(labels[item.id]!.label)!,
     judge: warm.answers.get(item.id)!.judge,
     source: item.source ?? 'files',
-    split: splitOf(item.id),
+    split: splitOf(item),
     ...(item.stratum ? { stratum: item.stratum } : {}),
   }));
   const sizes = stratumSizes(sample.recipe);
   const weighted = sizes ? reweighted(rows, sizes) : undefined;
   const importance = readImportance(dir).labels;
   const result = {
+    sampleSha256: sampleSha256(),
     // First, because a missed Important item is the mistake that matters most.
     privateMissed: Object.keys(importance).length > 0 ? privateByImportance(rows, importance) : undefined,
     at: new Date().toISOString(),
