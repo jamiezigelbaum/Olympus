@@ -180,7 +180,7 @@ export function keywordStatementKind(sql: string): string {
   if (sql.includes('MIN(top.rank)')) return 'ranked_match_page_bounded';
   if (sql.includes('MIN(connector_store_fts.rank)')) return 'ranked_match_page';
   if (sql.includes('COUNT(DISTINCT item_pk)')) return 'concept_weight_count';
-  if (sql.includes('candidate_rows.item_pk IN (') || sql.includes('connector_store_fts.item_pk IN (')) return 'concept_hits_for_candidates';
+  if (sql.includes('connector_store_fts.item_pk IN (')) return 'concept_hits_for_candidates';
   if (/FROM items WHERE tombstoned = 0/.test(sql) && sql.includes('COUNT(*)')) return 'item_population_count';
   return `other:${sql.replace(/\s+/g, ' ').trim().slice(0, 60)}`;
 }
