@@ -12,7 +12,7 @@ import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
-import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
+import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
@@ -50,7 +50,7 @@ import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/wo
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -161,6 +161,7 @@ import {
   type LoadSovereigntyOptions,
   type SovereigntyModelProfile,
   type SovereigntyResolvedProfile,
+  validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import {
@@ -2739,6 +2740,18 @@ export async function main(): Promise<void> {
     return 'ready';
   };
   let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
+  let deferredReloads: ModelKeyReloadRequest[] | undefined;
+  /** Run `writes` with every reload they request held until they finish, then requested once (#1050). */
+  const withDeferredReloads = async <T>(writes: () => Promise<T>): Promise<T> => {
+    if (deferredReloads) return writes();
+    deferredReloads = [];
+    try { return await writes(); }
+    finally {
+      const held = deferredReloads;
+      deferredReloads = undefined;
+      for (const request of held) requestModelReload(request);
+    }
+  };
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -6213,6 +6226,20 @@ export async function main(): Promise<void> {
               requestModelReload();
               return true;
             },
+            deferReloads: withDeferredReloads,
+            savePrivateAnswerMode: (choice) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return { ok: false, message: 'This Olympus has no policy file to change.' };
+              // The policy on disk, not the boot copy: an earlier change may already be saved.
+              let current;
+              try { current = validateSovereigntyConfig(JSON.parse(readFileSync(sovereigntyEngine.path, 'utf8'))); }
+              catch { return { ok: false, message: 'The privacy policy file cannot be read.' }; }
+              let result;
+              try { result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current); }
+              catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'The Private-answer mode could not be saved.' }; }
+              if (!result.ok) return { ok: false, message: 'The privacy policy changed while saving. Refresh and try again.' };
+              if (!result.changed) return { ok: true, message: 'Already in use.' };
+              return { ok: true, message: requestModelReload() ? 'Saved. Olympus is applying it.' : 'Saved. Restart Olympus to apply it.' };
+            },
             connectModelKey,
             // The panel's tools on the computer; bound late (set up further
             // down; called only per request).
@@ -7464,11 +7491,17 @@ export async function main(): Promise<void> {
     // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
-  requestModelReload = shutdownSignals.modelReload({
+  const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
+  requestModelReload = (request) => {
+    // While a settings proposal is being applied, every writer's reload waits
+    // for the last write, so the restart cannot cut the batch short.
+    if (deferredReloads) { deferredReloads.push(request ?? {}); return workerRestartsItself(workerLaunch, process.env); }
+    return reloadNow(request);
+  };
   modelReloadInstalled = true;
   // After the reload handler, so a newer strongest model found at boot is
   // applied; then daily, so a long-running worker follows new releases too.

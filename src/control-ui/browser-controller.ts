@@ -325,7 +325,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-source-action],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-source-action],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind],form[data-settings-proposal]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -383,6 +383,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'start_oauth': return 'Connecting…';
       case 'connect_api_key': return 'Validating the key…';
       case 'connect_this_computer': return 'Connecting…';
+      case 'apply_settings_proposal': return 'Applying…';
       default: return 'Working…';
     }
   }
@@ -550,6 +551,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (form.hasAttribute('data-computer-use')) return { action: 'set_computer_use', choice: (form.hasAttribute('data-server-mode') ? body.server === 'on' : body.choice === 'server') ? 'server' : 'everyday' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
+    if (form.hasAttribute('data-settings-proposal')) {
+      // The proposal the owner is looking at, by id: a newer one from the agent is never applied unseen.
+      if (!body.id) return undefined;
+      return { action: form.dataset.settingsProposal === 'discard' ? 'discard_settings_proposal' : 'apply_settings_proposal', id: body.id };
+    }
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {
       return {
@@ -1479,7 +1485,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-source-action],[data-local-models-discover],[data-local-models-test]',
+      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-source-action],[data-local-models-discover],[data-local-models-test],[data-settings-proposal]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only

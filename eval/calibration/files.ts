@@ -45,6 +45,45 @@ export interface CalibrationSampleItem {
   judgeSeesExact?: boolean;
   /** The messages either side of this one, for the owner only: judge runs ignore this. */
   context?: { before: CalibrationContextMessage[]; after: CalibrationContextMessage[] };
+  /** Whole-item samples: the half this item scores in, chosen by its related group, not its id. */
+  split?: 'dev' | 'test';
+  /** Whole-item samples: the chance this item had of being drawn (its cell's drawn / population). */
+  inclusionProbability?: number;
+  /** Whole-item samples: everything else the owner sees and the scorer counts. */
+  whole?: WholeItemDetail;
+}
+
+/** How an item's text was read, by kinds and statuses only. */
+export interface ExtractionNote {
+  /** read: text extracted; ocr: read from a scan or picture; failed: no usable text; pending: not read yet. */
+  outcome: 'read' | 'ocr' | 'transcript' | 'failed' | 'pending';
+  status: string;
+  extractorKind: string;
+  errorKind?: string;
+  artifactKinds: string[];
+  warnings: string[];
+}
+
+export interface WholeItemChild {
+  name: string;
+  mimeType: string;
+  text: string;
+  truncatedChars: number;
+  extraction?: ExtractionNote;
+}
+
+export interface WholeItemDetail {
+  /** Conversation, folder or (for email) sender keys: related items share one. */
+  groups: string[];
+  /** The item's own text was longer than the page keeps; this many characters are not shown. */
+  truncatedChars: number;
+  /** Attachments and other child items, each whole. */
+  children: WholeItemChild[];
+  extraction?: ExtractionNote;
+  /** The judge reads all of the item's own text (false: only an excerpt). */
+  judgeReadsAll: boolean;
+  /** The shared injection screen holds this item's judge input: no model reads it. */
+  injection: boolean;
 }
 
 export interface CalibrationSample {
@@ -58,11 +97,30 @@ export interface CalibrationSample {
   recipe?: unknown;
 }
 
-export type CalibrationLabel = 'personal' | 'private' | 'unsure' | 'skip';
+export type CalibrationLabel = 'personal' | 'private' | 'secret' | 'unsure' | 'skip';
+
+/**
+ * The side a label is scored on by score.ts and judge-run.ts: Secret counts as
+ * Private (it must never be Personal); Not sure, Skip and no label are not scored.
+ */
+export function scoredTier(label: string | undefined): 'personal' | 'private' | undefined {
+  if (label === 'personal') return 'personal';
+  return label === 'private' || label === 'secret' ? 'private' : undefined;
+}
+
+/** Whole-item pass: where the sensitive part of a Private or Secret item is. */
+export type SensitiveWhere = 'excerpt' | 'outside' | 'attachment' | 'names';
 
 export interface CalibrationLabels {
   version: 1;
-  labels: Record<string, { label: CalibrationLabel; at: string; correctedInImportancePass?: true }>;
+  labels: Record<string, {
+    label: CalibrationLabel;
+    at: string;
+    correctedInImportancePass?: true;
+    /** Whole-item pass: how much a Private item matters, given with the label. */
+    importance?: PrivateImportance;
+    where?: SensitiveWhere;
+  }>;
 }
 
 /** How much an item the owner called Private matters: a second pass, kept apart from the labels. */
