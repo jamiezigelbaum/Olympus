@@ -562,7 +562,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -2852,7 +2852,9 @@ export async function main(): Promise<void> {
   const backupService = createBackupService({
     paths: defaultBackupServicePaths(process.env),
     env: process.env,
-    exportInto: (destination) => exportOlympusData({ destination }),
+    // With the switch on the background writes it, between its own writes, so
+    // the stores and ledgers agree; this process packs it (#1224).
+    exportInto: engineFront ? frontDataExport(engineFront.client) : (destination) => exportOlympusData({ destination }),
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload(),
   });
@@ -7889,6 +7891,12 @@ export async function main(): Promise<void> {
           const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
           return runTierSetOnRecordedItem(locator, 'private', expected);
         },
+        // A backup's export. exportOlympusData is synchronous, so none of this
+        // process's writes runs between its snapshots (#1224).
+        export_data: ({ destination }) => {
+          exportOlympusData({ destination });
+          return { exported: destination };
+        },
         capture_stop: async ({ source }) => {
           await captureOwnership.stopForUnpair(source);
           return { stopped: source };
@@ -7918,6 +7926,7 @@ export async function main(): Promise<void> {
         extraction_queue: ({ request }) => runForwarded(request),
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
+        data_export: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
         judge_boost: ({ identities }) => {

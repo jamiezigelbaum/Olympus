@@ -26,7 +26,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -42,6 +42,7 @@ import {
   engineStatusSnapshotPath,
   OwnerBusyMarks,
   restartAfterFront,
+  DATA_EXPORT_WAIT_MS,
   SOURCE_SYNC_WAIT_MS,
   tierCommandOnlyReads,
   waitForProcessExit,
@@ -760,6 +761,45 @@ describe('Make Private from the front', () => {
     const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
     expect(server).toMatch(/setItemPrivate: engineFront\s*\?\s*frontSetItemPrivate\(engineFront\.client\)/);
     expect(server).toMatch(/tier_set_recorded: async \(\{ locator, expected \}\) => \{[\s\S]{0,200}?runTierSetOnRecordedItem\(locator, 'private', expected\)/);
+  });
+});
+
+describe('exports across the split (#1224)', () => {
+  test('the background takes the snapshots, on the writer\'s own loop; the front packs them', async () => {
+    const exported: string[] = [];
+    let fail = false;
+    const bg = background({ export_data: async ({ destination }) => { if (fail) throw new Error('disk full'); exported.push(destination); return { files: 3 }; } });
+    const clock = createTestClock();
+    const client = new EngineCommandClient({ fetch: bg.fetch, authToken: TOKEN, sleep: clock.sleep, now: clock.now });
+    const exportInto = frontDataExport(client);
+    await exportInto('/tmp/backup-staging/export');
+    expect(exported).toEqual(['/tmp/backup-staging/export']);
+    // An export the background could not finish fails the backup; nothing is packed.
+    fail = true;
+    await expect(exportInto('/tmp/backup-staging/again')).rejects.toThrow('disk full');
+    // It waits as long as an export can take.
+    const waits: Array<number | undefined> = [];
+    await frontDataExport({ send: async (_command, options) => { waits.push(options?.timeoutMs); return { id: 'c', state: 'done', instance_id: 'b', result: {} }; } })('/x');
+    expect(waits).toEqual([DATA_EXPORT_WAIT_MS]);
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0090', command: { kind: 'export_data', destination: 'relative/path' } })).toThrow('absolute');
+    expect(parseEngineCommandEnvelope({ id: 'command-0091', command: { kind: 'export_data', destination: '/abs/export' } }).command).toEqual({ kind: 'export_data', destination: '/abs/export' });
+  });
+
+  test('the CLI\'s export (and its backup) is forwarded, with the export\'s wait', async () => {
+    const sent: Array<{ kind: string; timeoutMs: number | undefined }> = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command, options) => { sent.push({ kind: command.kind, timeoutMs: options?.timeoutMs }); return { id: 'c', state: 'done', instance_id: 'b', result: { status: 200, headers: {}, body: '{}' } }; } },
+      gate: createFrontGate(), restartFront: () => {},
+    });
+    const response = await routes(new Request('http://127.0.0.1/v1/cli/data-export', { method: 'POST', body: JSON.stringify({ output: '/abs/export' }) }));
+    expect(response!.status).toBe(200);
+    expect(sent).toEqual([{ kind: 'data_export', timeoutMs: DATA_EXPORT_WAIT_MS }]);
+  });
+
+  test('scheduled and Back up now exports run in the background with the switch on, and as before with it off', () => {
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/exportInto: engineFront\s*\?\s*frontDataExport\(engineFront\.client\)\s*:\s*\(destination\) => exportOlympusData\(\{ destination \}\),/);
+    expect(server).toMatch(/export_data: \(\{ destination \}\) => \{\s*exportOlympusData\(\{ destination \}\);/);
   });
 });
 

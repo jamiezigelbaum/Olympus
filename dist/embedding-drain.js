@@ -46739,6 +46739,7 @@ var init_connect = __esm(() => {
 });
 
 // src/core/cli-via-worker.ts
+var WORKER_CLI_ROUTE_PREFIX = "/cli/", WORKER_CLI_OPERATIONS;
 var init_cli_via_worker = __esm(() => {
   init_config();
   init_data_owner_lock();
@@ -46746,6 +46747,7 @@ var init_cli_via_worker = __esm(() => {
   init_operation_error();
   init_worker_auth();
   init_worker_transport();
+  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement", "pairing-account", "settings", "setup-status", "settings-propose"];
 });
 
 // src/core/engine-split.ts
@@ -73637,7 +73639,50 @@ init_secret_store();
 init_source_corpus_registry();
 init_selected_item_safety();
 init_venice_models();
+
+// src/workers/email-source/write-routes.ts
+init_cli_via_worker();
 init_public_surface();
+var WORKER_WRITE_PATHS = [
+  "/consult/ask",
+  "/archive-import/start",
+  "/archive-import/status",
+  "/archive-import/remove",
+  "/privacy-item/find",
+  "/privacy-item/raise",
+  "/source/answer",
+  "/source/answer/received",
+  "/source/answer/release",
+  "/source/export",
+  "/source/index/status",
+  "/source/credentials/recheck",
+  "/source/scheduler/status",
+  "/source/watch/create",
+  "/source/watches",
+  "/source/watch/cancel",
+  "/source/index/x-bookmarks/content/recover",
+  "/source/index/sync",
+  "/source/index/files/extract",
+  "/source/index/files/plan",
+  "/source/index/files/transcribe",
+  "/source/index/files/recycle-leases",
+  "/source/index/files/janitor-requeue",
+  "/source/index/files/extract-pdfs",
+  "/source/index/files/status",
+  "/source/index/dropbox/content/export-eval-shard",
+  "/source/index/search",
+  "/source/index/embed",
+  "/source/index/dropbox/content/extract",
+  "/source/index/dropbox/content/plan",
+  "/source/index/dropbox/content/recycle-leases",
+  "/source/index/dropbox/content/janitor-requeue",
+  "/source/index/dropbox/transcribe",
+  ...WORKER_CLI_OPERATIONS.map((operation) => `${WORKER_CLI_ROUTE_PREFIX}${operation}`)
+];
+var READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+var WRITE_PATHS = new Set(WORKER_WRITE_PATHS);
+
+// src/workers/email-source/index.ts
 init_judge_check();
 init_unpaired_sources();
 init_pairing_session_paths();
@@ -81619,6 +81664,7 @@ init_atomic_file();
 
 // src/workers/engine-split/runtime.ts
 var SOURCE_SYNC_WAIT_MS = 35 * 60000;
+var DATA_EXPORT_WAIT_MS = 3 * 60 * 60000;
 class OwnerBusyMarks {
   marks = new Map;
   lapseMs;

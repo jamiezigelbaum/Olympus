@@ -106751,70 +106751,53 @@ function exportOlympusData(options) {
   for (const source of selected) {
     const sourceRoot = join96(destination, "sources", safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
-    const stored = snapshotAtOneLedgerGeneration({
-      ledgerPaths: source.files.stores.filter((store) => store !== ":memory:").map(tierLedgerPathForStore),
-      discard: (attempt) => {
-        for (const path of attempt.files)
-          rmSync27(path, { force: true });
-      },
-      attempt: () => {
-        const local = { files: [], skipped: [], artifacts: [] };
-        const legacyIndex = source.files.preCutoverIndex;
-        if (legacyIndex) {
-          exportSqliteStore({
-            sqlitePath: legacyIndex.path,
-            destinationRoot: sourceRoot,
-            exportRoot: destination,
-            sourceId: source.sourceId,
-            role: "legacy_store",
-            expectedStoreId: legacyIndex.storeId,
-            files: local.files,
-            skipped: local.skipped,
-            artifacts: local.artifacts
-          });
+    const legacyIndex = source.files.preCutoverIndex;
+    if (legacyIndex) {
+      exportSqliteStore({
+        sqlitePath: legacyIndex.path,
+        destinationRoot: sourceRoot,
+        exportRoot: destination,
+        sourceId: source.sourceId,
+        role: "legacy_store",
+        expectedStoreId: legacyIndex.storeId,
+        files,
+        skipped: skipped2,
+        artifacts
+      });
+    }
+    source.files.stores.forEach((storePath, storeIndex) => {
+      const before = artifacts.length;
+      exportSqliteStore({
+        sqlitePath: storePath,
+        destinationRoot: sourceRoot,
+        exportRoot: destination,
+        sourceId: source.sourceId,
+        role: "connector_store",
+        expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+        files,
+        skipped: skipped2,
+        artifacts
+      });
+      if (artifacts.length > before) {
+        artifacts[before].storeIndex = storeIndex;
+        for (const row of readChunkMediaRefs(join96(destination, artifacts[before].relativePath))) {
+          if (!mediaRefs.has(row.media_sha256))
+            mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
         }
-        source.files.stores.forEach((storePath, storeIndex) => {
-          const before = local.artifacts.length;
-          exportSqliteStore({
-            sqlitePath: storePath,
-            destinationRoot: sourceRoot,
-            exportRoot: destination,
-            sourceId: source.sourceId,
-            role: "connector_store",
-            expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-            files: local.files,
-            skipped: local.skipped,
-            artifacts: local.artifacts
-          });
-          if (local.artifacts.length > before)
-            local.artifacts[before].storeIndex = storeIndex;
-          for (const [sidecar, path, storeId] of [
-            ["tier_ledger", tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
-            ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
-            ["secret_locations", secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID]
-          ]) {
-            if (!existsSync71(path))
-              continue;
-            const at = local.artifacts.length;
-            exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: "tier_sidecar", expectedStoreId: storeId, files: local.files, skipped: local.skipped, artifacts: local.artifacts });
-            if (local.artifacts.length > at)
-              Object.assign(local.artifacts[at], { storeIndex, sidecar });
-          }
-        });
-        return local;
+      }
+      for (const [sidecar, path, storeId] of [
+        ["tier_ledger", tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
+        ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
+        ["secret_locations", secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID]
+      ]) {
+        if (!existsSync71(path))
+          continue;
+        const at = artifacts.length;
+        exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: "tier_sidecar", expectedStoreId: storeId, files, skipped: skipped2, artifacts });
+        if (artifacts.length > at)
+          Object.assign(artifacts[at], { storeIndex, sidecar });
       }
     });
-    files.push(...stored.files);
-    skipped2.push(...stored.skipped);
-    artifacts.push(...stored.artifacts);
-    for (const artifact of stored.artifacts) {
-      if (artifact.role !== "connector_store")
-        continue;
-      for (const row of readChunkMediaRefs(join96(destination, artifact.relativePath))) {
-        if (!mediaRefs.has(row.media_sha256))
-          mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
-      }
-    }
     for (const policyPath of source.files.settings) {
       const destinationPath = join96(sourceRoot, basename13(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped2)) {
@@ -107736,30 +107719,6 @@ function requireSource(sourceId) {
 function requireAccount5(sourceId, context2) {
   return lifecycleAccountOf(requireSource(sourceId).sourceId, context2);
 }
-function snapshotAtOneLedgerGeneration(input) {
-  const paths = [...new Set(input.ledgerPaths)].filter((path) => existsSync71(path));
-  const attempts = input.attempts ?? 3;
-  for (let tried = 0;tried < attempts; tried += 1) {
-    const watches = paths.map((path) => {
-      const db = new Database25(path, { readonly: true });
-      db.exec("PRAGMA busy_timeout = 10000;");
-      return { db, start: ledgerDataVersion(db) };
-    });
-    try {
-      const result = input.attempt();
-      if (watches.every((watch) => ledgerDataVersion(watch.db) === watch.start))
-        return result;
-      input.discard(result);
-    } finally {
-      for (const watch of watches)
-        closeSqliteStore(watch.db, { checkpoint: false });
-    }
-  }
-  throw new OperationError("source_index_error", `Olympus kept changing privacy decisions while this source was exported, ${attempts} times over, so its stores and ledgers never matched; nothing was published for it.`, "Export again in a few minutes, or once the privacy judge has caught up.");
-}
-function ledgerDataVersion(db) {
-  return db.query("PRAGMA data_version").get().data_version;
-}
 function exportSqliteStore(options) {
   const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped: skipped2, artifacts } = options;
   if (!existsSync71(sqlitePath)) {
@@ -107806,7 +107765,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
       return false;
     throw new OperationError("source_index_error", `Failed to snapshot Olympus SQLite store for export: ${sqlitePath}`, "Retry the export once the store is readable; no partial snapshot was published.");
   } finally {
-    closeSqliteStore(db, { checkpoint: false });
+    closeSqliteStore(db);
   }
   return true;
 }
@@ -172021,6 +171980,59 @@ var init_google_pilot_client = __esm(() => {
   ]);
 });
 
+// src/workers/email-source/write-routes.ts
+function workerRouteAllowed(method, pathname, basePath) {
+  if (pathname.startsWith("/dashboard") || pathname.startsWith("/oauth/callback/")) {
+    return isV04PublicDashboardRoute(method, pathname);
+  }
+  if (READ_METHODS.has(method))
+    return true;
+  return pathname.startsWith(`${basePath}/`) && WRITE_PATHS.has(pathname.slice(basePath.length));
+}
+var WORKER_WRITE_PATHS, READ_METHODS, WRITE_PATHS;
+var init_write_routes = __esm(() => {
+  init_cli_via_worker();
+  init_public_surface();
+  WORKER_WRITE_PATHS = [
+    "/consult/ask",
+    "/archive-import/start",
+    "/archive-import/status",
+    "/archive-import/remove",
+    "/privacy-item/find",
+    "/privacy-item/raise",
+    "/source/answer",
+    "/source/answer/received",
+    "/source/answer/release",
+    "/source/export",
+    "/source/index/status",
+    "/source/credentials/recheck",
+    "/source/scheduler/status",
+    "/source/watch/create",
+    "/source/watches",
+    "/source/watch/cancel",
+    "/source/index/x-bookmarks/content/recover",
+    "/source/index/sync",
+    "/source/index/files/extract",
+    "/source/index/files/plan",
+    "/source/index/files/transcribe",
+    "/source/index/files/recycle-leases",
+    "/source/index/files/janitor-requeue",
+    "/source/index/files/extract-pdfs",
+    "/source/index/files/status",
+    "/source/index/dropbox/content/export-eval-shard",
+    "/source/index/search",
+    "/source/index/embed",
+    "/source/index/dropbox/content/extract",
+    "/source/index/dropbox/content/plan",
+    "/source/index/dropbox/content/recycle-leases",
+    "/source/index/dropbox/content/janitor-requeue",
+    "/source/index/dropbox/transcribe",
+    ...WORKER_CLI_OPERATIONS.map((operation) => `${WORKER_CLI_ROUTE_PREFIX}${operation}`)
+  ];
+  READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+  WRITE_PATHS = new Set(WORKER_WRITE_PATHS);
+});
+
 // src/core/messaging-account-move.ts
 import { readFileSync as readFileSync88 } from "node:fs";
 import { homedir as homedir42 } from "node:os";
@@ -182708,8 +182720,7 @@ function createEmailSourceWorker(options = {}) {
     async fetch(request) {
       try {
         const url2 = new URL(request.url);
-        const dashboardNamespace = url2.pathname.startsWith("/dashboard") || url2.pathname.startsWith("/oauth/callback/");
-        if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url2.pathname)) {
+        if (!workerRouteAllowed(request.method, url2.pathname, basePath)) {
           return new Response("Not Found", { status: 404 });
         }
         const filesAlias = fileExtractionAliasFor(url2.pathname, basePath);
@@ -187594,7 +187605,7 @@ var init_email_source = __esm(() => {
   init_source_corpus_registry();
   init_selected_item_safety();
   init_venice_models();
-  init_public_surface();
+  init_write_routes();
   init_judge_check();
   init_staging();
   init_messaging_capture();
@@ -210063,7 +210074,8 @@ function parseEngineCommandEnvelope(value2) {
     case "source_watch":
     case "extraction_queue":
     case "people":
-    case "source_sync": {
+    case "source_sync":
+    case "data_export": {
       const frontPid = command2.frontPid;
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
@@ -210092,6 +210104,12 @@ function parseEngineCommandEnvelope(value2) {
         providerItemId,
         ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
       } } };
+    }
+    case "export_data": {
+      const destination = boundedString2(command2.destination, 4096);
+      if (!destination || !destination.startsWith("/"))
+        fail("export_data needs an absolute destination.");
+      return { id, command: { kind, destination } };
     }
     case "capture_stop": {
       const source = command2.source;
@@ -210293,6 +210311,7 @@ var init_commands = __esm(() => {
       "/dashboard/messaging/scope"
     ],
     embed_chunks: ["/v1/source/index/embed"],
+    data_export: ["/v1/cli/data-export"],
     source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
     extraction_queue: [
       "/v1/source/index/files/plan",
@@ -210738,7 +210757,7 @@ function createEngineFrontRoutes(input) {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
     } catch (error2) {
       return { unanswered: error2 instanceof Error ? error2.message : "The background engine is not answering." };
     }
@@ -210842,7 +210861,7 @@ function restartAfterFront(input) {
   });
   return true;
 }
-var SOURCE_SYNC_WAIT_MS;
+var SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS;
 var init_runtime4 = __esm(() => {
   init_engine_split();
   init_olympus_layout();
@@ -210852,6 +210871,7 @@ var init_runtime4 = __esm(() => {
   init_commands();
   init_snapshot();
   SOURCE_SYNC_WAIT_MS = 35 * 60000;
+  DATA_EXPORT_WAIT_MS = 3 * 60 * 60000;
 });
 
 // src/workers/engine-split/front-state.ts
@@ -210895,6 +210915,13 @@ function frontArchiveViews(local, snapshot2, changedAt = () => {
     cardViews: () => archive()?.cards ?? local.cardViews(),
     sourceImports: () => archive()?.source_imports ?? local.sourceImports(),
     archiveSources: () => archive()?.sources ?? local.archiveSources()
+  };
+}
+function frontDataExport(client) {
+  return async (destination) => {
+    const receipt = await client.send({ kind: "export_data", destination }, { timeoutMs: DATA_EXPORT_WAIT_MS });
+    if (receipt.state !== "done")
+      throw new Error(receipt.error ?? "The background did not finish the export.");
   };
 }
 function frontCaptureStop(client) {
@@ -210955,6 +210982,7 @@ function frontCaptureRuntime(local, snapshot2) {
   };
 }
 var init_front_state = __esm(() => {
+  init_runtime4();
   init_commands();
 });
 
@@ -234516,7 +234544,7 @@ async function main() {
   const backupService = createBackupService({
     paths: defaultBackupServicePaths(process.env),
     env: process.env,
-    exportInto: (destination) => exportOlympusData({ destination }),
+    exportInto: engineFront ? frontDataExport(engineFront.client) : (destination) => exportOlympusData({ destination }),
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload()
   });
@@ -238375,6 +238403,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           const { runTierSetOnRecordedItem: runTierSetOnRecordedItem2 } = await Promise.resolve().then(() => (init_tier_cli(), exports_tier_cli));
           return runTierSetOnRecordedItem2(locator, "private", expected);
         },
+        export_data: ({ destination }) => {
+          exportOlympusData({ destination });
+          return { exported: destination };
+        },
         capture_stop: async ({ source }) => {
           await captureOwnership.stopForUnpair(source);
           return { stopped: source };
@@ -238409,6 +238441,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         extraction_queue: ({ request }) => runForwarded(request),
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
+        data_export: ({ request }) => runForwarded(request),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };

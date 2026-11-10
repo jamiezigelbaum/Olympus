@@ -64,6 +64,9 @@ export const ENGINE_FORWARDED_ROUTES = {
     '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
   ],
   embed_chunks: ['/v1/source/index/embed'],
+  // The CLI's export (and so its backup): the background takes the snapshots
+  // on the writer's own loop, between its writes (#1224).
+  data_export: ['/v1/cli/data-export'],
   // The background runs source watches' passes and owns their store.
   source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
   // The extraction queue's writes, under the generic path or a family's alias.
@@ -82,8 +85,8 @@ export type EngineForwardedKind = keyof typeof ENGINE_FORWARDED_ROUTES;
  * front, and the reason says why that is safe. A route that writes data the
  * background owns (stores, tier ledgers, the people index, the extraction
  * queue, watches, capture) is forwarded instead; one that writes a file the
- * front owns says how the background learns of it. A key ending in `/` is a
- * prefix route whose actions the reason names.
+ * front owns says how the background learns of it. Every key is one exact route: a prefix
+ * route's actions each have their own (write-routes.ts).
  */
 export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/dashboard/control/launch': 'Dashboard sign-in: sessions the front holds.',
@@ -144,9 +147,11 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/dashboard/consult/standard': 'Outside-help settings, written by the front.',
   '/dashboard/private-answers': 'The waiting-question queue, consumed only by the front.',
   '/dashboard/apps-received': 'The app release log the front records; Make Private goes to the background (tier_set_recorded).',
-  '/v1/archive-import/': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/archive-import/start': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/archive-import/status': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/archive-import/remove': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
   '/v1/consult/ask': 'Asks an outside consultant; writes nothing the background owns.',
-  '/v1/privacy-item/': 'find reads the tier ledgers read-only; raise is forwarded (tier_override).',
+  '/v1/privacy-item/find': 'Reads the tier ledgers read-only; raise is forwarded (tier_override).',
   '/v1/source/answer': 'Answers from read-only stores.',
   '/v1/source/answer/received': 'An answer receipt, recorded where the front released it.',
   '/v1/source/answer/release': 'Checks a release ticket the front holds.',
@@ -160,7 +165,6 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/v1/source/watches': 'Lists watches read-only.',
   '/v1/cli/ingestion-status': 'Reads status.',
   '/v1/cli/setup-status': 'Reads status.',
-  '/v1/cli/data-export': 'Exports read-only snapshots.',
   '/v1/cli/settings': 'Settings files; a model or judge change restarts the background too (reload models).',
   '/v1/cli/settings-propose': 'Records a settings proposal the front holds.',
 };
@@ -201,7 +205,13 @@ export type EngineCommand =
   | { kind: 'tier_set_recorded'; locator: string; expected: EngineRecordedItem }
   /** Stop a messaging capture before Disconnect or Unpair tears down its grant; done means stopped. */
   | { kind: 'capture_stop'; source: 'telegram' | 'whatsapp' }
-  | { kind: 'judge_boost'; identities: EngineItemIdentity[] };
+  | { kind: 'judge_boost'; identities: EngineItemIdentity[] }
+  /**
+   * A backup's export, written by the background into the front's staging
+   * folder: the snapshots are taken between the background's writes, so the
+   * stores and ledgers agree; the front packs and encrypts them (#1224).
+   */
+  | { kind: 'export_data'; destination: string };
 
 export type EngineCommandKind = EngineCommand['kind'];
 
@@ -361,6 +371,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'extraction_queue':
     case 'people':
     case 'source_sync':
+    case 'data_export':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');
@@ -386,6 +397,11 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
         provider: provider!, providerItemId: providerItemId!,
         ...(typeof conversation === 'string' ? { providerConversationId: conversation } : {}),
       } } };
+    }
+    case 'export_data': {
+      const destination = boundedString(command!.destination, 4096);
+      if (!destination || !destination.startsWith('/')) fail('export_data needs an absolute destination.');
+      return { id, command: { kind, destination: destination! } };
     }
     case 'capture_stop': {
       const source = command!.source;

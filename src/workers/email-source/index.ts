@@ -63,7 +63,7 @@ import { canonicalSourceCorpusId, type SourceCorpusRegistry } from '../../core/s
 import { selectedItemContentFieldPath } from '../../core/source-index/selected-item-safety.ts';
 import { dropboxPolicyExcludedPathPrefixes, type SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
-import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
+import { workerRouteAllowed } from './write-routes.ts';
 import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
 import type { OwnerItemChoice, OwnerTierItems } from '../classification/tier-owner-items.ts';
@@ -1145,9 +1145,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     async fetch(request: Request): Promise<Response> {
       try {
         const url = new URL(request.url);
-        const dashboardNamespace = url.pathname.startsWith('/dashboard')
-          || url.pathname.startsWith('/oauth/callback/');
-        if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url.pathname)) {
+        // The dashboard's public routes, and the worker's writing routes
+        // (write-routes.ts): any other writer is refused before a handler runs.
+        if (!workerRouteAllowed(request.method, url.pathname, basePath)) {
           return new Response('Not Found', { status: 404 });
         }
 
