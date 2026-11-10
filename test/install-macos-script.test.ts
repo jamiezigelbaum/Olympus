@@ -185,12 +185,13 @@ out=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    --proto|--retry) shift 2 ;;
+    --proto|--retry|--retry-delay|-w) shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 echo "$url" >> "${curlLog}"
+if [ -n "$FAKE_HTTP_STATUS" ]; then printf '%s' "$FAKE_HTTP_STATUS"; exit 22; fi
 case "$url" in
   https://releases.test/*)
     case "$url" in *olympus-engine-helper-*) [ -z "$FAKE_HELPER_DOWNLOAD_FAIL" ] || exit 22 ;; esac
@@ -716,6 +717,16 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(result.status).not.toBe(0);
     expect(appVersion(h.app)).toBe(V1);
     expect(h.logLines()).toHaveLength(1);
+  });
+
+  shellTest('a download server error says to try again later, not to check the connection (#1038)', () => {
+    const h = harness(shell);
+    const result = h.run(V1, { FAKE_HTTP_STATUS: '504' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Bun could not be downloaded.');
+    expect(result.stderr).toContain('The download server returned an error (HTTP 504). Try again in a few minutes. Nothing was changed on this Mac.');
+    expect(existsSync(join(h.home, 'Library'))).toBe(false);
+    expect(readFileSync(join(REPO, 'scripts/install-macos.sh'), 'utf8')).toContain('--retry 6 --retry-delay 5');
   });
 
   shellTest('a Bun download that does not match its pinned SHA-256, or whose program does not, is never run', () => {

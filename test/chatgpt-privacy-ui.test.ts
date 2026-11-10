@@ -13,6 +13,7 @@ import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/
 import { privacyToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { PrivacyRuleView } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { DASHBOARD_CHATGPT_PRIVACY_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 const P = CHATGPT_PRIVACY_TOOLS;
 const S = CHATGPT_PICKER_TOOLS;
@@ -30,6 +31,7 @@ interface Host {
   hasButton(label: string): boolean;
   push(result: unknown): void;
   toolCalls(name?: string): any[];
+  inFlight(): number;
   settle(): Promise<void>;
 }
 
@@ -37,18 +39,23 @@ const hosts: Host[] = [];
 afterEach(async () => {
   while (hosts.length) await hosts.pop()!.win.happyDOM.close();
 });
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
- * Past the 450 ms question debounce and until the questions it asked for are
- * shown. A fixed wait raced the timer and the reply on a busy CI runner (#790).
+ * One short turn of the timer queue, so replies the fake host queued, renders
+ * and promise chains run. A yield, not a wait for slow work: assertions that
+ * depend on slow work use waitFor.
+ */
+const tick = () => new Promise<void>((resolve) => { setTimeout(resolve, 1); });
+/**
+ * Until every tool call the page made has its reply and the questions step is
+ * no longer loading. The page shows the loading line the moment it starts its
+ * 450 ms debounce, so this waits on what the page shows rather than a fixed
+ * sleep that raced the timer on a busy CI runner (#790, #756).
  */
 async function questionsShown(host: Host): Promise<void> {
-  await sleep(475);
-  await host.settle();
-  for (let waited = 0; waited < 3_000 && host.text().includes(W.questions.loading); waited += 10) {
-    await sleep(10);
+  await waitFor(async () => {
     await host.settle();
-  }
+    return host.inFlight() === 0 && !host.text().includes(W.questions.loading);
+  }, { description: 'the privacy questions step to finish loading', intervalMs: 5 });
 }
 
 function mount(serve: Record<string, Serve>, openai: Record<string, any> = { displayMode: 'fullscreen' }): Host {
@@ -60,6 +67,7 @@ function mount(serve: Record<string, Serve>, openai: Record<string, any> = { dis
   win.document.write(html.slice(0, start - '<script>'.length) + html.slice(html.indexOf('</script>', start) + '</script>'.length));
   const sent: any[] = [];
   const calls: Host['calls'] = [];
+  let inFlight = 0;
   const dispatch = (data: unknown) => win.dispatchEvent(new win.MessageEvent('message', { data, source: parent as any }));
   const parent = {
     postMessage: (message: any) => {
@@ -69,9 +77,13 @@ function mount(serve: Record<string, Serve>, openai: Record<string, any> = { dis
       if (!handler) return;
       const answer = handler(message.params.arguments);
       if (answer === 'hang') return;
-      setTimeout(() => dispatch(answer === 'fail'
-        ? { jsonrpc: '2.0', id: message.id, error: { code: -1, message: 'gone' } }
-        : { jsonrpc: '2.0', id: message.id, result: answer }), 0);
+      inFlight += 1;
+      setTimeout(() => {
+        inFlight -= 1;
+        dispatch(answer === 'fail'
+          ? { jsonrpc: '2.0', id: message.id, error: { code: -1, message: 'gone' } }
+          : { jsonrpc: '2.0', id: message.id, result: answer });
+      }, 0);
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
@@ -100,8 +112,9 @@ function mount(serve: Record<string, Serve>, openai: Record<string, any> = { dis
     push: (result) => dispatch({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: result }),
     toolCalls: (name) => sent.filter((message) => message.method === 'tools/call' && (!name || message.params.name === name))
       .map((message) => message.params.arguments),
+    inFlight: () => inFlight,
     settle: async () => {
-      for (let i = 0; i < 5; i++) await sleep(1);
+      for (let i = 0; i < 5; i++) await tick();
     },
   };
   hosts.push(host);
