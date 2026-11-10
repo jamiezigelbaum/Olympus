@@ -177,8 +177,70 @@ either kept front-owned or becomes one command.
 
 ## Writes the front still needs
 
-To be completed from the inventory of request handlers that write
-background-owned state (in progress).
+From an inventory of the request handlers on main `b649295` (handler
+bodies are in `src/workers/email-source/index.ts`; route sets in
+`src/workers/http.ts:600-720`). No request handler calls the sniffer or
+the tier-move code directly, and no answer path writes a verdict or a
+ledger. What the front does write falls into four kinds.
+
+**A. Front-owned files that stay front-written.** Remote connections
+(`src/core/remote-connections.ts`), waiting private questions
+(`src/core/waiting-private-questions.ts`), private answer and question
+jobs (in memory), dashboard control sessions, remote OAuth and pairing,
+ChatGPT handoffs, dashboard messaging grants, remote-access and agent
+settings. Nothing in the background writes these.
+
+**B. Config files the front writes and the background reads.** Connected
+handle registry (connect and disconnect), file and mail scope approvals
+(`src/core/source-scope-approval.ts`), the exclusions and owner rules file
+(`src/workers/source-dispositions.ts`), the embedding override file,
+model choices and judge spending, archive-import state and request queue.
+These stay front-written: each is already written atomically and re-read
+by the background. What changes is the wake. Today the handler then calls
+the scheduler in-process (`refreshDashboardSchedulerSources`,
+`index.ts:4254`; `startApprovedSourceRun`, `server.ts:7669`;
+`wakeTasksOfKind`); with the split it sends one command, `reload` with the
+kind of file, and the background re-reads and rewakes.
+
+**C. Writes to background-owned data that become commands with a
+synchronous answer.**
+
+| Today | Command | The front needs back |
+|---|---|---|
+| `POST /dashboard/sync-now` (`index.ts:2419`; admission at `:4194`) | `sync_now {source}` | `checking`, `busy` or `too_soon` |
+| Approve and start (`server.ts:5919`, `:5986`) | `start_approved {source}` | `ingestion_started` or why not |
+| Scope approval invalidating extraction jobs (`server.ts:6016`) | part of `reload scope` | done |
+| `POST /dashboard/disconnect`, `/unpair` (`index.ts:2526`, `:2780`) | registry write stays front; then `sources_changed`, and `capture_stop` for messaging | lanes parked |
+| `POST /dashboard/delete-source-data` (`index.ts:2714` → `:4051`) | `delete_source_data {source}`: the background, which holds the files, deletes them | `removed_count` |
+| `olympus tier set` via `/cli` (`index.ts:1189` → `tier-cli.ts:321`, `ledger.setOverride`) | `tier_override {item, tier}` | applied |
+| Archive `remove`, `stop`, `approveRemoval` (`archive-import/dashboard.ts:925`, `:1060`, `:1076`) | state write stays front; `archive_changed` | accepted |
+| Messaging capture start, respond, cancel, scope (`dashboard-messaging-service.ts`) | `capture_*` | the capture's status |
+
+A command is acknowledged once the background has committed it, so the
+dashboard keeps showing a real result. Delete-source-data stops doing a
+front-side delete of background-owned files, which today relies on
+checking that no read is running (`index.ts:4061`).
+
+**D. In-process signals that become cross-process.** The owner's own
+answers preempt the judge (`localModelActivity.onBusy → tierSniffer.preempt()`,
+`server.ts:7350`). With the split, the front sends `owner_busy` and
+`owner_idle`. On one shared local model this still matters (#1030,
+#1031); with the model on Delphi or Venice it stops mattering.
+
+**State the front reads, published by the background** in its snapshot:
+scheduler status (11 call sites), sniffer backlog and pending
+classification count (`server.ts:2562`, `:6860`), judge spending and
+runtime, capture statuses (`server.ts:2591`), unreadable-file state
+(`server.ts:4995`, `:5023`), the archive dashboard view, and manual-sync
+runs. The tier visibility gate (`tier-visibility.ts:48`) already reads the
+ledger per query and works read-only; the store memos are replaced by
+part 1.
+
+Not yet verified: the full remote MCP and OpenAPI operation registry
+(they call the same handlers, so they inherit this list), and whether
+`olympus tier set` rewrites stores or only the ledger
+(`tierCommandRewritesStores`, `tier-cli.ts:91`). Both are checked when
+part 3 is built.
 
 ## What gets deleted
 
