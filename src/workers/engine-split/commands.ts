@@ -69,6 +69,98 @@ export const ENGINE_FORWARDED_ROUTES = {
 } as const;
 export type EngineForwardedKind = keyof typeof ENGINE_FORWARDED_ROUTES;
 
+/**
+ * Every other POST route the worker serves (test/engine-split-route-guard.test.ts
+ * holds the two lists to the worker's routes): in the split it runs in the
+ * front, and the reason says why that is safe. A route that writes data the
+ * background owns (stores, tier ledgers, the people index, the extraction
+ * queue, watches, capture) is forwarded instead; one that writes a file the
+ * front owns says how the background learns of it. A key ending in `/` is a
+ * prefix route whose actions the reason names.
+ */
+export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
+  '/dashboard/control/launch': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/control/launch/redeem': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/control/session': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/control/session/local': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/connect/oauth/start': 'Credential custody and the handle registry (owner files); lanes follow the registry on reload sources.',
+  '/dashboard/connect/oauth/cancel': 'Cancels a pending sign-in the front started.',
+  '/dashboard/connect/api-key': 'Credential custody and the handle registry (owner files); lanes follow the registry on reload sources.',
+  '/dashboard/connect/this-computer': 'Credential custody and the handle registry (owner files); lanes follow the registry on reload sources.',
+  '/dashboard/disconnect': 'Credential teardown, after the background confirms the capture stopped (capture_stop).',
+  '/dashboard/unpair': 'Credential teardown, after the background confirms the capture stopped (capture_stop).',
+  '/dashboard/dispositions': 'Source scope and ingestion choices (owner files); an approval sends reload scope to the background.',
+  '/dashboard/sync-now': 'The front scheduler posts sync_now; the background runs the pass.',
+  '/dashboard/embedding-priority': 'The overnight guard\'s operator override file, read by the embedding drain.',
+  '/dashboard/models/check': 'Probes a model; writes nothing.',
+  '/dashboard/models/local/discover': 'Lists local models; writes nothing.',
+  '/dashboard/models/local/test': 'Probes a local model; writes nothing.',
+  '/dashboard/models/addable': 'Lists models; writes nothing.',
+  '/dashboard/models/first-run-privacy': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/models/judge': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/models/local/save': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/models/choice': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/settings/proposal/apply': 'Settings files; a model or judge change restarts the background too (reload models).',
+  '/dashboard/settings/proposal/discard': 'Drops a settings proposal the front holds.',
+  '/dashboard/engine/computer-use': 'A settings file read by the front\'s answer tools.',
+  '/dashboard/engine/go-easy': 'go-easy.json; the background reads it again (reload pacing).',
+  '/dashboard/engine/update': 'Updates the installed package and restarts the host.',
+  '/dashboard/engine/update/status': 'Reads the update\'s progress.',
+  '/dashboard/backup/status': 'Reads backup state.',
+  '/dashboard/backup/settings': 'Backup settings, a file the front owns.',
+  '/dashboard/backup/passphrase': 'The backup key file the front owns.',
+  '/dashboard/backup/browse': 'Lists folders; writes nothing.',
+  '/dashboard/backup/run': 'Exports read-only snapshots, checked against one generation of the background\'s writes (backup-service.ts).',
+  '/dashboard/backup/restore': 'Writes the pending-restore marker; the restore runs at the background\'s boot, after it stops answering ready.',
+  '/dashboard/tools/call': 'Panel tools run in process through the forwarding fetch.',
+  '/dashboard/archive-import/upload-start': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/upload-file': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/upload-status': 'Reads an upload\'s progress.',
+  '/dashboard/archive-import/upload-cancel': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/approve': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/decline': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/remove': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/stop': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/privacy/items/find': 'Reads the tier ledgers read-only.',
+  '/dashboard/agents/pairing-code': 'Remote connections and keys, in the front\'s connection store.',
+  '/dashboard/agents/keys': 'Remote connections and keys, in the front\'s connection store.',
+  '/dashboard/agents/revoke': 'Remote connections and keys, in the front\'s connection store.',
+  '/dashboard/agents/remote-access': 'Remote access settings the front serves.',
+  '/dashboard/consult': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/route': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/route/add': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/recover': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/abandon': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/tools/install': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/writer': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/writer/test': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/standard': 'Outside-help settings, written by the front.',
+  '/dashboard/private-answers': 'The waiting-question queue, consumed only by the front.',
+  '/dashboard/apps-received': 'The app release log the front records; Make Private goes to the background (tier_set_recorded).',
+  '/v1/archive-import/': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/consult/ask': 'Asks an outside consultant; writes nothing the background owns.',
+  '/v1/privacy-item/': 'find reads the tier ledgers read-only; raise is forwarded (tier_override).',
+  '/v1/source/answer': 'Answers from read-only stores.',
+  '/v1/source/answer/received': 'An answer receipt, recorded where the front released it.',
+  '/v1/source/answer/release': 'Checks a release ticket the front holds.',
+  '/v1/source/credentials/recheck': 'Re-reads credential state; writes nothing.',
+  '/v1/source/export': 'Copies source files out; reads only.',
+  '/v1/source/index/dropbox/content/export-eval-shard': 'Exports an eval shard from read-only stores.',
+  '/v1/source/index/files/status': 'Reads the extraction queue.',
+  '/v1/source/index/search': 'Searches read-only stores.',
+  '/v1/source/index/status': 'Reads status.',
+  '/v1/source/index/sync': 'The front scheduler posts sync_now; the background runs the pass.',
+  '/v1/source/scheduler/status': 'Reads the background\'s snapshot.',
+  '/v1/source/watches': 'Lists watches read-only.',
+  '/v1/cli/ingestion-status': 'Reads status.',
+  '/v1/cli/setup-status': 'Reads status.',
+  '/v1/cli/data-export': 'Exports read-only snapshots.',
+  '/v1/cli/settings': 'Settings files; a model or judge change restarts the background too (reload models).',
+  '/v1/cli/settings-propose': 'Records a settings proposal the front holds.',
+};
+
+
+
 export interface EngineForwardedRequest {
   path: string;
   headers: Record<string, string>;
