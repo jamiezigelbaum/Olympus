@@ -28,7 +28,8 @@ import {
   type EngineCommand,
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
-import { createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
+import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
+import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { createFrontDashboardHistory } from '../src/workers/engine-split/front-history.ts';
 import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
@@ -426,9 +427,12 @@ describe('the status snapshot', () => {
   test('the front scheduler answers from the snapshot and turns wakes into commands', async () => {
     const sent: EngineCommand[] = [];
     const status = { kind: 'source_scheduler_status', enabled: true, running: true, generated_at: 'now', sources: [{ source_id: 'gmail.email', corpus_id: 'gmail', tasks: [{ running: true }] }], policy: {} };
+    const clock = createTestClock();
     const scheduler = createFrontScheduler({
       client: { post: async (command) => { sent.push(command); return { id: 'x', state: 'received', instance_id: 'b' }; } },
-      snapshot: () => ({ age_ms: 10, snapshot: { scheduler: status } as never }),
+      snapshot: () => ({ age_ms: 10, snapshot: { scheduler: status, manual_syncs: { 'gmail.email': { started_at: clock.date().toISOString(), state: 'done' } } } as never }),
+      now: clock.date,
+      sleep: clock.sleep,
     });
     expect(scheduler.status()).toBe(status as never);
     expect(scheduler.hasExecutingTask(new Set(['gmail.email']))).toBe(true);
@@ -441,6 +445,95 @@ describe('the status snapshot', () => {
       { kind: 'reload', target: 'sources' },
       { kind: 'reload', target: 'extraction' },
     ]);
+  });
+});
+
+describe('state the front shows from the snapshot', () => {
+  function snapshotWith(fields: Record<string, unknown>) {
+    let current: Record<string, unknown> | undefined = fields;
+    return {
+      read: () => (current ? { age_ms: 5, snapshot: { judge: { backlog: null, pending: null, spending: null }, ...current } as never } : undefined),
+      set: (next: Record<string, unknown> | undefined) => { current = next; },
+    };
+  }
+
+  test('Sync now in the front settles when the background says its pass ended, and reads a failure as one', async () => {
+    const clock = createTestClock();
+    const status = { kind: 'source_scheduler_status', enabled: true, running: false, generated_at: 'now', sources: [], policy: {} };
+    const snapshot = snapshotWith({ scheduler: status, manual_syncs: { 'gmail.email': { started_at: new Date(clock.now() - 60_000).toISOString(), state: 'done' } } });
+    const sent: EngineCommand[] = [];
+    const scheduler = createFrontScheduler({
+      client: { post: async (command) => { sent.push(command); return { id: 'x', state: 'received', instance_id: 'b' }; } },
+      snapshot: snapshot.read, now: clock.date, sleep: clock.sleep,
+    });
+    let settled: unknown;
+    void scheduler.runSource('gmail.email', undefined, 'operator').then((value) => { settled = value; });
+    await flushMicrotasks();
+    // An older press's record is not this one's.
+    await clock.advance(5_000);
+    expect(settled).toBeUndefined();
+    snapshot.set({ scheduler: status, manual_syncs: { 'gmail.email': { started_at: clock.date().toISOString(), state: 'running' } } });
+    await clock.advance(5_000);
+    expect(settled).toBeUndefined();
+    snapshot.set({ scheduler: status, manual_syncs: { 'gmail.email': { started_at: new Date(clock.now() - 5_000).toISOString(), state: 'done' } } });
+    await clock.advance(1_000);
+    expect(settled).toBe(status);
+
+    snapshot.set({ scheduler: status, manual_syncs: { 'gmail.email': { started_at: clock.date().toISOString(), state: 'failed', failure_code: 'auth_expired' } } });
+    const failure = await scheduler.runSource('gmail.email', undefined, 'operator').catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(BackgroundSyncFailedError);
+    expect((failure as BackgroundSyncFailedError).code).toBe('auth_expired');
+
+    // A scheduled run answers at once; an operator run that never reports is read as it stands after the wait.
+    snapshot.set({ scheduler: status });
+    expect(await scheduler.runSource('gmail.email')).toBe(status as never);
+    let gaveUp: unknown;
+    void scheduler.runSource('gmail.email', undefined, 'operator').then((value) => { gaveUp = value; });
+    await flushMicrotasks();
+    await clock.advance(31 * 60_000);
+    expect(gaveUp).toBe(status);
+    expect(sent.map((command) => (command as { manual?: boolean }).manual)).toEqual([true, true, false, true]);
+  });
+
+  test('judge backlog, unreadable counts and the archive views come from the snapshot', () => {
+    const backlog = { checkingItems: 3, remainingQuestions: 2, pendingItems: 3, summary: 'Checking 3 items.', awaitingOwnerApproval: false };
+    const snapshot = snapshotWith({
+      judge: { backlog, pending: 3, spending: null, busy: true, archive_private_model: 'ready' },
+      unreadable: { 'dropbox.files': { unreadable: 4, blocked: 1 } },
+      archive: { view: { archives: ['from-background'] }, cards: [{ sourceId: 'card' }], source_imports: [], sources: [{ sourceId: 'whatsapp' }] },
+    });
+    const judge = frontJudgeState(snapshot.read);
+    expect(judge.backlog()).toEqual(backlog as never);
+    expect(judge.busy()).toBe(true);
+    expect(judge.archivePrivateModel()).toBe('ready' as never);
+    const counted: string[] = [];
+    const local = {
+      recheck: (corpusId: string) => { counted.push(corpusId); return { unreadable: 99, blocked: 0 }; },
+      names: () => ['report.pdf'],
+    } as never as Parameters<typeof frontUnreadableFiles>[0];
+    const unreadable = frontUnreadableFiles(local, snapshot.read);
+    expect(unreadable.recheck('dropbox.files')).toEqual({ unreadable: 4, blocked: 1 });
+    expect(unreadable.recheck('gmail')).toBeUndefined();
+    // The front counts nothing itself; names stay its own reads.
+    expect(counted).toEqual([]);
+    expect(unreadable.names(['dropbox.files'], 5)).toEqual(['report.pdf']);
+    const read: string[] = [];
+    const views = frontArchiveViews({
+      view: () => { read.push('view'); return { archives: ['local'] } as never; },
+      cardViews: () => { read.push('cards'); return []; },
+      sourceImports: () => { read.push('imports'); return []; },
+      archiveSources: () => { read.push('sources'); return []; },
+    }, snapshot.read);
+    expect(views.view()).toEqual({ archives: ['from-background'] } as never);
+    expect(views.cardViews()).toEqual([{ sourceId: 'card' }] as never);
+    expect(views.archiveSources()).toEqual([{ sourceId: 'whatsapp' }] as never);
+    expect(read).toEqual([]);
+    // Before any snapshot: nothing pending, and the front's own read of the archives.
+    snapshot.set(undefined);
+    expect(judge.backlog()).toBeUndefined();
+    expect(judge.busy()).toBe(false);
+    expect(judge.archivePrivateModel()).toBe('waiting');
+    expect(views.view()).toEqual({ archives: ['local'] } as never);
   });
 });
 

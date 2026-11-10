@@ -1,7 +1,8 @@
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
- * backlog, pending count, rate and spending, and capture status. The
+ * backlog, pending count, rate and spending, capture status, unreadable-file
+ * counts, the archive dashboard view, and Sync now runs. The
  * background writes the whole snapshot atomically every few seconds; the
  * front reads the last one and shows how old it is. No front request waits
  * on the background for status.
@@ -22,8 +23,25 @@ export interface EngineStatusSnapshot {
     backlog: unknown;
     pending: number | null;
     spending: unknown;
+    /** The judge is ahead of the lanes (it has priority): the front's "busy classifying". */
+    busy?: boolean;
+    /** Whether the judge can take imported archive items now (archive-import/dashboard.ts). */
+    archive_private_model?: string;
   };
   captures: unknown;
+  /** Each corpus's last unreadable count (file-extraction/unreadable-files.ts), counted in the background. */
+  unreadable?: Record<string, { unreadable: number; blocked: number }>;
+  /** The archive dashboard as the background, which runs the imports, sees it. */
+  archive?: { view: unknown; cards: unknown[]; source_imports: unknown[]; sources: unknown[] };
+  /** Sync now runs the background started for the front, by scheduler source id: the latest per source. */
+  manual_syncs?: Record<string, EngineManualSyncRun>;
+}
+
+export interface EngineManualSyncRun {
+  started_at: string;
+  state: 'running' | 'done' | 'failed';
+  /** `failed` only: the error's code, when it had one, for the front's closed failure word. */
+  failure_code?: string;
 }
 
 export interface EngineStatusRead {

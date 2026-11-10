@@ -546,6 +546,8 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, engineFrontRefusal, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
+import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory } from '../engine-split/front-history.ts';
 
@@ -5055,7 +5057,7 @@ export async function main(): Promise<void> {
     }
     return usable?.items ?? [];
   };
-  const unreadableFiles = createUnreadableFiles({
+  const localUnreadableFiles = createUnreadableFiles({
         items: (corpusId) => {
           const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []), ...settledUnreadableFor(corpusId)];
           return Array.from(new Map(items.map(item => [item.ref.localItemId, item])).values());
@@ -5082,6 +5084,8 @@ export async function main(): Promise<void> {
             }
           : {}),
       });
+  // The split's front shows the counts the background last counted (engine-split/front-state.ts).
+  const unreadableFiles = engineFront ? frontUnreadableFiles(localUnreadableFiles, () => engineFront!.status()) : localUnreadableFiles;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
@@ -5782,6 +5786,8 @@ export async function main(): Promise<void> {
     scheduling: () => (sourceScheduler ? archiveImportScheduling(olympusConfig.worker.scheduler) : 'disabled'),
   });
   if (!engineFront) archiveImportDashboard.resume();
+  // The split's front shows the archives as the background, which runs the imports, last published them.
+  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront!.status()) : archiveImportDashboard;
   // Built-in transcription installs only when the chosen sources contain
   // audio (each approved extraction lane checks at scheduler start, and each
   // plan pass after a sync), and once ready wakes every extraction task so
@@ -7183,10 +7189,10 @@ export async function main(): Promise<void> {
     },
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
-    archives: () => archiveImportDashboard.view(),
-    sourceImports: () => archiveImportDashboard.sourceImports(),
-    archiveSources: () => archiveImportDashboard.archiveSources(),
-    archiveCards: () => archiveImportDashboard.cardViews(),
+    archives: () => archiveViews.view(),
+    sourceImports: () => archiveViews.sourceImports(),
+    archiveSources: () => archiveViews.archiveSources(),
+    archiveCards: () => archiveViews.cardViews(),
   });
 
   const sharedRemoteMcpOptions = {
@@ -7439,9 +7445,17 @@ export async function main(): Promise<void> {
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  classificationBusy = () => tierSniffer?.hasPriority ?? false;
-  tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
-  archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
+  if (engineFront) {
+    // The judge runs in the background: the front shows what it last published.
+    const judge = frontJudgeState(() => engineFront!.status());
+    classificationBusy = judge.busy;
+    tierSnifferBacklog = judge.backlog as typeof tierSnifferBacklog;
+    archivePrivateModelState = judge.archivePrivateModel;
+  } else {
+    classificationBusy = () => tierSniffer?.hasPriority ?? false;
+    tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+    archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
+  }
   tierSniffer?.start();
   // The split's background: its private command socket, then the status
   // snapshot, then ready. The front waits for ready before it serves.
@@ -7458,6 +7472,8 @@ export async function main(): Promise<void> {
     const runForwarded = async (request: EngineForwardedRequest) =>
       responseToForwarded(await worker.fetch(forwardedRequestToRequest('http://olympus-worker.internal', request)));
     let deleteFromFront: number | undefined;
+    // Sync now runs the front asked for, published in the snapshot (front-scheduler.ts follows them).
+    const manualSyncRuns = new Map<string, EngineManualSyncRun>();
     const commands = startEngineBackgroundServer({
       socketPath: engineSocketPath!,
       authToken,
@@ -7488,9 +7504,15 @@ export async function main(): Promise<void> {
         // Starts the pass and answers; the pass reports through the scheduler status.
         sync_now: ({ source, manual }) => {
           if (!sourceScheduler) return { outcome: 'scheduler_disabled' };
-          void sourceScheduler.runSource(source, undefined, manual ? 'operator' : 'scheduled').catch(() => {
+          const started_at = new Date().toISOString();
+          if (manual) manualSyncRuns.set(source, { started_at, state: 'running' });
+          void sourceScheduler.runSource(source, undefined, manual ? 'operator' : 'scheduled').then(() => {
+            if (manual) manualSyncRuns.set(source, { started_at, state: 'done' });
+          }, (error: unknown) => {
+            const code = (error as { code?: unknown } | null | undefined)?.code;
+            if (manual) manualSyncRuns.set(source, { started_at, state: 'failed', ...(typeof code === 'string' ? { failure_code: code } : {}) });
             console.warn(`[source-scheduler] source=${source} sync requested by the front failed; the next scheduled pass retries.`);
-          });
+          }).finally(() => status.publish());
           return { outcome: 'started' };
         },
         start_approved: ({ source }) => {
@@ -7526,12 +7548,30 @@ export async function main(): Promise<void> {
       instanceId: commands.instanceId,
       collect: () => ({
         scheduler: sourceScheduler?.status() ?? null,
-        judge: {
-          backlog: tierSniffer?.backlog() ?? null,
-          pending: null,
-          spending: judgeSpending.status(),
-        },
+        judge: (() => {
+          const backlog = tierSniffer?.backlog();
+          return {
+            backlog: backlog ?? null,
+            pending: backlog?.pendingItems ?? null,
+            spending: judgeSpending.status(),
+            busy: tierSniffer?.hasPriority ?? false,
+            archive_private_model: archivePrivateModelState(),
+          };
+        })(),
         captures: dashboardCaptureRuntime(),
+        ...(localUnreadableFiles ? {
+          unreadable: Object.fromEntries(sourceCorpusRegistry.definitions('status', fullCorpusDefinitions).flatMap((definition) => {
+            const counted = localUnreadableFiles.recheck(definition.corpusId);
+            return counted ? [[definition.corpusId, counted]] : [];
+          })),
+        } : {}),
+        archive: {
+          view: archiveImportDashboard.view(),
+          cards: archiveImportDashboard.cardViews(),
+          source_imports: archiveImportDashboard.sourceImports(),
+          sources: archiveImportDashboard.archiveSources(),
+        },
+        manual_syncs: Object.fromEntries(manualSyncRuns),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front

@@ -69,7 +69,7 @@ export function startEngineBackgroundStatus(input: {
   env: Record<string, string | undefined>;
   instanceId: string;
   collect: () => Omit<EngineStatusSnapshot, 'schema' | 'instance_id' | 'written_at'>;
-}): { stop(): void } {
+}): { publish(): void; stop(): void } {
   return startEngineStatusPublisher({
     path: engineStatusSnapshotPath(input.env),
     instanceId: input.instanceId,

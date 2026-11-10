@@ -198487,6 +198487,36 @@ var init_runtime4 = __esm(() => {
   FRONT_REFUSED_EXTRACTION = /^\/source\/index\/(?:files\/(?:plan|transcribe|recycle-leases|janitor-requeue|extract-pdfs|extract)|dropbox\/(?:content\/(?:plan|recycle-leases|janitor-requeue|extract)|transcribe))$/;
 });
 
+// src/workers/engine-split/front-state.ts
+function isBacklog(value2) {
+  return typeof value2 === "object" && value2 !== null && typeof value2.checkingItems === "number" && typeof value2.summary === "string";
+}
+function frontJudgeState(snapshot2) {
+  return {
+    backlog: () => {
+      const backlog = snapshot2()?.snapshot.judge.backlog;
+      return isBacklog(backlog) ? backlog : undefined;
+    },
+    busy: () => snapshot2()?.snapshot.judge.busy === true,
+    archivePrivateModel: () => snapshot2()?.snapshot.judge.archive_private_model ?? "waiting"
+  };
+}
+function frontUnreadableFiles(local, snapshot2) {
+  return {
+    ...local,
+    recheck: (corpusId) => snapshot2()?.snapshot.unreadable?.[corpusId]
+  };
+}
+function frontArchiveViews(local, snapshot2) {
+  const archive = () => snapshot2()?.snapshot.archive;
+  return {
+    view: () => archive()?.view ?? local.view(),
+    cardViews: () => archive()?.cards ?? local.cardViews(),
+    sourceImports: () => archive()?.source_imports ?? local.sourceImports(),
+    archiveSources: () => archive()?.sources ?? local.archiveSources()
+  };
+}
+
 // src/workers/engine-split/front-scheduler.ts
 function emptyStatus2(now) {
   return {
@@ -198501,6 +198531,9 @@ function emptyStatus2(now) {
 function createFrontScheduler(options) {
   const now = options.now ?? (() => new Date);
   const log = options.log ?? ((line2) => console.warn(line2));
+  const sleep5 = options.sleep ?? ((ms) => new Promise((resolve30) => {
+    setTimeout(resolve30, ms).unref?.();
+  }));
   const status = () => {
     const scheduler = options.snapshot()?.snapshot.scheduler;
     return scheduler?.kind === "source_scheduler_status" ? scheduler : emptyStatus2(now());
@@ -198512,8 +198545,22 @@ function createFrontScheduler(options) {
   return {
     status: () => status(),
     async runSource(sourceIdOrCorpusId, _now, provenance = "scheduled") {
+      const pressed = now().getTime();
       await post2({ kind: "sync_now", source: sourceIdOrCorpusId, manual: provenance === "operator" });
-      return status();
+      if (provenance !== "operator")
+        return status();
+      const deadline = pressed + (options.manualSyncWaitMs ?? 30 * 60000);
+      for (;; ) {
+        const run2 = options.snapshot()?.snapshot.manual_syncs?.[sourceIdOrCorpusId];
+        if (run2 && Date.parse(run2.started_at) >= pressed - 1000 && run2.state !== "running") {
+          if (run2.state === "failed")
+            throw new BackgroundSyncFailedError(run2.failure_code);
+          return status();
+        }
+        if (now().getTime() >= deadline)
+          return status();
+        await sleep5(options.manualSyncPollMs ?? 1000);
+      }
     },
     updateSources() {
       post2({ kind: "reload", target: "sources" }).catch(() => {
@@ -198534,6 +198581,17 @@ function createFrontScheduler(options) {
     stop() {}
   };
 }
+var BackgroundSyncFailedError;
+var init_front_scheduler = __esm(() => {
+  BackgroundSyncFailedError = class BackgroundSyncFailedError extends Error {
+    code;
+    constructor(code) {
+      super("The sync did not finish.");
+      this.code = code;
+      this.name = "BackgroundSyncFailedError";
+    }
+  };
+});
 
 // src/workers/engine-split/front-history.ts
 import { existsSync as existsSync104 } from "node:fs";
@@ -223275,7 +223333,7 @@ ${key2}`;
     }
     return usable?.items ?? [];
   };
-  const unreadableFiles = createUnreadableFiles({
+  const localUnreadableFiles = createUnreadableFiles({
     items: (corpusId) => {
       const items = [...extractionReadinessLedger?.unreadableItems(corpusId) ?? [], ...settledUnreadableFor(corpusId)];
       return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
@@ -223290,6 +223348,7 @@ ${key2}`;
       openFile: (path, eligible) => openLocalFile(path, eligible, [...unreadableDropboxRoots(), ...localFilesOpenableRoots()])
     } : {}
   });
+  const unreadableFiles = engineFront ? frontUnreadableFiles(localUnreadableFiles, () => engineFront.status()) : localUnreadableFiles;
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
     corpusDefinitions: () => {
       mountConfiguredSourceStores();
@@ -223754,6 +223813,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   if (!engineFront)
     archiveImportDashboard.resume();
+  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront.status()) : archiveImportDashboard;
   wireBuiltInTranscriptionAtBoot({
     env: process.env,
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
@@ -224925,10 +224985,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
-    archives: () => archiveImportDashboard.view(),
-    sourceImports: () => archiveImportDashboard.sourceImports(),
-    archiveSources: () => archiveImportDashboard.archiveSources(),
-    archiveCards: () => archiveImportDashboard.cardViews()
+    archives: () => archiveViews.view(),
+    sourceImports: () => archiveViews.sourceImports(),
+    archiveSources: () => archiveViews.archiveSources(),
+    archiveCards: () => archiveViews.cardViews()
   });
   const sharedRemoteMcpOptions = {
     ...remoteAgentOptions,
@@ -225150,9 +225210,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  classificationBusy = () => tierSniffer?.hasPriority ?? false;
-  tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
-  archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
+  if (engineFront) {
+    const judge3 = frontJudgeState(() => engineFront.status());
+    classificationBusy = judge3.busy;
+    tierSnifferBacklog = judge3.backlog;
+    archivePrivateModelState = judge3.archivePrivateModel;
+  } else {
+    classificationBusy = () => tierSniffer?.hasPriority ?? false;
+    tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+    archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
+  }
   tierSniffer?.start();
   let engineBackground;
   if (engineRole === "background") {
@@ -225163,6 +225230,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     };
     const runForwarded = async (request) => responseToForwarded(await worker.fetch(forwardedRequestToRequest("http://olympus-worker.internal", request)));
     let deleteFromFront;
+    const manualSyncRuns = new Map;
     const commands = startEngineBackgroundServer({
       socketPath: engineSocketPath,
       authToken,
@@ -225188,9 +225256,18 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         sync_now: ({ source, manual }) => {
           if (!sourceScheduler)
             return { outcome: "scheduler_disabled" };
-          sourceScheduler.runSource(source, undefined, manual ? "operator" : "scheduled").catch(() => {
+          const started_at = new Date().toISOString();
+          if (manual)
+            manualSyncRuns.set(source, { started_at, state: "running" });
+          sourceScheduler.runSource(source, undefined, manual ? "operator" : "scheduled").then(() => {
+            if (manual)
+              manualSyncRuns.set(source, { started_at, state: "done" });
+          }, (error2) => {
+            const code = error2?.code;
+            if (manual)
+              manualSyncRuns.set(source, { started_at, state: "failed", ...typeof code === "string" ? { failure_code: code } : {} });
             console.warn(`[source-scheduler] source=${source} sync requested by the front failed; the next scheduled pass retries.`);
-          });
+          }).finally(() => status.publish());
           return { outcome: "started" };
         },
         start_approved: ({ source }) => {
@@ -225231,12 +225308,30 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       instanceId: commands.instanceId,
       collect: () => ({
         scheduler: sourceScheduler?.status() ?? null,
-        judge: {
-          backlog: tierSniffer?.backlog() ?? null,
-          pending: null,
-          spending: judgeSpending.status()
+        judge: (() => {
+          const backlog = tierSniffer?.backlog();
+          return {
+            backlog: backlog ?? null,
+            pending: backlog?.pendingItems ?? null,
+            spending: judgeSpending.status(),
+            busy: tierSniffer?.hasPriority ?? false,
+            archive_private_model: archivePrivateModelState()
+          };
+        })(),
+        captures: dashboardCaptureRuntime(),
+        ...localUnreadableFiles ? {
+          unreadable: Object.fromEntries(sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).flatMap((definition) => {
+            const counted = localUnreadableFiles.recheck(definition.corpusId);
+            return counted ? [[definition.corpusId, counted]] : [];
+          }))
+        } : {},
+        archive: {
+          view: archiveImportDashboard.view(),
+          cards: archiveImportDashboard.cardViews(),
+          source_imports: archiveImportDashboard.sourceImports(),
+          sources: archiveImportDashboard.archiveSources()
         },
-        captures: dashboardCaptureRuntime()
+        manual_syncs: Object.fromEntries(manualSyncRuns)
       })
     });
     restartForDelete = (request) => {
@@ -226117,6 +226212,7 @@ var init_server5 = __esm(async () => {
   init_store_write_guard();
   init_runtime4();
   init_commands();
+  init_front_scheduler();
   init_front_history();
   init_agent_connections();
   init_remote_access_control();
