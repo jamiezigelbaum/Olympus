@@ -2,9 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import {
   LocalPeopleIndex,
   OWNER_PERSON_ID,
+  peopleIndexPath,
   linkPeople,
   normalizePhone,
   strongKeysFromText,
@@ -221,6 +224,26 @@ describe('people index: owner corrections', () => {
       expect(index.citationName('messages', 'brianna@example.com')).toBeUndefined();
     } finally {
       index.close();
+    }
+  });
+});
+
+describe('people index: Private local data', () => {
+  test('lives in the data root and Delete all removes it, wherever XDG_DATA_HOME puts it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-index-delete-'));
+    const homeDir = join(dir, 'home');
+    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'elsewhere') };
+    try {
+      const path = peopleIndexPath(env);
+      expect(path.startsWith(join(dir, 'elsewhere'))).toBe(true);
+      const index = new LocalPeopleIndex({ dbPath: path });
+      index.correct({ kind: 'rename', identity: EMAIL, name: 'Brianna' });
+      index.close();
+      expect(existsSync(path)).toBe(true);
+      deleteOlympusData({ all: true, homeDir, env });
+      expect(existsSync(path)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -30,9 +30,10 @@
  */
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
 
 /** What one store knows about one sender: the input the index is built from. */
 export interface PeopleSenderObservation {
@@ -129,6 +130,54 @@ export type PeopleCorrection =
 const MAX_GROUP_SIGNAL_MEMBERS = 50;
 const MAX_NAMES_PER_IDENTITY = 8;
 const PEOPLE_SCHEMA_VERSION = 1;
+export const PEOPLE_INDEX_STORE_ID = 'people-index';
+
+function peopleIndexMigrations(): SqliteMigration[] {
+  return [{
+    version: 1,
+    name: 'people_index_v1',
+    up(db: Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS people_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS people_identities (
+          identity_key TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          sender_id TEXT,
+          sender_label TEXT,
+          keys_json TEXT NOT NULL,
+          names_json TEXT NOT NULL,
+          is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
+          item_count INTEGER NOT NULL,
+          person_id TEXT NOT NULL,
+          link_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_people_identities_person ON people_identities(person_id);
+        CREATE TABLE IF NOT EXISTS people_persons (
+          person_id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
+          name_shareable INTEGER NOT NULL CHECK(name_shareable IN (0, 1)),
+          item_count INTEGER NOT NULL,
+          linked_by_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS people_corrections (
+          correction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL CHECK(kind IN ('not_same', 'merge', 'split', 'rename')),
+          identity_a TEXT NOT NULL,
+          identity_b TEXT,
+          name TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS people_contact_cards (
+          card_id TEXT PRIMARY KEY,
+          name TEXT,
+          keys_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+    },
+  }];
+}
 
 export function peopleIndexPath(env: LayoutEnv = process.env): string {
   return sharedDataPath('people-index', env);
@@ -487,46 +536,17 @@ export class LocalPeopleIndex {
     if (options.dbPath !== ':memory:') mkdirSync(dirname(options.dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(options.dbPath, { create: true, strict: true });
     this.now = options.now ?? (() => new Date());
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS people_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS people_identities (
-        identity_key TEXT PRIMARY KEY,
-        provider TEXT NOT NULL,
-        sender_id TEXT,
-        sender_label TEXT,
-        keys_json TEXT NOT NULL,
-        names_json TEXT NOT NULL,
-        is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
-        item_count INTEGER NOT NULL,
-        person_id TEXT NOT NULL,
-        link_reason TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_people_identities_person ON people_identities(person_id);
-      CREATE TABLE IF NOT EXISTS people_persons (
-        person_id TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL,
-        is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
-        name_shareable INTEGER NOT NULL CHECK(name_shareable IN (0, 1)),
-        item_count INTEGER NOT NULL,
-        linked_by_json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS people_corrections (
-        correction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        kind TEXT NOT NULL CHECK(kind IN ('not_same', 'merge', 'split', 'rename')),
-        identity_a TEXT NOT NULL,
-        identity_b TEXT,
-        name TEXT,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS people_contact_cards (
-        card_id TEXT PRIMARY KEY,
-        name TEXT,
-        keys_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
-    this.db.query(`INSERT OR IGNORE INTO people_meta (key, value) VALUES ('schema_version', ?)`).run(String(PEOPLE_SCHEMA_VERSION));
+    try {
+      if (options.dbPath !== ':memory:') chmodSync(options.dbPath, 0o600);
+      this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;');
+      this.db.transaction(() => {
+        assertSqliteSchemaCanOpen(this.db, PEOPLE_INDEX_STORE_ID, PEOPLE_SCHEMA_VERSION);
+        runSqliteMigrations(this.db, PEOPLE_INDEX_STORE_ID, peopleIndexMigrations());
+      }).immediate();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     this.loadPeople();
   }
 
@@ -746,4 +766,39 @@ export class LocalPeopleIndex {
       }
     }
   }
+}
+
+/**
+ * The families whose items have an author: the ones the people index reads
+ * and the author-coverage count covers.
+ */
+export const PEOPLE_AUTHORED_FAMILIES: ReadonlySet<string> = new Set(['chat', 'email']);
+
+/** A store the people index can read: any connector store qualifies. */
+export interface PeopleObservationSource {
+  family: string;
+  peopleObservations(): PeopleSenderObservation[];
+  setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
+}
+
+/**
+ * Rebuild the index from every authored store and point each store's
+ * citations at it. A store that cannot be read is left out of this rebuild
+ * (its senders drop out until the next one); the others still link.
+ */
+export function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly PeopleObservationSource[]): PeoplePerson[] {
+  const observations: PeopleSenderObservation[] = [];
+  for (const store of stores) {
+    if (!PEOPLE_AUTHORED_FAMILIES.has(store.family)) continue;
+    try {
+      observations.push(...store.peopleObservations());
+    } catch {
+      // Unreadable now; the next refresh tries again.
+    }
+  }
+  const people = index.rebuild(observations);
+  const resolver = (provider: string, senderId: string | undefined, senderLabel: string | undefined) =>
+    index.citationName(provider, senderId, senderLabel);
+  for (const store of stores) store.setPeopleNames?.(resolver);
+  return people;
 }
