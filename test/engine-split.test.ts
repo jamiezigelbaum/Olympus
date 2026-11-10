@@ -15,7 +15,7 @@ import { SecretLocationsIndex as SecretLocations } from '../src/workers/classifi
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { createExistingStoreTierLane, createLaneTieredStoreSet, createTieredLaneSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
-import { EngineCommandClient, OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
+import { EngineCommandClient, EngineCommandUnavailableError, OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
 import {
   createEngineCommandHandler,
   EngineCommandLedger,
@@ -193,6 +193,41 @@ describe('commands from the front to the background', () => {
     const receipt = await sending;
     expect(receipt).toMatchObject({ state: 'done', instance_id: 'background-2' });
     expect(applied).toEqual(['first', 'second']);
+  });
+
+  test('a background that never answers, or never finishes its body, is aborted at the deadline', async () => {
+    const clock = createTestClock();
+    const signals: AbortSignal[] = [];
+    const silent = ((_input: RequestInfo | URL, init?: RequestInit) => { signals.push(init!.signal!); return new Promise<Response>(() => {}); }) as typeof fetch;
+    const client = new EngineCommandClient({
+      fetch: silent, authToken: TOKEN, sleep: clock.sleep, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout as (timer: unknown) => void, newId: () => 'command-0040',
+    });
+    let outcome: unknown;
+    void client.send({ kind: 'reload', target: 'sources' }, { timeoutMs: 20_000 }).then((value) => { outcome = value; }, (error) => { outcome = error; });
+    await flushMicrotasks();
+    await clock.advance(20_000);
+    await flushMicrotasks();
+    expect(outcome).toBeInstanceOf(EngineCommandUnavailableError);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+
+    // Headers arrive but the body never does: the body read is bounded too.
+    const stalledSignals: AbortSignal[] = [];
+    const stalled = ((_input: RequestInfo | URL, init?: RequestInit) => {
+      stalledSignals.push(init!.signal!);
+      return Promise.resolve({ status: 202, json: () => new Promise(() => {}) } as unknown as Response);
+    }) as typeof fetch;
+    const bodyClient = new EngineCommandClient({
+      fetch: stalled, authToken: TOKEN, sleep: clock.sleep, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout as (timer: unknown) => void, newId: () => 'command-0041',
+    });
+    let bodyOutcome: unknown;
+    void bodyClient.post({ kind: 'reload', target: 'sources' }, { timeoutMs: 20_000 }).then((value) => { bodyOutcome = value; }, (error) => { bodyOutcome = error; });
+    await flushMicrotasks();
+    await clock.advance(20_000);
+    await flushMicrotasks();
+    expect(bodyOutcome).toBeInstanceOf(EngineCommandUnavailableError);
+    expect(stalledSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(clock.pendingTimers()).toBe(0);
   });
 
   test('judge_boost takes at most 20 items; unknown commands are refused', () => {

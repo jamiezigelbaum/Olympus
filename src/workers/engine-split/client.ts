@@ -24,6 +24,9 @@ export interface EngineCommandClientOptions {
   newId?: () => string;
   /** Called with the background instance id each answer names. */
   onInstance?: (instanceId: string) => void;
+  /** Timer seams for the per-request deadline. */
+  setTimeout?: (callback: () => void, ms: number) => unknown;
+  clearTimeout?: (timer: unknown) => void;
 }
 
 export interface EngineSendOptions {
@@ -43,16 +46,28 @@ export class EngineCommandUnavailableError extends Error {
 
 const RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000];
 const RESULT_WAIT_MS = 10_000;
+/**
+ * How long one request (the fetch and its body) may take beyond any wait it
+ * asks the background for. A background that accepts the connection and
+ * never answers must not hold the front's caller past its own deadline.
+ */
+const REQUEST_GRACE_MS = 15_000;
+
+class RequestTimedOut extends Error {}
 
 export class EngineCommandClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly newId: () => string;
+  private readonly setTimer: (callback: () => void, ms: number) => unknown;
+  private readonly clearTimer: (timer: unknown) => void;
 
   constructor(private readonly options: EngineCommandClientOptions) {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.now ?? (() => Date.now());
     this.newId = options.newId ?? newEngineCommandId;
+    this.setTimer = options.setTimeout ?? ((callback, ms) => { const timer = setTimeout(callback, ms); timer.unref?.(); return timer; });
+    this.clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
   }
 
   /** Deliver the command and return its receipt; does not wait for the result. */
@@ -71,7 +86,7 @@ export class EngineCommandClient {
     while (receipt.state === 'received') {
       if (this.now() >= deadline) throw new EngineCommandUnavailableError('The background engine has not finished this command yet.');
       const wait = Math.max(0, Math.min(RESULT_WAIT_MS, deadline - this.now()));
-      const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: 'GET' });
+      const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: 'GET' }, deadline, wait);
       if (answer?.status === 200) { receipt = answer.body as EngineCommandReceipt; attempt = 0; continue; }
       // 404: the background restarted and lost the record; post it again under the same id.
       if (answer?.status === 404) { receipt = await this.postUntil(id, command, deadline); continue; }
@@ -87,7 +102,7 @@ export class EngineCommandClient {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ id, command }),
-      });
+      }, deadline);
       if (answer && (answer.status === 200 || answer.status === 202)) return answer.body as EngineCommandReceipt;
       // A refusal of the command itself is final; anything else is the background not being there yet.
       if (answer && answer.status >= 400 && answer.status < 500 && answer.status !== 404) {
@@ -98,17 +113,34 @@ export class EngineCommandClient {
     }
   }
 
-  private async request(path: string, init: RequestInit): Promise<{ status: number; body: unknown } | undefined> {
+  /**
+   * One request, bounded: the fetch and the body read share one abort signal
+   * and one timer (the wait asked of the background plus REQUEST_GRACE_MS,
+   * never past the caller's deadline). A request that runs out is aborted and
+   * counts as no answer.
+   */
+  private async request(path: string, init: RequestInit, deadline: number, waitMs = 0): Promise<{ status: number; body: unknown } | undefined> {
+    const limitMs = Math.max(1, Math.min(waitMs + REQUEST_GRACE_MS, deadline - this.now()));
+    const controller = new AbortController();
+    let timedOut!: () => void;
+    const expired = new Promise<never>((_, reject) => { timedOut = () => reject(new RequestTimedOut()); });
+    expired.catch(() => {});
+    const timer = this.setTimer(() => { controller.abort(); timedOut(); }, limitMs);
     try {
-      const response = await this.options.fetch(ENGINE_BACKGROUND_ORIGIN + path, {
-        ...init,
-        headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${this.options.authToken}` },
-      });
-      const body = await response.json().catch(() => undefined) as { instance_id?: unknown } | undefined;
-      if (typeof body?.instance_id === 'string') this.options.onInstance?.(body.instance_id);
-      return { status: response.status, body };
+      return await Promise.race([expired, (async () => {
+        const response = await this.options.fetch(ENGINE_BACKGROUND_ORIGIN + path, {
+          ...init,
+          signal: controller.signal,
+          headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${this.options.authToken}` },
+        });
+        const body = await response.json().catch(() => undefined) as { instance_id?: unknown } | undefined;
+        if (typeof body?.instance_id === 'string') this.options.onInstance?.(body.instance_id);
+        return { status: response.status, body };
+      })()]);
     } catch {
       return undefined;
+    } finally {
+      this.clearTimer(timer);
     }
   }
 }
