@@ -485,9 +485,10 @@ export class TierSnifferService {
 
   /**
    * An answer needs the private pool (the worker calls this when answers in
-   * flight go from 0 to 1): abort the sniffer's in-flight call at once. The
-   * pass stops as `preempted`; nothing is counted against any item, and the
-   * sniffer never records anything in the answer pool's breakers.
+   * flight go from 0 to 1, and when an answer is queued behind a running
+   * call): abort the sniffer's in-flight call at once. The pass stops as
+   * `preempted`; nothing is counted against any item, and the sniffer never
+   * records anything in the answer pool's breakers.
    */
   preempt(): void {
     // The owner's own answer ends a fair turn too, lowering slice included:
