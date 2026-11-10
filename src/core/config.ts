@@ -98,6 +98,12 @@ export interface OlympusConfig {
      */
     engineSplit: boolean;
     /**
+     * With engineSplit on, the background restarts itself, between judge
+     * passes, once its RSS passes this many MB (#957). 0 turns it off.
+     * Default ENGINE_RSS_RESTART_DEFAULT_MB (workers/engine-split/rss-restart.ts).
+     */
+    engineSplitRssRestartMb: number;
+    /**
      * Opt-in OpenClaw supervision of the packaged worker subprocess. The
      * native child loads the same ~/.config/olympus/worker.env written by
      * Olympus setup/connect; host service-wrapper environment is not inherited.
@@ -221,9 +227,20 @@ export interface OlympusConfig {
   };
 }
 
+/**
+ * The background's default memory ceiling before it restarts itself, in MB
+ * (workers/engine-split/rss-restart.ts, #957). On Sparta the single worker
+ * ran at 1.6 GB at the start of a long judging run and grew about 70 MB an
+ * hour; the background alone is smaller, so 3 GB leaves it more than a day
+ * of that growth between restarts, while staying far from the 8 GB a small
+ * Mac has for everything.
+ */
+export const ENGINE_RSS_RESTART_DEFAULT_MB = 3072;
+
 const DEFAULT_CONFIG: OlympusConfig = {
   worker: {
     engineSplit: false,
+    engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
     service: {
       enabled: false,
       startupTimeoutSeconds: 180,
@@ -731,6 +748,9 @@ export function configFromPluginConfig(
   if (worker && Object.prototype.hasOwnProperty.call(worker, 'engineSplit')) {
     config.worker.engineSplit = worker.engineSplit as boolean;
   }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, 'engineSplitRssRestartMb')) {
+    config.worker.engineSplitRssRestartMb = worker.engineSplitRssRestartMb as number;
+  }
   const service = asRecord(worker?.service);
   if (service) {
     if (typeof service.enabled === 'boolean') config.worker.service.enabled = service.enabled;
@@ -1222,6 +1242,9 @@ function applyModelProfileEnv(
 
 function validateConfig(config: OlympusConfig): void {
   assertBoolean(config.worker.engineSplit, 'worker.engineSplit');
+  if (!Number.isSafeInteger(config.worker.engineSplitRssRestartMb) || config.worker.engineSplitRssRestartMb < 0) {
+    throw new OperationError('config_error', 'worker.engineSplitRssRestartMb must be a whole number of MB, 0 or more (0 turns the restart off).');
+  }
   if (config.sovereignty?.configPath !== undefined) {
     if (typeof config.sovereignty.configPath !== 'string' || !config.sovereignty.configPath.trim()) {
       throw new OperationError('config_error', 'sovereignty.configPath must be a non-empty string.');

@@ -47,11 +47,11 @@ export function installWorkerShutdownSignals(options: {
   process.on('SIGTERM', onTerm);
   return {
     setShutdown(handler: (signal: NodeJS.Signals) => void) { shutdown = handler; },
-    modelReload(options: { managed: boolean; drain: () => Promise<void>; exit: (code: number) => void }) {
+    modelReload(options: { managed: boolean; drain: () => Promise<void>; exit: (code: number) => void; beforeExit?: () => void | Promise<void> }) {
       return createModelKeyReload({ managed: options.managed, shutdown: async () => {
         // A reload drains and exits with its own code: no signal deadline.
         stop('SIGTERM', false); await options.drain();
-      }, exit: options.exit });
+      }, exit: options.exit, ...(options.beforeExit ? { beforeExit: options.beforeExit } : {}) });
     },
     dispose() { process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm); },
   };

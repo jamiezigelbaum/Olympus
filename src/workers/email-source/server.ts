@@ -560,10 +560,11 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
-import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, engineStatusSnapshotPath, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
-import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
+import { readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
+import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rss-restart.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
@@ -7945,6 +7946,16 @@ export async function main(): Promise<void> {
         },
       },
     });
+    // Memory past the threshold: a supervised restart between judge passes
+    // (#957). Created before the first snapshot is written, so it carries the
+    // count the last background left in it.
+    const rssRestart = startEngineRssRestart({
+      thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
+      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      restart: () => requestModelReload(),
+      record: () => status.publish(),
+      previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env))),
+    });
     const status = startEngineBackgroundStatus({
       env: process.env,
       instanceId: commands.instanceId,
@@ -7974,6 +7985,7 @@ export async function main(): Promise<void> {
           sources: archiveImportDashboard.archiveSources(),
         },
         manual_syncs: Object.fromEntries(manualSyncRuns),
+        rss_restarts: rssRestart.restarts(),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front
@@ -7986,7 +7998,7 @@ export async function main(): Promise<void> {
       return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line) => console.warn(line) });
     };
     commands.markReady();
-    engineBackground = { stop: () => { status.stop(); commands.stop(); } };
+    engineBackground = { stop: () => { rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
@@ -8041,6 +8053,10 @@ export async function main(): Promise<void> {
   const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); },
+    // Last before the exit, even when the drain failed: a pass still running
+    // is recorded as interrupted, not left pending for the next process to
+    // back off on (#803).
+    beforeExit: () => { sourceScheduler?.settleInterruptedAttempts(); },
     exit: (code) => process.exit(code),
   });
   // In the split a model change restarts the background too, and the front

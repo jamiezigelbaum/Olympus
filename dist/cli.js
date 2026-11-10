@@ -16939,6 +16939,9 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   if (worker && Object.prototype.hasOwnProperty.call(worker, "engineSplit")) {
     config.worker.engineSplit = worker.engineSplit;
   }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, "engineSplitRssRestartMb")) {
+    config.worker.engineSplitRssRestartMb = worker.engineSplitRssRestartMb;
+  }
   const service = asRecord5(worker?.service);
   if (service) {
     if (typeof service.enabled === "boolean")
@@ -17357,6 +17360,9 @@ function applyModelProfileEnv(config, profile, env, prefix) {
 }
 function validateConfig(config) {
   assertBoolean(config.worker.engineSplit, "worker.engineSplit");
+  if (!Number.isSafeInteger(config.worker.engineSplitRssRestartMb) || config.worker.engineSplitRssRestartMb < 0) {
+    throw new OperationError("config_error", "worker.engineSplitRssRestartMb must be a whole number of MB, 0 or more (0 turns the restart off).");
+  }
   if (config.sovereignty?.configPath !== undefined) {
     if (typeof config.sovereignty.configPath !== "string" || !config.sovereignty.configPath.trim()) {
       throw new OperationError("config_error", "sovereignty.configPath must be a non-empty string.");
@@ -17679,7 +17685,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord5(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, ENGINE_RSS_RESTART_DEFAULT_MB = 3072, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_openclaw_plugin_remote();
@@ -17710,6 +17716,7 @@ var init_config = __esm(() => {
   DEFAULT_CONFIG = {
     worker: {
       engineSplit: false,
+      engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
       service: {
         enabled: false,
         startupTimeoutSeconds: 180,
@@ -48282,7 +48289,7 @@ function createModelKeyReload(options) {
     requested = true;
     (options.schedule ?? setTimeout)(() => {
       Promise.resolve().then(options.shutdown).finally(async () => {
-        for (const hook of beforeExit) {
+        for (const hook of options.beforeExit ? [...beforeExit, options.beforeExit] : beforeExit) {
           try {
             await hook();
           } catch {}
@@ -48330,7 +48337,7 @@ function installWorkerShutdownSignals(options) {
       return createModelKeyReload({ managed: options2.managed, shutdown: async () => {
         stop("SIGTERM", false);
         await options2.drain();
-      }, exit: options2.exit });
+      }, exit: options2.exit, ...options2.beforeExit ? { beforeExit: options2.beforeExit } : {} });
     },
     dispose() {
       process.removeListener("SIGINT", onInt);
@@ -190926,6 +190933,17 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind2} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind2, error2)}`);
     }
   }
+  get anyTaskRunning() {
+    return this.executingStates.size > 0;
+  }
+  settleInterruptedAttempts() {
+    let settled = 0;
+    for (const state of this.executingStates) {
+      this.recordShutdownInterruption(state);
+      settled += 1;
+    }
+    return settled;
+  }
   recordShutdownInterruption(state) {
     const interruptedAt = this.now().toISOString();
     if (this.stateStore?.recordInterruption) {
@@ -209149,6 +209167,9 @@ class TierSnifferService {
       this.scheduleTraining(judge3);
     }
   }
+  get passRunning() {
+    return this.running;
+  }
   stop() {
     this.stopped = true;
     this.pauseTraining();
@@ -211557,6 +211578,64 @@ function frontCaptureRuntime(local, snapshot2) {
 var init_front_state = __esm(() => {
   init_runtime4();
   init_commands();
+});
+
+// src/workers/engine-split/rss-restart.ts
+function engineRssRestartsFrom(read) {
+  const value2 = read?.snapshot.rss_restarts;
+  if (!value2 || !Number.isSafeInteger(value2.count) || value2.count < 0)
+    return { count: 0 };
+  const last = value2.last;
+  return {
+    count: value2.count,
+    ...last && typeof last.at === "string" && Number.isFinite(last.rss_mb) ? { last: { at: last.at, rss_mb: last.rss_mb } } : {}
+  };
+}
+function startEngineRssRestart(input) {
+  const now = input.now ?? (() => Date.now());
+  const rss = input.rss ?? (() => process.memoryUsage.rss());
+  const log = input.log ?? ((line2) => console.warn(line2));
+  let restarts = input.previous;
+  let overSince;
+  let done = false;
+  const check = () => {
+    if (done || input.thresholdMb <= 0)
+      return;
+    const rssMb = Math.round(rss() / (1024 * 1024));
+    if (rssMb < input.thresholdMb) {
+      overSince = undefined;
+      return;
+    }
+    overSince ??= now();
+    const waited = now() - overSince;
+    if (input.batchRunning() && waited < ENGINE_RSS_RESTART_MAX_WAIT_MS)
+      return;
+    done = true;
+    const next = { count: restarts.count + 1, last: { at: new Date(now()).toISOString(), rss_mb: rssMb } };
+    const previous = restarts;
+    restarts = next;
+    input.record(next);
+    if (!input.restart()) {
+      restarts = previous;
+      log(`[engine-split] rss_over_threshold rss_mb=${rssMb} threshold_mb=${input.thresholdMb}: nothing supervises this process, so it keeps running.`);
+      return;
+    }
+    log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited}`);
+  };
+  const timer = (input.setInterval ?? ((callback, ms) => {
+    const handle = setInterval(callback, ms);
+    handle.unref?.();
+    return handle;
+  }))(check, ENGINE_RSS_CHECK_INTERVAL_MS);
+  return {
+    restarts: () => restarts,
+    stop: () => (input.clearInterval ?? ((handle) => clearInterval(handle)))(timer)
+  };
+}
+var ENGINE_RSS_CHECK_INTERVAL_MS = 60000, ENGINE_RSS_RESTART_MAX_WAIT_MS;
+var init_rss_restart = __esm(() => {
+  init_config();
+  ENGINE_RSS_RESTART_MAX_WAIT_MS = 10 * 60000;
 });
 
 // src/workers/engine-split/front-scheduler.ts
@@ -239025,6 +239104,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         }
       }
     });
+    const rssRestart = startEngineRssRestart({
+      thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
+      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      restart: () => requestModelReload(),
+      record: () => status.publish(),
+      previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env)))
+    });
     const status = startEngineBackgroundStatus({
       env: process.env,
       instanceId: commands.instanceId,
@@ -239053,7 +239139,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           source_imports: archiveImportDashboard.sourceImports(),
           sources: archiveImportDashboard.archiveSources()
         },
-        manual_syncs: Object.fromEntries(manualSyncRuns)
+        manual_syncs: Object.fromEntries(manualSyncRuns),
+        rss_restarts: rssRestart.restarts()
       })
     });
     restartForDelete = (request) => {
@@ -239064,6 +239151,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     };
     commands.markReady();
     engineBackground = { stop: () => {
+      rssRestart.stop();
       status.stop();
       commands.stop();
     } };
@@ -239118,6 +239206,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     drain: async () => {
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
       await server?.stop(true);
+    },
+    beforeExit: () => {
+      sourceScheduler?.settleInterruptedAttempts();
     },
     exit: (code) => process.exit(code)
   });
@@ -239958,6 +240049,8 @@ var init_server5 = __esm(async () => {
   init_runtime4();
   init_commands();
   init_front_state();
+  init_snapshot();
+  init_rss_restart();
   init_front_scheduler();
   init_front_history();
   init_agent_connections();

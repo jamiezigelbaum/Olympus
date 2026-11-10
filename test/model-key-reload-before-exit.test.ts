@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createModelKeyReload } from '../src/core/model-key-reload.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 /** A reload whose timer the test fires, recording what happened in order. */
 function reload(options: { managed?: boolean; shutdown?: () => Promise<void> } = {}) {
@@ -60,5 +61,23 @@ describe('a reload\'s before-exit hooks', () => {
     const r = reload({ managed: false });
     expect(r.request({ beforeExit: () => { throw new Error('must not run'); } })).toBe(false);
     expect(r.events).toEqual([]);
+  });
+});
+
+describe('the reload\'s own last step', () => {
+  test('runs after every request\'s hooks and before the exit, even when the shutdown fails', async () => {
+    const events: string[] = [];
+    let fire: (() => void) | undefined;
+    const request = createModelKeyReload({
+      managed: true,
+      schedule: (run) => { fire = run; },
+      shutdown: async () => { throw new Error('capture stop failed'); },
+      beforeExit: () => { events.push('settle'); },
+      exit: (code) => { events.push(`exit ${code}`); },
+    });
+    request({ beforeExit: () => { events.push('hook'); } });
+    fire!();
+    await waitFor(() => events.includes('exit 75') ? true : undefined);
+    expect(events).toEqual(['hook', 'settle', 'exit 75']);
   });
 });
