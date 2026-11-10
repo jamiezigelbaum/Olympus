@@ -34,6 +34,8 @@ import {
 } from './workers/classification/tier-ledger-path.ts';
 import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
+import { Database } from 'bun:sqlite';
+import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from './workers/connector-store/local-index.ts';
 
 export interface DataRestorePlanEntry {
   /** The file in the export, relative to it. */
@@ -153,6 +155,19 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         throw new OperationError('invalid_params', `The backup holds a file this version of Olympus does not know: ${from}.`);
     }
   }
+  // A store that already holds tier-routed copies is bound to the ledger that
+  // judged them, and opens only beside that ledger. A backup that has such a
+  // store without its ledger (version 2 exported none) cannot be judged again
+  // into a new one, so it is refused before anything is written.
+  const ledgerSources = new Set(plan.filter((entry) => entry.kind === 'judgments' && entry.to.endsWith('.tier-ledger.sqlite')).map((entry) => entry.sourceId));
+  const unbound = plan.filter((entry) => entry.kind === 'store' && !ledgerSources.has(entry.sourceId) && storeIsTierBound(join(input, entry.from)));
+  if (unbound.length > 0) {
+    throw new OperationError(
+      'invalid_params',
+      `This backup holds ${[...new Set(unbound.map((entry) => entry.sourceId))].join(', ')} items that were judged into Private or Secret stores, but not the judgments themselves, so they could not be opened after a restore. Nothing was restored.`,
+      'Make a new backup with this version of Olympus (olympus data export), then restore that one.',
+    );
+  }
   if (manifest.version < 3 || !sawJudgments) {
     notes.push('This backup has no privacy judgments, so Olympus judges the restored items again.');
   }
@@ -228,4 +243,17 @@ function sourceSettingsTarget(artifact: DataExportArtifact, context: LifecyclePa
     throw new OperationError('invalid_params', `The backup holds a ${artifact.sourceId} settings file this version of Olympus does not keep: ${artifact.relativePath}.`);
   }
   return target;
+}
+
+/** Whether a store in the backup is bound to a tier ledger (it holds routed copies). */
+function storeIsTierBound(path: string): boolean {
+  const db = new Database(path, { readonly: true });
+  try {
+    const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
+    if (!table) return false;
+    const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
+    return Boolean(row?.cursor);
+  } finally {
+    db.close();
+  }
 }

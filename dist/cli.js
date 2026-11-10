@@ -195835,7 +195835,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database24 } from "bun:sqlite";
+import { Database as Database25 } from "bun:sqlite";
 import { existsSync as existsSync104 } from "node:fs";
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
@@ -196020,7 +196020,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database24(ledgerPath, { readonly: true, create: false });
+      db = new Database25(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {
@@ -226668,9 +226668,11 @@ init_sovereignty();
 init_tier_ledger_path();
 init_tier_rules();
 init_source_dispositions();
+init_local_index();
 import { copyFileSync as copyFileSync3, existsSync as existsSync84, mkdirSync as mkdirSync51, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
 import { dirname as dirname87, join as join113, resolve as resolve22 } from "node:path";
 import { randomUUID as randomUUID29 } from "node:crypto";
+import { Database as Database24 } from "bun:sqlite";
 function restoreOlympusData(options) {
   const input = resolve22(options.input);
   verifyOlympusDataExport({ destination: input });
@@ -226747,6 +226749,11 @@ function restoreOlympusData(options) {
         throw new OperationError("invalid_params", `The backup holds a file this version of Olympus does not know: ${from}.`);
     }
   }
+  const ledgerSources = new Set(plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(".tier-ledger.sqlite")).map((entry) => entry.sourceId));
+  const unbound = plan.filter((entry) => entry.kind === "store" && !ledgerSources.has(entry.sourceId) && storeIsTierBound(join113(input, entry.from)));
+  if (unbound.length > 0) {
+    throw new OperationError("invalid_params", `This backup holds ${[...new Set(unbound.map((entry) => entry.sourceId))].join(", ")} items that were judged into Private or Secret stores, but not the judgments themselves, so they could not be opened after a restore. Nothing was restored.`, "Make a new backup with this version of Olympus (olympus data export), then restore that one.");
+  }
   if (manifest2.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
@@ -226810,6 +226817,18 @@ function sourceSettingsTarget(artifact, context2) {
     throw new OperationError("invalid_params", `The backup holds a ${artifact.sourceId} settings file this version of Olympus does not keep: ${artifact.relativePath}.`);
   }
   return target;
+}
+function storeIsTierBound(path) {
+  const db = new Database24(path, { readonly: true });
+  try {
+    const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
+    if (!table)
+      return false;
+    const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+    return Boolean(row?.cursor);
+  } finally {
+    db.close();
+  }
 }
 
 // src/cli.ts

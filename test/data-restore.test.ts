@@ -127,3 +127,23 @@ describe('data restore across tier stores', () => {
     }
   });
 });
+
+test('refuses a store bound to a ledger the backup does not hold, and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-bound-'));
+  const homeA = join(dir, 'a');
+  const homeB = join(dir, 'b');
+  const backup = join(dir, 'backup');
+  try {
+    const store = storeOf(homeA);
+    mkdirSync(dirname(store), { recursive: true });
+    const db = new Database(store, { create: true });
+    db.exec('CREATE TABLE sync_runs (sync_run_id TEXT, connector_id TEXT, cursor TEXT);');
+    db.query('INSERT INTO sync_runs VALUES (?, ?, ?)').run('tiered-store-set-binding', 'tiered_store_set_binding', JSON.stringify({ ledgerId: 'l1', ledgerPath: '/x' }));
+    db.close();
+    exportOlympusData({ destination: backup, homeDir: homeA });
+    expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('not the judgments themselves');
+    expect(existsSync(storeOf(homeB))).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
