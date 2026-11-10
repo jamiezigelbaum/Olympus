@@ -250,10 +250,10 @@ func defaultBridgeDeps() bridgeDeps {
 			defer cancel()
 			return runUnlinkMode(ctx, container)
 		},
-		listChats: func(_ string, container *sqlstore.Container) error {
+		listChats: func(stateDir string, container *sqlstore.Container) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			return runListChatsMode(ctx, container)
+			return runListChatsMode(ctx, container, stateDir)
 		},
 		native: func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error) {
 			return startNativeCapture(stateDir, spoolDir, native, allowed, container, newWhatsmeowClient)
@@ -418,6 +418,7 @@ func runPairOnlyMode(stateDir string, container *sqlstore.Container) error {
 	}
 	unsupported := make(chan string, 1)
 	client := newWhatsmeowClient(device, &pairingDiagnosticLogger{stateDir: stateDir, unsupported: unsupported})
+	keepHistoryForCapture(client, stateDir)
 	return runPairOnly(ctx, client, container, stateDir, unsupported)
 }
 
@@ -910,6 +911,8 @@ func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureCo
 
 	connectWithBackoff(client)
 	log.Print(existingSessionConnectedLogLine())
+	// History the pair-only run kept, now read with the owner's chat choice.
+	go drainKeptHistory(ctx, client, audioStore, writer, allowed, stateDir)
 	return client, writer, fatalEvents, nil
 }
 
@@ -1043,6 +1046,10 @@ func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audi
 		if rec, ok := recordFromMessage(ctx, client, audioStore, v); ok {
 			writer.enqueue(rec)
 		}
+	case *events.HistorySync:
+		// The SDK dispatches these from its own history goroutine, never the
+		// live event loop, so spooling may wait for queue room (#852).
+		spoolHistorySync(ctx, client, audioStore, writer, allowed, v.Data)
 	case *events.Disconnected:
 		writer.markConnected(false)
 		log.Printf("olympus-whatsapp-bridge: disconnected; whatsmeow auto-reconnect will retry with backoff")

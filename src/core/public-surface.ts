@@ -392,6 +392,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/chat_list.go',
+  'tools/whatsapp-bridge/history_sync.go',
   'tools/whatsapp-bridge/capture_status.go',
   'tools/whatsapp-bridge/media_files.go',
   'tools/whatsapp-bridge/media_serve.go',
