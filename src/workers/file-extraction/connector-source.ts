@@ -68,7 +68,8 @@ function isBoundedFetchConnector(connector: SourceConnector): connector is Bound
  * original when it is a plain file under an approved folder (no copy), or a
  * private file it streams the bytes to, in bounded chunks, inside `spoolDir`
  * (a member of an archive, a part of a message). `spooled` says which, so only
- * a file the connector wrote is ever removed.
+ * a file the connector wrote is ever removed. `sizeBytes`, when given, is the
+ * size of the file it handed over.
  */
 export interface FileFetchConnector extends SourceConnector {
   fetchItemToFile(
@@ -81,7 +82,7 @@ export interface FileFetchConnector extends SourceConnector {
       spoolAnchor?: string;
       stillServed?: () => boolean;
     },
-  ): Promise<{ item: RawItem; path: string; spooled: boolean }>;
+  ): Promise<{ item: RawItem; path: string; spooled: boolean; sizeBytes?: number }>;
 }
 
 function isFileFetchConnector(connector: SourceConnector): connector is FileFetchConnector {
@@ -141,7 +142,7 @@ export async function readItemToFile(
      */
     stillServed?: () => boolean;
   },
-): Promise<{ item: RawItem; path: string; spooled: boolean }> {
+): Promise<{ item: RawItem; path: string; spooled: boolean; sizeBytes?: number }> {
   if (isFileFetchConnector(connector)) return connector.fetchItemToFile(localItemId, options);
   const item = await readItemWithin(connector, localItemId, options);
   const content = item.content;
@@ -336,7 +337,7 @@ export function createConnectorFileExtractionSource(
       // source removes it, and a start can tell it is an orphan.
       const owner = { corpusId, accountScope: ref.accountScope };
       const spoolDir = extractionSpoolOwnerDir(fileOptions.spoolDir, owner);
-      let handed: { item: RawItem; path: string; spooled: boolean };
+      let handed: { item: RawItem; path: string; spooled: boolean; sizeBytes?: number };
       try {
         handed = await readItemToFile(connector, ref.localItemId, {
           ...(fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {}),
@@ -350,10 +351,12 @@ export function createConnectorFileExtractionSource(
       }
       const content = handed.item.content;
       const mimeType = typeFor(ref, content.kind === 'bytes' ? content.mimeType : handed.item.mimeType);
+      // The size of the file handed over, when the connector measured it; else the size the store states.
+      const sizeBytes = handed.sizeBytes ?? deferred?.sizeBytes;
       return {
         path: handed.path,
         ...(mimeType ? { mimeType } : {}),
-        ...(deferred?.sizeBytes !== undefined ? { sizeBytes: deferred.sizeBytes } : {}),
+        ...(sizeBytes !== undefined ? { sizeBytes } : {}),
         dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose,
       };
     },

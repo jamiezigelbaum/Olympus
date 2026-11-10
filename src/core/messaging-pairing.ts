@@ -19,6 +19,7 @@ import { recordPairingAccount, settlePairingPlacement } from './pairing-placemen
 import { whatsappBridgeFileName } from './whatsapp-bridge-name.ts';
 import { captureGrantPathBeside, captureGrantPathFromEnv, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
+import { formatAllowedChatList, parseChatKindToken, type MessagingChatKind } from './messaging-chat-kinds.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
 export const TELEGRAM_API_ID_SECRET_KEY = 'telegram.personal.app.api_id';
@@ -28,6 +29,8 @@ export interface MessagingChatMetadata {
   chatScope: string;
   kind: 'dm' | 'bot' | 'group' | 'channel';
   title: string;
+  /** When the chat last had a message, for "most recent first" in the chooser; absent when the provider does not say. */
+  lastMessageAt?: string;
 }
 
 export type MessagingCaptureScopeApproval =
@@ -36,6 +39,8 @@ export type MessagingCaptureScopeApproval =
     explicitApproval: true;
     wholeAccount?: boolean;
     chatScopes?: readonly string[];
+    /** Every chat of these kinds, including chats started later (#1075). */
+    chatKinds?: readonly MessagingChatKind[];
   }
   | {
     source: 'whatsapp';
@@ -44,6 +49,8 @@ export type MessagingCaptureScopeApproval =
     wholeAccount?: boolean;
     /** Exact WhatsApp chat JIDs chosen in the private pairing UI. */
     chatJids?: readonly string[];
+    /** Every chat of these kinds, including chats started later (#1075). */
+    chatKinds?: readonly MessagingChatKind[];
   };
 
 export interface MessagingProducerLaunch {
@@ -324,7 +331,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     const priorScopes = typeof priorRaw === 'string' ? priorRaw.split(',') : [];
     const alternate = priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES;
     const retained = (priorRaw === alternate || (sameAccount && alternate === undefined))
-      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) || isKindToken(scope)) ? priorScopes.filter(scope => !isKindToken(scope)) : [];
     const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === 'telegram') {
       // Decided under the entry's lease by whoever owns the data, so an account it
@@ -595,13 +602,15 @@ function producerLaunch(
   }
   if (source === 'telegram') {
     const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes ?? [] : []);
+    const kinds = uniqueNonEmpty(approval.chatKinds ?? []);
     const wholeAccount = approval.source === 'telegram' && approval.wholeAccount === true;
-    if (wholeAccount === (scopes.length > 0)) throw new Error('Approve either the whole Telegram account or at least one exact chat, but not both.');
-    if (scopes.some((scope) => scope.includes('*'))) throw new Error('Telegram capture approval requires exact chat identifiers.');
+    if (wholeAccount === (scopes.length + kinds.length > 0)) throw new Error('Approve either the whole Telegram account or at least one chat kind or exact chat, but not both.');
+    if (scopes.some((scope) => scope.includes('*') || scope.startsWith('kind'))) throw new Error('Telegram capture approval requires exact chat identifiers.');
     const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error('Telegram capture approval contains a chat that was not in the verified account listing.');
     }
+    const allowed = formatAllowedChatList('telegram', { wholeAccount, chatKinds: kinds, chats: scopes });
     return {
       source,
       executable: helperExecutable,
@@ -610,8 +619,8 @@ function producerLaunch(
         // A folder account's spawner sets its paths from its folder (core/olympus-layout.ts, folderCaptureEnv).
         ...(layout === 'folder' ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath }),
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: allowed,
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: allowed,
       },
       secretEnvironment: [
         { env: 'OLYMPUS_TELEGRAM_API_ID', secretKey: TELEGRAM_API_ID_SECRET_KEY },
@@ -621,13 +630,15 @@ function producerLaunch(
     };
   }
   const chatJids = uniqueNonEmpty(approval.source === 'whatsapp' ? approval.chatJids ?? [] : []);
+  const kinds = uniqueNonEmpty(approval.chatKinds ?? []);
   const wholeAccount = approval.source === 'whatsapp' && approval.wholeAccount === true;
-  if (wholeAccount === (chatJids.length > 0)) {
-    throw new Error('Approve either the whole linked WhatsApp account or at least one exact chat, but not both.');
+  if (wholeAccount === (chatJids.length + kinds.length > 0)) {
+    throw new Error('Approve either the whole linked WhatsApp account or at least one chat kind or exact chat, but not both.');
   }
   if (chatJids.some((jid) => !/^[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(jid))) {
     throw new Error('WhatsApp capture approval contains an invalid chat identifier.');
   }
+  const allowed = formatAllowedChatList('whatsapp', { wholeAccount, chatKinds: kinds, chats: chatJids });
   return {
     source,
     executable: helperExecutable,
@@ -635,7 +646,7 @@ function producerLaunch(
     env: {
       ...(layout === 'folder' ? {} : { OLYMPUS_WHATSAPP_STATE_DIR: sessionPath }),
       OLYMPUS_WHATSAPP_QR_STDOUT: 'false',
-      OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: wholeAccount ? '*' : chatJids.join(','),
+      OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: allowed,
     },
     secretEnvironment: [],
     captureStarted: false,
@@ -658,6 +669,10 @@ function parseReadyReceipt(events: readonly Record<string, unknown>[], source: M
   return event as unknown as PairingReceipt;
 }
 
+function isKindToken(value: string): boolean {
+  try { return parseChatKindToken('telegram', value) !== undefined; } catch { return false; }
+}
+
 function parseTelegramDialogs(value: unknown): MessagingChatMetadata[] {
   if (!Array.isArray(value)) return [];
   const chats: MessagingChatMetadata[] = [];
@@ -669,6 +684,7 @@ function parseTelegramDialogs(value: unknown): MessagingChatMetadata[] {
       chatScope: item.chat_scope,
       kind: item.kind as MessagingChatMetadata['kind'],
       title: typeof item.title === 'string' ? item.title : '',
+      ...(typeof item.last_message_at === 'string' && !Number.isNaN(Date.parse(item.last_message_at)) ? { lastMessageAt: new Date(item.last_message_at).toISOString() } : {}),
     });
   }
   return chats;

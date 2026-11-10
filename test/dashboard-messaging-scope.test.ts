@@ -280,3 +280,31 @@ test('no pairing can start between Disconnect stopping the running one and finis
     await waitUntil(() => pairs === 2);
   } finally { await service.cancelAndWait('telegram'); service.close(); }
 });
+
+// #1075: a kind saved from the chooser lands in the grant as a token, and reads back as that kind.
+for (const source of ['telegram', 'whatsapp'] as const) {
+  test(`${source}: kinds save beside exact chats and read back; an unknown kind is refused`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'messaging-kinds-')); dirs.push(dir);
+    const key = source === 'telegram' ? 'OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES' : 'OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS';
+    const chatScope = source === 'telegram' ? 'telegram.personal:chat:101' : 'whatsapp.personal:chat:123@g.us';
+    const env = source === 'telegram' ? { [key]: '*', OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: '*' } : { [key]: '*' };
+    const grantPath = join(dir, `messaging-capture.${source}.json`);
+    writeFileSync(grantPath, JSON.stringify({ version: 1, source, handle: `${source}.personal`, sessionPath: dir, grantedAt: '2026-01-01', producer: { source, env, secretEnvironment: [] } }), { mode: 0o600 });
+    const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+      secretStore: { label: 'memory', get: async (name) => name.endsWith('api_id') ? '123' : 'fixture-hash', getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
+      withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async operation => operation(),
+      listCommand: async () => ({ dialogs: [{ chat_scope: chatScope, title: 'Family', kind: 'group', last_message_at: '2026-11-09T10:00:00Z' }] }),
+    });
+    try {
+      expect(await service.handle('chats', { source })).toMatchObject({ wholeAccount: true, chatKinds: [], chats: [{ chatScope, lastMessageAt: '2026-11-09T10:00:00.000Z' }] });
+      await expect(service.handle('scope', { source, wholeAccount: false, chatScopes: [], chatKinds: ['everyone'] })).rejects.toThrow();
+      await expect(service.handle('scope', { source, wholeAccount: true, chatScopes: [], chatKinds: ['dm'] })).rejects.toThrow();
+      await service.handle('scope', { source, wholeAccount: false, chatScopes: [chatScope], chatKinds: ['dm'] });
+      const saved = JSON.parse(readFileSync(grantPath, 'utf8')).producer.env;
+      expect(saved[key]).toBe(source === 'telegram' ? `kind:dm,${chatScope}` : 'kind:dm,123@g.us');
+      if (source === 'telegram') expect(saved.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe(saved[key]);
+      expect(await service.handle('chats', { source })).toMatchObject({ wholeAccount: false, chatKinds: ['dm'], chatScopes: [chatScope] });
+      expect(retainApprovedCaptureScope(source, saved)).toMatchObject({ [key]: saved[key] });
+    } finally { service.close(); }
+  });
+}
