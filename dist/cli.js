@@ -66412,7 +66412,7 @@ function createLocalModelActivity() {
     const kind = localInferencePriority?.getStore() ?? "owner";
     pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try {
-        resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
+        resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key2, work)) : lease(key2, work)));
       } catch (error) {
         reject(error);
       }
@@ -66420,6 +66420,19 @@ function createLocalModelActivity() {
     queueMicrotask(pump);
   });
   const taggedRunning = new Map;
+  const ownerRunning = new Map;
+  const lease = async (key2, work) => {
+    const store = localInferencePriority?.getStore();
+    const owner = store !== "background" && store !== "maintenance";
+    if (owner)
+      ownerRunning.set(key2, (ownerRunning.get(key2) ?? 0) + 1);
+    try {
+      return await get(key2).run(work);
+    } finally {
+      if (owner)
+        ownerRunning.set(key2, (ownerRunning.get(key2) ?? 1) - 1);
+    }
+  };
   const resources = new Map;
   const busyListeners = new Map;
   const get = (key2) => {
@@ -66438,7 +66451,8 @@ function createLocalModelActivity() {
   return {
     busy: (key2) => get(key2).busy,
     busyExcept: (key2, tag) => get(key2).inFlight > (taggedRunning.get(`${key2}\x00${tag}`) ?? 0),
-    run: (key2, work) => get(key2).run(work),
+    ownerInFlight: (key2) => (ownerRunning.get(key2) ?? 0) > 0,
+    run: (key2, work) => lease(key2, work),
     onBusy(key2, listener) {
       const listeners = busyListeners.get(key2) ?? new Set;
       busyListeners.set(key2, listeners);
@@ -66451,7 +66465,7 @@ function createLocalModelActivity() {
     track(key2, model, options = {}) {
       const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work2) => get(key2).run(work2) : (work2) => dispatch(key2, work2, limit);
+        const run = options.serialize === false ? (work2) => lease(key2, work2) : (work2) => dispatch(key2, work2, limit);
         return run(async () => {
           const tagKey = options.tag === undefined ? undefined : `${key2}\x00${options.tag}`;
           if (tagKey !== undefined)
@@ -100509,6 +100523,22 @@ class LocalSourceSchedulerStateStore {
           degraded_reason = CASE WHEN ? = 1 THEN excluded.degraded_reason ELSE source_scheduler_task_state.degraded_reason END,
           updated_at = excluded.updated_at
       `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
+    });
+  }
+  recordInterruption(input) {
+    const key2 = requireStateKey(input);
+    const interruptedAt = requireTimestamp2(input.interruptedAt, "interruptedAt");
+    return this.writeCurrentVersion(key2, () => {
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version,
+          not_before_at, attempt_in_progress, consecutive_failures, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          not_before_at = excluded.not_before_at,
+          attempt_in_progress = 0,
+          updated_at = excluded.updated_at
+      `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, interruptedAt, interruptedAt);
     });
   }
   writeCurrentVersion(key2, write) {
@@ -176587,6 +176617,7 @@ class SourceScheduler {
   lastAfterTickAt;
   afterTickTimer;
   timer;
+  stops = 0;
   fastWakeTimers = new Map;
   continueAfterMs;
   setTimeoutImpl;
@@ -176657,6 +176688,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.stops += 1;
     this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
@@ -176983,6 +177015,7 @@ class SourceScheduler {
     const cadenceAnchor = state.nextRunAt;
     const attemptedAt = this.now().toISOString();
     state.lastAttemptAt = attemptedAt;
+    const stopsAtStart = this.stops;
     try {
       if (this.stateStore) {
         if (state.pendingUnpark && this.stateStore.claimUnparkAttempt) {
@@ -177013,7 +177046,7 @@ class SourceScheduler {
           }));
         }
       }
-      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance);
+      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
@@ -177082,6 +177115,10 @@ class SourceScheduler {
         this.wakeDownstream(state, continueAt);
     } catch (error2) {
       delete state.wakeAfterRun;
+      if (this.stops !== stopsAtStart) {
+        this.recordShutdownInterruption(state);
+        return;
+      }
       const message2 = error2 instanceof Error ? error2.message : String(error2);
       const errorKind2 = safeSchedulerErrorKind(error2);
       const errorHash = hash(message2);
@@ -177114,6 +177151,21 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind2} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind2, error2)}`);
     }
   }
+  recordShutdownInterruption(state) {
+    const interruptedAt = this.now().toISOString();
+    if (this.stateStore?.recordInterruption) {
+      try {
+        this.applyPersistedState(state, this.stateStore.recordInterruption({
+          ...schedulerTaskStateKey(state.source, state.task),
+          interruptedAt
+        }));
+      } catch (stateError) {
+        console.error(`[olympus:source-scheduler] state_persist_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${safeSchedulerErrorKind(stateError)}`);
+      }
+    }
+    state.nextRunAt = Date.parse(interruptedAt);
+    console.info(`[olympus:source-scheduler] task_interrupted_by_shutdown source_id=${state.source.sourceId} task_id=${state.task.id}`);
+  }
   applyPendingUnparks(dueAt) {
     if (!this.stateStore?.pendingUnparks)
       return;
@@ -177131,7 +177183,7 @@ ${request.taskId}`);
       state.nextRunAt = Math.min(state.nextRunAt, dueAt);
     }
   }
-  async runWithTransientRetries(state, task, attemptedAt, provenance) {
+  async runWithTransientRetries(state, task, attemptedAt, provenance, stopsAtStart) {
     let lastError;
     for (let attempt = 1;attempt <= this.maxTransientRetries; attempt += 1) {
       try {
@@ -177149,7 +177201,11 @@ ${request.taskId}`);
         lastError = error2;
         if (safeSchedulerRetryAt(error2) || !isTransientError(error2) || attempt >= this.maxTransientRetries)
           break;
+        if (this.stops !== stopsAtStart)
+          break;
         await this.sleep(this.errorBackoffMs);
+        if (this.stops !== stopsAtStart)
+          break;
       }
     }
     throw lastError;
@@ -196282,6 +196338,11 @@ class TierSnifferService {
         this.yieldingSinceMs = undefined;
       return false;
     }
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
+    }
     if (this.fairTurn)
       return false;
     const now = this.clockMs();
@@ -196746,6 +196807,13 @@ class TierSnifferService {
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
       return;
+    }
+  }
+  ownerAnswering() {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
   answering() {
@@ -223636,6 +223704,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
+    ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),

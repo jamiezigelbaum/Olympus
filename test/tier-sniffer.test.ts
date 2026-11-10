@@ -815,6 +815,53 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('a long owner answer still running never grants classification its fair turn (#1031)', async () => {
+    // #1030 review: preempt() ends a turn only when the owner's call starts.
+    // A call that outlasts the minute must not let the next pass take a turn.
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-owner-inflight-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 3; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `boat trip plan ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let clock = 0;
+      let owner = true;
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'personal', category: 'everyday', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        answersInFlight: () => true,
+        ownerInFlight: () => owner,
+        maxCallsPerPass: 1,
+        now: () => new Date(clock),
+      });
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      clock += 61_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      clock += 120_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      // The owner's call ends; other answers are outlasted after a fresh minute.
+      owner = false;
+      clock += 1_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      clock += 61_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1 } });
+      service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a model that stops answering is named as such, though every failed dispatch counted as a call; answering again clears it', async () => {
     // Source-neutral: any store's queue (an imported archive's held mail, a
     // Dropbox folder's files) reads the same reason off the same service.

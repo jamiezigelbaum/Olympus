@@ -180,6 +180,8 @@ export interface TierSnifferServiceOptions {
   modelState?: () => string | undefined;
   /** True only while foreground inference uses this same local model. Moves drain independently. */
   answersInFlight?: () => boolean;
+  /** True while one of the owner's own calls runs on this model: a pass never takes a fair turn against it (#1031). */
+  ownerInFlight?: () => boolean;
   now?: () => Date;
   log?: (line: string) => void;
   /**
@@ -928,6 +930,13 @@ export class TierSnifferService {
       if (!this.fairTurn) this.yieldingSinceMs = undefined;
       return false;
     }
+    // A long owner call still running ends a turn and holds the wait at its
+    // start, as preempt() does when that call begins (#1031).
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
+    }
     if (this.fairTurn) return false;
     const now = this.clockMs();
     this.yieldingSinceMs ??= now;
@@ -1442,6 +1451,14 @@ export class TierSnifferService {
     } catch (error) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry.`);
       return undefined;
+    }
+  }
+
+  private ownerAnswering(): boolean {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
 
