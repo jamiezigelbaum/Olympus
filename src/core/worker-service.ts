@@ -617,6 +617,12 @@ ExecStart=${command.map(systemdExecArg).join(' ')}
 # A stop's SIGTERM ends in exit 143 when a pass outlives the shutdown deadline
 # (src/core/worker-shutdown.ts): a clean stop, not a failure (#953).
 SuccessExitStatus=143
+# With worker.engineSplit on this process supervises the background and the
+# front (src/core/worker-service-split.ts): a stop signals it alone, and it
+# stops the front, then the background, each within its shutdown deadline.
+# Whatever is left when it exits is killed, so nothing outlives the unit.
+KillMode=mixed
+TimeoutStopSec=90
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:${input.paths.logPath}

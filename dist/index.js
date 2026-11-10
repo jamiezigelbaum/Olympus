@@ -29876,6 +29876,25 @@ async function waitUntil(condition, timeoutMs, pollMs) {
   }
 }
 var ENGINE_BACKGROUND_SERVICE_ID = "olympus-worker-background";
+function engineBackgroundLaunch(input) {
+  input.env[ENGINE_ROLE_ENV] = "background";
+  input.env[ENGINE_BACKGROUND_SOCKET_ENV] = input.socketPath;
+  const fetchBackground = input.fetchForSocket ? input.fetchForSocket(input.socketPath) : createUnixSocketFetch(input.socketPath);
+  return {
+    command: input.command,
+    args: input.args,
+    env: input.env,
+    startupTimeoutMs: input.startupTimeoutMs,
+    endpointOccupied: false,
+    startupFailure: (child) => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
+    async readinessProbe(child) {
+      const ready = await probeEngineBackground(fetchBackground, input.authToken, input.instanceId, input.probeTimeoutMs);
+      if (ready)
+        input.onReady?.(child);
+      return ready;
+    }
+  };
+}
 function createNativeEngineBackgroundService(options) {
   let readyChild;
   let proofGeneration = 0;
@@ -29913,25 +29932,26 @@ function createNativeEngineBackgroundService(options) {
       const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
       const socketPath = engineBackgroundSocketPath({ env: settings.env });
       prepareEngineBackgroundSocketDirectory(socketPath);
-      settings.env[ENGINE_ROLE_ENV] = "background";
-      settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = socketPath;
       settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? "engine" : "gateway";
       const startupTimeoutMs = config.worker.service.startupTimeoutSeconds * 1000;
       const effective = options.startupTimeoutMs ?? startupTimeoutMs;
-      const fetchBackground = options.fetchForSocket ? options.fetchForSocket(socketPath) : createUnixSocketFetch(socketPath);
       return {
         ...settings,
-        startupTimeoutMs,
-        command: settings.runtimePath,
-        args: ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId],
-        endpointOccupied: false,
-        startupFailure: (child) => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-        async readinessProbe(child) {
-          const ready = await probeEngineBackground(fetchBackground, settings.authToken, settings.instanceId, Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effective, 1)));
-          if (ready && generation === proofGeneration)
-            readyChild = child;
-          return ready;
-        }
+        ...engineBackgroundLaunch({
+          env: settings.env,
+          socketPath,
+          authToken: settings.authToken,
+          instanceId: settings.instanceId,
+          command: settings.runtimePath,
+          args: ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId],
+          startupTimeoutMs,
+          probeTimeoutMs: Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effective, 1)),
+          ...options.fetchForSocket ? { fetchForSocket: options.fetchForSocket } : {},
+          onReady: (child) => {
+            if (generation === proofGeneration)
+              readyChild = child;
+          }
+        })
       };
     }
   });

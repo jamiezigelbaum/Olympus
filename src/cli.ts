@@ -15,7 +15,8 @@ import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './c
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
-import { loadConfig } from './core/config.ts';
+import { loadConfig, loadWorkerConfig } from './core/config.ts';
+import { superviseWorkerServiceSplit, workerServiceSplitApplies } from './core/worker-service-split.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
 
@@ -2138,6 +2139,10 @@ export async function runWorkerForeground(options: {
   env?: Record<string, string | undefined>;
   applySetupEnv?: () => void;
   startWorker?: (launch: WorkerLaunch) => void | Promise<void>;
+  /** Test seams for the worker service's own engine split (core/worker-service-split.ts). */
+  engineSplit?: () => boolean;
+  platform?: NodeJS.Platform;
+  superviseSplit?: (env: Record<string, string | undefined>) => Promise<unknown>;
 } = {}): Promise<void> {
   const env = options.env ?? process.env;
   const managedInstanceId = options.managedInstanceId;
@@ -2155,10 +2160,36 @@ export async function runWorkerForeground(options: {
       );
     }
   }
+  // The worker service's own unit with worker.engineSplit on: this process
+  // supervises the background and the front instead of being the worker.
+  if (workerServiceSplitApplies({
+    platform: options.platform ?? process.platform,
+    managed: managedInstanceId !== undefined,
+    env,
+    engineSplit: options.engineSplit ?? (() => {
+      // A config the worker cannot read fails as it always has, in the worker.
+      try { return loadWorkerConfig({ nativeServiceSupervised: false }, env).worker.engineSplit; } catch { return false; }
+    }),
+  })) {
+    await (options.superviseSplit ?? superviseWorkerServiceSplitHere)(env);
+    return;
+  }
   const startWorker = options.startWorker
     ?? (await import('./workers/email-source/server.ts')).startWorkerWithLaunch;
   // Only the validated native-service launch is supervised; never an ambient marker.
   await startWorker({ nativeServiceSupervised: managedInstanceId !== undefined });
+}
+
+async function superviseWorkerServiceSplitHere(env: Record<string, string | undefined>): Promise<void> {
+  const authToken = workerAuthTokenFromConfig(loadWorkerConfig({ nativeServiceSupervised: false }, env), { env });
+  if (!authToken) throw new OperationError('config_error', 'The engine split needs the worker auth token (OLYMPUS_WORKER_AUTH_TOKEN in worker.env).');
+  await superviseWorkerServiceSplit({
+    env: env as NodeJS.ProcessEnv,
+    runtimePath: process.execPath,
+    // The entry this process runs: the unit's dist/cli.js.
+    executablePath: resolve(process.argv[1]!),
+    authToken,
+  });
 }
 
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {

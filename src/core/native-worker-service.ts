@@ -536,6 +536,44 @@ export interface NativeEngineBackgroundServiceOptions {
 }
 
 /**
+ * How the background is launched and when it is ready, whoever supervises it
+ * (the engine host, the Gateway, or the worker service's own unit,
+ * worker-service-split.ts): the role and socket in its environment, a busy
+ * data owner as a retryable start, and ready once its command socket answers
+ * for this exact instance with its boot work done.
+ */
+export function engineBackgroundLaunch(input: {
+  env: NodeJS.ProcessEnv;
+  socketPath: string;
+  authToken: string;
+  instanceId: string;
+  command: string;
+  args: readonly string[];
+  startupTimeoutMs: number;
+  probeTimeoutMs: number;
+  fetchForSocket?: (socketPath: string) => typeof fetch;
+  onReady?: (child: ChildProcess) => void;
+}): NativeProcessStartSettings {
+  input.env[ENGINE_ROLE_ENV] = 'background';
+  input.env[ENGINE_BACKGROUND_SOCKET_ENV] = input.socketPath;
+  const fetchBackground = input.fetchForSocket ? input.fetchForSocket(input.socketPath) : createUnixSocketFetch(input.socketPath);
+  return {
+    command: input.command,
+    args: input.args,
+    env: input.env,
+    startupTimeoutMs: input.startupTimeoutMs,
+    endpointOccupied: false,
+    startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
+      ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
+    async readinessProbe(child) {
+      const ready = await probeEngineBackground(fetchBackground, input.authToken, input.instanceId, input.probeTimeoutMs);
+      if (ready) input.onReady?.(child);
+      return ready;
+    },
+  };
+}
+
+/**
  * The engine split's background process (core/engine-split.ts): the same
  * packaged worker with ENGINE_ROLE_ENV=background, supervised like the
  * worker (restart on exit with backoff, process-group cleanup). It serves no
@@ -576,26 +614,23 @@ export function createNativeEngineBackgroundService(options: NativeEngineBackgro
       const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
       const socketPath = engineBackgroundSocketPath({ env: settings.env });
       prepareEngineBackgroundSocketDirectory(socketPath);
-      settings.env[ENGINE_ROLE_ENV] = 'background';
-      settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = socketPath;
       settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? 'engine' : 'gateway';
       const startupTimeoutMs = config.worker.service.startupTimeoutSeconds * 1_000;
       const effective = options.startupTimeoutMs ?? startupTimeoutMs;
-      const fetchBackground = options.fetchForSocket ? options.fetchForSocket(socketPath) : createUnixSocketFetch(socketPath);
       return {
         ...settings,
-        startupTimeoutMs,
-        command: settings.runtimePath,
-        args: ['--no-env-file', settings.executablePath, '__worker-service-run', settings.instanceId],
-        endpointOccupied: false,
-        startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
-          ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-        async readinessProbe(child) {
-          const ready = await probeEngineBackground(fetchBackground, settings.authToken, settings.instanceId,
-            Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effective, 1)));
-          if (ready && generation === proofGeneration) readyChild = child;
-          return ready;
-        },
+        ...engineBackgroundLaunch({
+          env: settings.env,
+          socketPath,
+          authToken: settings.authToken,
+          instanceId: settings.instanceId,
+          command: settings.runtimePath,
+          args: ['--no-env-file', settings.executablePath, '__worker-service-run', settings.instanceId],
+          startupTimeoutMs,
+          probeTimeoutMs: Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effective, 1)),
+          ...(options.fetchForSocket ? { fetchForSocket: options.fetchForSocket } : {}),
+          onReady: (child) => { if (generation === proofGeneration) readyChild = child; },
+        }),
       };
     },
   });

@@ -1,0 +1,125 @@
+/**
+ * The engine split under the worker service's own unit (olympus-worker.service
+ * on Linux, `cli.js __worker-service-run`, rendered by worker-service.ts).
+ * That path has no engine host, so with `worker.engineSplit` on the unit's
+ * process supervises the two processes itself, as the engine host does
+ * (engine-host.ts, engineHostServices): the background first, launched and
+ * proved ready by the same engineBackgroundLaunch; then the front, told the
+ * background's socket; each under the shared supervision kernel
+ * (native-process-service.ts: its own process group, restart on exit with the
+ * shared backoff, a bounded SIGTERM then SIGKILL on stop). On SIGTERM or
+ * SIGINT the front stops first, then the background, then this process exits.
+ * The unit sends its stop signal to this process only (KillMode=mixed), so the
+ * order holds; with an older unit that signals every process at once, both
+ * still stop and nothing outlives the unit.
+ *
+ * Both children run `__worker-service-run` with their role already set, so
+ * neither supervises again. With the switch off, or with any role set, or
+ * when the Gateway or engine host launched the worker, none of this runs.
+ */
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import { spawn as spawnProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { ENGINE_BACKGROUND_INSTANCE_ENV, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, engineRoleFromEnv, prepareEngineBackgroundSocketDirectory } from './engine-split.ts';
+import { createNativeProcessService, type NativeProcessServiceContext } from './native-process-service.ts';
+import { ENGINE_BACKGROUND_SERVICE_ID, engineBackgroundLaunch } from './native-worker-service.ts';
+import { WORKER_SHUTDOWN_DEADLINE_MS } from './worker-shutdown.ts';
+
+/** Each child gets its own shutdown deadline and a margin before the forced kill. */
+const STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5_000;
+const STARTUP_TIMEOUT_MS = 180_000;
+const STABLE_UPTIME_MS = 30_000;
+
+export function workerServiceSplitApplies(input: {
+  platform: NodeJS.Platform;
+  /** The Gateway's or engine host's validated launch, which supervises the split itself. */
+  managed: boolean;
+  engineSplit: boolean | (() => boolean);
+  env: Record<string, string | undefined>;
+}): boolean {
+  if (input.platform !== 'linux' || input.managed) return false;
+  if (engineRoleFromEnv(input.env) !== 'single') return false;
+  return typeof input.engineSplit === 'function' ? input.engineSplit() : input.engineSplit;
+}
+
+export async function superviseWorkerServiceSplit(input: {
+  env: NodeJS.ProcessEnv;
+  runtimePath: string;
+  executablePath: string;
+  authToken: string;
+  spawn?: (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+  restartDelaysMs?: readonly number[];
+  readinessPollMs?: number;
+  startupTimeoutMs?: number;
+  stopGraceMs?: number;
+  signals?: { once(signal: 'SIGTERM' | 'SIGINT', handler: () => void): void };
+  exit?: (code: number) => void;
+  log?: (line: string) => void;
+}): Promise<{ stop(): Promise<void> }> {
+  const log = input.log ?? ((line: string) => console.warn(line));
+  const socketPath = engineBackgroundSocketPath({ env: input.env, platform: 'linux' });
+  prepareEngineBackgroundSocketDirectory(socketPath);
+  const startupTimeoutMs = input.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
+  const args = ['--no-env-file', input.executablePath, '__worker-service-run'];
+  const shared = {
+    reload: { configPrefixes: [] },
+    initialConfig: undefined,
+    retryInitialStartFailure: true,
+    stableUptimeMs: STABLE_UPTIME_MS,
+    stopGraceMs: input.stopGraceMs ?? STOP_GRACE_MS,
+    ...(input.restartDelaysMs ? { restartDelaysMs: input.restartDelaysMs } : {}),
+    ...(input.readinessPollMs !== undefined ? { readinessPollMs: input.readinessPollMs } : {}),
+    ...(input.spawn ? { spawn: input.spawn as unknown as typeof spawnProcess } : {}),
+  };
+  const background = createNativeProcessService({
+    ...shared,
+    id: ENGINE_BACKGROUND_SERVICE_ID,
+    label: 'background engine',
+    prepareStart: async () => {
+      const instanceId = randomUUID();
+      return engineBackgroundLaunch({
+        env: { ...input.env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
+        socketPath,
+        authToken: input.authToken,
+        instanceId,
+        command: input.runtimePath,
+        args,
+        startupTimeoutMs,
+        probeTimeoutMs: Math.min(5_000, startupTimeoutMs),
+      });
+    },
+  });
+  const front = createNativeProcessService({
+    ...shared,
+    id: 'olympus-worker',
+    label: 'worker front',
+    prepareStart: async () => ({
+      command: input.runtimePath,
+      args,
+      env: { ...input.env, [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
+      startupTimeoutMs,
+      endpointOccupied: false,
+      // The front waits for the background itself before it serves; running is enough here.
+      readinessProbe: async (child) => child.exitCode === null && child.signalCode === null,
+    }),
+  });
+  const context: NativeProcessServiceContext = { logger: { info: log, warn: log } };
+  let stopping: Promise<void> | undefined;
+  const stop = () => {
+    stopping ??= (async () => {
+      await front.stop().catch(() => undefined);
+      await background.stop().catch(() => undefined);
+    })();
+    return stopping;
+  };
+  const signals = input.signals ?? { once: (signal: 'SIGTERM' | 'SIGINT', handler: () => void) => { process.once(signal, handler); } };
+  const exit = input.exit ?? ((code: number) => process.exit(code));
+  signals.once('SIGTERM', () => { void stop().finally(() => exit(143)); });
+  signals.once('SIGINT', () => { void stop().finally(() => exit(130)); });
+  log('Olympus worker service: engine split on; starting the background, then the front.');
+  // A start that fails is retried on the backoff by the kernel; the front
+  // still starts, and waits for the background itself.
+  await background.start(context).catch(() => log('Olympus worker service: the background engine did not start yet; retrying.'));
+  await front.start(context).catch(() => log('Olympus worker service: the worker front did not start yet; retrying.'));
+  return { stop };
+}
