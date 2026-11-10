@@ -3,7 +3,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { ENGINE_BUILD_ENV, ENGINE_LABEL, enginePaths, engineServicePaths, inspectEngine, renderEnginePlist, restartEngine, setMacEngineServerMode, requestMacServerMode, macServerModeView, runMacServerModeChange, installEngine, engineBuildIdentity, installedEngineBuild, uninstallEngine, waitForMacAgentHandoff, macServerModeScript, validateMacEngineOwner, type EngineExec } from '../src/core/engine-service.ts';
+import { ENGINE_BUILD_ENV, ENGINE_LABEL, enginePaths, engineServicePaths, inspectEngine, renderEnginePlist, restartEngine, setMacEngineServerMode, requestMacServerMode, macServerModeView, runMacServerModeChange, installEngine, rollbackEngine, engineBuildIdentity, installedEngineBuild, uninstallEngine, waitForMacAgentHandoff, macServerModeScript, validateMacEngineOwner, type EngineExec } from '../src/core/engine-service.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { startEngineHost } from '../src/core/engine-host.ts';
 import { engineStatusReport } from '../src/core/engine-cli.ts';
@@ -160,6 +160,35 @@ test('daemon upgrades retain the exact plist and signal restart, with no adminis
   expect(installedEngineBuild(f.daemonPlistPath)).toBe(engineBuildIdentity(f.paths.appDir));
   expect(calls).toContainEqual(['/bin/kill', '-HUP', '4242']);
   expect(calls.some(call => call[0] === 'osascript' || ['kickstart', 'enable', 'disable', 'bootout', 'bootstrap'].includes(call[1]!))).toBe(false);
+});
+
+test('server mode refuses a rollback to a release older than 1.3.2 before changing anything', async () => {
+  const f = fixture(); f.put(f.daemonPlistPath, f.daemon);
+  const app = (dir: string, version: string) => {
+    f.put(join(dir, 'package.json'), JSON.stringify({ name: 'olympus', version }));
+    f.put(join(dir, 'dist', 'cli.js'), `// ${version}\n`);
+  };
+  app(f.paths.appDir, '1.4.2');
+  f.put(f.program.runtimePath, '#!/bin/sh'); chmodSync(f.program.runtimePath, 0o755);
+  f.put(f.program.helperPath, '#!/bin/sh'); chmodSync(f.program.helperPath, 0o755);
+  const calls: string[][] = [];
+  const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath, uid: 501, now: true,
+    exec: (command: string, args: string[]) => { calls.push([command, ...args]); return { status: 0, stdout: 'state = running\npid = 4242', stderr: '' }; } };
+  for (const old of ['1.3.1', '1.2.0', '1.3.2-rc.1']) {
+    app(f.paths.previousAppDir, old);
+    await expect(rollbackEngine(options)).rejects.toThrow(/older than 1\.3\.2.*Turn server mode off in Keys/s);
+    expect(readFileSync(join(f.paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 1.4.2\n');
+    expect(readFileSync(join(f.paths.previousAppDir, 'dist', 'cli.js'), 'utf8')).toBe(`// ${old}\n`);
+  }
+  expect(calls).toEqual([]);
+  expect(readFileSync(f.daemonPlistPath, 'utf8')).toBe(f.daemon);
+  // 1.3.2 and later get past the check and the daemon is signalled onto them.
+  app(f.paths.previousAppDir, '1.3.2');
+  let clock = 0;
+  const result = await rollbackEngine({ ...options, health: { timeoutMs: 0, pollMs: 1, now: () => (clock += 1), sleep: async () => {} } });
+  expect(result.ok).toBe(false);
+  expect(calls).toContainEqual(['/bin/kill', '-HUP', '4242']);
+  expect(readFileSync(join(f.paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 1.4.2\n');
 });
 
 test('host HUP drains services before exiting 75 for launchd KeepAlive', async () => {

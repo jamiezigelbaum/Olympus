@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
-import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
+import { isRetiredGooglePilotClientId, packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
 import { dropboxPublisherAppKey, googleDesktopClient, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
   createOAuthRelayNonce,
@@ -7218,6 +7218,11 @@ async function dashboardStoredClientIdIsPublisherOwned(
   clientIdKey: string,
   secretStore: SecretStore,
 ): Promise<boolean> {
+  // The beta.11 Desktop pilot client is Olympus's, never the owner's, however
+  // the id was stored. Its Google project is deleted (#765), so treating it as
+  // the owner's app would offer a reconnect through a client that no longer
+  // exists; as a publisher id, the card reconnects through the current one.
+  if (dashboardGoogleOAuthSource(source) && isRetiredGooglePilotClientId(clientId)) return true;
   const provenance = await secretStore.get(dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey));
   if (provenance === 'publisher') return true;
   if (provenance === 'byo') return false;
