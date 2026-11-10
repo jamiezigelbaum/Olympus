@@ -21,12 +21,16 @@
  *    In the set ledger, every copy of its items is superseded, so no store
  *    serves them from that moment, and every decision, override, history and
  *    proposal row is deleted, so no move, re-judge or migration acts on them.
- *    Its questions to the private model go too.
+ *    Its questions to the private model go too. The forget registry's
+ *    account-scope steps also take its items' names from the list of what
+ *    AI apps received.
  * 3. Answers waiting in the private inbox that read its items are deleted.
  *    Questions still waiting, and answers that read anything else, stay.
  * 4. Each store's rows, in bounded steps.
  * 5. The superseded copies (the mark that hid the rows), the resume point,
- *    the secret-locations entries, and the inbox once more.
+ *    the secret-locations entries, and the inbox and the AI apps list once
+ *    more (an answer that read the archive can still land before step 2's
+ *    withdrawal).
  * 6. The record.
  */
 import { existsSync } from 'node:fs';
@@ -35,6 +39,8 @@ import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { runForgetAccountScopeSteps } from '../../core/source-forget-registry.ts';
+import { appReleaseLogDbPath, forgetAppReleaseItems } from '../../core/app-release-log.ts';
+import { resolveRemoteConnectionsDbPath } from '../../core/remote-connections.ts';
 import { openTierSniffer } from '../../core/source-storage.ts';
 import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { archiveContinuations } from './continuation-cache.ts';
@@ -66,7 +72,8 @@ export interface ArchiveRemovalCounts {
   answers_removed: number;
   secret_locations_removed: number;
   /**
-   * Extraction ledger files that held rows of the archive and now hold none.
+   * Files the forget registry's account-scope steps took the archive's rows
+   * from: extraction ledgers, scratch spools, the AI apps list.
    */
   extraction_ledgers_cleared: number;
   /**
@@ -207,6 +214,7 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   lane.ledger.deleteSetCursor(archiveTierSetId(lane.family), connectorId);
   counts.secret_locations_removed += lane.secretLocations?.removeAccountScope(provider, accountScope) ?? 0;
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
+  forgetAppReleaseItems(appReleaseLogDbPath(resolveRemoteConnectionsDbPath(lane.env)), { corpusIds, accountScopes: [accountScope] });
 
   // 6: nothing derived from the archive is left.
   options.state.delete(record.archive_id);

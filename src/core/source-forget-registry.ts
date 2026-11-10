@@ -234,6 +234,11 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
       const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
       return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
     },
+    // One imported archive removed: only its items' rows, the family's other archives' stay.
+    forgetAccountScopes(account, accountScopes, context, { dryRun }) {
+      const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
+      return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids, accountScopes }, { dryRun }));
+    },
   },
   {
     id: 'source-dashboard',

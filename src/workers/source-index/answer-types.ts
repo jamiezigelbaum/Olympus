@@ -180,6 +180,10 @@ export interface SourceIndexAnswerEvidence {
   trust_domain: SourceTrustDomain;
   family: string;
   provider: string;
+  // The item's account. Output boundaries copy named fields only, so it
+  // never reaches a remote app; the owner's list of what AI apps received
+  // keeps it so removing one imported archive takes only that archive's rows.
+  account_scope?: string;
   provider_item_id: string;
   provider_thread_id?: string;
   provider_conversation_id?: string;

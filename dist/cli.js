@@ -29410,6 +29410,7 @@ function releasedItemFromEvidence(evidence, source, title) {
   const shownTitle = boundedString(title, TITLE_MAX);
   const corpusId = boundedString(evidence.corpus_id, ID_MAX);
   const provider = boundedString(evidence.provider, ID_MAX);
+  const accountScope = boundedString(evidence.account_scope, ID_MAX);
   const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
   const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
   const locator = boundedString(evidence.uri, ID_MAX);
@@ -29419,6 +29420,7 @@ function releasedItemFromEvidence(evidence, source, title) {
     tier: releasedTierOf(evidence.trust_domain),
     ...corpusId ? { corpusId } : {},
     ...provider ? { provider } : {},
+    ...accountScope ? { accountScope } : {},
     ...providerItemId ? { providerItemId } : {},
     ...providerConversationId ? { providerConversationId } : {},
     ...locator ? { locator } : {}
@@ -30460,13 +30462,13 @@ function openAppReleaseLog(dbPath, options = {}) {
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         const secret2 = db.query(`SELECT 1 FROM app_release_secret_items
           WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
         record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
           const named = !(item.provider && item.providerItemId && secret2.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
-          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
         });
       })();
       expire();
@@ -30525,13 +30527,15 @@ function openAppReleaseLog(dbPath, options = {}) {
     markAnsweredPrivately(privateQuestionKey2) {
       return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey2).changes;
     },
-    forgetCorpora(corpusIds, dryRun) {
-      if (corpusIds.length === 0)
+    forgetCorpora(corpusIds, dryRun, accountScopes) {
+      if (corpusIds.length === 0 || accountScopes?.length === 0)
         return 0;
-      const marks = corpusIds.map(() => "?").join(", ");
+      const marks = (values) => values.map(() => "?").join(", ");
+      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
+      const params = [...corpusIds, ...accountScopes ?? []];
       if (dryRun)
-        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds).n;
-      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
+      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
     },
     forgetSecretItem(item, options2 = {}) {
       const conversation = item.providerConversationId ?? "";
@@ -30570,7 +30574,7 @@ function forgetAppReleaseItems(dbPath, selector, options = {}) {
     return 0;
   const store = openAppReleaseLog(dbPath);
   try {
-    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+    return store.forgetCorpora(selector.corpusIds, options.dryRun === true, selector.accountScopes);
   } finally {
     store.close();
   }
@@ -30648,6 +30652,15 @@ function migrations2() {
         CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
       `);
     }
+  }, {
+    version: 3,
+    name: "app_release_items_account_scope",
+    up(db) {
+      db.exec(`
+        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
+        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
+      `);
+    }
   }];
 }
 function hardenPrivatePath2(dbPath) {
@@ -30668,7 +30681,7 @@ function hardenPrivatePath2(dbPath) {
       throw new Error("The AI apps log must be a regular file, not a symlink.");
   }
 }
-var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 2, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
+var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 3, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days", openLogPaths;
 var init_app_release_log = __esm(() => {
   init_olympus_layout();
   init_remote_connections();
@@ -74048,6 +74061,7 @@ function evidenceFromCitations(citations, detail) {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
@@ -74112,6 +74126,7 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
@@ -74271,6 +74286,7 @@ async function searchReleasedEvidence(input) {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
       ...cite?.title ? { title: cite.title } : {},
@@ -104525,6 +104541,10 @@ var init_source_forget_registry = __esm(() => {
       forget(account, context2, { dryRun }) {
         const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context2.env));
         return line(path, "titles shared with apps", forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
+      },
+      forgetAccountScopes(account, accountScopes, context2, { dryRun }) {
+        const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context2.env));
+        return line(path, "titles shared with apps", forgetAppReleaseItems(path, { corpusIds: account.corpus_ids, accountScopes }, { dryRun }));
       }
     },
     {
@@ -153843,6 +153863,9 @@ function renderLoopbackConsentPage(input) {
   const nonce = randomBytes27(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
+  const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
+<p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
+` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -153866,10 +153889,10 @@ ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${esca
 ${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="/connect/authorize">
+<form method="post" action="${escapeHtml(input.action ?? "/connect/authorize")}">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
-${TERMS_ASSENT}
+${ownerNeeded}${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
@@ -159506,7 +159529,7 @@ function outsideHelpClientScript(config2) {
   // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
   // (in memory), which says it again in the same form, with its section open.
   function formKey(form) {
-    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : form.hasAttribute('data-outside-save-languages') ? ':languages' : '');
   }
   function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
   (function showSaved() {
@@ -159572,7 +159595,8 @@ function outsideHelpClientScript(config2) {
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
+        // The switch's new state shows on the redrawn card; Save languages leaves nothing to see but its confirmation.
+        if ((kind !== 'enable' || form.hasAttribute('data-outside-save-languages')) && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
           redrawWhenBack(4000, form);
@@ -170147,7 +170171,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac5("sha256", options.sessionSecret?.trim() || randomBytes29(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes29(32).toString("base64url"), authToken ?? "");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -170616,19 +170640,41 @@ function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bear
     grade
   };
 }
-function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+function dashboardControlSigningKey(sessionSecret, authToken) {
+  return createHmac5("sha256", sessionSecret).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken).digest("base64url");
+}
+function dashboardOwnerSessionCheck(options) {
+  const authToken = normalizeWorkerAuthToken(options.authToken);
+  const configured = options.sessionSecret?.trim();
+  if (!authToken || !configured)
+    return () => false;
+  const sessionSecret = dashboardControlSigningKey(configured, authToken);
+  const now = options.now ?? Date.now;
+  return (request, origin) => {
+    const parts = liveDashboardControlSessionParts(request, sessionSecret, now());
+    return !!parts && constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin));
+  };
+}
+function liveDashboardControlSessionParts(request, sessionSecret, nowMs) {
   const cookie = cookieValue(request.headers.get("Cookie"), DASHBOARD_CONTROL_COOKIE);
   if (!cookie)
-    return { status: "missing" };
+    return;
   const parts = decodeDashboardControlSession(cookie);
   if (!parts)
-    return { status: "missing" };
+    return;
   const expected = dashboardControlSignature(sessionSecret, parts);
   if (!constantTimeStringEqual(parts.signature, expected))
-    return { status: "missing" };
+    return;
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
   if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60000)
+    return;
+  return parts;
+}
+function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+  const parts = liveDashboardControlSessionParts(request, sessionSecret, nowMs);
+  if (!parts)
     return { status: "missing" };
+  const expiresAtMs = dashboardControlExpiresAtMs(parts);
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined)
     return { status: "origin_mismatch" };
@@ -194327,6 +194373,7 @@ async function runArchiveRemoval(options) {
   lane.ledger.deleteSetCursor(archiveTierSetId(lane.family), connectorId);
   counts.secret_locations_removed += lane.secretLocations?.removeAccountScope(provider, accountScope) ?? 0;
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
+  forgetAppReleaseItems(appReleaseLogDbPath(resolveRemoteConnectionsDbPath(lane.env)), { corpusIds, accountScopes: [accountScope] });
   options.state.delete(record8.archive_id);
   return { kind: "removed", counts };
 }
@@ -194335,6 +194382,8 @@ var init_removal = __esm(() => {
   init_atomic_file();
   init_classification_ledger();
   init_source_forget_registry();
+  init_app_release_log();
+  init_remote_connections();
   init_source_storage();
   init_tier_ledger_path();
   init_continuation_cache();
@@ -220039,6 +220088,8 @@ function createRemoteOAuthHandler(options) {
     };
   };
   const directLoopback = (request) => !isRelayed(request) && loopbackHost(request) && (requestFromOwnerSocket(request) || !options.requireOwnerSocket && isLoopbackAddress(peerAddress(request)));
+  const ownerProof = (request) => requestFromOwnerSocket(request) || (options.ownerSession?.(request, new URL(request.url).origin) ?? false);
+  const approvalAction = (request, u) => u.installId && !requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.ownerAuthorize : REMOTE_OAUTH_PATHS.authorize;
   const linux = (options.platform ?? process.platform) === "linux";
   const notOnThisComputer = () => errorPage(403, linux ? "Approve on this computer through the owner's approval route. On a headless host, configure the owner-only SSH socket forward first." : "Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.");
   const authorizeGet = async (request, u, demo = false) => {
@@ -220092,7 +220143,7 @@ function createRemoteOAuthHandler(options) {
         if (entry2.demo || entry2.transaction !== transaction)
           continue;
         entry2.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
-        return consentPage(id, entry2, u);
+        return consentPage(id, entry2, u, undefined, true, approvalAction(request, u));
       }
     }
     admitPending();
@@ -220112,7 +220163,7 @@ function createRemoteOAuthHandler(options) {
       demo
     };
     pending.set(requestId, entry);
-    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u);
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request, u));
   };
   const demoPage = (requestId, entry, error2) => {
     const page2 = renderDemoSignInPage({
@@ -220200,9 +220251,11 @@ function createRemoteOAuthHandler(options) {
     }
     return issueCode(requestId, entry, u);
   };
-  const consentPage = (requestId, entry, u, error2, showAttempts = true) => {
+  const consentPage = (requestId, entry, u, error2, showAttempts = true, action = REMOTE_OAUTH_PATHS.authorize, ownerNeeded = false) => {
     const page2 = u.installId ? renderLoopbackConsentPage({
       platform: options.platform ?? process.platform,
+      action,
+      ownerNeeded,
       requestId,
       csrf: entry.csrf,
       clientName: entry.client.clientName,
@@ -220223,8 +220276,8 @@ function createRemoteOAuthHandler(options) {
       ...error2 && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}
     });
     const headers = new Headers(page2.headers);
-    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000));
-    return new Response(page2.body, { status: error2 ? 400 : 200, headers });
+    headers.append("Set-Cookie", consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000, consentCookiePath(action)));
+    return new Response(page2.body, { status: ownerNeeded ? 403 : error2 ? 400 : 200, headers });
   };
   const authorizePost = async (request, u) => {
     if ((u.installId || options.requireOwnerSocket) && !directLoopback(request))
@@ -220247,24 +220300,26 @@ function createRemoteOAuthHandler(options) {
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
       return errorPage(403, "This approval did not come from the Olympus page.");
     }
+    const path = new URL(request.url).pathname;
+    const clearCookie = (response) => {
+      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0, consentCookiePath(path)));
+      return response;
+    };
     const finish2 = (params) => {
       pending.delete(requestId);
-      const response = redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer });
-      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
-      return response;
+      return clearCookie(redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer }));
     };
     const action = form.get("action");
     if (action === "deny")
       return finish2({ error: "access_denied", error_description: "The owner denied the request." });
     if (action !== "approve")
       return errorPage(400, "The approval form was malformed.");
-    const approve = () => {
-      const response = issueCode(requestId, entry, u);
-      response.headers.append("Set-Cookie", consentCookie(requestId, "", cookieSecure(u), 0));
-      return response;
-    };
-    if (u.installId)
-      return approve();
+    const approve = () => clearCookie(issueCode(requestId, entry, u));
+    if (u.installId) {
+      if (ownerProof(request))
+        return approve();
+      return consentPage(requestId, entry, u, undefined, true, approvalAction(request, u), true);
+    }
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u, `Too many wrong codes were tried from here. Wait ${Math.ceil(wait / 1000)} seconds, then try again.`, false);
@@ -220448,6 +220503,12 @@ function createRemoteOAuthHandler(options) {
           if (method === "POST")
             return await authorizePost(request, urls);
           return methodNotAllowed("GET, POST");
+        case REMOTE_OAUTH_PATHS.ownerAuthorize:
+          if (!urls.installId)
+            return jsonResponse2(404, { error: "not_found" });
+          if (method === "POST")
+            return await authorizePost(request, urls);
+          return methodNotAllowed("POST");
         case REMOTE_OAUTH_PATHS.demoAuthorize:
           if (method === "GET")
             return await authorizeGet(request, urls, true);
@@ -220584,8 +220645,11 @@ function readCookie(request, name) {
 function consentCookieName(requestId) {
   return `olympus_consent_${requestId}`;
 }
-function consentCookie(requestId, value2, secure, maxAgeSeconds) {
-  return `${consentCookieName(requestId)}=${value2}; Path=/connect; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+function consentCookiePath(action) {
+  return action === REMOTE_OAUTH_PATHS.ownerAuthorize ? "/dashboard/connect" : "/connect";
+}
+function consentCookie(requestId, value2, secure, maxAgeSeconds, path = "/connect") {
+  return `${consentCookieName(requestId)}=${value2}; Path=${path}; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
 }
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left);
@@ -220673,6 +220737,7 @@ var init_handler = __esm(() => {
     protectedResourceDirectoryMcp: `/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
     authorizationServer: "/.well-known/oauth-authorization-server",
     authorize: "/connect/authorize",
+    ownerAuthorize: "/dashboard/connect/authorize",
     demoAuthorize: "/connect/demo/authorize",
     token: "/connect/token",
     register: "/connect/register",
@@ -229930,6 +229995,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       publicUrls: remotePublicUrls,
       requireOwnerSocket: !!socketPath,
       isRelayed: carriesRelayMarker2,
+      ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
