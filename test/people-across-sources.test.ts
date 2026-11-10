@@ -98,7 +98,7 @@ describe('one person across sources (#1076)', () => {
       ]), { fetchContent: true });
       await telegram.syncFromConnector(connector('telegram-test', 'chat', [
         chatItem('telegram', 'crew', 't1', { senderId: '777', senderLabel: 'B.', senderIsOwner: false }, 'Lisbon dinner on Friday?'),
-        chatItem('telegram', 'crew', 't2', { senderId: '888', senderLabel: 'Mark Alexander' }, 'Lisbon works for me.'),
+        chatItem('telegram', 'crew', 't2', { senderId: '888', senderLabel: 'Theo Lindqvist' }, 'Lisbon works for me.'),
       ]), { fetchContent: true });
 
       people.putContactCard({
@@ -142,7 +142,7 @@ describe('one person across sources (#1076)', () => {
       // Without a person filter, other people keep their own labels and the
       // owner's messages are not renamed by the people index.
       const all = await createConnectorStoreCorpusAdapter({ store: telegram })(request(telegram, 'lisbon'));
-      expect(all.hits.map((hit) => hit.provenance?.citation?.authorLabel).sort()).toEqual(['Brianna Reyes', 'Mark Alexander']);
+      expect(all.hits.map((hit) => hit.provenance?.citation?.authorLabel).sort()).toEqual(['Brianna Reyes', 'Theo Lindqvist']);
       const own = await createConnectorStoreCorpusAdapter({ store: whatsapp })(request(whatsapp, 'lisbon sounds'));
       const ownHit = own.hits.find((hit) => hit.sourceItem.providerItemId === 'w2');
       expect(ownHit?.provenance?.citation?.authorLabel).not.toBe('Brianna Reyes');

@@ -1967,16 +1967,23 @@ function isReflectRecord(keys) {
 function isRoamRecord(keys) {
   return keys.has("title") && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || keys.has("children") && keys.has("uid"));
 }
-function recordsFormat(records, shape) {
-  const reflect = records.some(isReflectRecord);
-  const roam = records.some(isRoamRecord);
-  if (reflect === roam)
-    return;
-  if (roam)
-    return shape === "list" ? "roam" : undefined;
-  return "reflect";
+function isChatGptConversation(keys) {
+  return keys.has("mapping") && (keys.has("current_node") || keys.has("create_time") || keys.has("title"));
 }
-function notesJsonFormat(probe) {
+function isClaudeConversation(keys) {
+  return keys.has("chat_messages") && (keys.has("uuid") || keys.has("name") || keys.has("created_at"));
+}
+function anyJsonExportRecord(keys) {
+  return JSON_EXPORT_RECORDS.some(([, is]) => is(keys));
+}
+function recordsFormat(records, shape) {
+  const found = JSON_EXPORT_RECORDS.filter(([, is]) => records.some(is)).map(([kind]) => kind);
+  if (found.length !== 1)
+    return;
+  const only = found[0];
+  return only === "reflect" || shape === "list" ? only : undefined;
+}
+function jsonExportFormat(probe) {
   const parsed = headRecordKeys(probe.head);
   if (!parsed)
     return;
@@ -1985,7 +1992,7 @@ function notesJsonFormat(probe) {
     return fromHead;
   let scanned = SCANNED.get(probe);
   if (!scanned) {
-    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], anyJsonExportRecord);
     scanned = { keys };
     SCANNED.set(probe, scanned);
   }
@@ -1996,14 +2003,14 @@ function isEmptyRecordList(head, inNotes) {
   return parsed !== undefined && parsed.empty && (inNotes || parsed.shape === "list");
 }
 function acceptsReflectJson(probe) {
-  if (notesJsonFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true))
+  if (jsonExportFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true))
     return true;
   if (!probe.listIsEmpty || SCANNED.get(probe)?.keys)
     return false;
   return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
 }
 function acceptsRoamJson(probe) {
-  return notesJsonFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
+  return jsonExportFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
 }
 function detectFile(probe, reads) {
   if (probe.chosen.kind === "file")
@@ -2015,12 +2022,23 @@ function zipJsonMembers(entry) {
   return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
 }
 function readsJsonExport(entry, format) {
-  const other = format === "reflect" ? "roam" : "reflect";
   if (entry.members) {
-    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
-    return members.includes(format) && !members.includes(other);
+    const members = zipJsonMembers(entry).map((member) => jsonExportFormat(member)).filter((kind) => kind !== undefined);
+    return members.includes(format) && members.every((kind) => kind === format);
   }
-  return notesJsonFormat(entry) === format;
+  return jsonExportFormat(entry) === format;
+}
+function acceptsChatGptJson(probe) {
+  return jsonExportFormat(probe) === "chatgpt" || isEmptyRecordList(probe.head, false);
+}
+function acceptsClaudeJson(probe) {
+  return jsonExportFormat(probe) === "claude" || isEmptyRecordList(probe.head, false);
+}
+function detectFiles(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return found.length > 0 ? found : undefined;
 }
 function looksLikeEnex(head) {
   const text = archiveHeadText(head).replace(/^\ufeff/, "");
@@ -2196,7 +2214,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, JSON_EXPORT_RECORDS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, AI_CONVERSATION_NAMES, CHATGPT_ARCHIVE_FORMAT, CLAUDE_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -2267,6 +2285,12 @@ var init_archive_formats = __esm(() => {
   REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
   REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
   ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  JSON_EXPORT_RECORDS = [
+    ["reflect", isReflectRecord],
+    ["roam", isRoamRecord],
+    ["chatgpt", isChatGptConversation],
+    ["claude", isClaudeConversation]
+  ];
   SCANNED = new WeakMap;
   REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
     id: "reflect-json",
@@ -2326,6 +2350,29 @@ var init_archive_formats = __esm(() => {
       ready: "Drop the .zip Roam saved, or the .json file inside it."
     }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  AI_CONVERSATION_NAMES = Object.freeze(["conversations.json", "conversations-*.json"]);
+  CHATGPT_ARCHIVE_FORMAT = Object.freeze({
+    id: "chatgpt-export",
+    label: "ChatGPT conversations (data export)",
+    family: "chat",
+    provider: "chatgpt_export",
+    chooseHint: "a ChatGPT data export (the .zip from Settings, Data controls, Export data, or the conversations.json in it)",
+    citationLabel: "ChatGPT",
+    probeNames: Object.freeze(["*.json"]),
+    signatureNames: AI_CONVERSATION_NAMES,
+    detect: (probe) => detectFiles(probe, (entry) => readsJsonExport(entry, "chatgpt"))
+  });
+  CLAUDE_ARCHIVE_FORMAT = Object.freeze({
+    id: "claude-export",
+    label: "Claude conversations (data export)",
+    family: "chat",
+    provider: "claude_export",
+    chooseHint: "a Claude data export (the .zip from Settings, Privacy, Export data, or the conversations.json in it)",
+    citationLabel: "Claude",
+    probeNames: Object.freeze(["*.json"]),
+    signatureNames: AI_CONVERSATION_NAMES,
+    detect: (probe) => detectFiles(probe, (entry) => readsJsonExport(entry, "claude"))
   });
   EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
     id: "evernote-enex",
@@ -2410,7 +2457,9 @@ var init_archive_formats = __esm(() => {
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
     TELEGRAM_JSON_ARCHIVE_FORMAT,
-    EVERNOTE_ENEX_ARCHIVE_FORMAT
+    EVERNOTE_ENEX_ARCHIVE_FORMAT,
+    CHATGPT_ARCHIVE_FORMAT,
+    CLAUDE_ARCHIVE_FORMAT
   ]);
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
@@ -3014,7 +3063,8 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/consult/writer/test" },
     { method: "POST", path: "/dashboard/consult/standard" },
     { method: "POST", path: "/dashboard/private-answers" },
-    { method: "POST", path: "/dashboard/apps-received" }
+    { method: "POST", path: "/dashboard/apps-received" },
+    { method: "POST", path: "/dashboard/people" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -20348,7 +20398,9 @@ function senderAddress(from) {
 function everyAddressIn(from) {
   if (!from)
     return [];
-  const text2 = from.slice(0, MAX_FROM_HEADER_CHARS);
+  return addressSpansIn(from.slice(0, MAX_FROM_HEADER_CHARS)).map(({ address, domain }) => ({ address, domain }));
+}
+function addressSpansIn(text2) {
   const found = [];
   for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
     let start = at;
@@ -20360,8 +20412,10 @@ function everyAddressIn(from) {
     if (start === at)
       continue;
     const domain = validDomain(text2.slice(at + 1, end));
-    if (domain)
-      found.push({ address: `${text2.slice(start, at).toLowerCase()}@${domain}`, domain });
+    if (!domain)
+      continue;
+    const local = text2.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
   }
   return found;
 }
@@ -38990,6 +39044,12 @@ var init_local_index = __esm(() => {
       }
     }
     peopleNames;
+    peopleVisibilityMarker() {
+      const ledger = this.visibilityLedger();
+      const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
+      const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
+      return `${ledgerCursor}:${storeCursor}`;
+    }
     peopleObservations() {
       const tierHidden = this.tierHiddenItemPks();
       const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
@@ -44686,6 +44746,68 @@ var init_whatsapp_bridge_name = __esm(() => {
     ;
 });
 
+// src/core/messaging-chat-kinds.ts
+function chatKindToken(kind) {
+  return `kind:${kind}`;
+}
+function parseChatKindToken(source, value) {
+  if (!value.startsWith("kind"))
+    return;
+  const match = KIND_TOKEN.exec(value);
+  const kind = match?.[1];
+  if (!kind || !SOURCE_CHAT_KINDS[source].includes(kind))
+    throw new Error("Invalid chat kind in capture grant.");
+  return kind;
+}
+function parseAllowedChatList(source, raw, validChat) {
+  const trimmed = raw.trim();
+  if (trimmed === "*")
+    return { wholeAccount: true, chatKinds: [], chats: [] };
+  const values = trimmed.split(",").map((value) => value.trim());
+  if (!trimmed || values.some((value) => !value))
+    throw new Error("Invalid capture grant scope.");
+  const chatKinds = [];
+  const chats = [];
+  for (const value of values) {
+    const kind = parseChatKindToken(source, value);
+    if (kind) {
+      if (!chatKinds.includes(kind))
+        chatKinds.push(kind);
+      continue;
+    }
+    if (value.includes("*") || !validChat(value))
+      throw new Error("Invalid capture grant scope.");
+    if (!chats.includes(value))
+      chats.push(value);
+  }
+  return { wholeAccount: false, chatKinds, chats };
+}
+function formatAllowedChatList(source, choice) {
+  const kinds = [...new Set(choice.chatKinds ?? [])];
+  const chats = [...new Set(choice.chats)];
+  if (choice.wholeAccount) {
+    if (kinds.length || chats.length)
+      throw new Error("Choose all chats, or chats and kinds, but not both.");
+    return "*";
+  }
+  if (!kinds.length && !chats.length)
+    throw new Error("Choose all chats, a kind, or at least one chat.");
+  for (const kind of kinds)
+    if (!SOURCE_CHAT_KINDS[source].includes(kind))
+      throw new Error("Invalid chat kind.");
+  if (chats.some((chat) => chat.includes("*") || chat.startsWith("kind")))
+    throw new Error("Capture approval requires exact chat identifiers.");
+  return [...kinds.map((kind) => chatKindToken(kind)), ...chats].join(",");
+}
+var SOURCE_CHAT_KINDS, KIND_TOKEN;
+var init_messaging_chat_kinds = __esm(() => {
+  SOURCE_CHAT_KINDS = {
+    telegram: ["dm", "group", "channel", "bot"],
+    whatsapp: ["dm", "group", "community"]
+  };
+  KIND_TOKEN = /^kind:([a-z]+)$/;
+});
+
 // src/core/messaging-pairing.ts
 import { Database as Database10 } from "bun:sqlite";
 import { chmodSync as chmodSync13, existsSync as existsSync33, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync21, renameSync as renameSync5, rmSync as rmSync10, rmdirSync as rmdirSync4, statSync as statSync16 } from "node:fs";
@@ -44824,7 +44946,7 @@ async function pairMessagingSource(options) {
     const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
     const priorScopes = typeof priorRaw === "string" ? priorRaw.split(",") : [];
     const alternate = priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES;
-    const retained = (priorRaw === alternate || sameAccount && alternate === undefined) && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const retained = (priorRaw === alternate || sameAccount && alternate === undefined) && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) || isKindToken(scope)) ? priorScopes.filter((scope) => !isKindToken(scope)) : [];
     const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === "telegram") {
       const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
@@ -45050,15 +45172,17 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
   }
   if (source === "telegram") {
     const scopes = uniqueNonEmpty(approval.source === "telegram" ? approval.chatScopes ?? [] : []);
+    const kinds2 = uniqueNonEmpty(approval.chatKinds ?? []);
     const wholeAccount2 = approval.source === "telegram" && approval.wholeAccount === true;
-    if (wholeAccount2 === scopes.length > 0)
-      throw new Error("Approve either the whole Telegram account or at least one exact chat, but not both.");
-    if (scopes.some((scope) => scope.includes("*")))
+    if (wholeAccount2 === scopes.length + kinds2.length > 0)
+      throw new Error("Approve either the whole Telegram account or at least one chat kind or exact chat, but not both.");
+    if (scopes.some((scope) => scope.includes("*") || scope.startsWith("kind")))
       throw new Error("Telegram capture approval requires exact chat identifiers.");
     const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error("Telegram capture approval contains a chat that was not in the verified account listing.");
     }
+    const allowed2 = formatAllowedChatList("telegram", { wholeAccount: wholeAccount2, chatKinds: kinds2, chats: scopes });
     return {
       source,
       executable: helperExecutable,
@@ -45066,8 +45190,8 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
       env: {
         ...layout === "folder" ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath },
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: wholeAccount2 ? "*" : scopes.join(","),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: wholeAccount2 ? "*" : scopes.join(",")
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: allowed2,
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: allowed2
       },
       secretEnvironment: [
         { env: "OLYMPUS_TELEGRAM_API_ID", secretKey: TELEGRAM_API_ID_SECRET_KEY },
@@ -45077,13 +45201,15 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
     };
   }
   const chatJids = uniqueNonEmpty(approval.source === "whatsapp" ? approval.chatJids ?? [] : []);
+  const kinds = uniqueNonEmpty(approval.chatKinds ?? []);
   const wholeAccount = approval.source === "whatsapp" && approval.wholeAccount === true;
-  if (wholeAccount === chatJids.length > 0) {
-    throw new Error("Approve either the whole linked WhatsApp account or at least one exact chat, but not both.");
+  if (wholeAccount === chatJids.length + kinds.length > 0) {
+    throw new Error("Approve either the whole linked WhatsApp account or at least one chat kind or exact chat, but not both.");
   }
   if (chatJids.some((jid) => !/^[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(jid))) {
     throw new Error("WhatsApp capture approval contains an invalid chat identifier.");
   }
+  const allowed = formatAllowedChatList("whatsapp", { wholeAccount, chatKinds: kinds, chats: chatJids });
   return {
     source,
     executable: helperExecutable,
@@ -45091,7 +45217,7 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
     env: {
       ...layout === "folder" ? {} : { OLYMPUS_WHATSAPP_STATE_DIR: sessionPath },
       OLYMPUS_WHATSAPP_QR_STDOUT: "false",
-      OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: wholeAccount ? "*" : chatJids.join(",")
+      OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: allowed
     },
     secretEnvironment: [],
     captureStarted: false
@@ -45108,6 +45234,13 @@ function parseReadyReceipt(events, source) {
     throw new Error(`${sourceLabel(source)} pairing readiness proof was incomplete.`);
   return event;
 }
+function isKindToken(value) {
+  try {
+    return parseChatKindToken("telegram", value) !== undefined;
+  } catch {
+    return false;
+  }
+}
 function parseTelegramDialogs(value) {
   if (!Array.isArray(value))
     return [];
@@ -45122,7 +45255,8 @@ function parseTelegramDialogs(value) {
     chats.push({
       chatScope: item.chat_scope,
       kind: item.kind,
-      title: typeof item.title === "string" ? item.title : ""
+      title: typeof item.title === "string" ? item.title : "",
+      ...typeof item.last_message_at === "string" && !Number.isNaN(Date.parse(item.last_message_at)) ? { lastMessageAt: new Date(item.last_message_at).toISOString() } : {}
     });
   }
   return chats;
@@ -45426,6 +45560,7 @@ var init_messaging_pairing = __esm(() => {
   init_whatsapp_bridge_name();
   init_messaging_capture_grant_file();
   init_provider_account_history();
+  init_messaging_chat_kinds();
 });
 
 // src/core/whatsapp-notice.ts
@@ -45482,8 +45617,11 @@ function readMessagingCaptureGrantFacts(source, grantPath = defaultMessagingCapt
       if (scopes.length > 0) {
         if (scopes.length === 1 && scopes[0] === "*")
           facts.scope = { kind: "whole_account" };
-        else if (scopes.every((scope) => !scope.includes("*")))
-          facts.scope = { kind: "chats", count: new Set(scopes).size };
+        else if (scopes.every((scope) => !scope.includes("*"))) {
+          const exact = scopes.filter((scope) => !scope.startsWith("kind:"));
+          if (exact.length > 0)
+            facts.scope = { kind: "chats", count: new Set(exact).size };
+        }
       }
     }
     return facts;
@@ -46170,6 +46308,15 @@ function peopleIndexMigrations() {
         );
       `);
     }
+  }, {
+    version: 2,
+    name: "people_corrections_corpora",
+    up(db) {
+      const columns = db.query(`PRAGMA table_info(people_corrections)`).all();
+      if (!columns.some((column) => column.name === "corpus_ids_json")) {
+        db.exec(`ALTER TABLE people_corrections ADD COLUMN corpus_ids_json TEXT NOT NULL DEFAULT '[]'`);
+      }
+    }
   }];
 }
 function peopleIndexPath(env = process.env) {
@@ -46195,9 +46342,8 @@ function strongKeysFromText(value) {
   if (!value)
     return [];
   const keys = new Set;
-  for (const match of value.matchAll(ADDRESS)) {
-    const local = match[1];
-    keys.add(`email:${match[0].toLowerCase()}`);
+  for (const { address, local } of addressesIn(value)) {
+    keys.add(`email:${address}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
   }
@@ -46211,7 +46357,10 @@ function strongKeysFromText(value) {
 function displayNameFromLabel(label) {
   if (!label)
     return;
-  const withoutAddress = label.replace(/<[^>]*>/g, " ").replace(ADDRESS, " ").replace(/["']/g, " ");
+  let withoutAddress = label;
+  for (const span of addressesIn(label).reverse())
+    withoutAddress = `${withoutAddress.slice(0, span.start)} ${withoutAddress.slice(span.end)}`;
+  withoutAddress = withoutAddress.replace(/<[^>]*>/g, " ").replace(/["']/g, " ");
   const name = withoutAddress.replace(/\s+/g, " ").trim();
   if (!name || normalizePhone(name))
     return;
@@ -46311,7 +46460,8 @@ function linkPeople(input) {
     }
   }
   const pairKey = (a, b) => a < b ? `${a}\x00${b}` : `${b}\x00${a}`;
-  const { merges, rejected, splits, renames } = replayCorrections(input.corrections ?? [], pairKey);
+  const ownerKeys = new Set([...identities.values()].filter((identity2) => identity2.isOwner).map((identity2) => identity2.identityKey));
+  const { merges, rejected, splits, renames } = replayCorrections((input.corrections ?? []).filter((correction) => !separatesOwner(correction, ownerKeys)), pairKey);
   const uf = new UnionFind;
   for (const key2 of identities.keys())
     uf.add(key2);
@@ -46477,6 +46627,13 @@ function linkPeople(input) {
   }
   return people.sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || b.itemCount - a.itemCount || a.personId.localeCompare(b.personId));
 }
+function separatesOwner(correction, ownerKeys) {
+  if (correction.kind === "split")
+    return ownerKeys.has(correction.identity);
+  if (correction.kind === "not_same")
+    return ownerKeys.has(correction.identityA) && ownerKeys.has(correction.identityB);
+  return false;
+}
 function replayCorrections(corrections, pairKey) {
   const merges = new Map;
   const rejected = new Set;
@@ -46619,10 +46776,28 @@ class LocalPeopleIndex {
           insertIdentity.run(identity2.identityKey, identity2.provider, identity2.senderId ?? null, identity2.senderLabel ?? null, JSON.stringify(identity2.keys), JSON.stringify(identity2.names), Number(identity2.isOwner), identity2.itemCount, person.personId, JSON.stringify(identity2.corpusIds), identity2.linkReason ?? null);
         }
       }
+      this.tagCorrectionCorpora();
       this.db.query(`INSERT OR REPLACE INTO people_meta (key, value) VALUES ('rebuilt_at', ?)`).run(this.now().toISOString());
     })();
     this.setPeople(people);
     return people;
+  }
+  tagCorrectionCorpora() {
+    this.db.exec(`
+      UPDATE people_corrections SET corpus_ids_json = (
+        SELECT json_group_array(DISTINCT value) FROM (
+          SELECT value FROM json_each(people_corrections.corpus_ids_json)
+          UNION
+          SELECT c.value FROM people_identities i, json_each(i.corpus_ids_json) c
+          WHERE i.identity_key IN (people_corrections.identity_a, people_corrections.identity_b)
+        )
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM people_identities i, json_each(i.corpus_ids_json) c
+        WHERE i.identity_key IN (people_corrections.identity_a, people_corrections.identity_b)
+          AND c.value NOT IN (SELECT value FROM json_each(people_corrections.corpus_ids_json))
+      )
+    `);
   }
   list() {
     return this.people;
@@ -46695,6 +46870,10 @@ class LocalPeopleIndex {
     return out;
   }
   correct(correction) {
+    const ownerKeys = new Set(this.db.query("SELECT identity_key FROM people_identities WHERE is_owner = 1").all().map((row) => row.identity_key));
+    if (separatesOwner(correction, ownerKeys)) {
+      throw new PeopleCorrectionRefusedError("Your own accounts are always You; they cannot be split apart.");
+    }
     const at = this.now().toISOString();
     const insert = this.db.query(`
       INSERT INTO people_corrections (kind, identity_a, identity_b, name, created_at) VALUES (?, ?, ?, ?, ?)
@@ -46718,6 +46897,7 @@ class LocalPeopleIndex {
           throw new Error("A person needs a name.");
         insert.run("rename", correction.identity, null, name, at);
       }
+      this.tagCorrectionCorpora();
     })();
   }
   corrections() {
@@ -46801,6 +46981,52 @@ function refreshPeopleIndex(index, stores) {
     store.setPeopleNames?.(resolver);
   return people;
 }
+
+class PeopleIndexRefresher {
+  index;
+  stores;
+  lastFingerprint;
+  lastRefreshAt;
+  now;
+  constructor(index, stores, options = {}) {
+    this.index = index;
+    this.stores = stores;
+    this.now = options.now ?? (() => Date.now());
+  }
+  refresh() {
+    const stores = this.stores();
+    this.lastFingerprint = refreshFingerprint(stores);
+    this.lastRefreshAt = this.now();
+    return refreshPeopleIndex(this.index, stores);
+  }
+  refreshIfChanged() {
+    const fingerprint = refreshFingerprint(this.stores());
+    if (fingerprint === this.lastFingerprint)
+      return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
+      return false;
+    this.refresh();
+    return true;
+  }
+}
+function refreshFingerprint(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+    let sync = "";
+    let visibility = "";
+    try {
+      const run = store.lastSyncRun?.();
+      sync = run && run.status === "completed" ? `${run.syncRunId}@${run.completedAt ?? ""}` : "";
+    } catch {
+      sync = "";
+    }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? "";
+    } catch {
+      visibility = "unreadable";
+    }
+    return `${sync}#${visibility}`;
+  }).join("|");
+}
 function forgetPeopleIndexRows(dbPath, scope, options = {}) {
   if (!existsSync36(dbPath) || scope.corpusIds.length === 0)
     return 0;
@@ -46813,13 +47039,13 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
       SELECT identity_key FROM people_identities
       WHERE EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?)))
     `).all(corpora).map((row) => row.identity_key);
-    if (keys.length === 0)
-      return 0;
     const keyList = JSON.stringify(keys);
-    const corrections = db.query(`
-      SELECT COUNT(*) AS n FROM people_corrections
-      WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-    `).get(keyList).n;
+    const keepsCorpora = db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('people_corrections') WHERE name = 'corpus_ids_json'`).get().n > 0;
+    const correctionMatch = `identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
+      ${keepsCorpora ? "OR EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?2)))" : "OR ?2 IS NULL"}`;
+    const corrections = db.query(`SELECT COUNT(*) AS n FROM people_corrections WHERE ${correctionMatch}`).get(keyList, corpora).n;
+    if (keys.length === 0 && corrections === 0)
+      return 0;
     const cards = db.query(`
       SELECT card_id FROM people_contact_cards
       WHERE EXISTS (SELECT 1 FROM json_each(keys_json) k WHERE k.value IN (SELECT value FROM json_each(?)))
@@ -46828,10 +47054,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
       return keys.length + corrections + cards;
     db.transaction(() => {
       db.query(`DELETE FROM people_identities WHERE identity_key IN (SELECT value FROM json_each(?))`).run(keyList);
-      db.query(`
-        DELETE FROM people_corrections
-        WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-      `).run(keyList);
+      db.query(`DELETE FROM people_corrections WHERE ${correctionMatch}`).run(keyList, corpora);
       const rows = db.query(`SELECT card_id, keys_json FROM people_contact_cards`).all();
       const gone = new Set(keys);
       for (const row of rows) {
@@ -46848,9 +47071,10 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
     closeSqliteStore(db);
   }
 }
-var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 1, PEOPLE_INDEX_STORE_ID = "people-index", ADDRESS, PEOPLE_AUTHORED_FAMILIES;
+var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000;
 var init_people_index = __esm(() => {
   init_olympus_layout();
+  init_sender_rules();
   init_sqlite_migrations();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
@@ -46861,7 +47085,12 @@ var init_people_index = __esm(() => {
     name_and_shared_group: "Linked by name and shared group chat",
     merged_by_owner: "Merged by you"
   });
-  ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
+  PeopleCorrectionRefusedError = class PeopleCorrectionRefusedError extends Error {
+    constructor(message2) {
+      super(message2);
+      this.name = "PeopleCorrectionRefusedError";
+    }
+  };
   PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
 });
 
@@ -50897,6 +51126,7 @@ function legacyWhatsAppCaptureState(account, env, pairing) {
     env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join44(stateDir, "spool"),
     ...pairing,
     join44(stateDir, "media"),
+    join44(stateDir, "history-pending"),
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ];
 }
@@ -85033,10 +85263,11 @@ function createConnectorFileExtractionSource(options) {
       }
       const content = handed.item.content;
       const mimeType = typeFor(ref, content.kind === "bytes" ? content.mimeType : handed.item.mimeType);
+      const sizeBytes = handed.sizeBytes ?? deferred?.sizeBytes;
       return {
         path: handed.path,
         ...mimeType ? { mimeType } : {},
-        ...deferred?.sizeBytes !== undefined ? { sizeBytes: deferred.sizeBytes } : {},
+        ...sizeBytes !== undefined ? { sizeBytes } : {},
         dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose
       };
     }
@@ -85131,7 +85362,7 @@ var init_connector_source = __esm(() => {
 
 // src/workers/whatsapp/child-media.ts
 import { closeSync as closeSync20, constants as constants9, fstatSync as fstatSync5, openSync as openSync20, readSync as readSync7, realpathSync as realpathSync13, rmSync as rmSync19, statSync as statSync24 } from "node:fs";
-import { isAbsolute as isAbsolute24, relative as relative10, resolve as resolve18 } from "node:path";
+import { isAbsolute as isAbsolute24, join as join68, relative as relative10, resolve as resolve18 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
 }
@@ -85249,17 +85480,66 @@ function readBounded(fd2, maxBytes) {
   }
   return Buffer.concat(chunks, total);
 }
-var WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = "whatsapp-media-file:v1:", COPY_CHUNK_BYTES;
+function whatsAppChildConnector(input) {
+  const childLocator = (localItemId, deferred) => {
+    if (!deferred?.locator || !localItemId.includes(CHILD_ITEM_ID_SEPARATOR))
+      throw new FileExtractionSourceError("source_content_unavailable");
+    return deferred.locator;
+  };
+  const item = (localItemId, bytes) => {
+    const mimeType = "application/octet-stream";
+    const providerItemId = localItemId.startsWith(`${input.account}:`) ? localItemId.slice(input.account.length + 1) : localItemId;
+    return {
+      identity: { family: "chat", provider: "whatsapp", accountScope: input.account, providerItemId, localItemId },
+      mimeType,
+      content: { kind: "bytes", mimeType, bytes },
+      metadata: {},
+      fetchedAt: new Date().toISOString()
+    };
+  };
+  const within = async (localItemId, options) => {
+    const locator = childLocator(localItemId, options.deferredBytes);
+    return item(localItemId, input.readChild(locator, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}));
+  };
+  return {
+    id: WHATSAPP_CHILD_CONNECTOR_ID,
+    family: "chat",
+    async authenticate() {},
+    async* listItems() {},
+    fetchItem: (localItemId, options) => within(localItemId, options?.deferredBytes ? { deferredBytes: options.deferredBytes } : {}),
+    fetchItemWithin: within,
+    async fetchItemToFile(localItemId, options) {
+      const locator = childLocator(localItemId, options.deferredBytes);
+      makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
+      const path = join68(options.spoolDir, extractionSpoolFileName());
+      let sizeBytes;
+      try {
+        sizeBytes = input.readChild.toFile(locator, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}, path);
+      } catch (error) {
+        discardExtractionSpoolFile(path, options.spoolDir);
+        throw error;
+      }
+      if (options.stillServed && !options.stillServed()) {
+        discardExtractionSpoolFile(path, options.spoolDir);
+        throw new FileExtractionSourceError("source_item_not_found");
+      }
+      return { item: item(localItemId, new Uint8Array(0)), path, spooled: true, sizeBytes };
+    },
+    classificationSignals: () => ({})
+  };
+}
+var WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = "whatsapp-media-file:v1:", COPY_CHUNK_BYTES, WHATSAPP_CHILD_CONNECTOR_ID = "whatsapp.children";
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
+  init_spool();
   COPY_CHUNK_BYTES = 1024 * 1024;
 });
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile5, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync21, constants as constants10, openSync as openSync21, readSync as readSync8, rmSync as rmSync20 } from "node:fs";
-import { basename as basename11, join as join68, relative as relative11, resolve as resolve19, sep as sep15 } from "node:path";
+import { basename as basename11, join as join69, relative as relative11, resolve as resolve19, sep as sep15 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -85271,11 +85551,9 @@ class WhatsAppExtractionSource {
   locators;
   mediaRoots;
   relocateLocator;
-  deferredBytes;
-  readChild;
+  children;
   constructor(options) {
-    this.deferredBytes = options.deferredBytes;
-    this.readChild = options.readChild;
+    this.children = options.children;
     this.relocateLocator = options.relocateLocator ?? ((path) => path);
     this.id = requireNonEmpty6(options.id, "WhatsApp extraction source id");
     this.corpusId = requireNonEmpty6(options.corpusId, "WhatsApp extraction corpus id");
@@ -85306,8 +85584,8 @@ class WhatsAppExtractionSource {
     };
   }
   async fetch(ref, options) {
-    if (ref.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true)
-      return this.fetchChild(ref, options);
+    if (isChild(ref.providerItemId))
+      return this.childSource().fetch(ref, options);
     const located = await this.locators.localContent(ref.localItemId, 1);
     const locator = located?.locatorUri?.trim();
     if (!locator)
@@ -85341,33 +85619,18 @@ class WhatsAppExtractionSource {
     }
   }
   async fetchFile(ref, options) {
-    const child2 = ref.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
-    let copy;
-    if (child2) {
-      if (!this.deferredBytes || !this.readChild)
-        throw new FileExtractionSourceError("source_item_not_found");
-      const answer = this.deferredBytes(ref);
-      if (answer === undefined)
-        throw new FileExtractionSourceError("source_item_not_found");
-      if ("refusal" in answer)
-        throw new FileExtractionSourceError(answer.refusal);
-      if (options.maxBytes !== undefined && answer.sizeBytes !== undefined && answer.sizeBytes > options.maxBytes) {
-        throw new FileExtractionSourceError("source_too_large");
-      }
-      const readChild = this.readChild;
-      copy = (dest2) => readChild.toFile(answer.locator, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}, dest2);
-    } else {
-      const located = await this.locators.localContent(ref.localItemId, 1);
-      const locator = located?.locatorUri?.trim();
-      if (!locator)
-        throw new FileExtractionSourceError("source_item_not_found");
-      const path = this.relocateLocator(locator);
-      copy = (dest2) => withConfinedFile(path, this.mediaRoots, options.maxBytes, (fd2, size) => copyDescriptor(fd2, size, dest2));
-    }
+    if (isChild(ref.providerItemId))
+      return this.childSource().fetchFile(ref, options);
+    const located = await this.locators.localContent(ref.localItemId, 1);
+    const locator = located?.locatorUri?.trim();
+    if (!locator)
+      throw new FileExtractionSourceError("source_item_not_found");
+    const path = this.relocateLocator(locator);
+    const copy = (dest2) => withConfinedFile(path, this.mediaRoots, options.maxBytes, (fd2, size) => copyDescriptor(fd2, size, dest2));
     const owner = { corpusId: this.corpusId, accountScope: ref.accountScope };
     const ownerDir = extractionSpoolOwnerDir(options.spoolDir, owner);
     makeExtractionSpoolOwnerDir(ownerDir, options.spoolAnchor);
-    const dest = join68(ownerDir, extractionSpoolFileName());
+    const dest = join69(ownerDir, extractionSpoolFileName());
     let sizeBytes;
     try {
       sizeBytes = copy(dest);
@@ -85385,23 +85648,13 @@ class WhatsAppExtractionSource {
       }
     };
   }
-  fetchChild(ref, options) {
-    if (!this.deferredBytes || !this.readChild)
+  childSource() {
+    if (!this.children)
       throw new FileExtractionSourceError("source_item_not_found");
-    const answer = this.deferredBytes(ref);
-    if (answer === undefined)
-      throw new FileExtractionSourceError("source_item_not_found");
-    if ("refusal" in answer)
-      throw new FileExtractionSourceError(answer.refusal);
-    if (options.maxBytes !== undefined && answer.sizeBytes !== undefined && answer.sizeBytes > options.maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
-    }
-    const bytes = this.readChild(answer.locator, { ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
-    return { bytes, ...ref.mimeType ? { mimeType: ref.mimeType } : {}, sizeBytes: bytes.byteLength };
+    return this.children;
   }
   refFromRow(row) {
-    const child2 = row.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
-    if (row.provider !== this.provider || row.accountScope !== this.accountScope || !row.providerItemId || (child2 ? !this.readChild || !this.deferredBytes : !row.locatorUri))
+    if (row.provider !== this.provider || row.accountScope !== this.accountScope || !row.providerItemId || (isChild(row.providerItemId) ? !this.children : !row.locatorUri))
       return;
     return {
       corpusId: this.corpusId,
@@ -85429,6 +85682,9 @@ class WhatsAppExtractionSource {
     }
     return false;
   }
+}
+function isChild(providerItemId) {
+  return providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
 }
 function requireNonEmpty6(value, label) {
   const normalized = value.trim();
@@ -85657,7 +85913,7 @@ var init_reaction_index = __esm(() => {
 import { Database as Database17 } from "bun:sqlite";
 import { randomBytes as randomBytes13 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync55 } from "node:fs";
-import { join as join69 } from "node:path";
+import { join as join70 } from "node:path";
 function comparePlaces(a, b) {
   if (a.file !== b.file)
     return a.file < b.file ? -1 : 1;
@@ -85672,7 +85928,7 @@ class WhatsAppSpoolIndex {
   static open(spoolDir) {
     if (!existsSync55(spoolDir))
       return;
-    const path = join69(spoolDir, WHATSAPP_SPOOL_INDEX_FILE);
+    const path = join70(spoolDir, WHATSAPP_SPOOL_INDEX_FILE);
     let db;
     try {
       db = new Database17(path, { create: true });
@@ -85763,7 +86019,7 @@ class WhatsAppSpoolIndex {
     const replaced = [];
     const gone = [];
     for (const { name, identity: identity2, indexed_to: indexedTo, boundary } of known) {
-      const path = join69(spoolDir, name);
+      const path = join70(spoolDir, name);
       const now = spoolFileIdentity(path);
       if (now !== undefined && now.identity === identity2 && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary))
         continue;
@@ -85793,7 +86049,7 @@ class WhatsAppSpoolIndex {
     this.db.query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key2, value);
   }
   noteFile(spoolDir, name, indexedTo) {
-    const path = join69(spoolDir, name);
+    const path = join70(spoolDir, name);
     const identity2 = spoolFileIdentity(path);
     const boundary = spoolBoundaryDigest(path, indexedTo);
     if (!identity2 || boundary === undefined)
@@ -85808,7 +86064,7 @@ class WhatsAppSpoolIndex {
     const row = this.db.query("SELECT indexed_to FROM files WHERE name = ?").get(name);
     if (!row)
       return;
-    const path = join69(spoolDir, name);
+    const path = join70(spoolDir, name);
     const identity2 = spoolFileIdentity(path);
     const boundary = spoolBoundaryDigest(path, row.indexed_to);
     if (!identity2 || boundary === undefined) {
@@ -85922,7 +86178,7 @@ var init_spool_index = __esm(() => {
 // src/workers/whatsapp/spool-resets.ts
 import { Database as Database18 } from "bun:sqlite";
 import { chmodSync as chmodSync24 } from "node:fs";
-import { join as join70 } from "node:path";
+import { join as join71 } from "node:path";
 
 class WhatsAppSpoolResets {
   db;
@@ -85930,7 +86186,7 @@ class WhatsAppSpoolResets {
     this.db = db;
   }
   static open(spoolDir) {
-    const path = join70(spoolDir, WHATSAPP_SPOOL_RESET_FILE);
+    const path = join71(spoolDir, WHATSAPP_SPOOL_RESET_FILE);
     let db;
     try {
       db = new Database18(path, { create: true });
@@ -86035,7 +86291,7 @@ var init_match_keys = __esm(() => {
 
 // src/workers/whatsapp/spool-reader.ts
 import { closeSync as closeSync22, openSync as openSync22, readFileSync as readFileSync44, readSync as readSync9, statSync as statSync25 } from "node:fs";
-import { join as join71 } from "node:path";
+import { join as join72 } from "node:path";
 function pauseAt(offset, skipping, continued) {
   if (!skipping)
     return { kind: "paused", offset };
@@ -86207,7 +86463,7 @@ function isRecordBoundary(path, offset) {
 function newestSpoolRecord(spoolDir, files, pick) {
   let budget = NEWEST_RECORD_SCAN_BYTES;
   for (let index = files.length - 1;index >= 0 && budget > 0; index -= 1) {
-    const path = join71(spoolDir, files[index]);
+    const path = join72(spoolDir, files[index]);
     const size = spoolFileIdentity(path)?.size ?? 0;
     let fd2;
     try {
@@ -86260,7 +86516,7 @@ function newestSpoolRecord(spoolDir, files, pick) {
   return;
 }
 function readWhatsAppCaptureStatus(spoolDir) {
-  const path = join71(spoolDir, WHATSAPP_CAPTURE_STATUS_FILE);
+  const path = join72(spoolDir, WHATSAPP_CAPTURE_STATUS_FILE);
   let parsed;
   try {
     if (statSync25(path).size > CAPTURE_STATUS_MAX_BYTES)
@@ -86304,7 +86560,7 @@ var init_spool_reader = __esm(() => {
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { createHash as createHash60 } from "node:crypto";
 import { closeSync as closeSync23, existsSync as existsSync56, fsyncSync as fsyncSync4, lstatSync as lstatSync31, openSync as openSync23, readFileSync as readFileSync45, readdirSync as readdirSync12, realpathSync as realpathSync14, rmSync as rmSync21, statSync as statSync26 } from "node:fs";
-import { basename as basename12, dirname as dirname60, isAbsolute as isAbsolute25, join as join72, relative as relative12 } from "node:path";
+import { basename as basename12, dirname as dirname60, isAbsolute as isAbsolute25, join as join73, relative as relative12 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
     malformedLines: 0,
@@ -86343,7 +86599,7 @@ function createWhatsAppLiveSourceConnector(options) {
     let match;
     const reactionIndex = createWhatsAppReactionIndexBuilder();
     for (const file of listSpoolFiles(spoolDir)) {
-      for (const line of spoolFileLines2(join72(spoolDir, file))) {
+      for (const line of spoolFileLines2(join73(spoolDir, file))) {
         const message2 = parseSpoolLine(line);
         if (message2 === undefined)
           continue;
@@ -86541,7 +86797,7 @@ function readMessageAt(spoolDir, file, offset, budget) {
   const own3 = { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES + TARGET_READ_CHUNK_BYTES };
   const before = own3.bytesLeft;
   try {
-    for (const record of spoolRecords(join72(spoolDir, file), offset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, own3, false, TARGET_READ_CHUNK_BYTES)) {
+    for (const record of spoolRecords(join73(spoolDir, file), offset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, own3, false, TARGET_READ_CHUNK_BYTES)) {
       return record.kind === "line" ? parseSpoolLine(record.text) : undefined;
     }
     return;
@@ -86614,7 +86870,7 @@ async function* liveRecords(spoolDir, options) {
 function resolveStart(spoolDir, start, pass) {
   if (start === undefined)
     return;
-  const path = join72(spoolDir, start.file);
+  const path = join73(spoolDir, start.file);
   const identity2 = spoolFileIdentity(path);
   if (identity2 === undefined) {
     pass.findings.cursorFilesMissing += 1;
@@ -86656,7 +86912,7 @@ function catchUpWhatsAppSpoolIndex(spoolDir, budgetBytes) {
     const last = files.at(-1);
     if (last === undefined)
       return true;
-    const end = spoolFileIdentity(join72(spoolDir, last));
+    const end = spoolFileIdentity(join73(spoolDir, last));
     if (!end)
       return false;
     const pass = {
@@ -86686,10 +86942,10 @@ function catchUpIndex(spoolDir, index, until, pass, atBoundary = true) {
     let offset = file === mark.file ? mark.offset : 0;
     const end = file === target.file ? target.offset : Number.POSITIVE_INFINITY;
     let paused = false;
-    if (!spoolFileIdentity(join72(spoolDir, file)))
+    if (!spoolFileIdentity(join73(spoolDir, file)))
       continue;
     index.transaction(() => {
-      for (const record of spoolRecords(join72(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
+      for (const record of spoolRecords(join73(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
         if (record.kind === "paused") {
           offset = record.offset;
           paused = true;
@@ -86779,7 +87035,7 @@ function readSpoolPage(spoolDir, start, limit, pass) {
       let offset = fromStart ? start.offset ?? 0 : 0;
       const skipping = fromStart && start.skipping === true;
       position = { file, line: lineIndex, offset, ...skipping ? { skipping: true } : {} };
-      for (const record of spoolRecords(join72(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
+      for (const record of spoolRecords(join73(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
         if (record.kind === "paused") {
           if (record.firstSeen)
             pass.findings.oversizedRecords += 1;
@@ -87175,7 +87431,7 @@ async function redactWhatsAppLiveSpoolSecrets(options) {
 function mediaPathOwners(spoolDir, relocate) {
   const owners = new Map;
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of spoolFileLines2(join72(spoolDir, file))) {
+    for (const line of spoolFileLines2(join73(spoolDir, file))) {
       const message2 = parseSpoolLine(line);
       if (message2?.mediaPath === undefined)
         continue;
@@ -87246,9 +87502,9 @@ function mediaTempFiles(roots, strict) {
     }
     for (const entry of entries) {
       if (entry.isDirectory() && depth < MEDIA_TEMP_DEPTH)
-        walk(join72(real, entry.name), depth + 1);
+        walk(join73(real, entry.name), depth + 1);
       else if (entry.isFile() && OLDER_MEDIA_TEMP.test(entry.name))
-        found.push({ path: join72(real, entry.name), name: entry.name });
+        found.push({ path: join73(real, entry.name), name: entry.name });
     }
   };
   for (const root of roots)
@@ -87268,9 +87524,9 @@ function deleteFetchedMedia(message2, roots) {
     }
     for (const entry of entries) {
       if (entry.isDirectory() && depth < MEDIA_TEMP_DEPTH)
-        walk(join72(dir, entry.name), depth + 1);
+        walk(join73(dir, entry.name), depth + 1);
       else if (entry.isFile() && entry.name.startsWith(prefix))
-        removeTemp(join72(dir, entry.name));
+        removeTemp(join73(dir, entry.name));
     }
   };
   for (const root of roots)
@@ -87485,7 +87741,7 @@ import {
   writeSync as writeSync7
 } from "node:fs";
 import { createConnection } from "node:net";
-import { dirname as dirname61, join as join73 } from "node:path";
+import { dirname as dirname61, join as join74 } from "node:path";
 async function runWhatsAppMediaFetch(options) {
   const result = { received: 0, filled: 0, dropped: 0, waitingForDisk: false };
   const { state, folder } = options;
@@ -87497,14 +87753,14 @@ async function runWhatsAppMediaFetch(options) {
   const space = options.space ?? volumeSpace;
   for (const name of listNames(folder))
     if (name.endsWith(PART_SUFFIX))
-      removeDurably(join73(folder, name));
+      removeDurably(join74(folder, name));
   const removeFiles = (row) => {
     let had = false;
     for (const name of listNames(folder)) {
       if (!name.startsWith(row.filePrefix))
         continue;
       had = true;
-      removeDurably(join73(folder, name));
+      removeDurably(join74(folder, name));
     }
     return had;
   };
@@ -87547,7 +87803,7 @@ async function runWhatsAppMediaFetch(options) {
     const named = listNames(folder).find((name) => name.startsWith(row.filePrefix) && !name.endsWith(PART_SUFFIX));
     if (named !== undefined) {
       if (verdict === "clear")
-        toFill.push({ row, path: join73(folder, named) });
+        toFill.push({ row, path: join74(folder, named) });
       continue;
     }
     if (verdict !== "clear")
@@ -87558,7 +87814,7 @@ async function runWhatsAppMediaFetch(options) {
     }
     if (!bridgeReachable)
       continue;
-    const finalPath = join73(folder, whatsAppFetchedMediaName(row.stem, row.versionDigest, extensionFor(row.media.mediaMime)));
+    const finalPath = join74(folder, whatsAppFetchedMediaName(row.stem, row.versionDigest, extensionFor(row.media.mediaMime)));
     const part = `${finalPath}${PART_SUFFIX}`;
     const answer = await options.call(requestOf(row), part, (size) => hasRoom(folder, space, size));
     if (answer.status === "unavailable") {
@@ -87624,7 +87880,7 @@ async function runWhatsAppMediaFetch(options) {
   const prefixes = state.all().map((row) => row.filePrefix);
   for (const name of listNames(folder)) {
     if (!prefixes.some((prefix) => name.startsWith(prefix)))
-      removeDurably(join73(folder, name));
+      removeDurably(join74(folder, name));
   }
   if (!hasRoom(folder, space, 0) && state.waitingCount() > 0)
     result.waitingForDisk = true;
@@ -87708,7 +87964,7 @@ class WhatsAppMediaFetchState {
     this.db = db;
   }
   static open(spoolDir) {
-    const path = join73(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
+    const path = join74(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
     const db = new Database19(path, { create: true });
     chmodSync25(path, 384);
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
@@ -87845,7 +88101,7 @@ function requestOf(row) {
   };
 }
 function fillRecord(spoolDir, row, path) {
-  for (const read of spoolRecords(join73(spoolDir, row.media.spoolFile), row.media.spoolOffset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES })) {
+  for (const read of spoolRecords(join74(spoolDir, row.media.spoolFile), row.media.spoolOffset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES })) {
     if (read.kind !== "line")
       return;
     const message2 = parseWhatsAppSpoolRecord(read.text);
@@ -87866,7 +88122,7 @@ function bridgeMediaCall(stateDir) {
   return (request, partPath, fits) => new Promise((resolve20) => {
     let socketPath;
     try {
-      const named = JSON.parse(readFileSync46(join73(stateDir, WHATSAPP_MEDIA_SOCKET_POINTER), "utf8"));
+      const named = JSON.parse(readFileSync46(join74(stateDir, WHATSAPP_MEDIA_SOCKET_POINTER), "utf8"));
       if (typeof named.socket !== "string" || named.socket === "")
         throw new Error("no socket");
       socketPath = named.socket;
@@ -88039,7 +88295,7 @@ var init_media_fetch = __esm(() => {
 
 // src/workers/whatsapp/store-sync.ts
 import { readdirSync as readdirSync14 } from "node:fs";
-import { isAbsolute as isAbsolute26, join as join74, relative as relative13 } from "node:path";
+import { isAbsolute as isAbsolute26, join as join75, relative as relative13 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
   return resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp", env);
 }
@@ -88050,12 +88306,12 @@ function defaultWhatsAppMediaDir(env = process.env) {
   return resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-media", env);
 }
 function defaultWhatsAppFetchedMediaDir(env = process.env) {
-  return join74(defaultWhatsAppStateDir(env), "media", "olympus");
+  return join75(defaultWhatsAppStateDir(env), "media", "olympus");
 }
 function defaultWhatsAppMediaRoots(env = process.env) {
   const root = resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-media-root", env);
   const state = defaultWhatsAppStateDir(env);
-  const beside = [join74(state, "media", "images"), join74(state, "media", "video"), defaultWhatsAppFetchedMediaDir(env)].filter((dir) => {
+  const beside = [join75(state, "media", "images"), join75(state, "media", "video"), defaultWhatsAppFetchedMediaDir(env)].filter((dir) => {
     const from = relative13(root, dir);
     return from === "" || from.startsWith("..") || isAbsolute26(from);
   });
@@ -88229,7 +88485,7 @@ async function clearWhatsAppSpoolSecrets(options) {
   for (const file of files) {
     if (file > throughFile)
       break;
-    const path = join74(options.spoolDir, file);
+    const path = join75(options.spoolDir, file);
     const before = spoolFileIdentity(path);
     if (!before)
       continue;
@@ -88271,7 +88527,7 @@ async function clearWhatsAppSpoolSecrets(options) {
     for (const file of files) {
       if (file <= throughFile)
         continue;
-      const path = join74(options.spoolDir, file);
+      const path = join75(options.spoolDir, file);
       const before = spoolFileIdentity(path);
       if (!before)
         continue;
@@ -88310,7 +88566,7 @@ async function clearWhatsAppSpoolSecrets(options) {
   });
   if (sweep && sweep.recordsRedacted + sweep.recordsBlanked > 0) {
     for (const [file, known] of Object.entries(next)) {
-      const entry = clearedFileNow(join74(options.spoolDir, file), known.lines, known.offset, known.size, known.judgedLines);
+      const entry = clearedFileNow(join75(options.spoolDir, file), known.lines, known.offset, known.size, known.judgedLines);
       if (entry)
         next[file] = entry;
       else
@@ -88455,22 +88711,52 @@ function whatsAppChildReader(env, archive) {
     ...archive ? { archive } : {}
   });
 }
+function whatsAppChildExtraction(input) {
+  const connector = whatsAppChildConnector({ account: input.accountScope, readChild: input.readChild });
+  const adapter = createConnectorFileExtractionSource({
+    id: input.id,
+    corpusId: input.corpusId,
+    provider: input.provider,
+    connector: (accountScope) => accountScope === input.accountScope ? connector : undefined,
+    deferredBytes: (ref) => input.deferredBytes(ref) ?? { refusal: "source_item_not_found" },
+    candidates: input.candidates,
+    lanes: [{ approvedScopeKey: input.approvedScopeKey }]
+  });
+  const fetchFile = adapter.fetchFile;
+  if (!fetchFile)
+    throw new Error("The shared connector adapter hands no file.");
+  return {
+    fetch: (ref, options) => adapter.fetch(ref, options),
+    fetchFile: (ref, options) => fetchFile.call(adapter, ref, options)
+  };
+}
 function whatsAppExtractionSourceFactory(env, archive) {
   const readChild = whatsAppChildReader(env, archive);
   return (input) => {
     const reader = input.view ?? input.store;
+    const id = `${input.config.corpusId}:extraction`;
+    const candidates = connectorStoreExtractionCandidateReader(reader);
+    const approvedScopeKey = input.config.scopes[0];
     return new WhatsAppExtractionSource({
-      id: `${input.config.corpusId}:extraction`,
+      id,
       corpusId: input.config.corpusId,
       provider: input.config.provider,
       accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
-      approvedScopeKey: input.config.scopes[0],
-      candidates: connectorStoreExtractionCandidateReader(reader),
+      approvedScopeKey,
+      candidates,
       locators: reader,
       mediaRoots: defaultWhatsAppMediaRoots(env),
       relocateLocator: whatsappMovedPathMapper(env),
-      deferredBytes: (ref) => deferredBytesAnswerFor(reader.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
-      readChild
+      children: whatsAppChildExtraction({
+        id,
+        corpusId: input.config.corpusId,
+        provider: input.config.provider,
+        accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
+        approvedScopeKey,
+        candidates,
+        deferredBytes: (ref) => deferredBytesAnswerFor(reader.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
+        readChild
+      })
     });
   };
 }
@@ -90919,7 +91205,7 @@ var init_input_limits = __esm(() => {
 // src/workers/file-extraction/extractors/image-prepare.ts
 import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join75 } from "node:path";
+import { join as join76 } from "node:path";
 function imageDecoderUnavailableWarning(format) {
   return `image_decoder_unavailable_${format}`;
 }
@@ -90958,9 +91244,9 @@ function createImagePreparation(options) {
     if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
       return { kind: "too_small" };
     }
-    const tempDir = await mkdtemp2(join75(tmpdir5(), TEMP_DIR_PREFIX2));
+    const tempDir = await mkdtemp2(join76(tmpdir5(), TEMP_DIR_PREFIX2));
     try {
-      const inputPath = join75(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+      const inputPath = join76(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
       await writeFile2(inputPath, input.bytes, { mode: 384 });
       let prepared;
       try {
@@ -91028,7 +91314,7 @@ var init_image_prepare = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir6 } from "node:os";
-import { dirname as dirname63, join as join76 } from "node:path";
+import { dirname as dirname63, join as join77 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -91387,9 +91673,9 @@ function pdfTextLooksUndecoded(text3) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp3(join76(tmpdir6(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join77(tmpdir6(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join76(tempDir, "input.pdf");
+    const inputPath = join77(tempDir, "input.pdf");
     await writeFile3(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -91649,12 +91935,12 @@ var init_text = __esm(() => {
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync57 } from "node:fs";
-import { dirname as dirname64, join as join77 } from "node:path";
+import { dirname as dirname64, join as join78 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync57) {
   let directory = dirname64(fileURLToPath8(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
-    const candidate = join77(directory, APPLE_VISION_OCR_SCRIPT);
+    const candidate = join78(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
     const parent = dirname64(directory);
@@ -91976,7 +92262,7 @@ var init_ocr_probe_fixture = __esm(() => {
 // src/workers/file-extraction/extractors/ocr-capability.ts
 import { mkdtemp as mkdtemp4, readFile as readFile6, readdir as readdir2, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir7 } from "node:os";
-import { join as join78 } from "node:path";
+import { join as join79 } from "node:path";
 function ocrmypdfArguments(input) {
   return [
     "--force-ocr",
@@ -92077,7 +92363,7 @@ async function probeTesseract(input) {
   }
 }
 async function probePdftoppm(input) {
-  const prefix = join78(input.directory, "render");
+  const prefix = join79(input.directory, "render");
   try {
     await input.runner({
       command: PDFTOPPM_COMMAND,
@@ -92092,20 +92378,20 @@ async function probePdftoppm(input) {
   if (!first)
     return "failed";
   if (input.tesseract === "ok") {
-    const read = await probeTesseract({ runner: input.runner, imagePath: join78(input.directory, first) });
+    const read = await probeTesseract({ runner: input.runner, imagePath: join79(input.directory, first) });
     if (read !== "ok")
       return "failed";
   }
   return "ok";
 }
 async function probeOcrmypdf(input) {
-  const sidecarPath = join78(input.directory, "probe-sidecar.txt");
+  const sidecarPath = join79(input.directory, "probe-sidecar.txt");
   try {
     await input.runner({
       command: OCRMYPDF_COMMAND,
       args: ocrmypdfArguments({
         inputPath: input.pdfPath,
-        outputPath: join78(input.directory, "probe-output.pdf"),
+        outputPath: join79(input.directory, "probe-output.pdf"),
         sidecarPath
       }),
       timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
@@ -92127,9 +92413,9 @@ async function probeOcrCapability(options = {}) {
   let ocrmypdf = "failed";
   let directory;
   try {
-    directory = await mkdtemp4(join78(tmpdir7(), PROBE_TEMP_PREFIX));
-    const imagePath = join78(directory, "probe.jpg");
-    const pdfPath = join78(directory, "probe.pdf");
+    directory = await mkdtemp4(join79(tmpdir7(), PROBE_TEMP_PREFIX));
+    const imagePath = join79(directory, "probe.jpg");
+    const pdfPath = join79(directory, "probe.pdf");
     await writeFile4(imagePath, ocrProbeJpeg());
     await writeFile4(pdfPath, buildOcrProbePdf());
     tesseract = await probeTesseract({ runner, imagePath });
@@ -92220,7 +92506,7 @@ var init_ocr_capability = __esm(() => {
 // src/workers/file-extraction/extractors/pdf-raster-ocr.ts
 import { mkdtemp as mkdtemp5, readdir as readdir3, rm as rm6 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
-import { join as join79 } from "node:path";
+import { join as join80 } from "node:path";
 function parseSizePoints(text3) {
   const [first, second] = text3.split("x");
   const width = Number.parseFloat(first ?? "");
@@ -92304,7 +92590,7 @@ async function rasterPdfOcr(input, options) {
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
   const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
-  const tempDir = await mkdtemp5(join79(tmpdir8(), RASTER_TEMP_PREFIX));
+  const tempDir = await mkdtemp5(join80(tmpdir8(), RASTER_TEMP_PREFIX));
   const pages = [];
   let attempted = 0;
   let failed = 0;
@@ -92345,7 +92631,7 @@ async function rasterPdfOcr(input, options) {
                 "-gray",
                 "-png",
                 input.inputPath,
-                join79(tempDir, RASTER_PAGE_PREFIX)
+                join80(tempDir, RASTER_PAGE_PREFIX)
               ],
               timeoutMs: Math.min(options.timeoutMs, renderLeftMs)
             });
@@ -92378,7 +92664,7 @@ async function rasterPdfOcr(input, options) {
             break rangeLoop;
           }
           attempted += 1;
-          const path = join79(tempDir, file.name);
+          const path = join80(tempDir, file.name);
           try {
             const { stdout } = await options.commandRunner({
               command: TESSERACT_COMMAND,
@@ -92496,7 +92782,7 @@ var init_pdf_raster_ocr = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp6, readFile as readFile7, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir9 } from "node:os";
-import { join as join80 } from "node:path";
+import { join as join81 } from "node:path";
 function pdfOcrTimeoutMs(baseMs, sizeBytes) {
   const steps = Math.max(1, Math.ceil((Number.isFinite(sizeBytes) ? Math.max(0, sizeBytes) : 0) / OCR_PDF_TIMEOUT_BYTES_PER_STEP));
   return Math.max(baseMs, Math.min(baseMs * steps, OCR_PDF_MAX_TIMEOUT_MS));
@@ -92753,9 +93039,9 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp6(join80(tmpdir9(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join81(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join80(tempDir, `input${extension}`);
+    const inputPath = join81(tempDir, `input${extension}`);
     await writeFile5(inputPath, bytes);
     return await read(inputPath);
   } finally {
@@ -92775,11 +93061,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp6(join80(tmpdir9(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join81(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join80(tempDir, "input.pdf");
-    const outputPath = join80(tempDir, "output.pdf");
-    const sidecarPath = join80(tempDir, "sidecar.txt");
+    const inputPath = join81(tempDir, "input.pdf");
+    const outputPath = join81(tempDir, "output.pdf");
+    const sidecarPath = join81(tempDir, "sidecar.txt");
     await writeFile5(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -92821,9 +93107,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp6(join80(tmpdir9(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join81(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join80(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join81(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile5(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -93169,7 +93455,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
 import { existsSync as existsSync58 } from "node:fs";
-import { dirname as dirname65, join as join81 } from "node:path";
+import { dirname as dirname65, join as join82 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 function modelThreadHandleId() {
   return nextHandle++;
@@ -93272,7 +93558,7 @@ function cancelled() {
 function modelWorkerPath() {
   const here = dirname65(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
-    const path = join81(here, name);
+    const path = join82(here, name);
     if (existsSync58(path))
       return path;
   }
@@ -93311,16 +93597,16 @@ import {
   writeFileSync as writeFileSync12,
   writeSync as writeSync8
 } from "node:fs";
-import { dirname as dirname66, isAbsolute as isAbsolute27, join as join82 } from "node:path";
+import { dirname as dirname66, isAbsolute as isAbsolute27, join as join83 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
     root,
-    modelDir: join82(root, model.modelId),
+    modelDir: join83(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
-    statusPath: join82(root, "status.json"),
-    lockPath: join82(root, "install.lock"),
-    runtimeLockPath: join82(root, "runtime.lock")
+    statusPath: join83(root, "status.json"),
+    lockPath: join83(root, "install.lock"),
+    runtimeLockPath: join83(root, "runtime.lock")
   };
 }
 function builtInReasoningRoot(env) {
@@ -93330,10 +93616,10 @@ function builtInReasoningRoot(env) {
   return root;
 }
 function llamaServerRuntimeDir(env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  return join82(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
+  return join83(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
 }
 function llamaServerRuntimeLockPath(env = process.env) {
-  return join82(builtInReasoningRoot(env), "runtime.lock");
+  return join83(builtInReasoningRoot(env), "runtime.lock");
 }
 function currentPlatform2() {
   return `${process.platform}-${process.arch}`;
@@ -93391,7 +93677,7 @@ async function installPinnedModel(options) {
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
   const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
-  const files = bundle.files.map((file) => ({ file, path: join82(paths.modelDir, file.name) }));
+  const files = bundle.files.map((file) => ({ file, path: join83(paths.modelDir, file.name) }));
   const filesPresent = () => files.every(({ path }) => existsSync59(path));
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
@@ -93545,7 +93831,7 @@ function reportPinnedModelState(target, state, failure) {
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
   if (marker?.serverPath)
-    return join82(runtimeDir, marker.serverPath);
+    return join83(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
@@ -93565,20 +93851,20 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync47(join82(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync47(join83(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync59(join82(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync59(join83(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID21()}`;
   ensureDirectory2(staging);
   try {
-    const archivePath = join82(staging, archive.name);
+    const archivePath = join83(staging, archive.name);
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
@@ -93595,7 +93881,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync12(join82(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync12(join83(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync23(runtimeDir, { recursive: true, force: true });
     renameSync11(staging, runtimeDir);
@@ -93632,14 +93918,14 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync15(join82(root, prefix));
+    entries = readdirSync15(join83(root, prefix));
   } catch {
     return;
   }
   if (entries.includes(name)) {
     const relative14 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync28(join82(root, relative14)).isFile())
+      if (statSync28(join83(root, relative14)).isFile())
         return relative14;
     } catch {}
   }
@@ -93648,7 +93934,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   for (const entry of entries) {
     const child2 = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync28(join82(root, child2)).isDirectory())
+      if (!statSync28(join83(root, child2)).isDirectory())
         continue;
     } catch {
       continue;
@@ -93892,7 +94178,7 @@ import { randomBytes as randomBytes14 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync24, writeFileSync as writeFileSync13 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir10 } from "node:os";
-import { join as join83 } from "node:path";
+import { join as join84 } from "node:path";
 function llamaServerEnvironment(parent, alias) {
   const env = {};
   for (const name of LLAMA_SERVER_ENV_ALLOWLIST) {
@@ -94084,8 +94370,8 @@ function createLlamaServerHandle(launch, options = {}) {
     superseded();
     const token = randomBytes14(24).toString("base64url");
     const alias = `olympus-${randomBytes14(12).toString("hex")}`;
-    const tokenDir = mkdtempSync3(join83(tmpdir10(), "olympus-built-in-model-"));
-    const tokenFile = join83(tokenDir, "token");
+    const tokenDir = mkdtempSync3(join84(tmpdir10(), "olympus-built-in-model-"));
+    const tokenFile = join84(tokenDir, "token");
     let spawnedProcess;
     try {
       writeFileSync13(tokenFile, `${token}
@@ -94398,18 +94684,18 @@ var init_server = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
 import { accessSync as accessSync8, constants as constants12, readFileSync as readFileSync48 } from "node:fs";
-import { delimiter as delimiter5, isAbsolute as isAbsolute28, join as join84 } from "node:path";
+import { delimiter as delimiter5, isAbsolute as isAbsolute28, join as join85 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || sharedDataPath("built-in-transcription", env);
   if (!isAbsolute28(root))
     throw new TypeError("The built-in transcription directory must be an absolute path.");
   return {
     root,
-    modelDir: join84(root, model.modelId),
+    modelDir: join85(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
     runtimeLockPath: llamaServerRuntimeLockPath(env),
-    statusPath: join84(root, "status.json"),
-    lockPath: join84(root, "install.lock"),
+    statusPath: join85(root, "status.json"),
+    lockPath: join85(root, "install.lock"),
     noun: BUILT_IN_TRANSCRIPTION_NOUN
   };
 }
@@ -94481,7 +94767,7 @@ function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) 
   };
   if (platform2.startsWith("darwin-"))
     return executable("/usr/bin/afconvert");
-  return (env.PATH ?? "").split(delimiter5).some((dir) => dir.length > 0 && isAbsolute28(dir) && executable(join84(dir, "ffmpeg")));
+  return (env.PATH ?? "").split(delimiter5).some((dir) => dir.length > 0 && isAbsolute28(dir) && executable(join85(dir, "ffmpeg")));
 }
 function modelLoadFailedReason(message2) {
   const text3 = message2 ?? "";
@@ -94640,7 +94926,7 @@ var init_audio_wav = __esm(() => {
 import { existsSync as existsSync60 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile8, rm as rm8 } from "node:fs/promises";
 import { tmpdir as tmpdir11, totalmem } from "node:os";
-import { join as join85 } from "node:path";
+import { join as join86 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
   const darwin = platform2.startsWith("darwin-");
   return async (inputPath, outputPath) => {
@@ -94705,7 +94991,7 @@ function createBuiltInTranscriber(options = {}) {
   const filesOnDisk = options.filesOnDisk ?? (() => {
     try {
       const layout = builtInTranscriptionLayout(model, env, options.installOptions?.runtime, platform2);
-      return model.files.every((file) => existsSync60(join85(layout.modelDir, file.name)));
+      return model.files.every((file) => existsSync60(join86(layout.modelDir, file.name)));
     } catch {
       return false;
     }
@@ -94824,9 +95110,9 @@ function createBuiltInTranscriber(options = {}) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
       const paths = installed;
-      const tempDir = await mkdtemp7(join85(tmpdir11(), TEMP_DIR_PREFIX5));
+      const tempDir = await mkdtemp7(join86(tmpdir11(), TEMP_DIR_PREFIX5));
       try {
-        const wavPath = join85(tempDir, "audio.wav");
+        const wavPath = join86(tempDir, "audio.wav");
         try {
           await convert(input.inputPath, wavPath);
         } catch (error) {
@@ -94979,7 +95265,7 @@ var init_built_in_transcriber = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp8, readFile as readFile9, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir12 } from "node:os";
-import { extname as extname3, join as join86 } from "node:path";
+import { extname as extname3, join as join87 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -95058,8 +95344,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp8(join86(tmpdir12(), tempDirPrefix));
-          inputPath = join86(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp8(join87(tmpdir12(), tempDirPrefix));
+          inputPath = join87(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile6(inputPath, bytes);
         }
         const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
@@ -98060,7 +98346,7 @@ var init_child_extraction_runtime = __esm(() => {
 
 // src/workers/telegram-messages/media-extraction.ts
 import { lstatSync as lstatSync32, readFileSync as readFileSync49 } from "node:fs";
-import { join as join87 } from "node:path";
+import { join as join88 } from "node:path";
 function telegramMediaLanes(corpusIds, accountScope) {
   return corpusIds.map((corpusId) => ({ corpusId, provider: "telegram", accountScope, approvedScopeKey: TELEGRAM_MEDIA_EXTRACTION_SCOPE_KEY }));
 }
@@ -98135,7 +98421,7 @@ function telegramMediaConnector(input) {
         if (!served())
           throw new FileExtractionSourceError("source_item_not_found");
         makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
-        const path = join87(options.spoolDir, extractionSpoolFileName());
+        const path = join88(options.spoolDir, extractionSpoolFileName());
         copyArchiveInputMediaToFile(locator, deps, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}, path);
         if (!served()) {
           discardExtractionSpoolFile(path, options.spoolDir);
@@ -98177,7 +98463,7 @@ var init_media_extraction = __esm(() => {
 
 // src/workers/telegram-messages/store-sync.ts
 import { existsSync as existsSync62, readdirSync as readdirSync16, rmSync as rmSync25 } from "node:fs";
-import { join as join88 } from "node:path";
+import { join as join89 } from "node:path";
 function createTelegramConnectorStores(env = process.env) {
   const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
   return {
@@ -98235,7 +98521,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
         if (!recorded || recorded.cursor !== cursor)
           return false;
         const offset = telegramCaptureCursorOffset(spoolDir, position);
-        return offset !== undefined && spoolBoundaryHolds(join88(spoolDir, cursorFile(position)), offset, recorded.digest);
+        return offset !== undefined && spoolBoundaryHolds(join89(spoolDir, cursorFile(position)), offset, recorded.digest);
       };
       const fileHolds = (cursor) => {
         const position = telegramSpoolPosition(cursor);
@@ -98243,7 +98529,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
           return true;
         const file = cursorFile(position);
         const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
-        return recorded === undefined || !existsSync62(join88(spoolDir, file)) || sameSpoolFile(recorded, join88(spoolDir, file));
+        return recorded === undefined || !existsSync62(join89(spoolDir, file)) || sameSpoolFile(recorded, join89(spoolDir, file));
       };
       const laneCursors = {
         internal: sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor),
@@ -98321,7 +98607,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
         if (!position)
           continue;
         const file = cursorFile(position);
-        const identity2 = spoolFileIdentity(join88(spoolDir, file))?.identity;
+        const identity2 = spoolFileIdentity(join89(spoolDir, file))?.identity;
         const key2 = `${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`;
         if (identity2 && tierSet.ledger.readMeta(key2) !== identity2)
           tierSet.ledger.writeMeta(key2, identity2);
@@ -98441,7 +98727,7 @@ function recordBoundary(set, spoolDir, name, cursor) {
   if (!cursor || !position)
     return;
   const offset = telegramCaptureCursorOffset(spoolDir, position);
-  const digest4 = offset === undefined ? undefined : spoolBoundaryDigest(join88(spoolDir, cursorFile(position)), offset);
+  const digest4 = offset === undefined ? undefined : spoolBoundaryDigest(join89(spoolDir, cursorFile(position)), offset);
   if (!digest4)
     return;
   const value = JSON.stringify({ cursor, digest: digest4 });
@@ -100872,7 +101158,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names", "ChatGPT data exports (the .zip, or its conversations.json)", "Claude data exports (the .zip, or its conversations.json)", "each conversation's title, dates and turns as shown (your prompts and the assistant's replies)"]
     },
     {
       source_id: "x.bookmarks",
@@ -100906,7 +101192,7 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
+      contextual_scopes: ["live linked-device traffic", "the recent history WhatsApp sends at pairing, for the chats you choose", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
@@ -101806,7 +102092,7 @@ function dashboardUnpairAction(sourceId, label) {
   return {
     source_id: sourceId,
     label: `Unpair ${label}`,
-    confirmation: `Stop new ${label} reads and delete this computer's ${label} pairing session.` + ` Messages already indexed stay, and so does everything already captured.` + ` This is local only: Olympus does not remove the linked device at ${label} — do that in ${providerSurface.label}.` + ` ${capture}`,
+    confirmation: `Stop new ${label} reads and delete this computer's ${label} pairing session.` + ` Messages already indexed stay, and so does everything already captured.` + (telegram ? ` This is local only: Olympus does not remove the linked device at ${label} — do that in ${providerSurface.label}.` : ` Olympus also removes itself from your phone's linked devices; if WhatsApp can't be reached, remove it in ${providerSurface.label}.`) + ` ${capture}`,
     provider_unlink_url: providerSurface.url,
     provider_unlink_label: providerSurface.label
   };
@@ -104155,22 +104441,22 @@ var init_source_scheduler_state = __esm(() => {
 
 // src/workers/classification/tier-migration-reports.ts
 import { existsSync as existsSync67, readdirSync as readdirSync17, readFileSync as readFileSync50 } from "node:fs";
-import { join as join92 } from "node:path";
+import { join as join93 } from "node:path";
 function tierMigrationDir(env) {
   return env[TIER_MIGRATION_DIR_ENV]?.trim() || sharedDataPath("tier-migration", env);
 }
 function tierMigrationReportDir(env) {
-  return join92(tierMigrationDir(env), "reports");
+  return join93(tierMigrationDir(env), "reports");
 }
 function tierMigrationStatePath(env) {
-  return join92(tierMigrationDir(env), "state.json");
+  return join93(tierMigrationDir(env), "state.json");
 }
 function forgetTierMigrationReports(reportDir, sourceIds, options = {}) {
   if (!existsSync67(reportDir))
     return 0;
   let forgotten = 0;
   for (const name of readdirSync17(reportDir).filter((entry) => entry.endsWith(".json")).sort()) {
-    const path = join92(reportDir, name);
+    const path = join93(reportDir, name);
     let report;
     try {
       report = JSON.parse(readFileSync50(path, "utf8"));
@@ -104499,7 +104785,7 @@ import {
   statSync as statSync29
 } from "node:fs";
 import { homedir as homedir28 } from "node:os";
-import { basename as basename13, dirname as dirname71, join as join93, relative as relative14, resolve as resolve20, sep as sep16 } from "node:path";
+import { basename as basename13, dirname as dirname71, join as join94, relative as relative14, resolve as resolve20, sep as sep16 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
 import { Database as Database24 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
@@ -104555,13 +104841,13 @@ function exportOlympusData(options) {
   refuseExportDuringMove(selected, options);
   const durabilityBoundary = exportDurabilityBoundary(destination);
   makeDurableDirectory(destination, durabilityBoundary);
-  rmSync26(join93(destination, "manifest.json"), { force: true });
+  rmSync26(join94(destination, "manifest.json"), { force: true });
   syncDirectorySync2(destination);
   const files = [];
   const skipped2 = [];
   const artifacts = [];
   for (const source of selected) {
-    const sourceRoot = join93(destination, "sources", safePathSegment(source.sourceId));
+    const sourceRoot = join94(destination, "sources", safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
     const legacyIndex = source.files.preCutoverIndex;
     if (legacyIndex) {
@@ -104591,7 +104877,7 @@ function exportOlympusData(options) {
       });
     }
     for (const policyPath of source.files.settings) {
-      const destinationPath = join93(sourceRoot, basename13(policyPath));
+      const destinationPath = join94(sourceRoot, basename13(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped2)) {
         artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, "sanitized_config"));
       }
@@ -104605,7 +104891,7 @@ function exportOlympusData(options) {
     const folder = source.files.folder;
     if (folder) {
       for (const name of ACCOUNT_FOLDER_UNEXPORTED) {
-        const path = join93(folder, name);
+        const path = join94(folder, name);
         if (existsSync68(path) && !skipped2.includes(path))
           skipped2.push(path);
       }
@@ -104633,17 +104919,17 @@ function exportOlympusData(options) {
         skipped2.push(path);
     }
   }
-  const configRoot = join93(destination, "config");
+  const configRoot = join94(destination, "config");
   makeDurableDirectory(configRoot, durabilityBoundary);
   for (const [sourcePath, destinationPath] of [
-    [join93(resolveHome(options.homeDir), ".olympus", "config.json"), join93(configRoot, "config.json")],
-    [defaultSovereigntyConfigPathForHome(options.homeDir), join93(configRoot, "sovereignty.json")]
+    [join94(resolveHome(options.homeDir), ".olympus", "config.json"), join94(configRoot, "config.json")],
+    [defaultSovereigntyConfigPathForHome(options.homeDir), join94(configRoot, "sovereignty.json")]
   ]) {
     if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped2)) {
       artifacts.push(fileArtifact(destination, destinationPath, "olympus.config", "sanitized_config"));
     }
   }
-  writePrivateFileAtomicSync(join93(destination, "manifest.json"), JSON.stringify({
+  writePrivateFileAtomicSync(join94(destination, "manifest.json"), JSON.stringify({
     kind: "olympus_data_export",
     version: 2,
     exported_at: new Date().toISOString(),
@@ -104654,12 +104940,12 @@ function exportOlympusData(options) {
     skipped: skipped2,
     artifacts
   }, null, 2));
-  files.push(join93(destination, "manifest.json"));
+  files.push(join94(destination, "manifest.json"));
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped: skipped2, artifacts };
 }
 function verifyOlympusDataExport(options) {
   const destination = resolve20(requirePath(options.destination, "--input"));
-  const manifestPath = join93(destination, "manifest.json");
+  const manifestPath = join94(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync51(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
     throw new OperationError("source_index_error", "Olympus data export manifest is unsupported or incomplete.");
@@ -104895,7 +105181,7 @@ function moveAccountFolderToTrash(folder, env, options) {
   try {
     mkdirSync43(trash, { recursive: true, mode: 448 });
     const dataRoot = olympusDataRoot(env);
-    if (lstatSync33(trash).isDirectory() && canonicalPath(trash) === join93(canonicalPath(dataRoot), relative14(resolve20(dataRoot), resolve20(trash)))) {
+    if (lstatSync33(trash).isDirectory() && canonicalPath(trash) === join94(canonicalPath(dataRoot), relative14(resolve20(dataRoot), resolve20(trash)))) {
       renameSync12(folder, accountTrashEntry(randomUUID22(), env));
       moved = true;
     }
@@ -104967,7 +105253,7 @@ function forgetSharedRows(source, options, only = {}) {
   }, { dryRun: options.dryRun === true, ...only.repeatableOnly === true ? { repeatableOnly: true } : {} });
 }
 function handleRegistryPathFor(context2) {
-  return context2.handleRegistryPath || envForContext(context2).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join93(resolveHome(context2.homeDir), ".config", "olympus", "handles.json");
+  return context2.handleRegistryPath || envForContext(context2).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join94(resolveHome(context2.homeDir), ".config", "olympus", "handles.json");
 }
 function readTierLedgerIds(storePaths) {
   const ids = new Set;
@@ -105156,8 +105442,8 @@ function allDeleteTargets(context2) {
     serviceUnitTarget(workerServicePaths("darwin", home2).unitPath),
     serviceUnitTarget(workerServicePaths("linux", home2).unitPath),
     ...process.platform === "darwin" && macEngineManager(home2) === "daemon" ? [serviceUnitTarget(MAC_ENGINE_DAEMON_PLIST)] : [],
-    ...globExisting(join93(home2, "Library", "LaunchAgents"), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/).map(serviceUnitTarget),
-    ...globExisting(join93(home2, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
+    ...globExisting(join94(home2, "Library", "LaunchAgents"), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/).map(serviceUnitTarget),
+    ...globExisting(join94(home2, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
   ];
 }
 function rmTargetKeepingOwnerLock(target, lockPath) {
@@ -105175,7 +105461,7 @@ function rmTargetKeepingOwnerLock(target, lockPath) {
   const clear = (directory, depth) => {
     const inLockDirectory = depth === keep.length - 1;
     for (const name of readdirSync18(directory)) {
-      const child2 = join93(directory, name);
+      const child2 = join94(directory, name);
       if (inLockDirectory && isDataOwnerLockName(name))
         continue;
       if (!inLockDirectory && name === keep[depth] && lstatSync33(child2).isDirectory()) {
@@ -105285,7 +105571,7 @@ function invalidateInstallEmbeddingPrefilter(context2) {
 }
 function installEmbeddingWeightsTarget(context2) {
   return {
-    path: join93(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2)))), "weights.json"),
+    path: join94(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2)))), "weights.json"),
     kind: "policy_file",
     allowRecursive: false,
     embeddingWeights: true
@@ -105415,7 +105701,7 @@ function exportSqliteStore(options) {
       skipped2.push(path);
     return;
   }
-  const destination = join93(destinationRoot, basename13(sqlitePath));
+  const destination = join94(destinationRoot, basename13(sqlitePath));
   const staging = `${destination}.${randomUUID22()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
@@ -105615,7 +105901,7 @@ function containsPrivateKeyBlock(value) {
 function globExisting(root, pattern) {
   if (!existsSync68(root))
     return [];
-  return readdirSync18(root).map((entry) => join93(root, entry)).filter((path) => {
+  return readdirSync18(root).map((entry) => join94(root, entry)).filter((path) => {
     const name = basename13(path);
     return pattern.test(name) && statSync29(path).isFile();
   });
@@ -105657,7 +105943,7 @@ function assertAccountFolderOwned(target) {
   const owned = target.ownedRoot ? resolve20(target.ownedRoot) : undefined;
   const lexical = resolve20(target.path);
   const inside = (name) => {
-    const folder = join93(owned, name);
+    const folder = join94(owned, name);
     return lexical === folder || isStrictlyInside(lexical, folder);
   };
   if (!owned || !(inside(ACCOUNT_FOLDERS_DIR) || inside(ACCOUNT_TRASH_DIR))) {
@@ -105665,7 +105951,7 @@ function assertAccountFolderOwned(target) {
   }
   if (!lstatSync33(target.path).isDirectory())
     refuse2("because it is not a folder (it may be a symbolic link)");
-  if (canonicalPath(lexical) !== join93(canonicalPath(owned), relative14(owned, lexical))) {
+  if (canonicalPath(lexical) !== join94(canonicalPath(owned), relative14(owned, lexical))) {
     refuse2("because it, or a folder above it, is a symbolic link");
   }
 }
@@ -105707,7 +105993,7 @@ function canonicalPath(path) {
   const rest = [];
   for (;; ) {
     try {
-      return join93(realpathSync15(existing), ...rest.reverse());
+      return join94(realpathSync15(existing), ...rest.reverse());
     } catch {
       const parent = dirname71(existing);
       if (parent === existing)
@@ -105738,7 +106024,7 @@ function assertRawStateTargetsContained(targets, context2, selectedSource) {
       }
       continue;
     }
-    const expectedReal = join93(root.real, relative14(root.lexical, lexical));
+    const expectedReal = join94(root.real, relative14(root.lexical, lexical));
     if (canonicalPath(lexical) !== expectedReal)
       refuse2(target.path, "because it, or a directory above it, is a symbolic link");
   }
@@ -105783,10 +106069,10 @@ function assertRawStateTargetsContained(targets, context2, selectedSource) {
       protectedPaths.add(path);
   }
   for (const path of [
-    join93(home2, ".olympus", "config.json"),
+    join94(home2, ".olympus", "config.json"),
     defaultSovereigntyConfigPathForHome(context2.homeDir),
-    join93(home2, ".config", "olympus", "handles.json"),
-    join93(home2, ".config", "olympus", "handles.json.unpaired"),
+    join94(home2, ".config", "olympus", "handles.json"),
+    join94(home2, ".config", "olympus", "handles.json.unpaired"),
     ...sqliteDeleteTargets(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2))), TIER_LEDGER_SQLITE_STORE_ID, context2).map((target) => target.path),
     ...remoteConnectionsDeleteTargets(context2).map((target) => target.path),
     ...mediaCacheDeleteTargets(context2).map((target) => target.path)
@@ -105818,7 +106104,7 @@ function assertSourcesFolderTargetsUnlinked(targets, context2) {
     const lexical = resolve20(target.path);
     if (!isStrictlyInside(lexical, sources))
       continue;
-    if (canonicalPath(lexical) !== join93(ownedReal, relative14(owned, lexical))) {
+    if (canonicalPath(lexical) !== join94(ownedReal, relative14(owned, lexical))) {
       throw new OperationError("invalid_params", `Refusing to delete inside the account folders because it, or a folder above it, is a symbolic link: ${target.path}`, "Check the Olympus data folder, then remove what the link points at by hand. Nothing was deleted.");
     }
   }
@@ -105840,15 +106126,15 @@ function isSameOrInsidePath(path, root) {
 function defaultSovereigntyConfigPathForHome(homeDir) {
   if (!homeDir || process.platform === "linux")
     return defaultSovereigntyConfigPath(envForHome(homeDir));
-  return join93(homeDir, ".olympus", "sovereignty.json");
+  return join94(homeDir, ".olympus", "sovereignty.json");
 }
 function envForHome(homeDir) {
   if (!homeDir)
     return process.env;
   return {
     HOME: homeDir,
-    XDG_DATA_HOME: join93(homeDir, ".local", "share"),
-    XDG_STATE_HOME: join93(homeDir, ".local", "state")
+    XDG_DATA_HOME: join94(homeDir, ".local", "share"),
+    XDG_STATE_HOME: join94(homeDir, ".local", "state")
   };
 }
 function envForContext(context2) {
@@ -108104,7 +108390,7 @@ var init_app_release_agent = __esm(() => {
 
 // src/core/first-run-privacy.ts
 import { existsSync as existsSync69, readFileSync as readFileSync52 } from "node:fs";
-import { dirname as dirname72, join as join94 } from "node:path";
+import { dirname as dirname72, join as join95 } from "node:path";
 function createPendingPrivacyPolicy() {
   const config = loadSovereigntyPreset("no-sensitive");
   config.privacyChoicePending = true;
@@ -108131,7 +108417,7 @@ function privacyChoicePending(policy) {
   }
 }
 function computerUseStatePath(policyPath) {
-  return join94(dirname72(policyPath), "computer-use.json");
+  return join95(dirname72(policyPath), "computer-use.json");
 }
 function readComputerUseState(policyPath) {
   try {
@@ -108220,7 +108506,7 @@ var init_first_run_privacy = __esm(() => {
 // src/core/linux-owner-bridge-host.ts
 import { randomBytes as randomBytes15 } from "node:crypto";
 import { lstatSync as lstatSync34, unlinkSync as unlinkSync3 } from "node:fs";
-import { dirname as dirname73, join as join95 } from "node:path";
+import { dirname as dirname73, join as join96 } from "node:path";
 function startLinuxOwnerBridgeHost(options) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
   const manager = manageLinuxOwnerBridge({ ...options, platform: "linux", listenerOwner: "engine-host", ready: () => !closed && ready, workerReady: () => workerReady && options.workerOwned?.() !== false });
@@ -108269,7 +108555,7 @@ function startLinuxOwnerBridgeHost(options) {
   };
   if (validateWorkerSocketDirectory(options.transport) !== options.socketPath)
     throw new Error("Owner runtime changed.");
-  const controlPath = join95(dirname73(options.socketPath), `owner-host-${process.pid}-${randomBytes15(6).toString("hex")}.sock`);
+  const controlPath = join96(dirname73(options.socketPath), `owner-host-${process.pid}-${randomBytes15(6).toString("hex")}.sock`);
   const control = bindWorkerSocket(controlPath, () => Bun.serve(workerSocketServe({ unix: controlPath, async fetch(request) {
     if (closed)
       return new Response(null, { status: 503 });
@@ -108846,7 +109132,7 @@ var init_native_process_service = __esm(() => {
 import { homedir as homedir29 } from "node:os";
 import { randomUUID as randomUUID23 } from "node:crypto";
 import { statSync as statSync30 } from "node:fs";
-import { basename as basename14, delimiter as delimiter6, isAbsolute as isAbsolute29, join as join96 } from "node:path";
+import { basename as basename14, delimiter as delimiter6, isAbsolute as isAbsolute29, join as join97 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
@@ -109067,8 +109353,8 @@ function resolveBunRuntimePath(configured, env) {
     return assertExecutableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...env.BUN_INSTALL ? [join96(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
-    ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join96(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...env.BUN_INSTALL ? [join97(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join97(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!isAbsolute29(candidate) || !isBunExecutableName2(candidate))
@@ -109266,7 +109552,7 @@ var init_engine_maintenance = __esm(() => {
 
 // src/core/update-check.ts
 import { readFileSync as readFileSync53 } from "node:fs";
-import { join as join97 } from "node:path";
+import { join as join98 } from "node:path";
 function installerForPlatform(platform2) {
   if (platform2 === "darwin")
     return {
@@ -109323,7 +109609,7 @@ function newerVersion(remote, running) {
 }
 function runningOlympusVersion() {
   try {
-    const value = JSON.parse(readFileSync53(join97(olympusPackageRoot(), "package.json"), "utf8")).version;
+    const value = JSON.parse(readFileSync53(join98(olympusPackageRoot(), "package.json"), "utf8")).version;
     return typeof value === "string" ? value : "unknown";
   } catch {
     return "unknown";
@@ -109438,9 +109724,9 @@ var init_update_check = __esm(() => {
 // src/core/engine-children.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync70, mkdirSync as mkdirSync44, readFileSync as readFileSync54 } from "node:fs";
-import { dirname as dirname74, join as join98 } from "node:path";
+import { dirname as dirname74, join as join99 } from "node:path";
 function engineChildrenPath(env = process.env) {
-  return join98(olympusDataDir(env), "engine", "children.json");
+  return join99(olympusDataDir(env), "engine", "children.json");
 }
 function readEngineChildren(path) {
   try {
@@ -109714,7 +110000,7 @@ import {
 } from "node:fs";
 import { open as open3 } from "node:fs/promises";
 import { homedir as homedir30 } from "node:os";
-import { dirname as dirname75, isAbsolute as isAbsolute30, join as join99, posix as posix2, sep as sep17 } from "node:path";
+import { dirname as dirname75, isAbsolute as isAbsolute30, join as join100, posix as posix2, sep as sep17 } from "node:path";
 import { gunzip } from "node:zlib";
 function zkapiAsset(url, sha2566, bytes, extra = {}) {
   return {
@@ -109753,18 +110039,18 @@ function managedToolsBase(host = {}) {
   const platform2 = host.platform ?? process.platform;
   const home2 = env.HOME?.trim() || (host.env ? undefined : homedir30());
   if (platform2 === "darwin")
-    return home2 && isAbsolute30(home2) ? join99(home2, "Library", "Application Support", "Olympus") : undefined;
+    return home2 && isAbsolute30(home2) ? join100(home2, "Library", "Application Support", "Olympus") : undefined;
   if (platform2 === "linux") {
     const xdg = env.XDG_DATA_HOME?.trim();
     if (xdg && isAbsolute30(xdg))
-      return join99(xdg, "olympus");
-    return home2 && isAbsolute30(home2) ? join99(home2, ".local", "share", "olympus") : undefined;
+      return join100(xdg, "olympus");
+    return home2 && isAbsolute30(home2) ? join100(home2, ".local", "share", "olympus") : undefined;
   }
   return;
 }
 function managedToolsRoot(host = {}) {
   const base = managedToolsBase(host);
-  return base ? join99(base, "tools") : undefined;
+  return base ? join100(base, "tools") : undefined;
 }
 function currentUid(host) {
   return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
@@ -109805,9 +110091,9 @@ function managedToolExecutable(tool, host = {}) {
   if (!pin || !asset || !base)
     return;
   const uid = currentUid(host);
-  const root = join99(base, "tools");
-  const versionDir = join99(root, tool, pin.version);
-  for (const dir of [base, root, join99(root, tool), versionDir]) {
+  const root = join100(base, "tools");
+  const versionDir = join100(root, tool, pin.version);
+  for (const dir of [base, root, join100(root, tool), versionDir]) {
     try {
       if (lstatSync35(dir).isSymbolicLink())
         return;
@@ -109817,17 +110103,17 @@ function managedToolExecutable(tool, host = {}) {
     if (!privatelyOwned(dir, uid, "dir"))
       return;
   }
-  const manifest = readManifest(join99(versionDir, MANIFEST_FILE), uid);
+  const manifest = readManifest(join100(versionDir, MANIFEST_FILE), uid);
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
     const realDir = realpathSync16(versionDir);
     for (const required3 of new Set([...asset.required, asset.executable])) {
-      if (!trustedInside(realDir, join99(versionDir, required3), uid, versionDir))
+      if (!trustedInside(realDir, join100(versionDir, required3), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync16(join99(versionDir, asset.executable));
+    const real = realpathSync16(join100(versionDir, asset.executable));
     accessSync9(real, constants13.X_OK);
     return real;
   } catch {
@@ -109840,7 +110126,7 @@ function trustedInside(realDir, path, uid, versionDir) {
     for (let index = 1;index <= parts.length; index += 1) {
       let stats;
       try {
-        stats = lstatSync35(join99(versionDir, ...parts.slice(0, index)));
+        stats = lstatSync35(join100(versionDir, ...parts.slice(0, index)));
       } catch {
         return false;
       }
@@ -109891,7 +110177,7 @@ function earlierManagedFolders(tool, host) {
   if (!pin?.replaces || !platformKey || !root)
     return [];
   const uid = currentUid(host);
-  const toolDir = join99(root, tool);
+  const toolDir = join100(root, tool);
   try {
     if (lstatSync35(toolDir).isSymbolicLink() || !privatelyOwned(toolDir, uid, "dir"))
       return [];
@@ -109903,7 +110189,7 @@ function earlierManagedFolders(tool, host) {
     const sha2566 = hashes[platformKey];
     if (!sha2566 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep17))
       continue;
-    const dir = join99(toolDir, version);
+    const dir = join100(toolDir, version);
     let stats;
     try {
       stats = lstatSync35(dir);
@@ -109912,7 +110198,7 @@ function earlierManagedFolders(tool, host) {
     }
     if (stats.isSymbolicLink() || !privatelyOwned(dir, uid, "dir"))
       continue;
-    const manifest = readManifest(join99(dir, MANIFEST_FILE), uid);
+    const manifest = readManifest(join100(dir, MANIFEST_FILE), uid);
     if (!manifest || manifest.tool !== tool || manifest.version !== version || manifest.platform !== platformKey || manifest.sha256 !== sha2566)
       continue;
     found.push({ version, dev: stats.dev, ino: stats.ino });
@@ -109925,7 +110211,7 @@ async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) 
   const realStaging = realpathSync16(staging);
   const signed = [];
   for (const relative15 of asset.adhocSign) {
-    const file = join99(staging, relative15);
+    const file = join100(staging, relative15);
     let real;
     try {
       real = realpathSync16(file);
@@ -110000,7 +110286,7 @@ async function installManagedTools(options = {}) {
     };
   }
   const uid = currentUid(options);
-  const root = join99(base, "tools");
+  const root = join100(base, "tools");
   try {
     mkdirSync45(dirname75(base), { recursive: true, mode: 448 });
     ensureOwnedDirectory(base, uid, "The Olympus folder", { repairWriteBits: true });
@@ -110010,7 +110296,7 @@ async function installManagedTools(options = {}) {
     return { ok: false, root, tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: failure.code, message: failure.message })) };
   }
   try {
-    return await withFileLease(join99(root, "install"), async (lease) => {
+    return await withFileLease(join100(root, "install"), async (lease) => {
       const results = [];
       for (const tool of tools) {
         try {
@@ -110043,17 +110329,17 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
   const existing = managedToolExecutable(tool, host);
   if (existing)
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
-  const toolDir = join99(root, tool);
-  const versionDir = join99(toolDir, pin.version);
+  const toolDir = join100(root, tool);
+  const versionDir = join100(toolDir, pin.version);
   const id = randomUUID24();
-  const download = join99(toolDir, `.download-${id}`);
-  const staging = join99(toolDir, `.staging-${id}`);
+  const download = join100(toolDir, `.download-${id}`);
+  const staging = join100(toolDir, `.staging-${id}`);
   try {
     await commit(async () => {
       ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
       for (const entry of readdirSync19(toolDir)) {
         if (/^\.(download|staging|old)-/.test(entry))
-          rmSync27(join99(toolDir, entry), { recursive: true, force: true });
+          rmSync27(join100(toolDir, entry), { recursive: true, force: true });
       }
     });
     options.onProgress?.({ tool, phase: "downloading", receivedBytes: 0, totalBytes: asset.bytes });
@@ -110068,7 +110354,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     await extractVerifiedArchive(download, staging, asset, tool);
     rmSync27(download, { force: true });
     for (const required3 of asset.required) {
-      if (!privatelyOwned(join99(staging, required3), uid, "file")) {
+      if (!privatelyOwned(join100(staging, required3), uid, "file")) {
         throw new ManagedToolsError("archive_incomplete", `The ${pin.label} download is missing ${required3}, so nothing was installed.`, tool);
       }
     }
@@ -110076,7 +110362,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     if ((options.platform ?? process.platform) === "darwin")
       await (options.clearQuarantine ?? defaultClearQuarantine)(staging);
     const adhocSigned = await adhocSignUnsigned(staging, asset, platformKey, options.runCommand ?? defaultCommandRunner, pin.label, tool);
-    const check = await (options.versionCheck ?? defaultVersionCheck)(join99(staging, asset.executable), {
+    const check = await (options.versionCheck ?? defaultVersionCheck)(join100(staging, asset.executable), {
       cwd: staging,
       env: { PATH: "/usr/bin:/bin", ...options.env?.HOME ? { HOME: options.env.HOME } : process.env.HOME ? { HOME: process.env.HOME } : {} }
     });
@@ -110095,13 +110381,13 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
       installedAt: (options.now ?? (() => new Date))().toISOString(),
       ...adhocSigned.length > 0 ? { adhocSigned } : {}
     };
-    writeFileSync14(join99(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
+    writeFileSync14(join100(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
 `, { mode: 384, flag: "wx" });
     await commit(async () => {
       let old;
       try {
         lstatSync35(versionDir);
-        old = join99(toolDir, `.old-${id}`);
+        old = join100(toolDir, `.old-${id}`);
         renameSync13(versionDir, old);
       } catch (error) {
         if (error.code !== "ENOENT")
@@ -110122,7 +110408,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
             return;
         }
         for (const folder of earlierManagedFolders(tool, host)) {
-          const path = join99(toolDir, folder.version);
+          const path = join100(toolDir, folder.version);
           const now = lstatSync35(path);
           if (now.isSymbolicLink() || now.dev !== folder.dev || now.ino !== folder.ino)
             continue;
@@ -110146,7 +110432,7 @@ function fileSha256(path) {
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
-    const file = join99(staging, pinned.path);
+    const file = join100(staging, pinned.path);
     if (!privatelyOwned(file, uid, "file")) {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${pinned.path}, so nothing was installed.`, tool);
     }
@@ -110159,7 +110445,7 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
     if (actual !== pinned.sha256) {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download carries a launcher (${pinned.path}) that does not match its pinned fingerprint, so nothing was installed.`, tool);
     }
-    const record = join99(staging, pinned.record);
+    const record = join100(staging, pinned.record);
     if (!privatelyOwned(record, uid, "file")) {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download does not carry its build record (${pinned.record}), so nothing was installed.`, tool);
     }
@@ -110383,7 +110669,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     }
   }
   const mkdirs = (relative15) => {
-    mkdirSync45(join99(staging, relative15), { recursive: true, mode: 448 });
+    mkdirSync45(join100(staging, relative15), { recursive: true, mode: 448 });
   };
   for (const entry of planned) {
     if (entry.type === "dir")
@@ -110393,7 +110679,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     if (entry.type !== "file")
       continue;
     mkdirs(posix2.dirname(entry.target));
-    const destination = join99(staging, entry.target);
+    const destination = join100(staging, entry.target);
     writeFileSync14(destination, entry.data ?? Buffer.alloc(0), { flag: "wx", mode: entry.mode & 64 ? 448 : 384 });
     chmodSync28(destination, entry.mode & 64 ? 448 : 384);
   }
@@ -110401,7 +110687,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     if (entry.type !== "symlink")
       continue;
     mkdirs(posix2.dirname(entry.target));
-    symlinkSync(entry.linkTarget, join99(staging, entry.target));
+    symlinkSync(entry.linkTarget, join100(staging, entry.target));
   }
   const realStaging = realpathSync16(staging);
   for (const entry of planned) {
@@ -110409,7 +110695,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
       continue;
     let real;
     try {
-      real = realpathSync16(join99(staging, entry.target));
+      real = realpathSync16(join100(staging, entry.target));
     } catch {
       throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
     }
@@ -110430,12 +110716,12 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
       ""
     ].join(`
 `);
-    writeFileSync14(join99(staging, asset.launcher.path), launcher, { flag: "wx", mode: 448 });
-    chmodSync28(join99(staging, asset.launcher.path), 448);
+    writeFileSync14(join100(staging, asset.launcher.path), launcher, { flag: "wx", mode: 448 });
+    chmodSync28(join100(staging, asset.launcher.path), 448);
   }
   for (const entry of planned) {
     if (entry.type === "dir")
-      chmodSync28(join99(staging, entry.target), 448);
+      chmodSync28(join100(staging, entry.target), 448);
   }
 }
 function createManagedToolsJob(options = {}) {
@@ -111130,7 +111416,7 @@ import { chmodSync as chmodSync29, readFileSync as readFileSync56, readlinkSync,
 import { createServer as createServer3, createConnection as createConnection3 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces as networkInterfaces2 } from "node:os";
-import { join as join100 } from "node:path";
+import { join as join101 } from "node:path";
 function hasEvery(row, keys) {
   return Boolean(row) && keys.every((key2) => Object.hasOwn(row, key2));
 }
@@ -111408,9 +111694,9 @@ async function createFixture(script2, workDir, launcher, ports, env, watchdogPat
     });
     let controlStreams = 0;
     let confinedStreams = 0;
-    const controlUnix = join100(workDir, "selftest-control.sock");
-    const confinedUnix = join100(workDir, "selftest-confined.sock");
-    const inheritedUnix = join100(workDir, "selftest-inherited.sock");
+    const controlUnix = join101(workDir, "selftest-control.sock");
+    const confinedUnix = join101(workDir, "selftest-confined.sock");
+    const inheritedUnix = join101(workDir, "selftest-inherited.sock");
     cleanupPaths.push(controlUnix, confinedUnix, inheritedUnix);
     const keepUnixSocket = (socket) => {
       acceptedSockets.push(socket);
@@ -111434,8 +111720,8 @@ async function createFixture(script2, workDir, launcher, ports, env, watchdogPat
     const confinedAbstract = `olympus-zkc-confined-${suffix}`;
     await listenPath(controlUnixServer(), `\x00${controlAbstract}`);
     await listenPath(confinedUnixServer(), `\x00${confinedAbstract}`);
-    const controlDgramPath = join100(workDir, "selftest-control-dgram.sock");
-    const confinedDgramPath = join100(workDir, "selftest-confined-dgram.sock");
+    const controlDgramPath = join101(workDir, "selftest-control-dgram.sock");
+    const confinedDgramPath = join101(workDir, "selftest-confined-dgram.sock");
     cleanupPaths.push(controlDgramPath, confinedDgramPath);
     const controlDgram = startDgramDecoy(script2, controlDgramPath, env, watchdogPath, supervise);
     decoys.push(controlDgram);
@@ -111793,8 +112079,8 @@ main().catch(() => process.exit(1));
       if (process.getuid?.() === 0)
         throw new Error("the unconfined syscall control must not run as root");
       const ports = partialPorts;
-      const probePath = join100(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes17(4).toString("hex")}.cjs`);
-      const watchdogPath = join100(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes17(4).toString("hex")}.cjs`);
+      const probePath = join101(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes17(4).toString("hex")}.cjs`);
+      const watchdogPath = join101(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes17(4).toString("hex")}.cjs`);
       try {
         writeFileSync15(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
         chmodSync29(probePath, 448);
@@ -111868,7 +112154,7 @@ main().catch(() => process.exit(1));
               instanceBound = linux.verifyLinuxInstance(ready, watchdog) && JSON.stringify(ready.bridgesExpose) === '["api"]' && JSON.stringify(ready.bridgesReach) === JSON.stringify([String(ports.tor)]);
               listenerSetBound = linux.inspectLinuxNamespace(ready, watchdog, ports);
               const payload2 = Buffer.alloc(4194304, 90);
-              const response = await bridge.linuxConfinementFetch(join100(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
+              const response = await bridge.linuxConfinementFetch(join101(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
               const echoed = Buffer.from(await response.arrayBuffer());
               parsed.apiBridgeBulk = response.status === 200 && echoed.equals(payload2) ? "intact" : "corrupt";
               resolveConfined();
@@ -111943,7 +112229,7 @@ import { promisify } from "node:util";
 import { readFile as readFile10, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash70 } from "node:crypto";
 import { lstatSync as lstatSync36, readFileSync as readFileSync57, readlinkSync as readlinkSync2, readdirSync as readdirSync21, realpathSync as realpathSync17 } from "node:fs";
-import { dirname as dirname76, join as join101 } from "node:path";
+import { dirname as dirname76, join as join102 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
@@ -112101,7 +112387,7 @@ Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus
 }
 async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
-  const managed = daemon ? join101(dirname76(daemon), "zkapi-confine") : undefined;
+  const managed = daemon ? join102(dirname76(daemon), "zkapi-confine") : undefined;
   const system = "/usr/local/libexec/olympus/zkapi-confine";
   for (const path of [system, managed]) {
     if (!path)
@@ -112211,7 +112497,7 @@ function linuxZkapiConfinement(deps = {}) {
         try {
           sysctls[p] = proc.read(p);
         } catch {}
-      const line2 = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join101(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
+      const line2 = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join102(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
       return { ok: result.ok, line: line2, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
     },
     selfTest: async (dir, childEnv, ports) => Boolean((await refresh()).ok && launcher && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
@@ -112263,7 +112549,7 @@ function linuxZkapiConfinement(deps = {}) {
           const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
           if (url.origin !== `http://127.0.0.1:${ports.daemon}`)
             throw new Error("wrong daemon origin");
-          return linuxConfinementFetch(join101(dir, "api.sock"), event.apiToken)(input, init);
+          return linuxConfinementFetch(join102(dir, "api.sock"), event.apiToken)(input, init);
         },
         verifyInstance: verify,
         inspect: () => verify() && inspectLinuxNamespace(event, wd, ports, proc),
@@ -112339,7 +112625,7 @@ import { createHash as createHash71, randomUUID as randomUUID25 } from "node:cry
 import { accessSync as accessSync10, chmodSync as chmodSync30, closeSync as closeSync27, constants as constants14, existsSync as existsSync71, mkdirSync as mkdirSync46, mkdtempSync as mkdtempSync4, readdirSync as readdirSync22, readFileSync as readFileSync58, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir31, tmpdir as tmpdir13 } from "node:os";
-import { delimiter as delimiter7, dirname as dirname77, isAbsolute as isAbsolute31, join as join102, resolve as resolvePath } from "node:path";
+import { delimiter as delimiter7, dirname as dirname77, isAbsolute as isAbsolute31, join as join103, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
@@ -112560,7 +112846,7 @@ function defaultZkapiConfinement(host = {}) {
           const other = await listenProbe();
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
-          const script2 = join102(workDir, "confinement-self-test.cjs");
+          const script2 = join103(workDir, "confinement-self-test.cjs");
           writeFileSync16(script2, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script2, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script2, targets], env);
@@ -112584,8 +112870,8 @@ function defaultZkapiConfinement(host = {}) {
 }
 function defaultZkapiStatePath(home2 = homedir31()) {
   if (process.platform === "linux")
-    return join102(resolveLinuxEngineLayout({ ...process.env, HOME: home2 }).configDir, "zkapi-consult-state.json");
-  return join102(home2, ".olympus", "zkapi-consult-state.json");
+    return join103(resolveLinuxEngineLayout({ ...process.env, HOME: home2 }).configDir, "zkapi-consult-state.json");
+  return join103(home2, ".olympus", "zkapi-consult-state.json");
 }
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
@@ -112615,7 +112901,7 @@ function zkapiUnresolvedSession(path, scope) {
 }
 function zkapiWalletDirectory(env) {
   const home2 = env.HOME?.trim() || homedir31();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join102(home2, "Library", "Application Support", "zkapi-clientd") : join102(env.XDG_CONFIG_HOME?.trim() || join102(home2, ".config"), "zkapi-clientd"));
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join103(home2, "Library", "Application Support", "zkapi-clientd") : join103(env.XDG_CONFIG_HOME?.trim() || join103(home2, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
     return realpathSync18(absolute2);
@@ -113037,7 +113323,7 @@ function daemonEnvironment(base, daemonExecutable) {
 }
 function standardExecutableDirectories(env, platform2 = process.platform) {
   const home2 = env.HOME?.trim();
-  const local = home2 && isAbsolute31(home2) ? [join102(home2, ".local", "bin")] : [];
+  const local = home2 && isAbsolute31(home2) ? [join103(home2, ".local", "bin")] : [];
   if (platform2 === "darwin")
     return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
   if (platform2 === "linux")
@@ -113077,7 +113363,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
 }
 function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
   const pathDirectories = (env.PATH ?? "").split(delimiter7).filter(Boolean);
-  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join102(dir, name));
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join103(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync10(candidate, constants14.X_OK);
@@ -113090,7 +113376,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   for (const dir of standardExecutableDirectories(env, platform2)) {
     if (pathDirectories.includes(dir))
       continue;
-    const found = trustedFallbackExecutable(join102(dir, name), trust);
+    const found = trustedFallbackExecutable(join103(dir, name), trust);
     if (found)
       return found;
   }
@@ -113686,9 +113972,9 @@ async function runSession(recovery, options, statePath, bridge, sent, clock3, st
   if (sessionSignal.aborted)
     return refuse2(abortCause);
   const sessionId = randomUUID25();
-  const workDir = mkdtempSync4(join102(tmpdir13(), "olympus-zkapi-"));
+  const workDir = mkdtempSync4(join103(tmpdir13(), "olympus-zkapi-"));
   chmodSync30(workDir, 448);
-  const watchdog = join102(workDir, "watchdog.cjs");
+  const watchdog = join103(workDir, "watchdog.cjs");
   const childEnv = childEnvironment(env);
   const groups = [];
   let tor;
@@ -113754,7 +114040,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock3, st
             return result = fail("confinement_unavailable");
           }
         }
-        const torDataDir = join102(workDir, "tor");
+        const torDataDir = join103(workDir, "tor");
         mkdirSync46(torDataDir, { mode: 448 });
         let bootstrapped = false;
         stage("torBootstrapMs");
@@ -114665,30 +114951,30 @@ import { spawn as spawn8, spawnSync as spawnSync13 } from "node:child_process";
 import { createHash as createHash72, randomBytes as randomBytes18 } from "node:crypto";
 import { existsSync as existsSync72, lstatSync as lstatSync37, readdirSync as readdirSync23, readFileSync as readFileSync59, renameSync as renameSync14, rmSync as rmSync30, statSync as statSync33 } from "node:fs";
 import { homedir as homedir32, platform as osPlatform3 } from "node:os";
-import { basename as basename15, dirname as dirname78, isAbsolute as isAbsolute32, join as join103, resolve as resolvePath2 } from "node:path";
+import { basename as basename15, dirname as dirname78, isAbsolute as isAbsolute32, join as join104, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
   const home2 = absolute2(homeDir, "home directory");
-  const logDir = join103(home2, "Library", "Logs", "Olympus");
-  const appSupportDir = join103(home2, "Library", "Application Support", "Olympus");
+  const logDir = join104(home2, "Library", "Logs", "Olympus");
+  const appSupportDir = join104(home2, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home2 };
   return {
     label: ENGINE_LABEL,
-    plistPath: join103(home2, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join104(home2, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join103(logDir, "engine.log"),
-    errorLogPath: join103(logDir, "engine.err"),
-    configPath: join103(home2, ".olympus", "engine.json"),
-    sovereigntyPath: join103(home2, ".olympus", "sovereignty.json"),
+    logPath: join104(logDir, "engine.log"),
+    errorLogPath: join104(logDir, "engine.err"),
+    configPath: join104(home2, ".olympus", "engine.json"),
+    sovereigntyPath: join104(home2, ".olympus", "sovereignty.json"),
     appSupportDir,
-    helperAppPath: join103(appSupportDir, ENGINE_HELPER_APP_NAME),
-    helperExecutablePath: join103(appSupportDir, ENGINE_HELPER_APP_NAME, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE),
-    appDir: join103(appSupportDir, "app"),
-    previousAppDir: join103(appSupportDir, "app.previous"),
-    runtimeDir: join103(appSupportDir, "runtime"),
-    workerEnvPath: join103(home2, ".config", "olympus", "worker.env"),
+    helperAppPath: join104(appSupportDir, ENGINE_HELPER_APP_NAME),
+    helperExecutablePath: join104(appSupportDir, ENGINE_HELPER_APP_NAME, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE),
+    appDir: join104(appSupportDir, "app"),
+    previousAppDir: join104(appSupportDir, "app.previous"),
+    runtimeDir: join104(appSupportDir, "runtime"),
+    workerEnvPath: join104(home2, ".config", "olympus", "worker.env"),
     statusPath: engineStatusPath(dataEnv),
     childrenPath: engineChildrenPath(dataEnv),
-    modelsDir: join103(olympusDataDir(dataEnv), "models"),
+    modelsDir: join104(olympusDataDir(dataEnv), "models"),
     remoteAccessDir: remoteAccessDir(dataEnv)
   };
 }
@@ -114706,23 +114992,23 @@ function engineServicePaths(options = {}) {
     label: "olympus-engine.service",
     plistPath: l.unitPath,
     logDir: l.stateDir,
-    logPath: join103(l.stateDir, "engine.log"),
-    errorLogPath: join103(l.stateDir, "engine.err"),
+    logPath: join104(l.stateDir, "engine.log"),
+    errorLogPath: join104(l.stateDir, "engine.err"),
     configPath: l.configPath,
     sovereigntyPath: l.sovereigntyPath,
     appSupportDir: l.packageDir,
-    appDir: join103(l.packageDir, "app"),
-    previousAppDir: join103(l.packageDir, "app.previous"),
-    runtimeDir: join103(l.packageDir, "runtime"),
+    appDir: join104(l.packageDir, "app"),
+    previousAppDir: join104(l.packageDir, "app.previous"),
+    runtimeDir: join104(l.packageDir, "runtime"),
     workerEnvPath: l.workerEnvPath,
-    statusPath: join103(l.dataDir, "engine/status.json"),
-    childrenPath: join103(l.dataDir, "engine/children.json"),
-    modelsDir: join103(l.dataDir, "models"),
-    remoteAccessDir: join103(l.dataDir, "connect-relay")
+    statusPath: join104(l.dataDir, "engine/status.json"),
+    childrenPath: join104(l.dataDir, "engine/children.json"),
+    modelsDir: join104(l.dataDir, "models"),
+    remoteAccessDir: join104(l.dataDir, "connect-relay")
   };
 }
 function engineStatusPath(env = process.env) {
-  return join103(olympusDataDir(env), "engine", "status.json");
+  return join104(olympusDataDir(env), "engine", "status.json");
 }
 function readEngineWorkerHealth(statusPath) {
   try {
@@ -114745,14 +115031,14 @@ function readEngineWorkerProblem(statusPath) {
 function engineBuildIdentity(packageRoot) {
   let version = "unknown";
   try {
-    const manifest = JSON.parse(readFileSync59(join103(packageRoot, "package.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync59(join104(packageRoot, "package.json"), "utf8"));
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
   const hash = createHash72("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
-      const bytes = readFileSync59(join103(packageRoot, "dist", name));
+      const bytes = readFileSync59(join104(packageRoot, "dist", name));
       hash.update(`${name}\x00${bytes.length}\x00`);
       hash.update(bytes);
     } catch {
@@ -114766,7 +115052,7 @@ function resolveEngineProgram(options = {}) {
   if (options.fromCheckout !== undefined) {
     const root2 = resolvePath2(options.cwd ?? process.cwd(), options.fromCheckout);
     assertOlympusPackage(root2, "--from-checkout");
-    const entryPath2 = join103(root2, "dist", "cli.js");
+    const entryPath2 = join104(root2, "dist", "cli.js");
     assertFile(entryPath2, `${entryPath2} is missing; run bun run build in the checkout first.`);
     return { runtimePath, entryPath: entryPath2, workingDirectory: root2, source: "checkout", build: engineBuildIdentity(root2) };
   }
@@ -114776,7 +115062,7 @@ function resolveEngineProgram(options = {}) {
   } catch {
     throw new OperationError("config_error", "The installed Olympus package could not be found.", "Pass --from-checkout <path> to install from a local checkout.");
   }
-  const entryPath = join103(root, "dist", "cli.js");
+  const entryPath = join104(root, "dist", "cli.js");
   assertFile(entryPath, `The installed Olympus package has no ${entryPath}.`);
   return { runtimePath, entryPath, workingDirectory: root, source: "package", build: engineBuildIdentity(root) };
 }
@@ -114915,7 +115201,7 @@ function waitForQuietEngine(options) {
 }
 function maintenanceStatePath(options) {
   const paths = engineServicePaths(options);
-  return paths.linux ? join103(paths.linux.configDir, "zkapi-consult-state.json") : join103(absolute2(options.homeDir ?? homedir32(), "home directory"), ".olympus", "zkapi-consult-state.json");
+  return paths.linux ? join104(paths.linux.configDir, "zkapi-consult-state.json") : join104(absolute2(options.homeDir ?? homedir32(), "home directory"), ".olympus", "zkapi-consult-state.json");
 }
 function fencedOptions(options, fence) {
   return { ...options, [MAINTENANCE_FENCE]: fence, consultInFlight: () => options.consultInFlight?.() ?? (fence.consultInFlight() ? { since: "before engine maintenance admission closed" } : zkapiConsultInFlightOnDisk(maintenanceStatePath(options))) };
@@ -115263,7 +115549,7 @@ function expectedEngineBuild(options) {
     }
   }
   assertOlympusPackage(root, "--expect-package");
-  assertFile(join103(root, "dist", "cli.js"), `${root} has no dist/cli.js, so it is not a runnable Olympus package.`);
+  assertFile(join104(root, "dist", "cli.js"), `${root} has no dist/cli.js, so it is not a runnable Olympus package.`);
   return engineBuildIdentity(root);
 }
 function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = process.getuid?.()) {
@@ -115398,7 +115684,7 @@ function openClawConfigHasOlympus(text3, stateDir) {
       return false;
     const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
     const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
-    return installed || loaded || existsSync72(join103(stateDir, "extensions", "olympus"));
+    return installed || loaded || existsSync72(join104(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text3);
   }
@@ -115464,7 +115750,7 @@ function directoryBytes(path, budget = { entries: 20000 }) {
   for (const name of entries) {
     if (--budget.entries < 0)
       break;
-    const child2 = join103(path, name);
+    const child2 = join104(path, name);
     try {
       const stat6 = lstatSync37(child2);
       if (stat6.isDirectory())
@@ -115530,7 +115816,7 @@ async function rollbackEngineUnderFence(options = {}) {
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths({ ...options, homeDir, platform: "darwin" });
   const installed = installedProgram(paths.plistPath);
-  const appEntry = join103(paths.appDir, "dist", "cli.js");
+  const appEntry = join104(paths.appDir, "dist", "cli.js");
   if (!installed) {
     throw new OperationError("config_error", "The engine is not installed, so there is nothing to roll back.", "Run the Olympus installer.");
   }
@@ -115539,7 +115825,7 @@ async function rollbackEngineUnderFence(options = {}) {
   }
   preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, "The previous app");
-  assertFile(join103(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
+  assertFile(join104(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   if (paths.engineManager === "daemon")
     assertServerModeCanRunPrevious(paths.previousAppDir);
   const bunBin = options.bunBin ?? installed.runtimePath;
@@ -115604,7 +115890,7 @@ async function rollbackEngineUnderFence(options = {}) {
 function assertServerModeCanRunPrevious(previousAppDir) {
   let version;
   try {
-    const manifest = JSON.parse(readFileSync59(join103(previousAppDir, "package.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync59(join104(previousAppDir, "package.json"), "utf8"));
     if (typeof manifest.version === "string" && isReleaseVersion(manifest.version))
       version = manifest.version;
   } catch {
@@ -115667,7 +115953,7 @@ function recoverInterruptedHelperSwap(paths, deps = {}) {
     return "none";
   let result = "cleaned";
   if (!exists(target)) {
-    const aside = over.map((name) => join103(paths.appSupportDir, name, ENGINE_HELPER_ASIDE_NAME)).filter((path) => {
+    const aside = over.map((name) => join104(paths.appSupportDir, name, ENGINE_HELPER_ASIDE_NAME)).filter((path) => {
       try {
         const stat6 = lstatSync37(path);
         return stat6.isDirectory() && !stat6.isSymbolicLink();
@@ -115686,7 +115972,7 @@ function recoverInterruptedHelperSwap(paths, deps = {}) {
     }
   }
   for (const name of over)
-    rmSync30(join103(paths.appSupportDir, name), { recursive: true, force: true });
+    rmSync30(join104(paths.appSupportDir, name), { recursive: true, force: true });
   return result;
 }
 function installedEngineHelper(paths) {
@@ -115905,8 +116191,8 @@ function resolveBun2(explicit) {
     explicit,
     isBunName(process.execPath) ? process.execPath : undefined,
     typeof Bun !== "undefined" ? Bun.which("bun") ?? undefined : undefined,
-    process.env.BUN_INSTALL ? join103(process.env.BUN_INSTALL, "bin", "bun") : undefined,
-    join103(homedir32(), ".bun", "bin", "bun"),
+    process.env.BUN_INSTALL ? join104(process.env.BUN_INSTALL, "bin", "bun") : undefined,
+    join104(homedir32(), ".bun", "bin", "bun"),
     "/opt/homebrew/bin/bun",
     "/usr/local/bin/bun"
   ];
@@ -115932,7 +116218,7 @@ function isBunName(path) {
 }
 function assertOlympusPackage(root, label) {
   try {
-    const manifest = JSON.parse(readFileSync59(join103(root, "package.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync59(join104(root, "package.json"), "utf8"));
     if (typeof manifest.name === "string" && PACKAGE_NAMES.has(manifest.name))
       return;
   } catch {}
@@ -116005,7 +116291,7 @@ function setMacEngineServerModeUnderFence(enable, options) {
     return { ok: true, manager: "agent" };
   const agent = enginePaths(homeDir);
   const current2 = installedProgram(paths.plistPath);
-  if (!current2 || current2.entryPath !== join103(paths.appDir, "dist/cli.js") || current2.runtimePath !== join103(paths.runtimeDir, "bun") || current2.helperPath !== paths.helperExecutablePath) {
+  if (!current2 || current2.entryPath !== join104(paths.appDir, "dist/cli.js") || current2.runtimePath !== join104(paths.runtimeDir, "bun") || current2.helperPath !== paths.helperExecutablePath) {
     throw new OperationError("config_error", "Server mode needs the installed Olympus Engine app. Update Olympus from its download page, then try again in Keys. Nothing was changed.");
   }
   preflightEnginePaths(homeDir, { ...agent, appDir: paths.appDir });
@@ -116044,10 +116330,10 @@ async function waitForMacAgentHandoff(options = {}) {
   return false;
 }
 function serverModeResultPath(paths) {
-  return join103(dirname78(paths.configPath), "server-mode-result.json");
+  return join104(dirname78(paths.configPath), "server-mode-result.json");
 }
 function serverModeAgentPath(paths) {
-  return join103(dirname78(paths.configPath), "server-mode-off.plist");
+  return join104(dirname78(paths.configPath), "server-mode-off.plist");
 }
 function macServerModeView(options = {}) {
   const paths = engineServicePaths(options);
@@ -116081,13 +116367,13 @@ function requestMacServerMode(enable, options = {}) {
       writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: MAC_SERVER_MODE_SIGN_IN }));
       throw new OperationError("config_error", MAC_SERVER_MODE_SIGN_IN);
     }
-    if (program.runtimePath !== join103(paths.runtimeDir, "bun") || program.entryPath !== join103(paths.appDir, "dist/cli.js")) {
+    if (program.runtimePath !== join104(paths.runtimeDir, "bun") || program.entryPath !== join104(paths.appDir, "dist/cli.js")) {
       throw new OperationError("config_error", "Update Olympus from its download page before changing this setting.");
     }
     const homeDir = options.homeDir ?? homedir32();
     ensurePrivateDirectoryTreeSync(homeDir, dirname78(paths.configPath));
     const agentPath = serverModeAgentPath(paths);
-    const args = [join103(paths.runtimeDir, "bun"), "--no-env-file", join103(paths.appDir, "dist/cli.js"), "__engine-server-mode", "off"];
+    const args = [join104(paths.runtimeDir, "bun"), "--no-env-file", join104(paths.appDir, "dist/cli.js"), "__engine-server-mode", "off"];
     const env = { HOME: homeDir, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv(options) };
     writePrivateFileAtomicSync(agentPath, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -116198,7 +116484,7 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync14 } from "node:child_process";
 import { chmodSync as chmodSync31, closeSync as closeSync28, constants as constants15, copyFileSync, existsSync as existsSync73, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync38, linkSync as linkSync3, mkdirSync as mkdirSync47, openSync as openSync27, readFileSync as readFileSync60, readlinkSync as readlinkSync4, readdirSync as readdirSync24, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync31, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
-import { basename as basename16, dirname as dirname79, join as join104, relative as relative15, resolve as resolve21, sep as sep18 } from "node:path";
+import { basename as basename16, dirname as dirname79, join as join105, relative as relative15, resolve as resolve21, sep as sep18 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes19, createHash as createHash73, randomUUID as randomUUID26 } from "node:crypto";
 function linuxEngineExec(command, args) {
@@ -116246,8 +116532,8 @@ RestartPreventExitStatus=78
 KillMode=mixed
 TimeoutStopSec=30
 SendSIGKILL=yes
-StandardOutput=append:${pathValue(join104(l.stateDir, "engine.log"))}
-StandardError=append:${pathValue(join104(l.stateDir, "engine.err"))}
+StandardOutput=append:${pathValue(join105(l.stateDir, "engine.log"))}
+StandardError=append:${pathValue(join105(l.stateDir, "engine.err"))}
 
 [Install]
 WantedBy=default.target
@@ -116364,7 +116650,7 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
   if (!group.startsWith("/user.slice/") || group.split("/").includes(".."))
     return;
   try {
-    return /^populated 0$/m.test(readFileSync60(join104(root, group, "cgroup.events"), "utf8"));
+    return /^populated 0$/m.test(readFileSync60(join105(root, group, "cgroup.events"), "utf8"));
   } catch (e) {
     if (e.code !== "ENOENT")
       return;
@@ -116372,13 +116658,13 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
     if (uid === undefined || !group.startsWith(`/user.slice/user-${uid}.slice/user@${uid}.service/`))
       return;
     try {
-      readFileSync60(join104(root, "cgroup.controllers"));
-      statSync34(dirname79(join104(root, group)));
+      readFileSync60(join105(root, "cgroup.controllers"));
+      statSync34(dirname79(join105(root, group)));
     } catch {
       return;
     }
     try {
-      statSync34(join104(root, group));
+      statSync34(join105(root, group));
       return;
     } catch (error) {
       return error.code === "ENOENT" ? true : undefined;
@@ -116541,7 +116827,7 @@ async function withLinuxEngineLifecycleLockAsync(layout, run) {
   }
 }
 function requireLinuxApprovalTransport(program) {
-  const manifest = JSON.parse(readFileSync60(join104(program.workingDirectory, "package.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync60(join105(program.workingDirectory, "package.json"), "utf8"));
   if (manifest.olympus?.linuxApprovalTransport !== "owner-unix-socket-v1")
     throw new Error("This package does not provide Linux owner-only approval. Install a Linux-enabled Olympus release; the existing service was left running.");
   if (manifest.olympus?.linuxStateCompatibility !== 1)
@@ -116571,7 +116857,7 @@ function linuxMachineArtifactDigest(path, kind) {
   const hash = createHash73("sha256");
   const walk = (dir) => {
     for (const name of readdirSync24(dir).sort()) {
-      const full = join104(dir, name);
+      const full = join105(dir, name);
       const rel = relative15(root, full).split(sep18).join("/");
       const info = lstatSync38(full);
       const entryKind = info.isDirectory() ? "directory" : info.isFile() ? "file" : info.isSymbolicLink() ? "symlink" : undefined;
@@ -116614,7 +116900,7 @@ function copyPrivateTree(source, destination) {
     throw new Error(`${source} is not a real package directory.`);
   mkdirSync47(destination, { mode: sourceInfo.mode & 4095 });
   for (const name of readdirSync24(source).sort()) {
-    const from = join104(source, name), to = join104(destination, name), info = lstatSync38(from);
+    const from = join105(source, name), to = join105(destination, name), info = lstatSync38(from);
     if (info.isDirectory() && !info.isSymbolicLink())
       copyPrivateTree(from, to);
     else if (info.isFile() && info.nlink === 1) {
@@ -116628,7 +116914,7 @@ function copyPrivateTree(source, destination) {
 }
 function durableProgram(layout, source, transaction, options) {
   createLinuxPrivateDirectory(layout.packageDir);
-  const generations = join104(layout.packageDir, "generations");
+  const generations = join105(layout.packageDir, "generations");
   createLinuxPrivateDirectory(generations);
   const staging = transaction.stagingPath;
   rmSync31(staging, { recursive: true, force: true });
@@ -116638,10 +116924,10 @@ function durableProgram(layout, source, transaction, options) {
   transaction.stagingInode = stagingInfo.ino;
   writeInstallTransaction(layout, transaction);
   lifecycleCheckpoint(options, "staging_identity_published");
-  const app = join104(staging, "app"), runtimeDir = join104(staging, "runtime");
+  const app = join105(staging, "app"), runtimeDir = join105(staging, "runtime");
   copyPrivateTree(source.workingDirectory, app);
   mkdirSync47(runtimeDir, { mode: 448 });
-  const runtime = join104(runtimeDir, "bun");
+  const runtime = join105(runtimeDir, "bun");
   const runtimeInfo = lstatSync38(source.runtimePath);
   if (!runtimeInfo.isFile() || runtimeInfo.isSymbolicLink() || runtimeInfo.nlink !== 1)
     throw new Error("The selected Bun runtime is not a singly-linked regular file.");
@@ -116651,11 +116937,11 @@ function durableProgram(layout, source, transaction, options) {
   syncDirectorySync(runtimeDir);
   syncDirectorySync(staging);
   const custodyToken = createHash73("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
-  writePrivateFileAtomicSync(join104(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
+  writePrivateFileAtomicSync(join105(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
 `);
   syncDirectorySync(staging);
   const digest4 = linuxMachineArtifactDigest(staging, "tree");
-  const generation = join104(generations, digest4);
+  const generation = join105(generations, digest4);
   transaction.generationPath = generation;
   transaction.generationCreated = !existsSync73(generation);
   transaction.generationArtifact = treeMachineArtifact(staging, generation);
@@ -116673,12 +116959,12 @@ function durableProgram(layout, source, transaction, options) {
   transaction.generationArtifact = treeMachineArtifact(generation);
   writeInstallTransaction(layout, transaction);
   const installed = {
-    runtimePath: join104(generation, "runtime/bun"),
-    entryPath: join104(generation, "app/dist/cli.js"),
-    workingDirectory: join104(generation, "app"),
+    runtimePath: join105(generation, "runtime/bun"),
+    entryPath: join105(generation, "app/dist/cli.js"),
+    workingDirectory: join105(generation, "app"),
     source: "package",
     ...source.build ? { build: source.build } : {},
-    runtimeDigest: hashFile(join104(generation, "runtime/bun"))
+    runtimeDigest: hashFile(join105(generation, "runtime/bun"))
   };
   if (engineBuildIdentity(installed.workingDirectory) !== source.build)
     throw new Error("The durable package generation does not match the verified source build.");
@@ -116686,7 +116972,7 @@ function durableProgram(layout, source, transaction, options) {
   return installed;
 }
 function unitLinkCandidates(layout) {
-  return [join104(layout.home, ".config/systemd/user", SYSTEMD_ENGINE_UNIT)].filter((path) => path !== layout.unitPath);
+  return [join105(layout.home, ".config/systemd/user", SYSTEMD_ENGINE_UNIT)].filter((path) => path !== layout.unitPath);
 }
 function ownedUnitLink(layout, path) {
   const info = lstatSync38(path, { throwIfNoEntry: false });
@@ -116714,14 +117000,14 @@ function removeNewUnitLinks(layout, transaction) {
   }
 }
 function transactionPath(layout) {
-  return join104(layout.stateDir, "install-transaction.json");
+  return join105(layout.stateDir, "install-transaction.json");
 }
 function transactionManagedFiles(layout, desktop = true) {
-  return [layout.unitPath, layout.launcherPath, layout.configPath, join104(layout.stateDir, "service-current.json"), join104(layout.stateDir, "service-previous.json"), ...desktop ? Object.values(linuxDesktopEntryPaths(layout)) : []];
+  return [layout.unitPath, layout.launcherPath, layout.configPath, join105(layout.stateDir, "service-current.json"), join105(layout.stateDir, "service-previous.json"), ...desktop ? Object.values(linuxDesktopEntryPaths(layout)) : []];
 }
 function transactionCreatedFiles(layout) {
   const paths = engineServicePaths({ platform: "linux", homeDir: layout.home, env: linuxEngineEnvironment(layout) });
-  return [layout.configPath, layout.sovereigntyPath, layout.workerEnvPath, join104(layout.configDir, "secret-backend.json"), paths.logPath, paths.errorLogPath];
+  return [layout.configPath, layout.sovereigntyPath, layout.workerEnvPath, join105(layout.configDir, "secret-backend.json"), paths.logPath, paths.errorLogPath];
 }
 function optionalText(path) {
   try {
@@ -116735,14 +117021,14 @@ function optionalText(path) {
 function writeSnapshot(backupDir, index, text3, mode = 384) {
   if (text3 === null)
     return { present: false };
-  const backupPath = join104(backupDir, `file-${index}.backup`);
+  const backupPath = join105(backupDir, `file-${index}.backup`);
   writePrivateFileAtomicSync(backupPath, text3);
   chmodSync31(backupPath, 384);
   syncCopiedFile(backupPath);
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join104(input.layout.stateDir, `.install-backup-${randomUUID26()}`);
+  const backupDir = join105(input.layout.stateDir, `.install-backup-${randomUUID26()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync38(backupDir);
   const files = {};
@@ -116759,7 +117045,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join104(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID26()}`),
+    stagingPath: join105(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID26()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -116790,14 +117076,14 @@ function readInstallTransaction(layout) {
   const backupDir = typeof value2?.backupDir === "string" ? resolve21(value2.backupDir) : "";
   const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname79(resolve21(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename16(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const legacy = value2.legacySettings;
-  if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join104(backupDir, `file-${1e4 + index}.backup`))))
+  if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join105(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
   const restore = value2.legacyRestoreSettings;
-  if (restore !== undefined && (!legacy || !restore || typeof restore !== "object" || Array.isArray(restore) || Object.keys(restore).length !== Object.keys(legacy).length || Object.entries(restore).some(([name, snapshot], index) => !Object.hasOwn(legacy, name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join104(backupDir, `file-${20000 + index}.backup`))))
+  if (restore !== undefined && (!legacy || !restore || typeof restore !== "object" || Array.isArray(restore) || Object.keys(restore).length !== Object.keys(legacy).length || Object.entries(restore).some(([name, snapshot], index) => !Object.hasOwn(legacy, name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join105(backupDir, `file-${20000 + index}.backup`))))
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve21(dirname79(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname79(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename16(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join104(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join104(backupDir, `file-${allowedFiles.length}.backup`) || dirname79(resolve21(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename16(value2.stagingPath)) || value2.generationPath !== undefined && (dirname79(resolve21(value2.generationPath)) !== join104(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename16(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename16(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join104(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve21(dirname79(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname79(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename16(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join105(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join105(backupDir, `file-${allowedFiles.length}.backup`) || dirname79(resolve21(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename16(value2.stagingPath)) || value2.generationPath !== undefined && (dirname79(resolve21(value2.generationPath)) !== join105(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename16(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename16(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join105(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -116881,12 +117167,12 @@ function assertDesktopTransactionTargets(layout, transaction) {
   assertLinuxDesktopEntryOwnership(layout, [old, transaction.desktopIconSha256].filter((hash) => typeof hash === "string"));
 }
 function writeTransactionDesktop(layout, program, transaction, exec) {
-  transaction.desktopIconSha256 = hashFile(join104(program.workingDirectory, LINUX_APP_ICON));
+  transaction.desktopIconSha256 = hashFile(join105(program.workingDirectory, LINUX_APP_ICON));
   writeInstallTransaction(layout, transaction);
   writeLinuxDesktopEntry(layout, program.workingDirectory, exec);
 }
 function legacySettingTarget(layout, name) {
-  return join104(layout.configDir, name);
+  return join105(layout.configDir, name);
 }
 function legacyOAuthWriterRunning(layout, name) {
   if (!name.startsWith("pending-oauth/") || name.endsWith(".tmp"))
@@ -116898,7 +117184,7 @@ function legacyOAuthWriterRunning(layout, name) {
   else {
     let state;
     try {
-      state = JSON.parse(readFileSync60(join104(layout.home, ".olympus", name), "utf8"));
+      state = JSON.parse(readFileSync60(join105(layout.home, ".olympus", name), "utf8"));
     } catch {
       throw new Error("A legacy Olympus sign-in state is unreadable. Back it up before retrying the upgrade. Nothing was changed.");
     }
@@ -116922,7 +117208,7 @@ function legacyOAuthWriterRunning(layout, name) {
 function priorEngineUsesLegacySettings(layout, receiptState = readLinuxEngineReceipt(layout.receiptPath)?.installationState) {
   const prior = currentProgram(layout);
   if (prior) {
-    const manifest = JSON.parse(readFileSync60(join104(prior.workingDirectory, "package.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync60(join105(prior.workingDirectory, "package.json"), "utf8"));
     return manifest.olympus?.linuxSettingsLayout !== "receipt-v1";
   }
   return receiptState === "installed";
@@ -116933,7 +117219,7 @@ function isLegacyConsultSidecar(name) {
 function legacyConsultWriterIsLive(directory) {
   for (const name of LEGACY_CONSULT_LEASE_FILES) {
     try {
-      const record2 = JSON.parse(readFileSync60(join104(directory, name), "utf8"));
+      const record2 = JSON.parse(readFileSync60(join105(directory, name), "utf8"));
       if (typeof record2.pid === "number" && recordedProcessOwnerIsAlive(record2.pid, parseProcessInstanceIdentity(record2.processInstance)))
         return true;
     } catch {}
@@ -116944,14 +117230,14 @@ function withLegacyConsultLease(layout, run) {
   const files = legacyLinuxSettings(layout);
   if (!files.some((name) => name === "consult.json" || isLegacyConsultSidecar(name)))
     return run();
-  const directory = join104(layout.home, ".olympus");
+  const directory = join105(layout.home, ".olympus");
   try {
-    return withFileLeaseSync(join104(directory, "consult.json"), (lease) => lease.commit(() => {
+    return withFileLeaseSync(join105(directory, "consult.json"), (lease) => lease.commit(() => {
       if (legacyConsultWriterIsLive(directory))
-        throw new FileLeaseBusyError(join104(directory, "consult.json"));
+        throw new FileLeaseBusyError(join105(directory, "consult.json"));
       const result = run();
       for (const name of LEGACY_CONSULT_LEASE_FILES)
-        rmSync31(join104(directory, name), { force: true });
+        rmSync31(join105(directory, name), { force: true });
       return result;
     }), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
   } catch (error) {
@@ -116970,12 +117256,12 @@ function assertLegacySettingOverrides(layout, env) {
       continue;
     const selected = resolve21(value2.trim());
     const moved = files.find((name) => {
-      const source = join104(layout.home, ".olympus", name);
+      const source = join105(layout.home, ".olympus", name);
       return selected === source || source.startsWith(selected + sep18);
     });
     if (!moved)
       continue;
-    const destination = join104(layout.configDir, relative15(join104(layout.home, ".olympus"), selected));
+    const destination = join105(layout.configDir, relative15(join105(layout.home, ".olympus"), selected));
     throw new Error(`Set ${key2} to ${destination} in ${layout.workerEnvPath} and in any launch environment that sets it, then retry the upgrade. Nothing was changed.`);
   }
 }
@@ -117022,13 +117308,13 @@ function migrateLegacySettings(layout, transaction, options) {
   const snapshots = {};
   const tracked = [...files, ...LEGACY_LINUX_POLICY_FILES.filter((name) => !files.includes(name) && !existsSync73(legacySettingTarget(layout, name)))];
   for (const [index, name] of tracked.entries()) {
-    const source = join104(layout.home, ".olympus", name), present = existsSync73(source);
+    const source = join105(layout.home, ".olympus", name), present = existsSync73(source);
     snapshots[name] = writeSnapshot(transaction.backupDir, 1e4 + index, present ? readFileSync60(source) : null, present ? lstatSync38(source).mode & 511 : 384);
   }
   transaction.legacySettings = snapshots;
   writeInstallTransaction(layout, transaction);
   for (const name of files) {
-    const source = join104(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
+    const source = join105(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
     assertLinuxManagedPath(source);
     assertLinuxManagedPath(target);
     const sourceIdentity = lstatSync38(source);
@@ -117092,7 +117378,7 @@ function restoreLegacySettings(layout, transaction) {
   if (transaction.legacySettings && !transaction.legacyRestoreSettings) {
     const snapshots = {};
     for (const [index, [name, original]] of Object.entries(transaction.legacySettings).entries()) {
-      const source = join104(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
+      const source = join105(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
       assertLinuxManagedPath(source);
       assertLinuxManagedPath(target);
       const sourceChanged = existsSync73(source) && hashFile(source) !== original.sha256;
@@ -117106,7 +117392,7 @@ function restoreLegacySettings(layout, transaction) {
   }
   for (const [name, snapshot] of Object.entries(transaction.legacyRestoreSettings ?? {})) {
     snapshotBytes(snapshot);
-    const source = join104(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
+    const source = join105(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
     for (const path of [source, target]) {
       assertLinuxManagedPath(path);
       if (existsSync73(path) && ![snapshot.sha256, transaction.legacySettings[name].sha256].includes(hashFile(path)))
@@ -117114,7 +117400,7 @@ function restoreLegacySettings(layout, transaction) {
     }
   }
   for (const [name, snapshot] of Object.entries(transaction.legacyRestoreSettings ?? {})) {
-    restoreOptionalFile(join104(layout.home, ".olympus", name), snapshot);
+    restoreOptionalFile(join105(layout.home, ".olympus", name), snapshot);
     removeFileDurablySync(legacySettingTarget(layout, name));
     const temporary = legacyMigrationTemporary(layout, transaction, name);
     assertLinuxManagedPath(temporary);
@@ -117123,7 +117409,7 @@ function restoreLegacySettings(layout, transaction) {
 }
 function cleanupLegacySettingsDirectories(layout) {
   for (const name of [...LEGACY_LINUX_SETTINGS_DIRECTORIES, ""].sort((a, b) => b.length - a.length)) {
-    const path = join104(layout.home, ".olympus", name);
+    const path = join105(layout.home, ".olympus", name);
     if (!lstatSync38(path, { throwIfNoEntry: false }))
       continue;
     assertLinuxManagedPath(path, process.getuid(), "directory");
@@ -117178,7 +117464,7 @@ function restoreInstallTransaction(layout, exec, options) {
 }
 function currentProgram(l) {
   try {
-    return JSON.parse(readFileSync60(join104(l.stateDir, "service-current.json"), "utf8")).program;
+    return JSON.parse(readFileSync60(join105(l.stateDir, "service-current.json"), "utf8")).program;
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -117186,10 +117472,10 @@ function currentProgram(l) {
   }
 }
 function treeMachineArtifact(path, recordedPath = path) {
-  const root = lstatSync38(path), markerPath = join104(path, ".olympus-generation.json"), marker = lstatSync38(markerPath);
+  const root = lstatSync38(path), markerPath = join105(path, ".olympus-generation.json"), marker = lstatSync38(markerPath);
   if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 63) !== 0 || !marker.isFile() || marker.isSymbolicLink() || marker.uid !== process.getuid() || (marker.mode & 63) !== 0)
     throw new Error(`Generation custody marker is unsafe: ${path}`);
-  return { path: recordedPath, kind: "tree", sha256: linuxMachineArtifactDigest(path, "tree"), rootDevice: root.dev, rootInode: root.ino, markerPath: join104(recordedPath, ".olympus-generation.json"), markerSha256: hashFile(markerPath) };
+  return { path: recordedPath, kind: "tree", sha256: linuxMachineArtifactDigest(path, "tree"), rootDevice: root.dev, rootInode: root.ino, markerPath: join105(recordedPath, ".olympus-generation.json"), markerSha256: hashFile(markerPath) };
 }
 function refreshMachineArtifacts(layout, _includeTransaction = true) {
   const receipt = readLinuxEngineReceipt(layout.receiptPath);
@@ -117205,14 +117491,14 @@ function refreshMachineArtifacts(layout, _includeTransaction = true) {
     { path: layout.launcherPath, kind: "file" },
     ...(transaction && !Object.hasOwn(transaction.before.files, linuxDesktopEntryPaths(layout).desktop) ? [] : Object.values(linuxDesktopEntryPaths(layout))).map((path) => ({ path, kind: "file" })),
     { path: layout.openHandlerPath, kind: "file" },
-    { path: join104(layout.stateDir, "service-current.json"), kind: "file" },
-    { path: join104(layout.stateDir, "service-previous.json"), kind: "file" },
+    { path: join105(layout.stateDir, "service-current.json"), kind: "file" },
+    { path: join105(layout.stateDir, "service-previous.json"), kind: "file" },
     ...receipt.ownedUnitLinks.map((path) => ({ path, kind: "symlink" }))
   ];
-  const generations = join104(layout.packageDir, "generations");
+  const generations = join105(layout.packageDir, "generations");
   if (existsSync73(generations)) {
     for (const name of readdirSync24(generations).sort())
-      candidates.push({ path: join104(generations, name), kind: "tree" });
+      candidates.push({ path: join105(generations, name), kind: "tree" });
   }
   const machineArtifacts = candidates.filter(({ path }) => existsSync73(path)).map(({ path, kind }) => {
     if (kind === "tree")
@@ -117385,9 +117671,9 @@ function installLinuxEngine(options) {
       writeTransactionDesktop(l, program, transaction, exec);
       lifecycleCheckpoint(options, "launcher_published");
       const unit = renderEngineSystemdUnit(l, program);
-      const candidateDir = join104(l.cacheDir, `unit-check-${process.pid}`);
+      const candidateDir = join105(l.cacheDir, `unit-check-${process.pid}`);
       createLinuxPrivateDirectory(candidateDir);
-      const candidate = join104(candidateDir, SYSTEMD_ENGINE_UNIT);
+      const candidate = join105(candidateDir, SYSTEMD_ENGINE_UNIT);
       writePrivateFileAtomicSync(candidate, unit);
       try {
         const check = exec("systemd-analyze", ["--user", "verify", "--man=no", candidate]);
@@ -117405,7 +117691,7 @@ function installLinuxEngine(options) {
       writeInstallTransaction(l, transaction);
       lifecycleCheckpoint(options, "activating_published");
       migrateLegacySettings(l, transaction, options);
-      selectLinuxSecretBackend({ encryptedFilePath: l.secretsPath, keyFilePath: l.secretsKeyPath, backendFilePath: join104(l.configDir, "secret-backend.json") }, (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || "auto");
+      selectLinuxSecretBackend({ encryptedFilePath: l.secretsPath, keyFilePath: l.secretsKeyPath, backendFilePath: join105(l.configDir, "secret-backend.json") }, (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || "auto");
       for (const path of [paths.logPath, paths.errorLogPath]) {
         assertLinuxManagedPath(path);
         if (!existsSync73(path))
@@ -117413,7 +117699,7 @@ function installLinuxEngine(options) {
       }
       const oldUnit = optionalText(l.unitPath), oldProgram = currentProgram(l);
       if (oldUnit && oldProgram && oldProgram.build !== program.build)
-        writePrivateFileAtomicSync(join104(l.stateDir, "service-previous.json"), JSON.stringify({ program: oldProgram, unit: oldUnit, config: readFileSync60(l.configPath, "utf8") }));
+        writePrivateFileAtomicSync(join105(l.stateDir, "service-previous.json"), JSON.stringify({ program: oldProgram, unit: oldUnit, config: readFileSync60(l.configPath, "utf8") }));
       const existingWithoutPolicy = !existsSync73(l.sovereigntyPath) && (existingReceipt?.installationState === "installed" || privacyState.state !== "not_installed");
       const config = reconcileEngineConfig(l.configPath), seeded = existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
       let wroteEnv = false;
@@ -117442,7 +117728,7 @@ OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
         throw new Error(`The user manager did not load ${l.unitPath}; installation is incomplete.`);
       systemdMust(exec, ["enable", l.unitPath]);
       systemdMust(exec, ["start", SYSTEMD_ENGINE_UNIT]);
-      writePrivateFileAtomicSync(join104(l.stateDir, "service-current.json"), JSON.stringify({ program, unit }));
+      writePrivateFileAtomicSync(join105(l.stateDir, "service-current.json"), JSON.stringify({ program, unit }));
       lifecycleCheckpoint(options, "current_published");
       refreshMachineArtifacts(l);
       const warnings = [...base.warnings];
@@ -117460,7 +117746,7 @@ OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
 }
 function previousProgram(layout) {
   try {
-    return JSON.parse(readFileSync60(join104(layout.stateDir, "service-previous.json"), "utf8")).program;
+    return JSON.parse(readFileSync60(join105(layout.stateDir, "service-previous.json"), "utf8")).program;
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -117468,19 +117754,19 @@ function previousProgram(layout) {
   }
 }
 function assertTreeArtifactCustody(path, artifact) {
-  const root = lstatSync38(path), markerPath = join104(path, ".olympus-generation.json");
+  const root = lstatSync38(path), markerPath = join105(path, ".olympus-generation.json");
   if (artifact.kind !== "tree" || artifact.path !== path || root.isSymbolicLink() || !root.isDirectory() || root.uid !== process.getuid() || (root.mode & 63) !== 0 || root.dev !== artifact.rootDevice || root.ino !== artifact.rootInode || artifact.markerPath !== markerPath || hashFile(markerPath) !== artifact.markerSha256) {
     throw new Error(`Engine generation root or custody marker changed: ${path}`);
   }
 }
 function pruneOldGenerations(layout) {
   const keep = new Set([currentProgram(layout)?.workingDirectory, previousProgram(layout)?.workingDirectory].filter((path) => Boolean(path)).map((path) => dirname79(path)));
-  const generations = join104(layout.packageDir, "generations");
+  const generations = join105(layout.packageDir, "generations");
   if (!existsSync73(generations))
     return;
   const receipt = readLinuxEngineReceipt(layout.receiptPath);
   for (const name of readdirSync24(generations)) {
-    const path = join104(generations, name);
+    const path = join105(generations, name);
     if (keep.has(path))
       continue;
     const artifact = receipt?.machineArtifacts.find((entry) => entry.path === path && entry.kind === "tree");
@@ -117513,7 +117799,7 @@ async function recoverInterruptedLinuxEngineInstall(options) {
     }
     transaction = restoreInstallTransaction(layout, exec, options);
     let previousBuild = null;
-    const previousCurrent = snapshotText(transaction.before.files[join104(layout.stateDir, "service-current.json")]);
+    const previousCurrent = snapshotText(transaction.before.files[join105(layout.stateDir, "service-current.json")]);
     if (previousCurrent) {
       try {
         previousBuild = JSON.parse(previousCurrent).program?.build ?? null;
@@ -117698,8 +117984,8 @@ async function rollbackLinuxEngine(options) {
     assertNoInterruptedInstall(l);
     assertKnown(inspectSystemdEngine(l, exec));
     ensureEngineLinger(exec, options.uid, options.userName, options.notice);
-    const previous = JSON.parse(readFileSync60(join104(l.stateDir, "service-previous.json"), "utf8"));
-    const previousManifest = JSON.parse(readFileSync60(join104(previous.program.workingDirectory, "package.json"), "utf8"));
+    const previous = JSON.parse(readFileSync60(join105(l.stateDir, "service-previous.json"), "utf8"));
+    const previousManifest = JSON.parse(readFileSync60(join105(previous.program.workingDirectory, "package.json"), "utf8"));
     if (previousManifest.olympus?.linuxSettingsLayout !== "receipt-v1")
       throw new Error("The previous engine cannot read receipt-owned settings. Rollback was refused; the current engine and privacy settings were left unchanged.");
     const current2 = currentProgram(l);
@@ -117747,7 +118033,7 @@ async function rollbackLinuxEngine(options) {
       writeLinuxLauncher(l, p);
       writeTransactionDesktop(l, p, transaction, exec);
       lifecycleCheckpoint(options, "launcher_published");
-      writePrivateFileAtomicSync(join104(l.stateDir, "service-current.json"), JSON.stringify({ program: p, unit }));
+      writePrivateFileAtomicSync(join105(l.stateDir, "service-current.json"), JSON.stringify({ program: p, unit }));
       lifecycleCheckpoint(options, "current_published");
       systemdMust(exec, ["daemon-reload"]);
       systemdMust(exec, ["link", l.unitPath]);
@@ -117772,7 +118058,7 @@ async function rollbackLinuxEngine(options) {
         restored = { ok: false, build: current2.build, reason: String(e) };
       }
     } else {
-      writePrivateFileAtomicSync(join104(l.stateDir, "service-previous.json"), JSON.stringify({ program: current2, unit: currentUnit, config: currentConfig }));
+      writePrivateFileAtomicSync(join105(l.stateDir, "service-previous.json"), JSON.stringify({ program: current2, unit: currentUnit, config: currentConfig }));
       refreshMachineArtifacts(l, false);
       lifecycleCheckpoint(options, "receipt_finalized");
       transaction.phase = "qualified";
@@ -117793,7 +118079,7 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "unknown";
   if (facts.control_group && !waitForEmptyCgroup(facts.control_group, options))
     return "unknown";
-  const childrenPath = join104(l.dataDir, "engine/children.json");
+  const childrenPath = join105(l.dataDir, "engine/children.json");
   const record2 = readEngineChildren(childrenPath);
   if (existsSync73(childrenPath) && (!record2 || record2.children.length > 0))
     return "unknown";
@@ -117820,12 +118106,12 @@ var init_linux_engine_service = __esm(() => {
 
 // src/version.ts
 import { readFileSync as readFileSync61 } from "node:fs";
-import { dirname as dirname80, join as join105 } from "node:path";
+import { dirname as dirname80, join as join106 } from "node:path";
 import { fileURLToPath as fileURLToPath11 } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
   repoRoot = dirname80(dirname80(fileURLToPath11(import.meta.url)));
-  manifest = JSON.parse(readFileSync61(join105(repoRoot, "openclaw.plugin.json"), "utf8"));
+  manifest = JSON.parse(readFileSync61(join106(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
 
@@ -118150,7 +118436,7 @@ var init_credential_degradation = __esm(() => {
 import { createHash as createHash75 } from "node:crypto";
 import { existsSync as existsSync75, readFileSync as readFileSync62, statSync as statSync35 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
-import { basename as basename17, dirname as dirname81, join as join106 } from "node:path";
+import { basename as basename17, dirname as dirname81, join as join107 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
 import { gunzipSync as gunzipSync2 } from "node:zlib";
 function classifyPath(path, isNumber2) {
@@ -118564,7 +118850,7 @@ function consultVocabularySelection(options = {}) {
   return { shipped: shipped.sort(), user: user.sort() };
 }
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join106(env.HOME?.trim() || homedir33(), ".olympus", "consult", "vocabulary"));
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join107(env.HOME?.trim() || homedir33(), ".olympus", "consult", "vocabulary"));
 }
 function sortedPack(bytes) {
   let tooLong = false;
@@ -118685,13 +118971,13 @@ function readPack(path, sha2566) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname81(fileURLToPath12(moduleUrl));
   const root = basename17(here) === "core" && basename17(dirname81(here)) === "src" ? dirname81(dirname81(here)) : basename17(here) === "dist" ? dirname81(here) : undefined;
-  return root !== undefined && existsSync75(join106(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync75(join107(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join106(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join107(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -118699,7 +118985,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest2 = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha2566 = manifest2.get(id);
-      const result = !manifest2.has(id) ? "missing" : sha2566 === undefined ? "hash_mismatch" : verifiedPackFile(join106(userDir, `${id}.txt.gz`), sha2566);
+      const result = !manifest2.has(id) ? "missing" : sha2566 === undefined ? "hash_mismatch" : verifiedPackFile(join107(userDir, `${id}.txt.gz`), sha2566);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -118711,7 +118997,7 @@ function loadConsultVocabulary(packs = CONSULT_VOCABULARY_PACKS, userDir = null,
   const status = [];
   let complete = root !== undefined;
   for (const [id, sha2566] of Object.entries(packs)) {
-    const result = root ? readPack(join106(root, ...VOCABULARY_DIR, `${id}.txt.gz`), sha2566) : "missing";
+    const result = root ? readPack(join107(root, ...VOCABULARY_DIR, `${id}.txt.gz`), sha2566) : "missing";
     if (typeof result === "string") {
       status.push({ id, origin: "shipped", state: result, words: 0 });
       complete = false;
@@ -118725,7 +119011,7 @@ function loadConsultVocabulary(packs = CONSULT_VOCABULARY_PACKS, userDir = null,
       continue;
     if (status.filter((entry) => entry.origin === "user").length >= CONSULT_VOCABULARY_MAX_USER_PACKS)
       break;
-    const result = sha2566 === undefined ? "hash_mismatch" : readPack(join106(userDir, `${id}.txt.gz`), sha2566);
+    const result = sha2566 === undefined ? "hash_mismatch" : readPack(join107(userDir, `${id}.txt.gz`), sha2566);
     if (typeof result === "string") {
       status.push({ id, origin: "user", state: result, words: 0 });
       continue;
@@ -118752,7 +119038,7 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join106(userDir, "manifest.json");
+    const path = join107(userDir, "manifest.json");
     if (!existsSync75(path) || statSync35(path).size > 1024 * 1024)
       return [];
     const manifest2 = JSON.parse(readFileSync62(path, "utf8"));
@@ -121256,7 +121542,7 @@ __export(exports_consult_settings, {
   CONSULT_CALLER_PROVIDERS: () => CONSULT_CALLER_PROVIDERS
 });
 import { closeSync as closeSync29, constants as constants16, fstatSync as fstatSync7, openSync as openSync28, readSync as readSync11 } from "node:fs";
-import { join as join107 } from "node:path";
+import { join as join108 } from "node:path";
 function consultStandardMode(settings) {
   return settings.standardMode ?? CONSULT_STANDARD_MODE_WHEN_UNSET;
 }
@@ -121293,7 +121579,7 @@ function consultSettingsPath(env = process.env) {
   const home2 = env.HOME?.trim();
   if (process.platform === "linux" && home2 && !home2.startsWith("/"))
     return;
-  return home2 ? linuxOwnerConfigPath("consult.json", env) ?? join107(home2, ".olympus", "consult.json") : undefined;
+  return home2 ? linuxOwnerConfigPath("consult.json", env) ?? join108(home2, ".olympus", "consult.json") : undefined;
 }
 function parseConsultSettings(value2) {
   if (!isPlainObject(value2))
@@ -121587,11 +121873,11 @@ var init_consult_settings = __esm(() => {
 // src/core/doctor.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
 import { existsSync as existsSync76, readFileSync as readFileSync63 } from "node:fs";
-import { join as join108 } from "node:path";
+import { join as join109 } from "node:path";
 import { homedir as homedir34 } from "node:os";
 function installedPluginVersion() {
   try {
-    const value2 = JSON.parse(readFileSync63(join108(olympusPackageRoot(), "openclaw.plugin.json"), "utf8")).version;
+    const value2 = JSON.parse(readFileSync63(join109(olympusPackageRoot(), "openclaw.plugin.json"), "utf8")).version;
     return typeof value2 === "string" ? value2 : undefined;
   } catch {
     return;
@@ -121716,7 +122002,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home2 = deps.env.HOME?.trim();
-  return home2 ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join108(home2, ".olympus", "sovereignty.json") : undefined;
+  return home2 ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join109(home2, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -122990,7 +123276,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync76(join108(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync76(join109(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync15(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -124650,6 +124936,7 @@ var init_operations = __esm(() => {
       description: [
         "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
         "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
+        "AI conversation exports work too: a ChatGPT data export (the .zip from Settings, Data controls, Export data) or a Claude data export (the .zip from Settings, Privacy, Export data), or the conversations.json inside either. Each conversation is imported as one item with its title, dates and turns as shown; pictures and attached files are not imported. Each conversation is judged on its own like mail.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
         "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
@@ -125312,7 +125599,7 @@ var init_privacy_profile = __esm(() => {
 
 // src/workers/classification/judge-spending.ts
 import { existsSync as existsSync81, readFileSync as readFileSync68 } from "node:fs";
-import { dirname as dirname86, join as join113 } from "node:path";
+import { dirname as dirname86, join as join114 } from "node:path";
 function judgeArchiveEstimate(count, model) {
   const items = Math.max(0, Math.trunc(count));
   const shortHours = items / LOCAL_JUDGE_MEASUREMENT.shortPerMinute / 60;
@@ -125329,7 +125616,7 @@ function judgeArchiveEstimate(count, model) {
   };
 }
 function judgeSpendingPath(env) {
-  return join113(dirname86(resolveClassificationLedgerPath(env)), "judge-spending.json");
+  return join114(dirname86(resolveClassificationLedgerPath(env)), "judge-spending.json");
 }
 function readJudgeSpending(path) {
   try {
@@ -126155,7 +126442,7 @@ var init_installed_sniffer_runtime = __esm(() => {
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash79 } from "node:crypto";
 import { chmodSync as chmodSync34, existsSync as existsSync82, mkdirSync as mkdirSync51, readFileSync as readFileSync69, renameSync as renameSync17, writeFileSync as writeFileSync19 } from "node:fs";
-import { dirname as dirname87, join as join114 } from "node:path";
+import { dirname as dirname87, join as join115 } from "node:path";
 function domainTier(domain) {
   return domain === "public_safe" ? "public" : domain === "internal" ? "private" : "secure";
 }
@@ -126514,7 +126801,7 @@ async function planTierMigration(options) {
     ].join("\x01")).sort()
   ].join("\x00")).slice(0, 16)}`;
   const top = topPatterns(patterns, options.topPatterns ?? 20);
-  const reportPath = join114(options.paths.reportDir, `${planId}.json`);
+  const reportPath = join115(options.paths.reportDir, `${planId}.json`);
   const noteEntryId = `tier-migration-plan:${planId}`;
   const existing = state.plans.find((plan) => plan.planId === planId);
   const reused = existing !== undefined;
@@ -130296,7 +130583,7 @@ var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_
 
 // src/workers/classification/embedding-prefilter.ts
 import { chmodSync as chmodSync35, existsSync as existsSync89, lstatSync as lstatSync44, mkdirSync as mkdirSync53, readFileSync as readFileSync75 } from "node:fs";
-import { join as join117 } from "node:path";
+import { join as join118 } from "node:path";
 import { createHash as createHash81, randomUUID as randomUUID29 } from "node:crypto";
 function prefilterVector(copy, reject = () => {
   return;
@@ -130510,7 +130797,7 @@ class EmbeddingPrefilter {
     this.options = options;
     this.owner = options.sharedWith?.owner ?? this;
     this.owner.members.add(this);
-    this.path = join117(embeddingPrefilterDirectory(this.control.dbPath), "weights.json");
+    this.path = join118(embeddingPrefilterDirectory(this.control.dbPath), "weights.json");
     try {
       const audit = this.control.readMeta(`${PREFIX3}audit`);
       this.auditState = audit ? JSON.parse(audit) : { misses: [], stopped: false };
@@ -131202,7 +131489,7 @@ __export(exports_prefilter_training_dry_run, {
   prefilterTrainingDryRunMain: () => prefilterTrainingDryRunMain
 });
 import { copyFileSync as copyFileSync2, existsSync as existsSync90, lstatSync as lstatSync45, mkdirSync as mkdirSync54, readdirSync as readdirSync26, rmSync as rmSync34, statSync as statSync38 } from "node:fs";
-import { join as join118, resolve as resolve23 } from "node:path";
+import { join as join119, resolve as resolve23 } from "node:path";
 function emptyReport() {
   return { ledgers: [], errors: 0, error_reasons: Object.fromEntries(ERROR_REASONS.map((reason) => [reason, 0])), snapshot_retries: 0 };
 }
@@ -131248,7 +131535,7 @@ function snapshotPrefilterDatabase(path, destination, retry, copy = copyFileSync
 }
 function* databaseFiles(root) {
   for (const entry of readdirSync26(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    const path = join118(root, entry.name);
+    const path = join119(root, entry.name);
     if (entry.isDirectory())
       yield* databaseFiles(path);
     else if (entry.isFile() && entry.name.endsWith(".sqlite"))
@@ -131268,9 +131555,9 @@ function runPrefilterTrainingDryRun(options = {}) {
   try {
     const inspected = [];
     for (const original of databaseFiles(root)) {
-      const dir = join118(scratch, String(inspected.length));
+      const dir = join119(scratch, String(inspected.length));
       mkdirSync54(dir, { mode: 448 });
-      const target = join118(dir, "snapshot.sqlite");
+      const target = join119(dir, "snapshot.sqlite");
       let db;
       try {
         snapshotPrefilterDatabase(original, target, () => {
@@ -146835,29 +147122,29 @@ var init_server4 = __esm(() => {
 
 // src/workers/dashboard/embedding-runtime.ts
 import { mkdirSync as mkdirSync55, readFileSync as readFileSync76, rmSync as rmSync36, writeFileSync as writeFileSync21 } from "node:fs";
-import { dirname as dirname91, join as join119 } from "node:path";
+import { dirname as dirname91, join as join120 } from "node:path";
 import { homedir as homedir40 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join119(env.HOME?.trim() || homedir40(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join120(env.HOME?.trim() || homedir40(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
-  return join119(guardStateDir(env), "operator-override");
+  return join120(guardStateDir(env), "operator-override");
 }
 function resolveGuardReportPath(env = process.env) {
-  return join119(guardStateDir(env), "latest.json");
+  return join120(guardStateDir(env), "latest.json");
 }
 function resolveEmbeddingDrainReportPath(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join119(dir, "source-embedding-drain-current.json");
+  return join120(dir, "source-embedding-drain-current.json");
 }
 function readEmbeddingOperatorOverride(path) {
   let raw;
@@ -147092,7 +147379,7 @@ var init_embedding_runtime = __esm(() => {
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID31 } from "node:crypto";
 import { readFileSync as readFileSync77, statSync as statSync39 } from "node:fs";
-import { delimiter as delimiter8, dirname as dirname92, isAbsolute as isAbsolute35, join as join120 } from "node:path";
+import { delimiter as delimiter8, dirname as dirname92, isAbsolute as isAbsolute35, join as join121 } from "node:path";
 import { fileURLToPath as fileURLToPath13 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
@@ -147140,7 +147427,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   if (!isAbsolute35(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
-  const readinessPath = join120(dirname92(reportPath), READINESS_FILE);
+  const readinessPath = join121(dirname92(reportPath), READINESS_FILE);
   const instanceId = randomUUID31();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
@@ -147184,7 +147471,7 @@ function resolveBunRuntimePath2(configured, env) {
     return assertUsableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...(env.PATH ?? "").split(delimiter8).filter(Boolean).map((dir) => join120(dir, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...(env.PATH ?? "").split(delimiter8).filter(Boolean).map((dir) => join121(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute35(candidate))
@@ -147511,7 +147798,7 @@ __export(exports_engine_host, {
   ENGINE_STATUS_SCHEMA: () => ENGINE_STATUS_SCHEMA
 });
 import { mkdirSync as mkdirSync56 } from "node:fs";
-import { join as join121 } from "node:path";
+import { join as join122 } from "node:path";
 function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
   const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
@@ -147606,7 +147893,7 @@ async function startEngineHost(options) {
       return;
     status.updated_at = now();
     try {
-      mkdirSync56(join121(statusPath, ".."), { recursive: true, mode: 448 });
+      mkdirSync56(join122(statusPath, ".."), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}
 `);
       lastStatus = content;
@@ -147973,10 +148260,10 @@ var init_protocol2 = __esm(() => {
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
 import { chmodSync as chmodSync36, existsSync as existsSync91, lstatSync as lstatSync46, mkdirSync as mkdirSync57, readFileSync as readFileSync78, renameSync as renameSync19, writeFileSync as writeFileSync22 } from "node:fs";
-import { join as join122 } from "node:path";
+import { join as join123 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync57(stateDir, { recursive: true, mode: 448 });
-  const dir = join122(stateDir, "connect-relay");
+  const dir = join123(stateDir, "connect-relay");
   mkdirSync57(dir, { recursive: true, mode: 448 });
   const stat6 = lstatSync46(dir);
   if (!stat6.isDirectory() || stat6.isSymbolicLink() || typeof process.getuid === "function" && stat6.uid !== process.getuid()) {
@@ -147992,7 +148279,7 @@ function writePrivateFile(path, contents) {
   renameSync19(temporary, path);
 }
 function loadOrCreateIdentity(stateDir) {
-  const path = join122(ensureStateDir(stateDir), "install-key.pem");
+  const path = join123(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
   if (existsSync91(path)) {
     privateKey = createPrivateKey(readFileSync78(path));
@@ -148702,6 +148989,134 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
+// src/workers/email-source/dashboard-people.ts
+function createDashboardPeople(input) {
+  return {
+    view: () => dashboardPeopleView(input.index),
+    handle(record4) {
+      const correction = correctionFrom(record4, input.index);
+      if (!correction) {
+        return { status: 400, body: { ok: false, error: { code: "invalid_request", message: "That change could not be read. Reload and try again." } } };
+      }
+      try {
+        input.index.correct(correction);
+      } catch (error2) {
+        if (!(error2 instanceof PeopleCorrectionRefusedError))
+          throw error2;
+        return { status: 400, body: { ok: false, error: { code: "owner_is_you", message: error2.message } } };
+      }
+      input.refresh();
+      return { status: 200, body: { ok: true } };
+    }
+  };
+}
+function dashboardPeopleView(index) {
+  const people = index.list();
+  const byId = new Map(people.map((person) => [person.personId, person]));
+  const suggestions = [];
+  for (const suggestion of index.suggestions()) {
+    const a = byId.get(suggestion.personA);
+    const b = byId.get(suggestion.personB);
+    if (!a || !b)
+      continue;
+    if (a.itemCount < PEOPLE_SUGGESTION_MIN_MESSAGES || b.itemCount < PEOPLE_SUGGESTION_MIN_MESSAGES)
+      continue;
+    const flip = b.identities.length < a.identities.length || b.identities.length === a.identities.length && b.itemCount < a.itemCount;
+    suggestions.push({
+      identityA: flip ? suggestion.identityB : suggestion.identityA,
+      identityB: flip ? suggestion.identityA : suggestion.identityB,
+      a: suggestionSide(flip ? b : a),
+      b: suggestionSide(flip ? a : b)
+    });
+    if (suggestions.length >= MAX_SUGGESTIONS)
+      break;
+  }
+  const sources = new Set(people.flatMap((person) => person.identities.map((identity2) => identity2.provider)));
+  return {
+    total: people.length,
+    sourceCount: sources.size,
+    suggestions,
+    people: people.slice(0, PEOPLE_SCREEN_MAX_PEOPLE).map(screenPerson)
+  };
+}
+function suggestionSide(person) {
+  const best = [...person.identities].sort((x2, y) => Number(y.names.length > 0) - Number(x2.names.length > 0) || y.itemCount - x2.itemCount)[0];
+  const chip = identityChip(best);
+  return { name: person.displayName, source: chip.source, detail: chip.detail };
+}
+function screenPerson(person) {
+  const named = person.isOwner || person.identities.some((identity2) => identity2.names.length > 0) || person.nameShareable;
+  return {
+    personId: person.personId,
+    displayName: person.displayName,
+    isOwner: person.isOwner,
+    named,
+    messages: person.itemCount,
+    linkedBy: person.linkedBy,
+    identities: person.identities.map(identityChip)
+  };
+}
+function identityChip(identity2) {
+  const email2 = identity2.keys.find((key2) => key2.startsWith("email:"))?.slice("email:".length);
+  const phone = identity2.keys.find((key2) => key2.startsWith("phone:"))?.slice("phone:".length);
+  const handle = identity2.senderLabel?.startsWith("@") ? identity2.senderLabel : undefined;
+  const shownAddress = email2 !== undefined && (!/^\d+@/.test(email2) || (identity2.senderLabel ?? "").toLowerCase().includes(email2));
+  const detail = handle ?? (shownAddress ? email2 : phone ?? email2) ?? identity2.names[0] ?? identity2.senderLabel ?? identity2.senderId ?? "";
+  return {
+    identityKey: identity2.identityKey,
+    provider: identity2.provider,
+    source: SOURCE_NAMES[identity2.provider] ?? identity2.provider,
+    detail
+  };
+}
+function correctionFrom(record4, index) {
+  const text3 = (key2) => {
+    const value2 = record4[key2];
+    return typeof value2 === "string" && value2.trim() && value2.length <= 2000 ? value2.trim() : undefined;
+  };
+  const known = new Set(index.list().flatMap((person) => person.identities.map((identity3) => identity3.identityKey)));
+  const identity2 = (key2) => {
+    const value2 = text3(key2);
+    return value2 && known.has(value2) ? value2 : undefined;
+  };
+  switch (record4.op) {
+    case "same":
+    case "merge": {
+      const a = identity2("identity_a");
+      const b = identity2("identity_b");
+      return a && b && a !== b ? { kind: "merge", identityA: a, identityB: b } : undefined;
+    }
+    case "not_same": {
+      const a = identity2("identity_a");
+      const b = identity2("identity_b");
+      return a && b && a !== b ? { kind: "not_same", identityA: a, identityB: b } : undefined;
+    }
+    case "split": {
+      const a = identity2("identity");
+      return a ? { kind: "split", identity: a } : undefined;
+    }
+    case "rename": {
+      const a = identity2("identity");
+      const name = text3("name");
+      return a && name && name.length <= 160 ? { kind: "rename", identity: a, name } : undefined;
+    }
+    default:
+      return;
+  }
+}
+var PEOPLE_SUGGESTION_MIN_MESSAGES = 3, PEOPLE_SCREEN_MAX_PEOPLE = 2000, MAX_SUGGESTIONS = 20, SOURCE_NAMES;
+var init_dashboard_people = __esm(() => {
+  init_people_index();
+  SOURCE_NAMES = {
+    gmail: "Gmail",
+    telegram: "Telegram",
+    whatsapp: "WhatsApp",
+    apple_messages: "Messages",
+    x: "X",
+    x_bookmarks: "X"
+  };
+});
+
 // src/workers/classification/judge-setup.ts
 async function adoptExistingCloudApproval(spending, input, ledgerPath, promptVersion) {
   if (spending.hasRecord())
@@ -149058,7 +149473,7 @@ var init_tier_owner_items = __esm(() => {
 // src/workers/source-index/built-in-reranker.ts
 import { availableParallelism as availableParallelism3 } from "node:os";
 import { existsSync as existsSync92, readFileSync as readFileSync79 } from "node:fs";
-import { isAbsolute as isAbsolute36, join as join123 } from "node:path";
+import { isAbsolute as isAbsolute36, join as join124 } from "node:path";
 function createCrossEncoderReranker(options) {
   const maxPairTokens = options.maxPairTokens ?? MAX_PAIR_TOKENS;
   const batchSize = Math.max(1, options.batchSize ?? BATCH_SIZE);
@@ -149111,8 +149526,8 @@ function builtInRerankerFromEnv(options = {}) {
   const modelDir = env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim();
   if (!modelDir || !isAbsolute36(modelDir))
     return;
-  const modelPath = join123(modelDir, "model.onnx");
-  const vocabularyPath = join123(modelDir, "vocab.txt");
+  const modelPath = join124(modelDir, "model.onnx");
+  const vocabularyPath = join124(modelDir, "vocab.txt");
   if (!existsSync92(modelPath) || !existsSync92(vocabularyPath))
     return;
   const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim() || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
@@ -151521,7 +151936,7 @@ var init_release_signing = __esm(() => {
 import { spawn as spawn11 } from "node:child_process";
 import { randomBytes as randomBytes25 } from "node:crypto";
 import { chmodSync as chmodSync37, existsSync as existsSync94, mkdirSync as mkdirSync58, readdirSync as readdirSync27, readFileSync as readFileSync80, rmSync as rmSync37 } from "node:fs";
-import { join as join124 } from "node:path";
+import { join as join125 } from "node:path";
 function linuxSelfUpdateRunArgs(runner, runDir, layoutEnv2) {
   return [
     "--user",
@@ -151602,7 +152017,7 @@ function createSelfUpdater(options) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const launch = options.launch ?? defaultLaunch(options.platform, options.homeDir);
   const publicKeyPem = "publicKeyPem" in options ? options.publicKeyPem : RELEASE_SIGNING_PUBLIC_KEY;
-  const statePath = join124(options.stateDir, "state.json");
+  const statePath = join125(options.stateDir, "state.json");
   const installer = installerForPlatform(options.platform);
   const platform2 = releasePlatformFor(options.platform);
   let busy2 = false;
@@ -151618,7 +152033,7 @@ function createSelfUpdater(options) {
     mkdirSync58(options.stateDir, { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(statePath, JSON.stringify(record6));
   }
-  const runDir = (id) => join124(options.stateDir, `run-${id}`);
+  const runDir = (id) => join125(options.stateDir, `run-${id}`);
   function status() {
     const record6 = read();
     if (!record6)
@@ -151633,7 +152048,7 @@ function createSelfUpdater(options) {
     }
     let result;
     try {
-      result = readFileSync80(join124(runDir(record6.id), "result"), "utf8");
+      result = readFileSync80(join125(runDir(record6.id), "result"), "utf8");
     } catch {
       result = undefined;
     }
@@ -151651,7 +152066,7 @@ function createSelfUpdater(options) {
     }
     let log = "";
     try {
-      log = readFileSync80(join124(runDir(record6.id), "install.log"), "utf8");
+      log = readFileSync80(join125(runDir(record6.id), "install.log"), "utf8");
     } catch {
       log = "";
     }
@@ -151692,10 +152107,10 @@ function createSelfUpdater(options) {
     try {
       mkdirSync58(dir, { recursive: true, mode: 448 });
       chmodSync37(dir, 448);
-      writePrivateFileAtomicSync(join124(dir, "install.sh"), installerBytes);
-      writePrivateFileAtomicSync(join124(dir, "run.sh"), RUNNER);
+      writePrivateFileAtomicSync(join125(dir, "install.sh"), installerBytes);
+      writePrivateFileAtomicSync(join125(dir, "run.sh"), RUNNER);
       write(next);
-      await launch(join124(dir, "run.sh"), dir);
+      await launch(join125(dir, "run.sh"), dir);
     } catch {
       fail(next, "launch_failed");
     }
@@ -151716,7 +152131,7 @@ function createSelfUpdater(options) {
       try {
         for (const name of existsSync94(options.stateDir) ? readdirSync27(options.stateDir) : []) {
           if (name.startsWith("run-"))
-            rmSync37(join124(options.stateDir, name), { recursive: true, force: true });
+            rmSync37(join125(options.stateDir, name), { recursive: true, force: true });
         }
       } catch {}
       const record6 = { id: randomBytes25(8).toString("hex"), from: options.runningVersion, to: target.version, step: 1, started_at: now(), engine_pid: pid };
@@ -151796,6 +152211,709 @@ var init_linux_model_readiness = __esm(() => {
   init_assets();
   init_transcription_model();
   init_manifest2();
+});
+
+// src/workers/email-source/dashboard-messaging.ts
+function createDashboardMessagingPairing(options) {
+  const states = new Map;
+  const attempts = new Map;
+  const record6 = (source, outcome) => {
+    const list = attempts.get(source) ?? [];
+    list.push({ at: (options.now?.() ?? new Date).toISOString(), outcome });
+    attempts.set(source, list.slice(-ATTEMPTS_KEPT));
+  };
+  const status = (source) => {
+    const item = states.get(source);
+    return item ? {
+      ok: true,
+      state: item.state,
+      ...item.field ? { field: item.field } : {},
+      ...item.qr ? { qr: item.qr } : {},
+      ...item.linked && item.state !== "failed" && item.state !== "cancelled" ? { linked: true } : {},
+      ...item.state === "failed" && item.reason ? { reason: item.reason } : {},
+      ...(item.state === "failed" || item.state === "cancelled") && item.unlinked ? { unlinked: item.unlinked } : {},
+      ...item.state === "cancelled" && item.task ? { cleaning: true } : {},
+      ...item.chats ? { chats: item.chats } : {},
+      ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [], chatKinds: [] } : {},
+      ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {},
+      ...item.state === "failed" ? { details: pairingDetails({
+        source,
+        state: item.state,
+        reason: item.reason,
+        linked: item.linked === true,
+        unlinked: item.unlinked,
+        registrationMayBeSaved: item.registrationMayBeSaved === true,
+        attempts: attempts.get(source) ?? [],
+        identity: options.identity
+      }) } : {}
+    } : { ok: true, state: "idle" };
+  };
+  return {
+    status,
+    busy(source) {
+      return states.get(source)?.task !== undefined;
+    },
+    start(source) {
+      const prior = states.get(source);
+      if (prior?.task)
+        throw new Error("Pairing is already running.");
+      const item = { state: "starting", controller: new AbortController };
+      states.set(source, item);
+      item.task = Promise.resolve().then(async () => {
+        try {
+          const result = await options.pair(source, {
+            signal: item.controller.signal,
+            prompt(field, reply) {
+              if (item.controller.signal.aborted || item.reply)
+                throw new Error("Pairing prompt is unavailable.");
+              item.field = field;
+              item.reply = reply;
+              item.state = "waiting";
+            },
+            qr(value2) {
+              if (!item.controller.signal.aborted) {
+                item.qr = value2;
+                item.state = "waiting";
+              }
+            },
+            linked() {
+              if (!item.controller.signal.aborted) {
+                delete item.qr;
+                item.linked = true;
+                item.state = "starting";
+              }
+            },
+            choose(chats) {
+              if (item.controller.signal.aborted)
+                return Promise.reject(new Error("Pairing was cancelled."));
+              delete item.reply;
+              delete item.field;
+              delete item.qr;
+              item.chats = chats;
+              item.state = "scope_selection_required";
+              return new Promise((resolve26, reject) => {
+                const abort = () => {
+                  delete item.selection;
+                  reject(new Error("Pairing was cancelled."));
+                };
+                item.controller.signal.addEventListener("abort", abort, { once: true });
+                item.selection = (selection) => {
+                  item.controller.signal.removeEventListener("abort", abort);
+                  delete item.selection;
+                  item.state = "starting";
+                  resolve26(selection);
+                };
+              });
+            },
+            commit() {
+              if (item.controller.signal.aborted)
+                throw new Error("Pairing was cancelled.");
+              delete item.reply;
+              delete item.field;
+              delete item.qr;
+              item.state = "committing";
+            }
+          });
+          if (item.controller.signal.aborted)
+            return;
+          item.state = "committing";
+          await options.publish(source, result, item.controller.signal);
+          if (item.controller.signal.aborted)
+            return;
+          item.chats = result.chats;
+          item.state = "paired";
+        } catch (error2) {
+          const unlinked = error2 && typeof error2 === "object" ? error2.unlinked : undefined;
+          if (unlinked === "removed" || unlinked === "offline" || unlinked === "failed")
+            item.unlinked = unlinked;
+          if (!item.controller.signal.aborted) {
+            if (item.state === "committing")
+              item.registrationMayBeSaved = true;
+            item.reason = pairingFailureReason(error2);
+            item.state = "failed";
+            console.warn(`[messaging] ${source} pairing failed: ${item.reason}`);
+          }
+        } finally {
+          if (item.state === "paired" || item.state === "cancelled")
+            record6(source, item.state);
+          else if (item.state === "failed")
+            record6(source, item.reason ?? "unexpected");
+          delete item.reply;
+          delete item.field;
+          delete item.qr;
+          delete item.task;
+        }
+      });
+      return status(source);
+    },
+    select(source, selection) {
+      const item = states.get(source);
+      if (!item || item.state !== "scope_selection_required" || !item.selection)
+        throw new Error("No pending chat choice.");
+      const chosen = selection.chatScopes.length + (selection.chatKinds?.length ?? 0);
+      if (selection.wholeAccount ? chosen > 0 : chosen === 0)
+        throw new Error("Choose all chats, a kind, or at least one chat.");
+      if (selection.chatScopes.some((scope) => !item.chats?.some((chat) => chat.chatScope === scope)))
+        throw new Error("Chat list changed.");
+      item.selection(selection);
+      return status(source);
+    },
+    respond(source, field, value2) {
+      const item = states.get(source);
+      if (!item || item.state !== "waiting" || item.field !== field || !item.reply || !value2 || value2.length > 4096 || /[\r\n\0]/.test(value2)) {
+        throw new Error("No matching pairing prompt.");
+      }
+      const reply = item.reply;
+      delete item.reply;
+      delete item.field;
+      item.state = "starting";
+      reply(value2);
+      return status(source);
+    },
+    cancel(source) {
+      const item = states.get(source);
+      if (item && (item.state === "starting" || item.state === "waiting" || item.state === "scope_selection_required")) {
+        item.controller.abort();
+        delete item.reply;
+        delete item.field;
+        delete item.qr;
+        item.state = "cancelled";
+      }
+      return status(source);
+    },
+    async cancelAndWait(source) {
+      this.cancel(source);
+      await states.get(source)?.task;
+    },
+    close() {
+      for (const source of states.keys())
+        this.cancel(source);
+    }
+  };
+}
+function pairingDetails(input) {
+  const code = (value2) => value2 && /^[a-z0-9_]{1,64}$/.test(value2) ? value2 : "unexpected";
+  const lines = [
+    `Olympus ${input.identity?.version ?? "unknown"}`,
+    `OS: ${input.identity?.os ?? "unknown"}`,
+    `Source: ${input.source}`,
+    `State: ${input.state}`,
+    `Failure: ${code(input.reason)}`,
+    ...input.source === "whatsapp" ? [`Phone accepted the QR: ${input.linked ? "yes" : "no"}`] : [],
+    ...input.unlinked ? [`Phone entry: ${input.unlinked}`] : [],
+    ...input.registrationMayBeSaved ? ["Connection may be saved: yes"] : [],
+    "Recent attempts:",
+    ...input.attempts.map((attempt) => `  ${attempt.at} ${code(attempt.outcome)}`)
+  ];
+  return lines.join(`
+`);
+}
+function pairingFailureReason(error2) {
+  const code = error2 && typeof error2 === "object" ? error2.code : undefined;
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unexpected";
+}
+function codedError(message2, code) {
+  const error2 = new Error(message2);
+  if (code && /^[a-z0-9_]{1,64}$/.test(code))
+    error2.code = code;
+  return error2;
+}
+var ATTEMPTS_KEPT = 5;
+
+// src/workers/email-source/dashboard-messaging-runner.ts
+import { spawn as spawn12 } from "node:child_process";
+async function runDashboardPairingCommand(request, hooks) {
+  const child2 = spawn12(request.executable, request.args, {
+    env: { ...request.env, OLYMPUS_TELEGRAM_LIST_CHATS: "", OLYMPUS_TELEGRAM_DASHBOARD_PROMPTS: "1" },
+    stdio: ["pipe", "pipe", "pipe", "pipe", ...request.inheritFds ?? []]
+  });
+  const stdin = child2.stdin;
+  const stdout = child2.stdout;
+  const stderr = child2.stderr;
+  if (!stdin || !stdout || !stderr || !child2.stdio[3])
+    throw new Error("Pairing pipes unavailable.");
+  let escalation;
+  const cancel = () => {
+    child2.kill("SIGTERM");
+    escalation ??= setTimeout(() => child2.kill("SIGKILL"), 5000);
+  };
+  const timer = setTimeout(cancel, 10 * 60000);
+  if (hooks.signal.aborted)
+    cancel();
+  else
+    hooks.signal.addEventListener("abort", cancel, { once: true });
+  const lines = [];
+  stdin.on("error", () => {});
+  const exit = new Promise((resolve26, reject) => {
+    child2.once("error", reject);
+    child2.once("close", (code) => resolve26(code ?? 1));
+  });
+  const readLines = async () => {
+    let buffer = "";
+    for await (const chunk of stdout) {
+      buffer += Buffer.from(chunk).toString("utf8");
+      if (buffer.length > 4 * 1024 * 1024)
+        throw new Error("Pairing output exceeded its bound.");
+      let newline;
+      while ((newline = buffer.indexOf(`
+`)) >= 0) {
+        const line2 = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        let event = {};
+        try {
+          event = JSON.parse(line2);
+        } catch {}
+        if (event.event === "prompt") {
+          if (typeof event.field !== "string" || !FIELDS.has(event.field))
+            throw new Error("Invalid pairing prompt.");
+          const field = event.field;
+          hooks.prompt(field, (value2) => {
+            stdin.write(`${JSON.stringify({ field, value: value2 })}
+`);
+          });
+        } else {
+          lines.push(line2);
+          await request.onStdoutLine?.(line2);
+        }
+      }
+    }
+    if (buffer.trim())
+      throw new Error("Incomplete pairing output.");
+  };
+  const readBounded3 = async (stream, limit) => {
+    const chunks2 = [];
+    let size = 0;
+    for await (const chunk of stream) {
+      const bytes = Buffer.from(chunk);
+      size += bytes.length;
+      if (size > limit)
+        throw new Error("Pairing output exceeded its bound.");
+      chunks2.push(bytes);
+    }
+    return Buffer.concat(chunks2).toString("utf8").trim();
+  };
+  try {
+    const [exitCode, stderrText, privatePayload] = await Promise.all([
+      exit,
+      readBounded3(stderr, 16 * 1024),
+      readBounded3(child2.stdio[3], 4096),
+      readLines()
+    ]);
+    return { exitCode, stdoutLines: lines, stderr: stderrText, ...privatePayload ? { privatePayload } : {} };
+  } catch (error2) {
+    cancel();
+    await exit.catch(() => 1);
+    throw error2;
+  } finally {
+    clearTimeout(timer);
+    if (escalation)
+      clearTimeout(escalation);
+    hooks.signal.removeEventListener("abort", cancel);
+    stdin.destroy();
+  }
+}
+var FIELDS;
+var init_dashboard_messaging_runner = __esm(() => {
+  FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
+});
+
+// src/workers/email-source/dashboard-messaging-service.ts
+import { spawn as spawn13 } from "node:child_process";
+import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readFileSync as readFileSync81 } from "node:fs";
+import { arch, platform as platform2, release } from "node:os";
+import { basename as basename19, join as join126 } from "node:path";
+function sourceOf(value2) {
+  if (value2 !== "telegram" && value2 !== "whatsapp")
+    throw new Error("Invalid messaging source.");
+  return value2;
+}
+function validScope(source, scope) {
+  return source === "telegram" ? /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) : /^whatsapp\.personal:chat:[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(scope);
+}
+function parseChats(source, listing) {
+  if (!listing || typeof listing !== "object" || !Array.isArray(listing.dialogs))
+    throw codedError("Invalid chat listing.", "chat_list_unreadable");
+  const chats = [];
+  for (const raw of listing.dialogs) {
+    if (!raw || typeof raw !== "object")
+      continue;
+    const row = raw;
+    if (typeof row.chat_scope !== "string" || typeof row.title !== "string" || typeof row.kind !== "string")
+      continue;
+    const lastMessageAt = typeof row.last_message_at === "string" && !Number.isNaN(Date.parse(row.last_message_at)) ? new Date(row.last_message_at).toISOString() : undefined;
+    if (validScope(source, row.chat_scope))
+      chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind, ...lastMessageAt ? { lastMessageAt } : {} });
+  }
+  return chats;
+}
+function grantChoice(source, raw) {
+  const choice = parseAllowedChatList(source, raw, (value2) => validScope(source, source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2));
+  return { wholeAccount: choice.wholeAccount, chatKinds: choice.chatKinds, chatScopes: choice.chats.map((value2) => source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2) };
+}
+function chosenKinds(source, value2) {
+  if (value2 === undefined)
+    return [];
+  if (!Array.isArray(value2) || !value2.every((kind) => typeof kind === "string" && SOURCE_CHAT_KINDS[source].includes(kind)))
+    throw new Error("Invalid chat kinds.");
+  return [...new Set(value2)];
+}
+function retainApprovedCaptureScope(source, env) {
+  const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
+  const alternate = source === "telegram" ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
+  const raw = env[key2]?.trim() || alternate?.trim();
+  if (!raw || alternate && alternate.trim() !== raw)
+    throw new Error("Invalid capture grant scope.");
+  grantChoice(source, raw);
+  return source === "telegram" ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw } : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
+}
+function readQr(path) {
+  if (basename19(path) !== "qr.png")
+    throw new Error("Invalid QR artifact.");
+  const fd2 = openSync31(path, constants17.O_RDONLY | (constants17.O_NOFOLLOW ?? 0));
+  try {
+    const stat6 = fstatSync8(fd2);
+    if (!stat6.isFile() || stat6.size > 1024 * 1024 || (stat6.mode & 63) !== 0 || typeof process.getuid === "function" && stat6.uid !== process.getuid())
+      throw new Error("Invalid QR artifact.");
+    const bytes = readFileSync81(fd2);
+    if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+      throw new Error("Invalid QR artifact.");
+    return `data:image/png;base64,${bytes.toString("base64")}`;
+  } finally {
+    closeSync32(fd2);
+  }
+}
+async function unlinkHelper(command2, env) {
+  const child2 = spawn13(command2, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let errorTail = "";
+  child2.stderr?.on("data", (chunk) => {
+    errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
+  });
+  const timeout = setTimeout(() => child2.kill("SIGKILL"), 60000);
+  try {
+    const code = await new Promise((resolve26, reject) => {
+      child2.once("error", reject);
+      child2.once("close", (exit) => resolve26(exit ?? 1));
+    });
+    if (code === 0)
+      return "removed";
+    return listingErrorCode(errorTail) === "unlink_offline" ? "offline" : "failed";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function listingErrorCode(stderr) {
+  for (const line2 of stderr.split(/\r?\n/).reverse()) {
+    const match = /olympus-whatsapp-bridge:\s*([a-z0-9_]{1,48})\s*$/.exec(line2.trim());
+    if (match)
+      return match[1];
+  }
+  return;
+}
+async function listHelper(command2, args, env, input) {
+  const child2 = spawn13(command2, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  const stdin = child2.stdin;
+  const stdout = child2.stdout;
+  const stderr = child2.stderr;
+  if (!stdin || !stdout || !stderr)
+    throw new Error("Chat listing pipes unavailable.");
+  stdin.on("error", () => {});
+  let errorTail = "";
+  stderr.on("data", (chunk) => {
+    errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
+  });
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child2.kill("SIGKILL");
+  }, 60000);
+  const exit = new Promise((resolve26, reject) => {
+    child2.once("error", reject);
+    child2.once("close", (code) => resolve26(code ?? 1));
+  });
+  try {
+    stdin.end(input);
+    input = undefined;
+    let output = "";
+    for await (const chunk of stdout) {
+      output += Buffer.from(chunk).toString("utf8");
+      if (output.length > 16 * 1024 * 1024)
+        throw new Error("Chat listing is too large.");
+    }
+    if (await exit !== 0)
+      throw codedError("Chat listing failed.", timedOut ? "chat_list_timeout" : `chat_list_${listingErrorCode(errorTail) ?? "failed"}`);
+    try {
+      return JSON.parse(output);
+    } catch {
+      throw codedError("Chat listing was unreadable.", "chat_list_unreadable");
+    }
+  } catch (error2) {
+    child2.kill("SIGKILL");
+    await exit.catch(() => 1);
+    throw error2;
+  } finally {
+    clearTimeout(timeout);
+    stdin.destroy();
+  }
+}
+function createDashboardMessagingService(options) {
+  const packageRoot = olympusPackageRoot();
+  const available = new Map;
+  const selecting = new Set;
+  const held = new Map;
+  const initialGrants = new Map;
+  const grantSnapshot = (source) => {
+    const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source)
+      throw new Error("Invalid capture grant.");
+    if (read.kind === "valid")
+      retainApprovedCaptureScope(source, read.grant.producer.env);
+    return JSON.stringify(read.kind === "valid" ? read.grant : null);
+  };
+  const grantFor = (source) => {
+    const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+    const read = readCaptureGrantFile(path);
+    if (read.kind !== "valid" || read.grant.source !== source || read.grant.pairingPending)
+      throw new Error("No valid capture grant.");
+    return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
+  };
+  const manager = createDashboardMessagingPairing({
+    identity: { version: runningOlympusVersion(), os: `${platform2() === "darwin" ? "macOS" : platform2()} (kernel ${release()}, ${arch()})` },
+    pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
+      let created;
+      try {
+        const result = await (options.pairSource ?? pairMessagingSource)({
+          source,
+          packageRoot,
+          secretStore: options.secretStore,
+          ...options.registryPath ? { registryPath: options.registryPath } : {},
+          signal: hooks.signal,
+          onCommitStart: () => {
+            created = undefined;
+            hooks.commit();
+          },
+          whatsappQrMode: "artifact",
+          requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
+            const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+            if (grantSnapshot(source) !== initialGrants.get(source))
+              throw new Error("Capture grant changed during pairing.");
+            let selection;
+            if (source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(accountProof) && prior.kind === "valid" && prior.grant.accountProof === accountProof) {
+              const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
+              selection = grantChoice(source, env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
+            } else {
+              let choices = chats;
+              if (source === "whatsapp") {
+                const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
+                  ...process.env,
+                  OLYMPUS_WHATSAPP_STATE_DIR: sessionPath
+                });
+                choices = parseChats(source, listing);
+              }
+              selection = await hooks.choose(choices);
+            }
+            if (grantSnapshot(source) !== initialGrants.get(source))
+              throw new Error("Capture grant changed during pairing.");
+            const chatKinds = [...selection.chatKinds ?? []];
+            return source === "telegram" ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes, ...chatKinds.length ? { chatKinds } : {} } : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map((scope) => scope.slice("whatsapp.personal:chat:".length)), ...chatKinds.length ? { chatKinds } : {} };
+          },
+          runCommand: (request) => runDashboardPairingCommand(request, hooks),
+          onWhatsAppQr: (path) => hooks.qr(readQr(path)),
+          onWhatsAppLinked: (link) => {
+            if (link.created)
+              created = link.sessionPath;
+            hooks.linked();
+          }
+        });
+        if (!result.registered)
+          throw new Error("Pairing did not finish.");
+        return result;
+      } catch (error2) {
+        if (source === "whatsapp" && created !== undefined) {
+          const unlinked = await (options.unlinkCommand ?? unlinkHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), {
+            ...process.env,
+            OLYMPUS_WHATSAPP_STATE_DIR: created
+          }).catch(() => "failed");
+          console.warn(`[messaging] whatsapp unlink after a failed pairing: ${unlinked}`);
+          const coded = error2 && typeof error2 === "object" ? error2 : codedError("Pairing failed.", undefined);
+          coded.unlinked = unlinked;
+          throw coded;
+        }
+        throw error2;
+      }
+    }),
+    publish: (source, result, signal) => options.withGrantMutation(async () => {
+      if (signal.aborted)
+        return;
+      const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+      const prior = readCaptureGrantFile(path);
+      if (grantSnapshot(source) !== initialGrants.get(source))
+        throw new Error("Capture grant changed during pairing.");
+      if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
+        throw new Error("Invalid capture grant.");
+      if (signal.aborted)
+        return;
+      saveMessagingCaptureGrant({ path, pairing: result });
+      available.delete(source);
+    })
+  });
+  const list = async (source) => {
+    const current2 = grantFor(source);
+    const listing = await options.withMessagingCapturePaused(source, async () => {
+      if (source === "telegram") {
+        const apiId = await options.secretStore.get(TELEGRAM_API_ID_SECRET_KEY);
+        const apiHash = await options.secretStore.get(TELEGRAM_API_HASH_SECRET_KEY);
+        const python = telegramPythonExecutable();
+        if (!python || !apiId || !apiHash || !/^\d+$/.test(apiId))
+          throw new Error("Telegram credentials unavailable.");
+        const session = current2.grant.sessionPath ?? telegramSessionBasePath({ env: process.env });
+        return withFileLease(`${session}.pairing`, () => (options.listCommand ?? listHelper)(python, [join126(packageRoot, "scripts", "telegram-pair.py")], {
+          ...process.env,
+          OLYMPUS_TELEGRAM_LIST_CHATS: "1",
+          OLYMPUS_TELEGRAM_SESSION_PATH: session
+        }, `${JSON.stringify({ api_id: Number(apiId), api_hash: apiHash })}
+`), { acquireTimeoutMs: 1 });
+      }
+      return (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
+        ...process.env,
+        OLYMPUS_WHATSAPP_STATE_DIR: current2.grant.sessionPath ?? whatsappStateDir({ env: process.env })
+      });
+    });
+    const chats = parseChats(source, listing);
+    const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
+    const choice = grantChoice(source, current2.grant.producer.env[key2] ?? "");
+    for (const scope of choice.chatScopes)
+      if (!chats.some((chat) => chat.chatScope === scope))
+        chats.push({ chatScope: scope, title: scope, kind: "chat" });
+    available.set(source, { fingerprint: current2.fingerprint, chats });
+    return { ok: true, state: "paired", chats, ...choice, ...source === "whatsapp" ? { coverage: "contacts_and_joined_groups" } : {} };
+  };
+  const withCaptureFact = (source, status) => {
+    if (status.state !== "failed" && status.state !== "cancelled")
+      return status;
+    try {
+      const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      return read.kind === "valid" && read.grant.source === source && read.grant.pairingPending ? { ...status, capturePaused: true } : status;
+    } catch {
+      return status;
+    }
+  };
+  return {
+    async handle(operation, record6) {
+      const source = sourceOf(record6.source);
+      if (operation === "start") {
+        if (selecting.has(source))
+          throw new Error("Finish choosing chats first.");
+        if (held.get(source))
+          throw new Error("Disconnect is running. Pair again after it finishes.");
+        if (manager.busy(source))
+          return manager.status(source);
+        return options.withGrantMutation(async () => {
+          if (manager.busy(source))
+            throw new Error("Pairing is already running.");
+          if (held.get(source))
+            throw new Error("Disconnect is running. Pair again after it finishes.");
+          grantSnapshot(source);
+          const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+          const prior = readCaptureGrantFile(path);
+          if (prior.kind === "valid") {
+            writePrivateFileAtomicSync(path, `${JSON.stringify({ ...prior.grant, pairingPending: true }, null, 2)}
+`);
+          }
+          initialGrants.set(source, grantSnapshot(source));
+          return manager.start(source);
+        });
+      }
+      if (operation === "status") {
+        const status = manager.status(source);
+        if (status.state !== "idle")
+          return withCaptureFact(source, status);
+        const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+        return read.kind === "valid" && read.grant.source === source && !read.grant.pairingPending ? { ok: true, state: "paired" } : status;
+      }
+      if (operation === "cancel")
+        return withCaptureFact(source, manager.cancel(source));
+      if (operation === "respond") {
+        if (typeof record6.field !== "string" || typeof record6.value !== "string")
+          throw new Error("Invalid response.");
+        const value2 = record6.value;
+        delete record6.value;
+        return manager.respond(source, record6.field, value2);
+      }
+      if (operation === "scope" && manager.status(source).state === "scope_selection_required") {
+        if (typeof record6.wholeAccount !== "boolean" || !Array.isArray(record6.chatScopes) || !record6.chatScopes.every((value2) => typeof value2 === "string"))
+          throw new Error("Invalid scope.");
+        return manager.select(source, { wholeAccount: record6.wholeAccount, chatScopes: [...new Set(record6.chatScopes)], chatKinds: chosenKinds(source, record6.chatKinds) });
+      }
+      if (manager.busy(source))
+        throw new Error("Finish or cancel pairing first.");
+      if (operation !== "chats" && operation !== "scope")
+        throw new Error("Unknown operation.");
+      if (selecting.has(source))
+        throw new Error("Chat selection is already running.");
+      selecting.add(source);
+      try {
+        if (operation === "chats") {
+          if (readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath)).kind === "missing")
+            return { ok: true, state: "not_paired" };
+          return await list(source);
+        }
+        const whole = record6.wholeAccount === true;
+        if (!Array.isArray(record6.chatScopes) || !record6.chatScopes.every((value2) => typeof value2 === "string"))
+          throw new Error("Invalid scope.");
+        const selected = [...new Set(record6.chatScopes)];
+        const kinds = chosenKinds(source, record6.chatKinds);
+        if (whole ? selected.length + kinds.length > 0 : selected.length + kinds.length === 0)
+          throw new Error("Choose all chats, a kind, or at least one chat.");
+        return await options.withGrantMutation(() => options.withMessagingCapturePaused(source, async () => {
+          const current2 = grantFor(source);
+          const snapshot2 = available.get(source);
+          if (!snapshot2 || snapshot2.fingerprint !== current2.fingerprint || selected.some((scope) => !snapshot2.chats.some((chat) => chat.chatScope === scope)))
+            throw new Error("Chat list changed.");
+          const value2 = formatAllowedChatList(source, { wholeAccount: whole, chatKinds: kinds, chats: selected.map((scope) => source === "whatsapp" ? scope.slice("whatsapp.personal:chat:".length) : scope) });
+          const env = { ...current2.grant.producer.env };
+          if (source === "telegram") {
+            env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = value2;
+            env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES = value2;
+          } else
+            env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS = value2;
+          writePrivateFileAtomicSync(current2.path, `${JSON.stringify({ ...current2.grant, producer: { ...current2.grant.producer, env } }, null, 2)}
+`);
+          available.delete(source);
+          return { ok: true, state: "paired" };
+        }));
+      } finally {
+        selecting.delete(source);
+      }
+    },
+    cancelAndWait: (source) => manager.cancelAndWait(source),
+    async withPairingHeld(source, operation) {
+      held.set(source, (held.get(source) ?? 0) + 1);
+      try {
+        await manager.cancelAndWait(source);
+        return await operation();
+      } finally {
+        const left = (held.get(source) ?? 1) - 1;
+        if (left > 0)
+          held.set(source, left);
+        else
+          held.delete(source);
+      }
+    },
+    close: () => manager.close()
+  };
+}
+var init_dashboard_messaging_service = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_messaging_capture();
+  init_messaging_capture_grant_file();
+  init_messaging_chat_kinds();
+  init_messaging_pairing();
+  init_messaging_runtime();
+  init_package_root();
+  init_pairing_session_paths();
+  init_update_check();
+  init_dashboard_messaging_runner();
 });
 
 // src/core/model-setup.ts
@@ -152197,10 +153315,10 @@ var init_model_setup = __esm(() => {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes26 } from "node:crypto";
-import { chmodSync as chmodSync38, lstatSync as lstatSync48, mkdirSync as mkdirSync59, readFileSync as readFileSync81 } from "node:fs";
-import { dirname as dirname94, join as join125 } from "node:path";
+import { chmodSync as chmodSync38, lstatSync as lstatSync48, mkdirSync as mkdirSync59, readFileSync as readFileSync82 } from "node:fs";
+import { dirname as dirname94, join as join127 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
-  return join125(dirname94(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
+  return join127(dirname94(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
   return randomBytes26(32).toString("base64url");
@@ -152222,7 +153340,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text3 = readFileSync81(path, "utf8").trim();
+      const text3 = readFileSync82(path, "utf8").trim();
       if (SECRET_PATTERN.test(text3))
         return { secret: text3, source: "file", path };
       existing = "invalid";
@@ -152832,18 +153950,18 @@ var init_analyst_openai = __esm(() => {
 import {
   existsSync as existsSync95,
   mkdirSync as mkdirSync60,
-  readFileSync as readFileSync82,
+  readFileSync as readFileSync83,
   renameSync as renameSync20,
   rmSync as rmSync38,
   writeFileSync as writeFileSync23
 } from "node:fs";
 import { randomUUID as randomUUID32 } from "node:crypto";
 import { homedir as homedir41 } from "node:os";
-import { dirname as dirname95, isAbsolute as isAbsolute37, join as join126 } from "node:path";
+import { dirname as dirname95, isAbsolute as isAbsolute37, join as join128 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir41(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute37(configuredRoot) ? configuredRoot : join126(homeDir, ".cache");
-  return join126(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute37(configuredRoot) ? configuredRoot : join128(homeDir, ".cache");
+  return join128(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -153017,7 +154135,7 @@ function readCatalogCache(path, type) {
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync82(path, "utf8"));
+    payload2 = JSON.parse(readFileSync83(path, "utf8"));
   } catch {
     return;
   }
@@ -153542,2768 +154660,33 @@ var init_openai_compatible_client = __esm(() => {
   init_vlm();
 });
 
-// src/workers/dashboard/models-on-computer.ts
-function routeMembers(config2) {
-  const route = config2.routes?.secure_local;
-  if (route?.pool) {
-    const members = route.pool.members ?? [];
-    if (route.pool.order)
-      return { ids: route.pool.order.filter((id) => members.includes(id)), ordered: true };
-    return { ids: [...members], ordered: members.length <= 1 };
+// src/core/computer-identity.ts
+import { spawnSync as spawnSync20 } from "node:child_process";
+import { hostname, userInfo as userInfo3 } from "node:os";
+function dashboardComputerIdentity() {
+  if (fixedIdentity !== undefined)
+    return fixedIdentity;
+  let name = hostname();
+  if (process.platform === "darwin") {
+    const result = spawnSync20("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
+    if (result.status === 0 && result.stdout.trim())
+      name = result.stdout.trim();
   }
-  return { ids: [...route?.analyst ?? []], ordered: true };
-}
-function hostOf(baseUrl) {
-  if (!baseUrl)
-    return;
+  let account = "unknown account";
   try {
-    const host = new URL(baseUrl).hostname;
-    return host && !LOOPBACK_HOSTS2.has(host) ? host : undefined;
-  } catch {
-    return;
-  }
-}
-function memberName(config2, id, builtIn) {
-  const profile = config2.modelProfiles?.[id];
-  if (!profile)
-    return;
-  const model = "model" in profile && typeof profile.model === "string" && profile.model.trim() ? profile.model.trim() : undefined;
-  switch (profile.provider) {
-    case "local-openai-compatible": {
-      if (builtIn.answers)
-        return `${builtIn.name ?? "the built-in model"} on this computer`;
-      const host = hostOf(profile.baseUrl);
-      return `${model ?? "your model server"} on ${host ?? "this computer"}`;
-    }
-    case "venice":
-      return "Venice";
-    case "openclaw-infer":
-      return model ?? "your OpenClaw agent's model";
-    default:
-      return model ?? String(profile.provider);
-  }
-}
-function dashboardModelsOnComputer(input) {
-  const rows = input.readiness ?? [];
-  const privateRow = rows.find((row) => row.name === "Private answers");
-  const transcriptionRow = rows.find((row) => row.name === "Transcription");
-  const config2 = input.config;
-  let privateAnswers = { unknown: true };
-  let usesLocal = false;
-  if (config2) {
-    if (config2.routes?.secure_local?.mode === "disabled")
-      privateAnswers = { off: true };
-    else {
-      const { ids, ordered } = routeMembers(config2);
-      usesLocal = ids.some((id) => config2.modelProfiles?.[id]?.provider === "local-openai-compatible");
-      const names = ids.map((id) => memberName(config2, id, { answers: input.builtInAnswers, ...privateRow?.model ? { name: privateRow.model } : {} })).filter((name) => !!name);
-      if (!ordered && names.length > 1)
-        privateAnswers = { any: names };
-      else if (names.length)
-        privateAnswers = { first: names[0], ...names[1] ? { fallback: names[1] } : {} };
-    }
-  }
-  const out = { privateAnswers };
-  if (privateRow) {
-    const state = privateRow.state === "unavailable" ? `not available: ${privateRow.cause ?? privateRow.detail}` : BUILT_IN_STATES[privateRow.state] ?? privateRow.state;
-    out.builtIn = { name: privateRow.model ?? "Built-in private model", state, used: usesLocal && input.builtInAnswers };
-  }
-  if (transcriptionRow) {
-    const line2 = transcriptionRow.state === "unavailable" ? transcriptionRow.cause ? `off: ${transcriptionRow.cause}` : transcriptionRow.detail : TRANSCRIPTION_STATES[transcriptionRow.state] ?? transcriptionRow.state;
-    out.transcription = { line: line2 };
-  }
-  return out;
-}
-var LOOPBACK_HOSTS2, BUILT_IN_STATES, TRANSCRIPTION_STATES;
-var init_models_on_computer = __esm(() => {
-  LOOPBACK_HOSTS2 = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
-  BUILT_IN_STATES = {
-    ready: "downloaded",
-    loading: "downloaded",
-    not_started: "not downloaded",
-    downloading: "downloading",
-    verifying: "checking the download",
-    failed: "download failed"
-  };
-  TRANSCRIPTION_STATES = {
-    ready: "ready",
-    loading: "starting",
-    not_needed: "not downloaded: it downloads when you add audio",
-    not_downloaded: "not downloaded",
-    interrupted: "download interrupted",
-    downloading: "downloading",
-    verifying: "checking the download",
-    failed: "download failed",
-    load_failed: "couldn't start"
-  };
-});
-
-// src/workers/settings-proposal-holder.ts
-import { randomUUID as randomUUID33 } from "node:crypto";
-function modeLabel(id) {
-  return PRIVACY_PRESET_LABELS[id] ?? id;
-}
-function judgeLabel(choice, cap) {
-  if (choice === "local")
-    return "Local (free)";
-  return cap === null ? "Venice, no spending limit" : `Venice, up to $${cap}`;
-}
-function createSettingsProposalHolder(targets, now = () => new Date) {
-  let held;
-  let lastApplied;
-  async function rowsFor(input) {
-    const rows = [];
-    if (input.computer_use && Object.keys(input).length > 1) {
-      throw new SettingsProposalError("How this computer runs goes in two proposals: propose computer_use on its own first, and once it is applied, propose the other changes.");
-    }
-    if (input.private_answer_mode) {
-      if (!targets.saveAnswerMode)
-        throw new SettingsProposalError("This Olympus cannot change the Private-answer mode from the dashboard.");
-      if (targets.computerSetup?.().computer_use_pending === true) {
-        throw new SettingsProposalError("Choose how this computer runs first: propose computer_use on its own, and once it is applied, propose private_answer_mode.");
-      }
-      rows.push({ key: "private_answer_mode", label: "Private-answer mode", current: targets.answerMode().label, proposed: modeLabel(input.private_answer_mode) });
-    }
-    if (input.computer_use) {
-      const setup = targets.computerSetup?.();
-      if (!setup?.engine_server_mode || !targets.saveComputerUse)
-        throw new SettingsProposalError("computer_use can be set only in the standalone Olympus app on a Mac.");
-      if (setup.computer_use_pending !== true) {
-        throw new SettingsProposalError("How this Mac runs was already chosen. Change it with the Engine switch on the dashboard Settings page.");
-      }
-      rows.push({ key: "computer_use", label: "How this computer runs", current: "Not chosen yet", proposed: input.computer_use === "server" ? "Always-on server" : "Everyday computer" });
-    }
-    if (input.privacy_judge && (input.models || input.private_answer_mode)) {
-      throw new SettingsProposalError("The privacy judge goes in two proposals: propose the other changes first, and once they are applied, propose privacy_judge on its own.");
-    }
-    if (input.privacy_judge) {
-      const judge3 = targets.judge?.();
-      if (!judge3 || !targets.saveJudge)
-        throw new SettingsProposalError("This Olympus has no privacy judge setting.");
-      if (input.privacy_judge.choice === "venice" && !judge3.cloudAvailable) {
-        throw new SettingsProposalError("Venice judging needs a Venice key and an allowed Venice model first. Connect Venice, then propose again.");
-      }
-      rows.push({
-        key: "privacy_judge",
-        label: "Privacy judge",
-        current: judgeLabel(judge3.choice, judge3.uncapped ? null : judge3.capDollars),
-        proposed: judgeLabel(input.privacy_judge.choice, input.privacy_judge.spending_limit_dollars)
-      });
-    }
-    if (input.models) {
-      const choices = targets.modelChoices ? await targets.modelChoices() : undefined;
-      if (!choices || !targets.saveModel)
-        throw new SettingsProposalError("This Olympus has no model pickers.");
-      for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
-        const value2 = input.models[provider];
-        if (value2 === undefined)
-          continue;
-        const list = choices[provider];
-        if (!list)
-          throw new SettingsProposalError(`There is no ${MODEL_LABELS[provider]} picker on this computer yet. Set it up first, then propose again.`);
-        const option = list.options.find((candidate) => candidate.value === value2);
-        if (!option)
-          throw new SettingsProposalError(`models.${provider} must be one of: ${list.options.map((candidate) => candidate.value).join(", ")}.`);
-        const current2 = list.options.find((candidate) => candidate.value === list.current);
-        rows.push({ key: `models.${provider}`, label: MODEL_LABELS[provider], current: current2?.label ?? list.current, proposed: option.label });
-      }
-    }
-    return rows;
-  }
-  return {
-    async propose(input, from) {
-      const proposal = {
-        id: randomUUID33(),
-        created_at: now().toISOString(),
-        ...from ? { from } : {},
-        input,
-        rows: await rowsFor(input)
-      };
-      held = proposal;
-      lastApplied = undefined;
-      return proposal;
-    },
-    current() {
-      return held;
-    },
-    lastApplied() {
-      if (!lastApplied || now().getTime() - lastApplied.at > 15 * 60000)
-        return;
-      return lastApplied.result;
-    },
-    discard(id) {
-      if (!held || held.id !== id)
-        return false;
-      held = undefined;
-      return true;
-    },
-    async apply(id) {
-      if (!held || held.id !== id)
-        return;
-      const proposal = held;
-      held = undefined;
-      const input = proposal.input;
-      const results = [];
-      const record6 = async (key2, run2) => {
-        const row = proposal.rows.find((candidate) => candidate.key === key2);
-        try {
-          const saved = await run2();
-          results.push({ ...row, applied: saved.ok, ...saved.message ? { message: saved.message } : {} });
-        } catch (error2) {
-          results.push({ ...row, applied: false, message: error2 instanceof Error ? error2.message : "This setting could not be saved." });
-        }
-      };
-      const writes = async () => {
-        for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
-          const value2 = input.models?.[provider];
-          if (value2 !== undefined)
-            await record6(`models.${provider}`, () => targets.saveModel(provider, value2));
-        }
-        if (input.privacy_judge) {
-          const judge3 = input.privacy_judge;
-          await record6("privacy_judge", () => targets.saveJudge(judge3.choice, judge3.spending_limit_dollars));
-        }
-        if (input.computer_use)
-          await record6("computer_use", () => targets.saveComputerUse(input.computer_use));
-        if (input.private_answer_mode)
-          await record6("private_answer_mode", () => targets.saveAnswerMode(input.private_answer_mode));
-      };
-      await (targets.deferReloads ? targets.deferReloads(writes) : writes());
-      const result = { ok: results.every((row) => row.applied), rows: results };
-      lastApplied = { at: now().getTime(), result };
-      return result;
-    }
-  };
-}
-var MODEL_LABELS;
-var init_settings_proposal_holder = __esm(() => {
-  init_privacy_language();
-  init_settings_proposal();
-  MODEL_LABELS = { local: "Local model", venice: "Venice model", zkapi: "zkAPI model" };
-});
-
-// src/workers/email-source/dashboard-messaging.ts
-function createDashboardMessagingPairing(options) {
-  const states = new Map;
-  const attempts = new Map;
-  const record6 = (source, outcome) => {
-    const list = attempts.get(source) ?? [];
-    list.push({ at: (options.now?.() ?? new Date).toISOString(), outcome });
-    attempts.set(source, list.slice(-ATTEMPTS_KEPT));
-  };
-  const status = (source) => {
-    const item = states.get(source);
-    return item ? {
-      ok: true,
-      state: item.state,
-      ...item.field ? { field: item.field } : {},
-      ...item.qr ? { qr: item.qr } : {},
-      ...item.linked && item.state !== "failed" && item.state !== "cancelled" ? { linked: true } : {},
-      ...item.state === "failed" && item.reason ? { reason: item.reason } : {},
-      ...(item.state === "failed" || item.state === "cancelled") && item.unlinked ? { unlinked: item.unlinked } : {},
-      ...item.state === "cancelled" && item.task ? { cleaning: true } : {},
-      ...item.chats ? { chats: item.chats } : {},
-      ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [] } : {},
-      ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {},
-      ...item.state === "failed" ? { details: pairingDetails({
-        source,
-        state: item.state,
-        reason: item.reason,
-        linked: item.linked === true,
-        unlinked: item.unlinked,
-        registrationMayBeSaved: item.registrationMayBeSaved === true,
-        attempts: attempts.get(source) ?? [],
-        identity: options.identity
-      }) } : {}
-    } : { ok: true, state: "idle" };
-  };
-  return {
-    status,
-    busy(source) {
-      return states.get(source)?.task !== undefined;
-    },
-    start(source) {
-      const prior = states.get(source);
-      if (prior?.task)
-        throw new Error("Pairing is already running.");
-      const item = { state: "starting", controller: new AbortController };
-      states.set(source, item);
-      item.task = Promise.resolve().then(async () => {
-        try {
-          const result = await options.pair(source, {
-            signal: item.controller.signal,
-            prompt(field, reply) {
-              if (item.controller.signal.aborted || item.reply)
-                throw new Error("Pairing prompt is unavailable.");
-              item.field = field;
-              item.reply = reply;
-              item.state = "waiting";
-            },
-            qr(value2) {
-              if (!item.controller.signal.aborted) {
-                item.qr = value2;
-                item.state = "waiting";
-              }
-            },
-            linked() {
-              if (!item.controller.signal.aborted) {
-                delete item.qr;
-                item.linked = true;
-                item.state = "starting";
-              }
-            },
-            choose(chats) {
-              if (item.controller.signal.aborted)
-                return Promise.reject(new Error("Pairing was cancelled."));
-              delete item.reply;
-              delete item.field;
-              delete item.qr;
-              item.chats = chats;
-              item.state = "scope_selection_required";
-              return new Promise((resolve26, reject) => {
-                const abort = () => {
-                  delete item.selection;
-                  reject(new Error("Pairing was cancelled."));
-                };
-                item.controller.signal.addEventListener("abort", abort, { once: true });
-                item.selection = (selection) => {
-                  item.controller.signal.removeEventListener("abort", abort);
-                  delete item.selection;
-                  item.state = "starting";
-                  resolve26(selection);
-                };
-              });
-            },
-            commit() {
-              if (item.controller.signal.aborted)
-                throw new Error("Pairing was cancelled.");
-              delete item.reply;
-              delete item.field;
-              delete item.qr;
-              item.state = "committing";
-            }
-          });
-          if (item.controller.signal.aborted)
-            return;
-          item.state = "committing";
-          await options.publish(source, result, item.controller.signal);
-          if (item.controller.signal.aborted)
-            return;
-          item.chats = result.chats;
-          item.state = "paired";
-        } catch (error2) {
-          const unlinked = error2 && typeof error2 === "object" ? error2.unlinked : undefined;
-          if (unlinked === "removed" || unlinked === "offline" || unlinked === "failed")
-            item.unlinked = unlinked;
-          if (!item.controller.signal.aborted) {
-            if (item.state === "committing")
-              item.registrationMayBeSaved = true;
-            item.reason = pairingFailureReason(error2);
-            item.state = "failed";
-            console.warn(`[messaging] ${source} pairing failed: ${item.reason}`);
-          }
-        } finally {
-          if (item.state === "paired" || item.state === "cancelled")
-            record6(source, item.state);
-          else if (item.state === "failed")
-            record6(source, item.reason ?? "unexpected");
-          delete item.reply;
-          delete item.field;
-          delete item.qr;
-          delete item.task;
-        }
-      });
-      return status(source);
-    },
-    select(source, selection) {
-      const item = states.get(source);
-      if (!item || item.state !== "scope_selection_required" || !item.selection)
-        throw new Error("No pending chat choice.");
-      if (selection.wholeAccount ? selection.chatScopes.length > 0 : selection.chatScopes.length === 0)
-        throw new Error("Choose all chats or at least one chat.");
-      if (selection.chatScopes.some((scope) => !item.chats?.some((chat) => chat.chatScope === scope)))
-        throw new Error("Chat list changed.");
-      item.selection(selection);
-      return status(source);
-    },
-    respond(source, field, value2) {
-      const item = states.get(source);
-      if (!item || item.state !== "waiting" || item.field !== field || !item.reply || !value2 || value2.length > 4096 || /[\r\n\0]/.test(value2)) {
-        throw new Error("No matching pairing prompt.");
-      }
-      const reply = item.reply;
-      delete item.reply;
-      delete item.field;
-      item.state = "starting";
-      reply(value2);
-      return status(source);
-    },
-    cancel(source) {
-      const item = states.get(source);
-      if (item && (item.state === "starting" || item.state === "waiting" || item.state === "scope_selection_required")) {
-        item.controller.abort();
-        delete item.reply;
-        delete item.field;
-        delete item.qr;
-        item.state = "cancelled";
-      }
-      return status(source);
-    },
-    async cancelAndWait(source) {
-      this.cancel(source);
-      await states.get(source)?.task;
-    },
-    close() {
-      for (const source of states.keys())
-        this.cancel(source);
-    }
-  };
-}
-function pairingDetails(input) {
-  const code = (value2) => value2 && /^[a-z0-9_]{1,64}$/.test(value2) ? value2 : "unexpected";
-  const lines = [
-    `Olympus ${input.identity?.version ?? "unknown"}`,
-    `OS: ${input.identity?.os ?? "unknown"}`,
-    `Source: ${input.source}`,
-    `State: ${input.state}`,
-    `Failure: ${code(input.reason)}`,
-    ...input.source === "whatsapp" ? [`Phone accepted the QR: ${input.linked ? "yes" : "no"}`] : [],
-    ...input.unlinked ? [`Phone entry: ${input.unlinked}`] : [],
-    ...input.registrationMayBeSaved ? ["Connection may be saved: yes"] : [],
-    "Recent attempts:",
-    ...input.attempts.map((attempt) => `  ${attempt.at} ${code(attempt.outcome)}`)
-  ];
-  return lines.join(`
-`);
-}
-function pairingFailureReason(error2) {
-  const code = error2 && typeof error2 === "object" ? error2.code : undefined;
-  return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unexpected";
-}
-function codedError(message2, code) {
-  const error2 = new Error(message2);
-  if (code && /^[a-z0-9_]{1,64}$/.test(code))
-    error2.code = code;
-  return error2;
-}
-var ATTEMPTS_KEPT = 5;
-
-// src/workers/email-source/dashboard-messaging-runner.ts
-import { spawn as spawn12 } from "node:child_process";
-async function runDashboardPairingCommand(request, hooks) {
-  const child2 = spawn12(request.executable, request.args, {
-    env: { ...request.env, OLYMPUS_TELEGRAM_LIST_CHATS: "", OLYMPUS_TELEGRAM_DASHBOARD_PROMPTS: "1" },
-    stdio: ["pipe", "pipe", "pipe", "pipe", ...request.inheritFds ?? []]
-  });
-  const stdin = child2.stdin;
-  const stdout = child2.stdout;
-  const stderr = child2.stderr;
-  if (!stdin || !stdout || !stderr || !child2.stdio[3])
-    throw new Error("Pairing pipes unavailable.");
-  let escalation;
-  const cancel = () => {
-    child2.kill("SIGTERM");
-    escalation ??= setTimeout(() => child2.kill("SIGKILL"), 5000);
-  };
-  const timer = setTimeout(cancel, 10 * 60000);
-  if (hooks.signal.aborted)
-    cancel();
-  else
-    hooks.signal.addEventListener("abort", cancel, { once: true });
-  const lines = [];
-  stdin.on("error", () => {});
-  const exit = new Promise((resolve26, reject) => {
-    child2.once("error", reject);
-    child2.once("close", (code) => resolve26(code ?? 1));
-  });
-  const readLines = async () => {
-    let buffer = "";
-    for await (const chunk of stdout) {
-      buffer += Buffer.from(chunk).toString("utf8");
-      if (buffer.length > 4 * 1024 * 1024)
-        throw new Error("Pairing output exceeded its bound.");
-      let newline;
-      while ((newline = buffer.indexOf(`
-`)) >= 0) {
-        const line2 = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        let event = {};
-        try {
-          event = JSON.parse(line2);
-        } catch {}
-        if (event.event === "prompt") {
-          if (typeof event.field !== "string" || !FIELDS.has(event.field))
-            throw new Error("Invalid pairing prompt.");
-          const field = event.field;
-          hooks.prompt(field, (value2) => {
-            stdin.write(`${JSON.stringify({ field, value: value2 })}
-`);
-          });
-        } else {
-          lines.push(line2);
-          await request.onStdoutLine?.(line2);
-        }
-      }
-    }
-    if (buffer.trim())
-      throw new Error("Incomplete pairing output.");
-  };
-  const readBounded3 = async (stream, limit) => {
-    const chunks2 = [];
-    let size = 0;
-    for await (const chunk of stream) {
-      const bytes = Buffer.from(chunk);
-      size += bytes.length;
-      if (size > limit)
-        throw new Error("Pairing output exceeded its bound.");
-      chunks2.push(bytes);
-    }
-    return Buffer.concat(chunks2).toString("utf8").trim();
-  };
-  try {
-    const [exitCode, stderrText, privatePayload] = await Promise.all([
-      exit,
-      readBounded3(stderr, 16 * 1024),
-      readBounded3(child2.stdio[3], 4096),
-      readLines()
-    ]);
-    return { exitCode, stdoutLines: lines, stderr: stderrText, ...privatePayload ? { privatePayload } : {} };
-  } catch (error2) {
-    cancel();
-    await exit.catch(() => 1);
-    throw error2;
-  } finally {
-    clearTimeout(timer);
-    if (escalation)
-      clearTimeout(escalation);
-    hooks.signal.removeEventListener("abort", cancel);
-    stdin.destroy();
-  }
-}
-var FIELDS;
-var init_dashboard_messaging_runner = __esm(() => {
-  FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
-});
-
-// src/workers/email-source/dashboard-messaging-service.ts
-import { spawn as spawn13 } from "node:child_process";
-import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readFileSync as readFileSync83 } from "node:fs";
-import { arch, platform as platform2, release } from "node:os";
-import { basename as basename19, join as join127 } from "node:path";
-function sourceOf(value2) {
-  if (value2 !== "telegram" && value2 !== "whatsapp")
-    throw new Error("Invalid messaging source.");
-  return value2;
-}
-function validScope(source, scope) {
-  return source === "telegram" ? /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) : /^whatsapp\.personal:chat:[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(scope);
-}
-function parseChats(source, listing) {
-  if (!listing || typeof listing !== "object" || !Array.isArray(listing.dialogs))
-    throw codedError("Invalid chat listing.", "chat_list_unreadable");
-  const chats = [];
-  for (const raw of listing.dialogs) {
-    if (!raw || typeof raw !== "object")
-      continue;
-    const row = raw;
-    if (typeof row.chat_scope !== "string" || typeof row.title !== "string" || typeof row.kind !== "string")
-      continue;
-    if (validScope(source, row.chat_scope))
-      chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind });
-  }
-  return chats;
-}
-function retainApprovedCaptureScope(source, env) {
-  const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
-  const alternate = source === "telegram" ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
-  const raw = env[key2]?.trim() || alternate?.trim();
-  if (!raw || alternate && alternate.trim() !== raw)
-    throw new Error("Invalid capture grant scope.");
-  if (raw !== "*") {
-    const values = raw.split(",").map((value2) => value2.trim());
-    if (!values.length || values.some((value2) => !validScope(source, source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2)))
-      throw new Error("Invalid capture grant scope.");
-  }
-  return source === "telegram" ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw } : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
-}
-function readQr(path) {
-  if (basename19(path) !== "qr.png")
-    throw new Error("Invalid QR artifact.");
-  const fd2 = openSync31(path, constants17.O_RDONLY | (constants17.O_NOFOLLOW ?? 0));
-  try {
-    const stat6 = fstatSync8(fd2);
-    if (!stat6.isFile() || stat6.size > 1024 * 1024 || (stat6.mode & 63) !== 0 || typeof process.getuid === "function" && stat6.uid !== process.getuid())
-      throw new Error("Invalid QR artifact.");
-    const bytes = readFileSync83(fd2);
-    if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
-      throw new Error("Invalid QR artifact.");
-    return `data:image/png;base64,${bytes.toString("base64")}`;
-  } finally {
-    closeSync32(fd2);
-  }
-}
-async function unlinkHelper(command2, env) {
-  const child2 = spawn13(command2, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
-  let errorTail = "";
-  child2.stderr?.on("data", (chunk) => {
-    errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
-  });
-  const timeout = setTimeout(() => child2.kill("SIGKILL"), 60000);
-  try {
-    const code = await new Promise((resolve26, reject) => {
-      child2.once("error", reject);
-      child2.once("close", (exit) => resolve26(exit ?? 1));
-    });
-    if (code === 0)
-      return "removed";
-    return listingErrorCode(errorTail) === "unlink_offline" ? "offline" : "failed";
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-function listingErrorCode(stderr) {
-  for (const line2 of stderr.split(/\r?\n/).reverse()) {
-    const match = /olympus-whatsapp-bridge:\s*([a-z0-9_]{1,48})\s*$/.exec(line2.trim());
-    if (match)
-      return match[1];
-  }
-  return;
-}
-async function listHelper(command2, args, env, input) {
-  const child2 = spawn13(command2, args, { env, stdio: ["pipe", "pipe", "pipe"] });
-  const stdin = child2.stdin;
-  const stdout = child2.stdout;
-  const stderr = child2.stderr;
-  if (!stdin || !stdout || !stderr)
-    throw new Error("Chat listing pipes unavailable.");
-  stdin.on("error", () => {});
-  let errorTail = "";
-  stderr.on("data", (chunk) => {
-    errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
-  });
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    child2.kill("SIGKILL");
-  }, 60000);
-  const exit = new Promise((resolve26, reject) => {
-    child2.once("error", reject);
-    child2.once("close", (code) => resolve26(code ?? 1));
-  });
-  try {
-    stdin.end(input);
-    input = undefined;
-    let output = "";
-    for await (const chunk of stdout) {
-      output += Buffer.from(chunk).toString("utf8");
-      if (output.length > 16 * 1024 * 1024)
-        throw new Error("Chat listing is too large.");
-    }
-    if (await exit !== 0)
-      throw codedError("Chat listing failed.", timedOut ? "chat_list_timeout" : `chat_list_${listingErrorCode(errorTail) ?? "failed"}`);
-    try {
-      return JSON.parse(output);
-    } catch {
-      throw codedError("Chat listing was unreadable.", "chat_list_unreadable");
-    }
-  } catch (error2) {
-    child2.kill("SIGKILL");
-    await exit.catch(() => 1);
-    throw error2;
-  } finally {
-    clearTimeout(timeout);
-    stdin.destroy();
-  }
-}
-function createDashboardMessagingService(options) {
-  const packageRoot = olympusPackageRoot();
-  const available = new Map;
-  const selecting = new Set;
-  const held = new Map;
-  const initialGrants = new Map;
-  const grantSnapshot = (source) => {
-    const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
-    if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source)
-      throw new Error("Invalid capture grant.");
-    if (read.kind === "valid")
-      retainApprovedCaptureScope(source, read.grant.producer.env);
-    return JSON.stringify(read.kind === "valid" ? read.grant : null);
-  };
-  const grantFor = (source) => {
-    const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
-    const read = readCaptureGrantFile(path);
-    if (read.kind !== "valid" || read.grant.source !== source || read.grant.pairingPending)
-      throw new Error("No valid capture grant.");
-    return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
-  };
-  const manager = createDashboardMessagingPairing({
-    identity: { version: runningOlympusVersion(), os: `${platform2() === "darwin" ? "macOS" : platform2()} (kernel ${release()}, ${arch()})` },
-    pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
-      let created;
-      try {
-        const result = await (options.pairSource ?? pairMessagingSource)({
-          source,
-          packageRoot,
-          secretStore: options.secretStore,
-          ...options.registryPath ? { registryPath: options.registryPath } : {},
-          signal: hooks.signal,
-          onCommitStart: () => {
-            created = undefined;
-            hooks.commit();
-          },
-          whatsappQrMode: "artifact",
-          requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
-            const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
-            if (grantSnapshot(source) !== initialGrants.get(source))
-              throw new Error("Capture grant changed during pairing.");
-            let selection;
-            if (source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(accountProof) && prior.kind === "valid" && prior.grant.accountProof === accountProof) {
-              const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-              const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
-              selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",") };
-            } else {
-              let choices = chats;
-              if (source === "whatsapp") {
-                const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
-                  ...process.env,
-                  OLYMPUS_WHATSAPP_STATE_DIR: sessionPath
-                });
-                choices = parseChats(source, listing);
-              }
-              selection = await hooks.choose(choices);
-            }
-            if (grantSnapshot(source) !== initialGrants.get(source))
-              throw new Error("Capture grant changed during pairing.");
-            return source === "telegram" ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes } : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map((scope) => scope.slice("whatsapp.personal:chat:".length)) };
-          },
-          runCommand: (request) => runDashboardPairingCommand(request, hooks),
-          onWhatsAppQr: (path) => hooks.qr(readQr(path)),
-          onWhatsAppLinked: (link) => {
-            if (link.created)
-              created = link.sessionPath;
-            hooks.linked();
-          }
-        });
-        if (!result.registered)
-          throw new Error("Pairing did not finish.");
-        return result;
-      } catch (error2) {
-        if (source === "whatsapp" && created !== undefined) {
-          const unlinked = await (options.unlinkCommand ?? unlinkHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), {
-            ...process.env,
-            OLYMPUS_WHATSAPP_STATE_DIR: created
-          }).catch(() => "failed");
-          console.warn(`[messaging] whatsapp unlink after a failed pairing: ${unlinked}`);
-          const coded = error2 && typeof error2 === "object" ? error2 : codedError("Pairing failed.", undefined);
-          coded.unlinked = unlinked;
-          throw coded;
-        }
-        throw error2;
-      }
-    }),
-    publish: (source, result, signal) => options.withGrantMutation(async () => {
-      if (signal.aborted)
-        return;
-      const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
-      const prior = readCaptureGrantFile(path);
-      if (grantSnapshot(source) !== initialGrants.get(source))
-        throw new Error("Capture grant changed during pairing.");
-      if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
-        throw new Error("Invalid capture grant.");
-      if (signal.aborted)
-        return;
-      saveMessagingCaptureGrant({ path, pairing: result });
-      available.delete(source);
-    })
-  });
-  const list = async (source) => {
-    const current2 = grantFor(source);
-    const listing = await options.withMessagingCapturePaused(source, async () => {
-      if (source === "telegram") {
-        const apiId = await options.secretStore.get(TELEGRAM_API_ID_SECRET_KEY);
-        const apiHash = await options.secretStore.get(TELEGRAM_API_HASH_SECRET_KEY);
-        const python = telegramPythonExecutable();
-        if (!python || !apiId || !apiHash || !/^\d+$/.test(apiId))
-          throw new Error("Telegram credentials unavailable.");
-        const session = current2.grant.sessionPath ?? telegramSessionBasePath({ env: process.env });
-        return withFileLease(`${session}.pairing`, () => (options.listCommand ?? listHelper)(python, [join127(packageRoot, "scripts", "telegram-pair.py")], {
-          ...process.env,
-          OLYMPUS_TELEGRAM_LIST_CHATS: "1",
-          OLYMPUS_TELEGRAM_SESSION_PATH: session
-        }, `${JSON.stringify({ api_id: Number(apiId), api_hash: apiHash })}
-`), { acquireTimeoutMs: 1 });
-      }
-      return (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
-        ...process.env,
-        OLYMPUS_WHATSAPP_STATE_DIR: current2.grant.sessionPath ?? whatsappStateDir({ env: process.env })
-      });
-    });
-    const chats = parseChats(source, listing);
-    const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
-    const rawScope = current2.grant.producer.env[key2] ?? "";
-    const selected = rawScope === "*" ? [] : rawScope.split(",").filter(Boolean).map((v) => source === "whatsapp" ? `whatsapp.personal:chat:${v}` : v);
-    if (!rawScope || selected.some((scope) => !validScope(source, scope)))
-      throw new Error("Invalid capture grant scope.");
-    for (const scope of selected)
-      if (!chats.some((chat) => chat.chatScope === scope))
-        chats.push({ chatScope: scope, title: scope, kind: "chat" });
-    available.set(source, { fingerprint: current2.fingerprint, chats });
-    return { ok: true, state: "paired", chats, wholeAccount: rawScope === "*", chatScopes: selected, ...source === "whatsapp" ? { coverage: "contacts_and_joined_groups" } : {} };
-  };
-  const withCaptureFact = (source, status) => {
-    if (status.state !== "failed" && status.state !== "cancelled")
-      return status;
-    try {
-      const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
-      return read.kind === "valid" && read.grant.source === source && read.grant.pairingPending ? { ...status, capturePaused: true } : status;
-    } catch {
-      return status;
-    }
-  };
-  return {
-    async handle(operation, record6) {
-      const source = sourceOf(record6.source);
-      if (operation === "start") {
-        if (selecting.has(source))
-          throw new Error("Finish choosing chats first.");
-        if (held.get(source))
-          throw new Error("Disconnect is running. Pair again after it finishes.");
-        if (manager.busy(source))
-          return manager.status(source);
-        return options.withGrantMutation(async () => {
-          if (manager.busy(source))
-            throw new Error("Pairing is already running.");
-          if (held.get(source))
-            throw new Error("Disconnect is running. Pair again after it finishes.");
-          grantSnapshot(source);
-          const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
-          const prior = readCaptureGrantFile(path);
-          if (prior.kind === "valid") {
-            writePrivateFileAtomicSync(path, `${JSON.stringify({ ...prior.grant, pairingPending: true }, null, 2)}
-`);
-          }
-          initialGrants.set(source, grantSnapshot(source));
-          return manager.start(source);
-        });
-      }
-      if (operation === "status") {
-        const status = manager.status(source);
-        if (status.state !== "idle")
-          return withCaptureFact(source, status);
-        const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
-        return read.kind === "valid" && read.grant.source === source && !read.grant.pairingPending ? { ok: true, state: "paired" } : status;
-      }
-      if (operation === "cancel")
-        return withCaptureFact(source, manager.cancel(source));
-      if (operation === "respond") {
-        if (typeof record6.field !== "string" || typeof record6.value !== "string")
-          throw new Error("Invalid response.");
-        const value2 = record6.value;
-        delete record6.value;
-        return manager.respond(source, record6.field, value2);
-      }
-      if (operation === "scope" && manager.status(source).state === "scope_selection_required") {
-        if (typeof record6.wholeAccount !== "boolean" || !Array.isArray(record6.chatScopes) || !record6.chatScopes.every((value2) => typeof value2 === "string"))
-          throw new Error("Invalid scope.");
-        return manager.select(source, { wholeAccount: record6.wholeAccount, chatScopes: [...new Set(record6.chatScopes)] });
-      }
-      if (manager.busy(source))
-        throw new Error("Finish or cancel pairing first.");
-      if (operation !== "chats" && operation !== "scope")
-        throw new Error("Unknown operation.");
-      if (selecting.has(source))
-        throw new Error("Chat selection is already running.");
-      selecting.add(source);
-      try {
-        if (operation === "chats") {
-          if (readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath)).kind === "missing")
-            return { ok: true, state: "not_paired" };
-          return await list(source);
-        }
-        const whole = record6.wholeAccount === true;
-        if (!Array.isArray(record6.chatScopes) || !record6.chatScopes.every((value2) => typeof value2 === "string"))
-          throw new Error("Invalid scope.");
-        const selected = [...new Set(record6.chatScopes)];
-        if (whole ? selected.length > 0 : selected.length === 0)
-          throw new Error("Choose all chats or at least one chat.");
-        return await options.withGrantMutation(() => options.withMessagingCapturePaused(source, async () => {
-          const current2 = grantFor(source);
-          const snapshot2 = available.get(source);
-          if (!snapshot2 || snapshot2.fingerprint !== current2.fingerprint || selected.some((scope) => !snapshot2.chats.some((chat) => chat.chatScope === scope)))
-            throw new Error("Chat list changed.");
-          const value2 = whole ? "*" : selected.map((scope) => source === "whatsapp" ? scope.slice("whatsapp.personal:chat:".length) : scope).join(",");
-          const env = { ...current2.grant.producer.env };
-          if (source === "telegram") {
-            env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = value2;
-            env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES = value2;
-          } else
-            env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS = value2;
-          writePrivateFileAtomicSync(current2.path, `${JSON.stringify({ ...current2.grant, producer: { ...current2.grant.producer, env } }, null, 2)}
-`);
-          available.delete(source);
-          return { ok: true, state: "paired" };
-        }));
-      } finally {
-        selecting.delete(source);
-      }
-    },
-    cancelAndWait: (source) => manager.cancelAndWait(source),
-    async withPairingHeld(source, operation) {
-      held.set(source, (held.get(source) ?? 0) + 1);
-      try {
-        await manager.cancelAndWait(source);
-        return await operation();
-      } finally {
-        const left = (held.get(source) ?? 1) - 1;
-        if (left > 0)
-          held.set(source, left);
-        else
-          held.delete(source);
-      }
-    },
-    close: () => manager.close()
-  };
-}
-var init_dashboard_messaging_service = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_messaging_capture();
-  init_messaging_capture_grant_file();
-  init_messaging_pairing();
-  init_messaging_runtime();
-  init_package_root();
-  init_pairing_session_paths();
-  init_update_check();
-  init_dashboard_messaging_runner();
-});
-
-// src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes28 } from "node:crypto";
-function hostnameOf(host) {
-  try {
-    return new URL(`https://${host}`).hostname;
-  } catch {
-    return host;
-  }
-}
-function escapeHtml(value2) {
-  return value2.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-referrer") {
-  const formAction = redirectOrigin ? `'self' ${redirectOrigin}` : "'self'";
-  return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Content-Security-Policy": [
-      "default-src 'none'",
-      `style-src 'nonce-${nonce}'`,
-      `form-action ${formAction}`,
-      "frame-ancestors 'none'",
-      "base-uri 'none'"
-    ].join("; "),
-    "X-Frame-Options": "DENY",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": referrerPolicy,
-    "Cache-Control": "no-store",
-    "Cross-Origin-Opener-Policy": "same-origin"
-  };
-}
-function renderConsentPage(input) {
-  const nonce = randomBytes28(16).toString("base64");
-  const name = escapeHtml(input.clientName);
-  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
-  const redirectHostname = hostnameOf(input.redirectHost);
-  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
-  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
-  const error2 = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
-  const body = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<title>Connect to Olympus</title>
-<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
-</head>
-<body>
-<main>
-<h1>Connect ${name} to Olympus?</h1>
-<div class="card">
-<div class="name">${name}</div>
-${provenance}
-<p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
-</div>
-${mismatchWarning}${loopbackWarning}
-<p>${name} will be able to ask Olympus questions under your privacy rules. For Private items it gets only answers written from them, which can repeat what they say, and nothing Olympus recognizes as a Secret. Labels are automatic and can be wrong. You can remove it any time with <code>olympus connections revoke</code>.</p>
-<form method="post" action="/connect/authorize">
-<input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
-${error2}
-<label for="pairing_code">Pairing code</label>
-<input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
-<p class="hint">Get one by running <code>olympus connections pair</code> on the computer running Olympus, or by asking your OpenClaw agent. Codes last 10 minutes and work once.</p>
-${TERMS_ASSENT}
-<div class="actions">
-<button class="approve" type="submit" name="action" value="approve">Approve</button>
-<button class="deny" type="submit" name="action" value="deny" formnovalidate>Deny</button>
-</div>
-</form>
-<p class="small">Olympus runs on your own computer. This page was served by it.</p>
-</main>
-</body>
-</html>`;
-  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
-}
-function renderLoopbackConsentPage(input) {
-  const nonce = randomBytes28(16).toString("base64");
-  const name = escapeHtml(input.clientName);
-  const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
-  const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
-<p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
-` : "";
-  const body = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<title>Connect to Olympus</title>
-<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
-</head>
-<body>
-<main>
-<h1>Connect ${name} to Olympus?</h1>
-<div class="card">
-<div class="name">${name}</div>
-${input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
-<p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
-</div>
-${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
-<p><strong>Connecting links Olympus on this ${computer} to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
-<p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
-${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
-<p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
-<p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="${escapeHtml(input.action ?? "/connect/authorize")}">
-<input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
-${ownerNeeded}${TERMS_ASSENT}
-<div class="actions">
-<button class="approve" type="submit" name="action" value="approve">Connect</button>
-<button class="deny" type="submit" name="action" value="deny">Cancel</button>
-</div>
-</form>
-<p class="small">This page is served by Olympus on this ${computer}, and only here.</p>
-</main>
-</body>
-</html>`;
-  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
-}
-function renderDemoSignInPage(input) {
-  const nonce = randomBytes28(16).toString("base64");
-  const name = escapeHtml(input.clientName);
-  const error2 = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}</p>` : "";
-  const body = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="${DEMO_REFERRER_POLICY}">
-<title>Olympus demo sign-in</title>
-<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
-</head>
-<body>
-<main>
-<h1>Sign in to the Olympus demo</h1>
-<div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
-<div class="card">
-<div class="name">${name}</div>
-<p class="meta">After you sign in, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
-</div>
-<form method="post" action="${escapeHtml(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
-<input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
-${error2}
-<label for="username">Username</label>
-<input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
-<label for="password">Password</label>
-<input class="plain" type="password" id="password" name="password" autocomplete="current-password" maxlength="1024" required>
-<div class="actions">
-<button class="approve" type="submit" name="action" value="approve">Sign in and connect</button>
-<button class="deny" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
-</div>
-</form>
-</main>
-</body>
-</html>`;
-  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin, DEMO_REFERRER_POLICY) };
-}
-function renderConsentErrorPage(message2) {
-  const nonce = randomBytes28(16).toString("base64");
-  const body = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<title>Olympus could not connect this app</title>
-<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
-</head>
-<body>
-<main>
-<h1>Olympus could not connect this app</h1>
-<div class="card"><p>${escapeHtml(message2)}</p></div>
-<p class="small">Close this page and try adding the connector again.</p>
-</main>
-</body>
-</html>`;
-  return { body, headers: consentSecurityHeaders(nonce) };
-}
-function renderConsentSuccessPage(connected2) {
-  const nonce = randomBytes28(16).toString("base64");
-  const heading = connected2 ? "Connected" : "Approved";
-  const message2 = connected2 ? "You already approved this connection. You can close this page and return to the app." : "You approved this connection. Return to the app to finish. If it doesn't show Olympus as connected, start connecting again from the app.";
-  return {
-    body: `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${heading} · Olympus</title>
-<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
-</head>
-<body>
-<main>
-<h1>${heading}</h1>
-<div class="card"><p>${message2}</p></div>
-</main>
-</body>
-</html>`,
-    headers: consentSecurityHeaders(nonce)
-  };
-}
-var CONSENT_PAGE_STYLE = `
-:root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafaf8; --card: #ffffff;
-  --line: #deded8; --accent: #1f4fd1; --warn-bg: #fff4d6; --warn-fg: #6b4a00; --err: #b3261e; }
-@media (prefers-color-scheme: dark) { :root { --fg: #ededea; --muted: #a8a8a2; --bg: #141413; --card: #1d1d1b;
-  --line: #34342f; --accent: #8fb0ff; --warn-bg: #3a2f10; --warn-fg: #f3d68a; --err: #ff8a80; } }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 26rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
-h1 { font-size: 1.35rem; line-height: 1.3; margin: 0 0 1rem; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
-.name { font-weight: 600; font-size: 1.1rem; overflow-wrap: anywhere; }
-.host { font: 600 1.1rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: .35rem; overflow-wrap: anywhere; }
-.host.unverified { color: var(--warn-fg); font-family: system-ui, sans-serif; }
-.meta { color: var(--muted); font-size: .92rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
-.warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 10px; padding: .75rem; font-size: .92rem; margin-bottom: 1rem; }
-.err { color: var(--err); font-weight: 600; margin: 0 0 .75rem; }
-label { display: block; font-weight: 600; margin-bottom: .35rem; }
-input[type=text] { width: 100%; font: 600 1.35rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
-  padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg);
-  text-transform: uppercase; }
-input.plain { width: 100%; font: 1rem/1.3 system-ui, sans-serif; letter-spacing: normal; text-transform: none;
-  padding: .6rem .7rem; margin-bottom: .9rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); }
-.hint { color: var(--muted); font-size: .88rem; margin: .4rem 0 1.25rem; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
-.actions { display: flex; gap: .75rem; }
-button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; border-radius: 10px; cursor: pointer; }
-.approve { background: var(--accent); color: #fff; border: 0; }
-.deny { background: transparent; color: var(--fg); border: 1px solid var(--line); }
-p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
-p.small a { color: var(--accent); }
-`, TERMS_ASSENT = '<p class="small">By connecting, you agree to the Olympus <a href="https://olympusplugin.ai/terms/" target="_blank" rel="noopener noreferrer">Terms of Service</a> and acknowledge the <a href="https://olympusplugin.ai/privacy/" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>', DEMO_REFERRER_POLICY = "same-origin";
-var init_consent_page = () => {};
-
-// src/core/google-pilot-client.ts
-import { createHash as createHash87 } from "node:crypto";
-function isRetiredGooglePilotClientId(clientId) {
-  const trimmed2 = clientId?.trim();
-  if (!trimmed2)
-    return false;
-  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash87("sha256").update(trimmed2).digest("hex"));
-}
-function resolveGooglePilotClientId(packaged, shipped) {
-  const substituted = packaged.trim();
-  if (substituted !== "" && substituted !== GOOGLE_PILOT_CLIENT_ID_SENTINEL)
-    return substituted;
-  const fallback = shipped.trim();
-  return fallback === "" ? undefined : fallback;
-}
-function packagedGooglePilotClientId() {
-  return resolveGooglePilotClientId(PACKAGED_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID);
-}
-var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256, PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
-var init_google_pilot_client = __esm(() => {
-  RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
-    "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
-  ]);
-});
-
-// src/workers/archive-import/staging.ts
-import { randomBytes as randomBytes29 } from "node:crypto";
-import { existsSync as existsSync96, mkdirSync as mkdirSync61, readdirSync as readdirSync28, realpathSync as realpathSync21, rmSync as rmSync39, statSync as statSync40, statfsSync as statfsSync4, utimesSync } from "node:fs";
-import { open as open5 } from "node:fs/promises";
-import { sep as sep20, join as join128, resolve as resolve26 } from "node:path";
-function sanitizeUploadPath(raw) {
-  const bad = () => {
-    throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
-  };
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS)
-    return bad();
-  if (/[\u0000-\u001f\u007f]/.test(raw))
-    return bad();
-  if (raw.startsWith("/") || raw.startsWith("\\") || /^[A-Za-z]:/.test(raw))
-    return bad();
-  const parts = raw.split("/");
-  if (parts.length > MAX_DEPTH)
-    return bad();
-  for (const part of parts) {
-    if (part === "" || part === "." || part === "..")
-      return bad();
-    if (part.split("\\").some((piece) => piece === ".."))
-      return bad();
-    if (Buffer.byteLength(part, "utf8") > MAX_NAME_BYTES)
-      return bad();
-  }
-  return parts;
-}
-function createArchiveUploads(options) {
-  const freeBytes = options.freeBytes ?? ((path) => {
-    const stats = statfsSync4(path);
-    return Number(stats.bavail) * Number(stats.bsize);
-  });
-  const headroomFor = (path) => {
-    if (options.headroomBytes !== undefined)
-      return options.headroomBytes;
-    if (options.freeBytes)
-      return ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES;
-    try {
-      const stats = statfsSync4(path);
-      return Math.min(ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, Number(stats.blocks) * Number(stats.bsize) / 4);
-    } catch {
-      return ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES;
-    }
-  };
-  const pause = options.pause ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
-  const now = options.now ?? (() => Date.now());
-  const sessions = new Map;
-  let rootPath;
-  let closed = false;
-  const stagingRoot = () => {
-    if (rootPath)
-      return rootPath;
-    mkdirSync61(options.root, { recursive: true, mode: 448 });
-    rootPath = realpathSync21.native(options.root);
-    return rootPath;
-  };
-  const contained = (parent, child2) => child2 === parent || child2.startsWith(parent + sep20);
-  const session = (uploadId) => {
-    const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
-    if (!found)
-      throw new ArchiveUploadError("unknown_upload", ARCHIVE_UPLOAD_COPY.unknown_upload, 404);
-    return found;
-  };
-  const drop = (found) => {
-    sessions.delete(found.id);
-    rmSync39(found.dir, { recursive: true, force: true });
-  };
-  const roomFor = async (found, needed, signal) => {
-    let waited = false;
-    try {
-      for (;; ) {
-        if (found.cancelled || closed || signal?.aborted)
-          return false;
-        let free;
-        try {
-          free = freeBytes(found.files);
-        } catch {
-          return true;
-        }
-        if (free - needed >= headroomFor(found.files))
-          return true;
-        waited = true;
-        found.paused = true;
-        found.lastTouch = now();
-        await pause(SPACE_POLL_MS);
-      }
-    } finally {
-      if (waited)
-        found.paused = false;
-    }
-  };
-  const receive = async (uploadId, relPath, body, receiveOptions = {}) => {
-    const found = session(uploadId);
-    if (found.cancelled)
-      throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-    const segments = sanitizeUploadPath(relPath);
-    const key2 = segments.join("/");
-    const offset = receiveOptions.offset ?? 0;
-    const final = receiveOptions.final ?? true;
-    if (!Number.isSafeInteger(offset) || offset < 0)
-      throw new ArchiveUploadError("bad_offset", ARCHIVE_UPLOAD_COPY.bad_offset, 400);
-    const declared = receiveOptions.declaredBytes;
-    if (declared !== undefined && Number.isFinite(declared) && declared > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES)
-      throw new ArchiveUploadError("chunk_too_large", ARCHIVE_UPLOAD_COPY.chunk_too_large, 413);
-    if (offset === 0) {
-      if (found.paths.has(key2))
-        throw new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409);
-      found.paths.add(key2);
-      found.partials.set(key2, { written: 0, busy: true });
-    } else {
-      const partial2 = found.partials.get(key2);
-      if (!partial2 || partial2.busy || partial2.written !== offset)
-        throw new ArchiveUploadError("bad_offset", ARCHIVE_UPLOAD_COPY.bad_offset, 409);
-      partial2.busy = true;
-    }
-    found.active += 1;
-    found.lastTouch = now();
-    let handle;
-    let target = "";
-    let created = false;
-    let written = 0;
-    let reader;
-    const stop = () => {
-      reader?.cancel().catch(() => {
-        return;
-      });
-    };
-    found.abort.add(stop);
-    try {
-      const parent = join128(found.files, ...segments.slice(0, -1));
-      try {
-        mkdirSync61(parent, { recursive: true, mode: 448 });
-        if (!contained(realpathSync21.native(found.files), realpathSync21.native(parent)))
-          throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
-      } catch (error2) {
-        if (error2 instanceof ArchiveUploadError)
-          throw error2;
-        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path, 409);
-      }
-      target = join128(parent, segments[segments.length - 1]);
-      if (!contained(found.files, resolve26(target)))
-        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
-      if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0, receiveOptions.signal)) {
-        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-      }
-      try {
-        handle = await open5(target, offset === 0 ? "wx" : "r+", 384);
-      } catch (error2) {
-        const code = error2?.code;
-        throw code === "EEXIST" ? new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409) : new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 500);
-      }
-      created = offset === 0;
-      if (offset > 0)
-        created = true;
-      if (body) {
-        reader = body.getReader();
-        let sinceCheck = 0;
-        for (;; ) {
-          let step;
-          try {
-            step = await reader.read();
-          } catch {
-            throw new ArchiveUploadError("unreadable", ARCHIVE_UPLOAD_COPY.unreadable, 400);
-          }
-          if (step.done)
-            break;
-          const chunk = step.value;
-          if (found.cancelled)
-            throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-          found.lastTouch = now();
-          if (written + chunk.byteLength > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES)
-            throw new ArchiveUploadError("chunk_too_large", ARCHIVE_UPLOAD_COPY.chunk_too_large, 413);
-          sinceCheck += chunk.byteLength;
-          if (sinceCheck >= SPACE_CHECK_EVERY_BYTES) {
-            sinceCheck = 0;
-            if (!await roomFor(found, chunk.byteLength, receiveOptions.signal))
-              throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-          }
-          try {
-            let done = 0;
-            while (done < chunk.byteLength) {
-              const { bytesWritten } = await handle.write(chunk, done, chunk.byteLength - done, offset + written + done);
-              done += bytesWritten;
-            }
-          } catch {
-            throw new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 507);
-          }
-          written += chunk.byteLength;
-          found.bytes += chunk.byteLength;
-        }
-        if (found.cancelled)
-          throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-      }
-      await handle.close();
-      handle = undefined;
-      if (!final) {
-        found.partials.set(key2, { written: offset + written, busy: false });
-        return { bytes: written };
-      }
-      found.partials.delete(key2);
-      const modified = receiveOptions.modified;
-      if (modified !== undefined && Number.isFinite(modified) && modified > 0 && modified < 4102444800000) {
-        try {
-          const when = new Date(modified);
-          utimesSync(target, when, when);
-        } catch {}
-      }
-      found.fileCount += 1;
-      return { bytes: written };
-    } catch (error2) {
-      if (handle)
-        await handle.close().catch(() => {
-          return;
-        });
-      if (created && existsSync96(target))
-        rmSync39(target, { force: true });
-      found.paths.delete(key2);
-      found.partials.delete(key2);
-      found.bytes -= offset + written;
-      throw found.cancelled ? new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409) : error2;
-    } finally {
-      found.abort.delete(stop);
-      found.active -= 1;
-      found.lastTouch = now();
-    }
-  };
-  return {
-    begin() {
-      if (closed)
-        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-      const root = stagingRoot();
-      const uploadId = randomBytes29(16).toString("hex");
-      const dir = join128(root, uploadId);
-      mkdirSync61(join128(dir, "files"), { recursive: true, mode: 448 });
-      sessions.set(uploadId, {
-        id: uploadId,
-        dir,
-        files: join128(dir, "files"),
-        fileCount: 0,
-        bytes: 0,
-        active: 0,
-        paused: false,
-        cancelled: false,
-        lastTouch: now(),
-        abort: new Set,
-        paths: new Set,
-        partials: new Map
-      });
-      return { uploadId };
-    },
-    receive,
-    status(uploadId) {
-      const found = session(uploadId);
-      return {
-        state: found.paused ? "paused_disk_full" : found.active > 0 ? "receiving" : "idle",
-        files: found.fileCount,
-        bytes: found.bytes
-      };
-    },
-    cancel(uploadId, keep) {
-      if (typeof uploadId !== "string" || !ID2.test(uploadId))
-        return false;
-      const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync96(options.root) ? join128(stagingRoot(), uploadId) : undefined);
-      if (!dir)
-        return false;
-      if (keep?.(dir)) {
-        if (found) {
-          found.cancelled = true;
-          for (const stop of [...found.abort])
-            stop();
-          sessions.delete(uploadId);
-        }
-        return false;
-      }
-      if (found) {
-        found.cancelled = true;
-        for (const stop of [...found.abort])
-          stop();
-        sessions.delete(uploadId);
-      }
-      rmSync39(dir, { recursive: true, force: true });
-      return true;
-    },
-    chosenPath(uploadId) {
-      const found = session(uploadId);
-      if (found.cancelled)
-        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
-      if (found.active > 0 || found.partials.size > 0)
-        throw new ArchiveUploadError("upload_closed", "Files are still arriving. Wait until the upload has finished.", 409);
-      const entries = readdirSync28(found.files);
-      const top = entries.length === 1 ? join128(found.files, entries[0]) : found.files;
-      const canonical2 = realpathSync21.native(top);
-      if (!contained(realpathSync21.native(found.dir), canonical2))
-        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
-      return canonical2;
-    },
-    handOver(uploadId) {
-      const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
-      if (!found)
-        return;
-      found.cancelled = true;
-      for (const stop of [...found.abort])
-        stop();
-      sessions.delete(uploadId);
-    },
-    release(uploadId, keep) {
-      if (typeof uploadId !== "string" || !ID2.test(uploadId))
-        return;
-      const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync96(options.root) ? join128(stagingRoot(), uploadId) : undefined);
-      if (!dir || keep?.(dir))
-        return;
-      sessions.delete(uploadId);
-      rmSync39(dir, { recursive: true, force: true });
-    },
-    sweep(needed) {
-      if (!rootPath && !existsSync96(options.root))
-        return;
-      let root;
-      try {
-        root = stagingRoot();
-      } catch {
-        return;
-      }
-      let names;
-      try {
-        names = readdirSync28(root);
-      } catch {
-        return;
-      }
-      for (const name of names) {
-        if (!ID2.test(name))
-          continue;
-        const dir = join128(root, name);
-        const found = sessions.get(name);
-        if (found && (found.active > 0 || now() - found.lastTouch < ARCHIVE_UPLOAD_IDLE_MS))
-          continue;
-        try {
-          if (!statSync40(dir).isDirectory())
-            continue;
-        } catch {
-          continue;
-        }
-        if (needed(dir)) {
-          sessions.delete(name);
-          continue;
-        }
-        if (found)
-          found.cancelled = true;
-        sessions.delete(name);
-        rmSync39(dir, { recursive: true, force: true });
-      }
-    },
-    close() {
-      closed = true;
-      for (const found of sessions.values()) {
-        found.cancelled = true;
-        for (const stop of [...found.abort])
-          stop();
-      }
-    }
-  };
-}
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY;
-var init_staging = __esm(() => {
-  ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-  ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
-  ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
-  SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
-  ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
-  ID2 = /^[0-9a-f]{32}$/;
-  ArchiveUploadError = class ArchiveUploadError extends Error {
-    code;
-    status;
-    constructor(code, message2, status = 400) {
-      super(message2);
-      this.code = code;
-      this.status = status;
-      this.name = "ArchiveUploadError";
-    }
-  };
-  ARCHIVE_UPLOAD_COPY = {
-    bad_path: "Olympus could not take a file with that name or place in the folder. Choose the folder again.",
-    duplicate_file: "The same file came twice in one upload. Choose the folder again.",
-    bad_offset: "A part of a file arrived out of order. Choose the folder again.",
-    chunk_too_large: "A part of a file was larger than Olympus takes in one piece. Choose the folder again.",
-    unknown_upload: "This upload is no longer here. Choose the folder again.",
-    upload_closed: "This upload was already finished. Choose the folder again.",
-    cancelled: "This upload was cancelled.",
-    unreadable: "Olympus could not read what was sent. Choose the folder again.",
-    write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
-  };
-});
-
-// src/core/messaging-account-move.ts
-import { readFileSync as readFileSync84 } from "node:fs";
-import { homedir as homedir42 } from "node:os";
-import { join as join129, resolve as resolve27 } from "node:path";
-function namesDefaultLegacySession(source, value2, env) {
-  const trimmed2 = value2.trim();
-  if (trimmed2 === "")
-    return false;
-  if (source === "telegram") {
-    const base = trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
-    return resolve27(base) === resolve27(legacyTelegramSessionBase(env));
-  }
-  return resolve27(whatsappStateDirFromValue(trimmed2)) === resolve27(legacyWhatsAppDefaultStateDir(env));
-}
-function movedSessionValue(source, value2, env) {
-  try {
-    const entry = findRegistryAccount(readSourceRegistry(env), source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
-    if (!entry || entry.layout !== "folder" || entry.migration?.state !== "done")
-      return value2;
-  } catch {
-    return value2;
-  }
-  return namesDefaultLegacySession(source, value2, env) ? folderSessionValue(source, env) : value2;
-}
-function folderSessionValue(source, env) {
-  const account = { source_id: source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: "folder" };
-  return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
-}
-function handleRegistryPath(env) {
-  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join129(env.HOME?.trim() || homedir42(), ".config", "olympus", "handles.json");
-}
-async function sessionPathKeys(source, secretStore) {
-  const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
-  try {
-    for (const key2 of await secretStore.list())
-      if (key2.startsWith(`${source}.`) && key2.endsWith(".session_path"))
-        keys.add(key2);
+    account = userInfo3().username;
   } catch {}
-  return [...keys].sort();
+  return `${name} · ${account}`;
 }
-function grantSessionValues(grant, sessionEnv) {
-  const env = grant.producer.env;
-  const fromEnv = env && typeof env[sessionEnv] === "string" ? [env[sessionEnv]] : [];
-  return [...grant.sessionPath !== undefined ? [grant.sessionPath] : [], ...fromEnv];
-}
-async function messagingMoveFacts(env, secretStore) {
-  const facts = {};
-  const unpaired = readUnpairedSources(handleRegistryPath(env));
-  for (const { sourceId, source, sessionEnv } of SOURCES) {
-    facts[sourceId] = await factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv);
-  }
-  return facts;
-}
-async function factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv) {
-  const read = readCaptureGrantFile(captureGrantPathFromEnv(source, env));
-  if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source) {
-    return { unreadable: "Its capture grant cannot be read, so it cannot be told where its session is." };
-  }
-  if (read.kind === "valid") {
-    if (grantSessionValues(read.grant, sessionEnv).some((value2) => !namesDefaultLegacySession(source, value2, env))) {
-      return { pin: "Its capture grant names a session path of its own, so its files stay there." };
-    }
-    const producerEnv = read.grant.producer.env ?? {};
-    const other = legacyOverrideEnvNames(sourceId).find((name) => name !== sessionEnv && typeof producerEnv[name] === "string" && producerEnv[name].trim() !== "");
-    if (other)
-      return { pin: `Its capture grant starts capture with ${other}, so its files stay where that names.` };
-  }
-  try {
-    for (const key2 of await sessionPathKeys(source, secretStore)) {
-      const value2 = (await secretStore.get(key2))?.trim();
-      if (value2 && !namesDefaultLegacySession(source, value2, env)) {
-        return { pin: "It was connected with a session path of its own, so its files stay there." };
-      }
-    }
-  } catch {
-    return { unreadable: "The session path it was connected with cannot be read from the secret store." };
-  }
-  if (unpaired.status === "unreadable")
-    return { unreadable: "The record of its last Unpair cannot be read." };
-  if (unpaired.status === "ok" && unpaired.records.some((record6) => record6.source_id === sourceId && record6.state !== "unpaired")) {
-    return { pin: "An Unpair that did not finish names its files, so they stay where it can find them." };
-  }
-  return {};
-}
-async function repointMovedMessagingAccounts(env, secretStore) {
-  const report = { rewritten: [], errors: [] };
-  let accounts;
-  try {
-    accounts = readSourceRegistry(env).accounts;
-  } catch {
-    return report;
-  }
-  for (const { sourceId, source, sessionEnv } of SOURCES) {
-    const entry = findRegistryAccount({ schema: 2, accounts }, sourceId, DEFAULT_ACCOUNT_SLOT);
-    if (!entry || entry.state !== "active" || entry.layout !== "folder" || entry.migration?.state !== "done")
-      continue;
-    try {
-      if (repointGrant(env, source, sessionEnv))
-        report.rewritten.push(`${sourceId}: capture grant`);
-    } catch (error2) {
-      report.errors.push({ sourceId, message: `capture grant: ${error2?.code ?? "error"}` });
-    }
-    try {
-      for (const key2 of await sessionPathKeys(source, secretStore)) {
-        const value2 = await secretStore.get(key2);
-        if (value2 === undefined || !namesDefaultLegacySession(source, value2, env))
-          continue;
-        await secretStore.set(key2, folderSessionValue(source, env));
-        report.rewritten.push(`${sourceId}: ${key2}`);
-      }
-    } catch (error2) {
-      report.errors.push({ sourceId, message: `secret store: ${error2?.code ?? "error"}` });
-    }
-  }
-  return report;
-}
-function repointGrant(env, source, sessionEnv) {
-  const path = captureGrantPathFromEnv(source, env);
-  let before;
-  try {
-    before = readFileSync84(path, "utf8");
-  } catch {
-    return false;
-  }
-  const read = readCaptureGrantFile(path);
-  if (read.kind !== "valid" || read.grant.source !== source)
-    return false;
-  const values = grantSessionValues(read.grant, sessionEnv);
-  if (values.length === 0 || !values.every((value2) => namesDefaultLegacySession(source, value2, env)))
-    return false;
-  const { sessionPath: _dropped, ...rest } = read.grant;
-  const producerEnv = { ...read.grant.producer.env ?? {} };
-  delete producerEnv[sessionEnv];
-  const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
-  if (readFileSync84(path, "utf8") !== before)
-    return false;
-  writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
-`);
-  return true;
-}
-var SOURCES;
-var init_messaging_account_move = __esm(() => {
-  init_atomic_file();
-  init_messaging_capture_grant_file();
-  init_olympus_layout();
-  init_source_registry();
-  init_unpaired_sources();
-  SOURCES = [
-    { sourceId: TELEGRAM_SOURCE_ID, source: "telegram", sessionEnv: "OLYMPUS_TELEGRAM_SESSION_PATH" },
-    { sourceId: WHATSAPP_SOURCE_ID, source: "whatsapp", sessionEnv: "OLYMPUS_WHATSAPP_STATE_DIR" }
-  ];
-});
+var fixedIdentity;
+var init_computer_identity = () => {};
 
-// src/workers/source-index/answer-latency-log.ts
-import {
-  chmod as chmod2,
-  mkdir as mkdir5,
-  open as open6,
-  rename as rename2,
-  stat as stat6,
-  unlink
-} from "node:fs/promises";
-import { dirname as dirname96 } from "node:path";
-function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
-  const audit = result.audit;
-  const skipped2 = audit.skipped_corpora.map((skip) => ({
-    corpus_id: skip.corpus_id,
-    reason: skip.reason
-  }));
-  const fallback = audit.answer_synthesis.analyst_fallback;
-  const decision = result.opsec.release_decision.decision;
-  return {
-    kind: "source_answer_latency",
-    logged_at: now().toISOString(),
-    latency_ms: audit.latency_ms,
-    ...audit.phase_timings ? { phase_timings: audit.phase_timings } : {},
-    searched_corpora: [...audit.searched_corpora],
-    skipped_corpora: skipped2,
-    lane_timeouts: skipped2.filter((skip) => skip.reason === "lane_timeout").map((skip) => skip.corpus_id),
-    analyst_backend: audit.answer_synthesis.analyst_backend,
-    ...fallback ? {
-      analyst_fallback: {
-        from: fallback.from,
-        to: fallback.to,
-        reason: fallback.reason,
-        ...fallback.elapsed_ms !== undefined ? { elapsed_ms: fallback.elapsed_ms } : {},
-        ...fallback.timeout_ms !== undefined ? { timeout_ms: fallback.timeout_ms } : {}
-      }
-    } : {},
-    release_decision: decision,
-    released: decision === "allow" || decision === "redact",
-    ...caller ? { caller: copyCaller(caller) } : {}
-  };
+// src/workers/dashboard/session-marker.ts
+import { createHash as createHash87 } from "node:crypto";
+function dashboardSessionMarker(csrfToken) {
+  return createHash87("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
 }
-function copyCaller(caller) {
-  return {
-    surface: caller.surface,
-    ...caller.connection_id ? { connection_id: caller.connection_id } : {},
-    ...caller.display_name ? { display_name: caller.display_name } : {}
-  };
-}
-function buildSourceAnswerLatencyTraceRecord(input) {
-  const now = (input.now ?? (() => new Date))();
-  const latencyMs = nonNegativeMs2(now.getTime() - input.trace.receivedAtMs);
-  const attempts = input.trace.retrievalAttempts.map(copyRetrievalAttempt);
-  const evidenceBudget = nonNegativeMs2(input.trace.phaseTimings?.evidence_pack_ms ?? sumAttemptMs(attempts));
-  const retrievalBuckets = fitRetrievalAttemptsToBudget(attempts, evidenceBudget);
-  const rawPhases = {
-    lane_setup_ms: nonNegativeMs2(input.trace.phaseTimings?.lane_setup_ms ?? 0),
-    bulk_gate_ms: nonNegativeMs2(input.trace.phaseTimings?.bulk_gate_ms ?? 0),
-    keyword_retrieval_ms: retrievalBuckets.keyword,
-    hybrid_retrieval_ms: retrievalBuckets.hybrid,
-    selected_retrieval_ms: retrievalBuckets.selected,
-    self_heal_ms: nonNegativeMs2(input.trace.phaseTimings?.self_heal_ms ?? 0),
-    self_heal_rebuild_ms: retrievalBuckets.selfHealRebuild,
-    analyst_ms: nonNegativeMs2(input.trace.phaseTimings?.analyst_ms ?? input.trace.routeResolutionMs + input.trace.analystLegs.reduce((sum2, leg) => sum2 + leg.elapsed_ms, 0)),
-    release_gate_ms: nonNegativeMs2(input.trace.phaseTimings?.release_gate_ms ?? 0),
-    sqlite_backoff_ms: nonNegativeMs2(input.trace.sqliteBackoffMs),
-    record_build_ms: nonNegativeMs2(input.trace.recordBuildMs),
-    append_ms: nonNegativeMs2(input.trace.appendMs)
-  };
-  const fittedPhases = fitPhaseBucketsToWall(rawPhases, latencyMs);
-  const assignedMs = Object.values(fittedPhases).reduce((sum2, value2) => sum2 + value2, 0);
-  const unattributedMs = Math.max(0, latencyMs - assignedMs);
-  return {
-    kind: "source_answer_latency_trace",
-    schema_version: 2,
-    correlation_id: input.trace.correlationId,
-    ...input.compatV1LoggedAt ? { compat_v1_logged_at: input.compatV1LoggedAt } : {},
-    logged_at: now.toISOString(),
-    sample_kind: input.sampleKind ?? "natural",
-    outcome: input.outcome,
-    ...input.error !== undefined ? { error_class: sourceAnswerTraceErrorClass(input.error) } : {},
-    latency_ms: latencyMs,
-    sqlite: {
-      retry_count: Math.max(0, Math.floor(input.trace.sqliteRetryCount)),
-      backoff_ms: nonNegativeMs2(input.trace.sqliteBackoffMs)
-    },
-    query_planner: {
-      elapsed_ms: nonNegativeMs2(input.trace.queryPlannerMs),
-      formulation_count: Math.max(0, Math.floor(input.trace.queryFormulationCount)),
-      awaited_count: Math.max(0, Math.floor(input.trace.queryPlannerAwaitedCount)),
-      ignored_after_strong_literal_count: Math.max(0, Math.floor(input.trace.queryPlannerIgnoredAfterStrongLiteralCount)),
-      failed_count: Math.max(0, Math.floor(input.trace.queryPlannerFailedCount))
-    },
-    retrieval_attempts: attempts,
-    analyst_route: {
-      resolution_ms: nonNegativeMs2(input.trace.routeResolutionMs),
-      ordered_route: input.trace.orderedRoute.map((step) => ({
-        profile_id: step.profile_id,
-        backend: step.backend,
-        model_id: step.model_id
-      }))
-    },
-    analyst_legs: input.trace.analystLegs.map((leg) => ({
-      profile_id: leg.profile_id,
-      backend: leg.backend,
-      model_id: leg.model_id,
-      budget_ms: nonNegativeMs2(leg.budget_ms),
-      elapsed_ms: nonNegativeMs2(leg.elapsed_ms),
-      outcome: leg.outcome,
-      ...leg.error_class ? { error_class: leg.error_class } : {}
-    })),
-    residual_analyst_orphan_count: Math.max(0, Math.floor(input.trace.residualAnalystOrphanCount)),
-    ...input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {},
-    ...input.caller ? { caller: copyCaller(input.caller) } : {},
-    phase_ms: {
-      ...fittedPhases,
-      unattributed_ms: unattributedMs
-    }
-  };
-}
-async function appendSourceAnswerLatencyLine(path, record6, options = {}) {
-  const line2 = `${JSON.stringify(record6)}
-`;
-  const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir5(dirname96(path), { recursive: true, mode: 448 });
-  await makeExistingLedgerPrivate(path);
-  if (Number.isFinite(maxBytes) && maxBytes > 0) {
-    await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line2), maxBytes);
-  }
-  const handle = await open6(path, "a", 384);
-  try {
-    await handle.chmod(384);
-    await handle.appendFile(line2, "utf8");
-  } finally {
-    await handle.close();
-  }
-}
-function createFileSourceAnswerLatencyLog(path, options = {}) {
-  let writeFailureCount = 0;
-  let lastFailureClass;
-  let queue = Promise.resolve();
-  const noteFailure = (error2) => {
-    writeFailureCount += 1;
-    lastFailureClass = sourceAnswerTraceErrorClass(error2);
-    console.error(`[source-answer-latency] write failed error_class=${lastFailureClass}`);
-  };
-  return {
-    record(entry) {
-      queue = queue.then(async () => {
-        try {
-          await appendSourceAnswerLatencyLine(path, entry, options);
-        } catch (error2) {
-          noteFailure(error2);
-        }
-      });
-      return queue;
-    },
-    health() {
-      return {
-        write_failure_count: writeFailureCount,
-        ...lastFailureClass ? { last_failure_class: lastFailureClass } : {}
-      };
-    },
-    recordFailure(error2) {
-      noteFailure(error2);
-    }
-  };
-}
-function resolveSourceAnswerLatencyLogPath(env = process.env) {
-  const raw = env.OLYMPUS_SOURCE_ANSWER_LATENCY_LOG_PATH?.trim();
-  if (raw) {
-    const lowered = raw.toLowerCase();
-    if (lowered === "off" || lowered === "none" || lowered === "disabled" || lowered === "false" || lowered === "0") {
-      return;
-    }
-    return raw;
-  }
-  return sharedDataPath("answer-latency", env);
-}
-async function makeExistingLedgerPrivate(path) {
-  try {
-    await chmod2(path, 384);
-  } catch (error2) {
-    if (!isMissingFileError(error2))
-      throw error2;
-  }
-}
-async function rotateLatencyLedgerIfNeeded(path, incomingBytes, maxBytes) {
-  let currentBytes = 0;
-  try {
-    currentBytes = (await stat6(path)).size;
-  } catch (error2) {
-    if (!isMissingFileError(error2))
-      throw error2;
-    return;
-  }
-  if (currentBytes + incomingBytes <= maxBytes)
-    return;
-  const predecessor = `${path}.1`;
-  try {
-    await unlink(predecessor);
-  } catch (error2) {
-    if (!isMissingFileError(error2))
-      throw error2;
-  }
-  await rename2(path, predecessor);
-  await chmod2(predecessor, 384);
-}
-function isMissingFileError(error2) {
-  return error2?.code === "ENOENT";
-}
-function copyRetrievalAttempt(attempt) {
-  return {
-    kind: attempt.kind,
-    elapsed_ms: nonNegativeMs2(attempt.elapsed_ms),
-    hydration_ms: nonNegativeMs2(attempt.hydration_ms),
-    queries: attempt.queries.map((query) => ({
-      ordinal: Math.max(1, Math.floor(query.ordinal)),
-      elapsed_ms: nonNegativeMs2(query.elapsed_ms),
-      corpus_timings: query.corpus_timings.map((timing) => ({
-        corpus_id: timing.corpus_id,
-        elapsed_ms: nonNegativeMs2(timing.elapsed_ms),
-        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs2(timing.adapter_reported_ms) } : {},
-        outcome: timing.outcome,
-        ...timing.error_class ? { error_class: timing.error_class } : {}
-      }))
-    }))
-  };
-}
-function sumAttemptMs(attempts) {
-  return attempts.reduce((sum2, attempt) => sum2 + nonNegativeMs2(attempt.elapsed_ms), 0);
-}
-function fitRetrievalAttemptsToBudget(attempts, budgetMs) {
-  const raw = {
-    keyword: attempts.filter((attempt) => attempt.kind === "keyword").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0),
-    hybrid: attempts.filter((attempt) => attempt.kind === "hybrid").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0),
-    selected: attempts.filter((attempt) => attempt.kind === "selected").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0),
-    selfHealRebuild: attempts.filter((attempt) => attempt.kind === "self_heal_rebuild").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0)
-  };
-  const rawTotal = raw.keyword + raw.hybrid + raw.selected + raw.selfHealRebuild;
-  if (rawTotal === 0 || rawTotal <= budgetMs)
-    return raw;
-  const ratio = budgetMs / rawTotal;
-  const fitted = {
-    keyword: Math.floor(raw.keyword * ratio),
-    hybrid: Math.floor(raw.hybrid * ratio),
-    selected: Math.floor(raw.selected * ratio),
-    selfHealRebuild: Math.floor(raw.selfHealRebuild * ratio)
-  };
-  const fittedTotal = fitted.keyword + fitted.hybrid + fitted.selected + fitted.selfHealRebuild;
-  fitted.keyword += Math.max(0, budgetMs - fittedTotal);
-  return fitted;
-}
-function fitPhaseBucketsToWall(phases, wallMs) {
-  const total = Object.values(phases).reduce((sum2, value2) => sum2 + value2, 0);
-  if (total <= wallMs || total === 0)
-    return phases;
-  const ratio = wallMs / total;
-  const entries = Object.entries(phases);
-  const fitted = Object.fromEntries(entries.map(([key2, value2]) => [
-    key2,
-    Math.floor(value2 * ratio)
-  ]));
-  const fittedTotal = Object.values(fitted).reduce((sum2, value2) => sum2 + value2, 0);
-  const firstNonZero = entries.find(([, value2]) => value2 > 0)?.[0];
-  if (firstNonZero)
-    fitted[firstNonZero] = (fitted[firstNonZero] ?? 0) + Math.max(0, wallMs - fittedTotal);
-  return fitted;
-}
-function nonNegativeMs2(value2) {
-  return Number.isFinite(value2) ? Math.max(0, Math.round(value2)) : 0;
-}
-var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-var init_answer_latency_log = __esm(() => {
-  init_olympus_layout();
-  init_answer_latency_trace();
-  DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
-});
-
-// src/workers/local-files/approved-scope-filter.ts
-var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC;
-var init_approved_scope_filter2 = __esm(() => {
-  init_locator_path_scope_codec();
-  LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
-});
-
-// src/workers/local-files/locator-result-projector.ts
-import { pathToFileURL as pathToFileURL3 } from "node:url";
-function locatorFromScopePath(value2) {
-  if (!value2?.startsWith("/"))
-    return;
-  let split;
-  try {
-    split = splitScopePath(value2);
-  } catch {
-    return;
-  }
-  if (split.path === "/")
-    return;
-  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
-  const locator = {
-    display_path: split.path,
-    parent_display_path: parent
-  };
-  if (!split.volumeId) {
-    locator.finder_url = pathToFileURL3(split.path).href;
-    locator.parent_finder_url = pathToFileURL3(parent).href;
-  }
-  return locator;
-}
-var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC;
-var init_locator_result_projector2 = __esm(() => {
-  init_scope();
-  init_paths();
-  LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
-    create(input) {
-      return Object.freeze({
-        project(candidate) {
-          if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
-            return;
-          const locator = locatorFromScopePath(candidate.readLocatorUri());
-          return locator ? { locator } : undefined;
-        }
-      });
-    }
-  });
-});
-
-// src/workers/source-watch-runtime.ts
-import { createHash as createHash88 } from "node:crypto";
-import { readFileSync as readFileSync85 } from "node:fs";
-import { request as httpsRequest2 } from "node:https";
-import { homedir as homedir43 } from "node:os";
-import { resolve as resolvePath3 } from "node:path";
-import { checkServerIdentity } from "node:tls";
-function trustedSourceWatchOwnerFromRequest(request) {
-  const ownerId2 = request.headers.get(SOURCE_WATCH_OWNER_HEADER);
-  const routeKind = request.headers.get(SOURCE_WATCH_ROUTE_KIND_HEADER);
-  const routeTargetId = request.headers.get(SOURCE_WATCH_ROUTE_TARGET_HEADER);
-  const routeAccountId = request.headers.get(SOURCE_WATCH_ROUTE_ACCOUNT_HEADER);
-  if (!ownerId2 || !routeKind || !routeTargetId)
-    throw new Error("Missing authenticated watch route.");
-  return createTrustedSourceWatchOwnerContext({
-    ownerId: ownerId2,
-    routeKind,
-    routeTargetId,
-    ...routeAccountId ? { routeAccountId } : {}
-  });
-}
-function createSourceWatchSearchFromAnalystLanes(lanes) {
-  return {
-    async search(input) {
-      const corpusId = canonicalSourceCorpusId(input.corpusId);
-      const configured = lanes({
-        question: input.query,
-        corpus_id: corpusId,
-        retrieval_mode: "keyword",
-        include_internal: true,
-        include_secure_local: true,
-        max_results: input.maxResults
-      });
-      const corpus = configured.registry.require(corpusId);
-      const routed = await routeSourceIndexSearch({
-        registry: configured.registry,
-        adapters: configured.adapters,
-        request: {
-          query: input.query,
-          maxResults: input.maxResults,
-          corpusIds: [corpusId],
-          context: {
-            allowedTrustDomains: [corpus.trustDomain],
-            allowedCorpusIds: [corpusId],
-            allowCloudQueries: true
-          }
-        },
-        ...configured.visibilityGate ? { visibilityGate: configured.visibilityGate } : {}
-      });
-      return routed.hits.map((hit) => ({
-        ref: {
-          corpusId: hit.corpusId,
-          localItemId: hit.sourceItem.localItemId,
-          sourceVersion: hit.sourceItem.sourceVersion ?? hit.provenance?.chunk?.contentHash ?? sha2568(JSON.stringify(hit.sourceItem))
-        },
-        sourceObservedAt: observedAt(hit)
-      }));
-    }
-  };
-}
-function sourceWatchPublicView(watch2, delivery) {
-  return {
-    watch_id: watch2.watchId,
-    corpus_id: watch2.corpusId,
-    query_sha256: sha2568(watch2.queryText),
-    mode: watch2.mode,
-    status: watch2.status,
-    created_at: watch2.createdAt,
-    updated_at: watch2.updatedAt,
-    ...watch2.expiresAt ? { expires_at: watch2.expiresAt } : {},
-    ...watch2.cancelledAt ? { cancelled_at: watch2.cancelledAt } : {},
-    ...watch2.cancelReason ? { cancel_reason: watch2.cancelReason } : {},
-    ...watch2.completedAt ? { completed_at: watch2.completedAt } : {},
-    delivery: {
-      pending_count: delivery.pendingCount,
-      in_flight_count: delivery.inFlightCount,
-      retry_count: delivery.retryCount,
-      delivered_count: delivery.deliveredCount,
-      dead_letter_count: delivery.deadLetterCount,
-      cancelled_count: delivery.cancelledCount,
-      attempts: delivery.attempts,
-      ...delivery.lastErrorKind ? { last_error_kind: delivery.lastErrorKind } : {}
-    }
-  };
-}
-function createSourceWatchPublicView(input) {
-  const watch2 = input.store.createWatch(input.create, input.owner);
-  return sourceWatchPublicView(watch2, input.store.deliverySummary(input.owner, watch2.watchId));
-}
-function listSourceWatchPublicViews(input) {
-  const page2 = input.store.listWatches(input.owner, {
-    ...input.limit !== undefined ? { limit: input.limit } : {},
-    ...input.cursor ? { cursor: input.cursor } : {}
-  });
-  return {
-    kind: "source_watches",
-    watches: page2.items.map((watch2) => sourceWatchPublicView(watch2, input.store.deliverySummary(input.owner, watch2.watchId))),
-    ...page2.nextCursor ? { next_cursor: page2.nextCursor } : {},
-    policy: SOURCE_WATCH_POLICY
-  };
-}
-function sourceWatchEvidencePointerPayload(lease) {
-  return {
-    headline: SOURCE_WATCH_DELIVERY_HEADLINE,
-    watch_id: deliveryString(lease.watchId, 256),
-    corpus_id: deliveryString(lease.corpusId, 256),
-    query_text: deliveryQueryText(lease.queryText),
-    watch_mode: deliveryWatchMode(lease.watchMode),
-    match_count: 1,
-    items: [{
-      local_item_id: deliveryString(lease.ref.localItemId, 4096),
-      source_version: deliveryTimestamp(lease.ref.sourceVersion),
-      matched_at: deliveryTimestamp(lease.matchedAt)
-    }]
-  };
-}
-function deliveryString(value2, maximum) {
-  if (typeof value2 !== "string" || value2.length < 1 || value2.length > maximum || /[\u0000-\u001f\u007f]/u.test(value2)) {
-    throw new TypeError("Invalid watch delivery string.");
-  }
-  return value2;
-}
-function deliveryQueryText(value2) {
-  if (typeof value2 !== "string" || value2.length < 1 || value2.length > SOURCE_WATCH_MAX_QUERY_LENGTH) {
-    throw new TypeError("Invalid watch delivery query.");
-  }
-  const sanitized = value2.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
-  if (!sanitized)
-    throw new TypeError("Invalid watch delivery query.");
-  return sanitized;
-}
-function deliveryWatchMode(value2) {
-  if (value2 !== "one_shot" && value2 !== "continuous")
-    throw new TypeError("Invalid watch delivery mode.");
-  return value2;
-}
-function deliveryTimestamp(value2) {
-  const bounded = deliveryString(value2, 64);
-  if (!Number.isFinite(Date.parse(bounded)))
-    throw new TypeError("Invalid watch delivery timestamp.");
-  return bounded;
-}
-
-class OpenClawSourceWatchDeliveryTransport {
-  fetchImpl;
-  authToken;
-  baseUrl;
-  caPem;
-  timeoutMs;
-  constructor(options = {}) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.authToken = normalizeWorkerAuthToken(options.authToken);
-    const env = options.env ?? process.env;
-    const configured = options.gatewayConfig === undefined ? undefined : resolveSourceWatchGatewayConnection(options.gatewayConfig, {
-      env,
-      ...options.gatewayPort !== undefined ? { gatewayPort: options.gatewayPort } : {}
-    });
-    const configuredUrl = configured?.baseUrl;
-    const baseUrl = normalizeGatewayBaseUrl(options.baseUrl ?? configuredUrl ?? defaultOpenClawGatewayBaseUrl(env));
-    if (configuredUrl && options.baseUrl && new URL(options.baseUrl).protocol !== new URL(configuredUrl).protocol) {
-      throw new TypeError("Source watch delivery gateway URL does not match gateway.tls.enabled.");
-    }
-    this.baseUrl = baseUrl;
-    const trustPath = options.publicCertificatePath ?? configured?.certificatePath;
-    if (new URL(baseUrl).protocol === "https:") {
-      if (!trustPath) {
-        throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
-      }
-      try {
-        this.caPem = readFileSync85(trustPath, "utf8");
-      } catch {
-        throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
-      }
-      if (!this.caPem.trim()) {
-        throw new TypeError("Source watch HTTPS gateway public certificate is empty.");
-      }
-    }
-    this.timeoutMs = options.timeoutMs ?? 30000;
-  }
-  async send(lease) {
-    if (lease.route.kind === "openclaw_task") {
-      return { status: "failed", errorKind: "openclaw_task_deferred" };
-    }
-    if (!this.authToken) {
-      return { status: "failed", errorKind: "watch_delivery_auth_unconfigured" };
-    }
-    let response;
-    try {
-      const requestInit = withWorkerAuthHeader({
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          route: lease.route,
-          downstream_idempotency_key: lease.downstreamIdempotencyKey,
-          payload: sourceWatchEvidencePointerPayload(lease)
-        }),
-        redirect: "error"
-      }, this.authToken);
-      const url2 = `${this.baseUrl}${SOURCE_WATCH_DELIVERY_ROUTE}`;
-      response = this.caPem ? await requestVerifiedHttps(url2, requestInit, this.timeoutMs, this.caPem) : await fetchWithTimeout(this.fetchImpl, url2, requestInit, this.timeoutMs);
-    } catch {
-      return { status: "failed", errorKind: "openclaw_gateway_unreachable" };
-    }
-    if (!response.ok) {
-      return { status: "failed", errorKind: `openclaw_gateway_http_${response.status}` };
-    }
-    const result = await response.json().catch(() => {
-      return;
-    });
-    const record6 = asRecord18(result);
-    if (record6?.status !== "sent") {
-      const outcome = typeof record6?.status === "string" ? record6.status : "invalid_response";
-      return { status: "failed", errorKind: safeErrorKind(`openclaw_${outcome}`) };
-    }
-    const receipt = asRecord18(record6.receipt);
-    return {
-      status: "delivered",
-      receipt: {
-        transport: "openclaw_sdk_durable",
-        outcome: "sent",
-        platform_message_ids: Array.isArray(receipt?.platform_message_ids) ? receipt.platform_message_ids.filter((value2) => typeof value2 === "string") : [],
-        downstream_idempotency: "unsupported_by_openclaw_sdk"
-      }
-    };
-  }
-}
-function createOpenClawSourceWatchDeliveryTransport(options = {}) {
-  let initialized;
-  const initialize = async () => {
-    const env = options.env ?? process.env;
-    const gatewayConfig = await loadOpenClawGatewayConfig(env);
-    return new OpenClawSourceWatchDeliveryTransport({
-      ...options.authToken ? { authToken: options.authToken } : {},
-      ...options.env ? { env: options.env } : {},
-      ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
-      ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
-      ...gatewayConfig ? { gatewayConfig } : {}
-    });
-  };
-  return {
-    async send(lease) {
-      if (!initialized) {
-        const attempt = initialize();
-        initialized = attempt.catch(() => {
-          initialized = undefined;
-          return {
-            send: async () => ({
-              status: "failed",
-              errorKind: "openclaw_gateway_config_unavailable"
-            })
-          };
-        });
-      }
-      return (await initialized).send(lease);
-    }
-  };
-}
-async function postOpenClawGatewayPluginRoute(input) {
-  const env = input.env ?? process.env;
-  const gatewayConfig = input.gatewayConfig !== undefined ? input.gatewayConfig : await loadOpenClawGatewayConfig(env).catch(() => {
-    return;
-  });
-  const connection = resolveSourceWatchGatewayConnection(gatewayConfig, { env });
-  const init = withWorkerAuthHeader({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input.body),
-    redirect: "error"
-  }, input.authToken);
-  const url2 = `${connection.baseUrl}${input.path}`;
-  const timeoutMs = input.timeoutMs ?? 30000;
-  if (connection.certificatePath) {
-    return requestVerifiedHttps(url2, init, timeoutMs, readFileSync85(connection.certificatePath, "utf8"));
-  }
-  return fetchWithTimeout(input.fetchImpl ?? fetch, url2, init, timeoutMs);
-}
-function defaultOpenClawGatewayBaseUrl(env = process.env, gatewayConfig) {
-  return resolveSourceWatchGatewayConnection(gatewayConfig, { env }).baseUrl;
-}
-async function runSourceWatchDeliveryPass(input) {
-  const leases = input.store.leaseDeliveries(input.executor, {
-    leaseDurationMs: input.leaseDurationMs ?? SOURCE_WATCH_DELIVERY_LEASE_MS,
-    ...input.limit !== undefined ? { limit: input.limit } : {}
-  });
-  const counts = {
-    deliveries_leased: leases.length,
-    deliveries_delivered: 0,
-    deliveries_retried: 0,
-    deliveries_dead_lettered: 0,
-    delivery_fences_rejected: 0
-  };
-  for (const lease of leases) {
-    let result;
-    try {
-      result = await input.transport.send(lease);
-    } catch {
-      result = { status: "failed", errorKind: "transport_exception" };
-    }
-    try {
-      if (result.status === "delivered") {
-        input.store.recordDelivered(input.executor, leaseFence(lease));
-        counts.deliveries_delivered += 1;
-        continue;
-      }
-      const failure2 = input.store.recordDeliveryFailure(input.executor, {
-        ...leaseFence(lease),
-        retryAfterMs: input.retryAfterMs ?? SOURCE_WATCH_DELIVERY_RETRY_MS,
-        errorKind: safeErrorKind(result.errorKind),
-        errorHash: sha2568(result.errorKind)
-      });
-      if (failure2.status === "dead_letter")
-        counts.deliveries_dead_lettered += 1;
-      else
-        counts.deliveries_retried += 1;
-    } catch (error2) {
-      if (!isDeliveryFenceRejection(error2))
-        throw error2;
-      counts.delivery_fences_rejected += 1;
-    }
-  }
-  return {
-    status: leases.length > 0 ? "progress" : "idle",
-    counts,
-    ...leases.some((lease) => lease.route.kind === "openclaw_task") ? { warnings: ["openclaw_task watch delivery is deferred; the attempt was recorded for bounded retry/dead-letter handling."] } : {}
-  };
-}
-async function runSourceWatchSchedulerPass(input) {
-  let evaluation;
-  let delivery;
-  const failures = [];
-  try {
-    evaluation = await runSourceWatchEvaluationPass(input);
-  } catch (error2) {
-    failures.push(error2);
-  }
-  try {
-    delivery = await runSourceWatchDeliveryPass(input);
-  } catch (error2) {
-    failures.push(error2);
-  }
-  if (failures.length === 1)
-    throw failures[0];
-  if (failures.length > 1)
-    throw new AggregateError(failures, "Source watch evaluation and delivery both failed.");
-  if (!evaluation || !delivery)
-    throw new Error("Source watch scheduler pass did not produce a result.");
-  return {
-    status: evaluation.status === "progress" || delivery.status === "progress" ? "progress" : "idle",
-    counts: { ...evaluation.counts, ...delivery.counts },
-    ...delivery.warnings ? { warnings: delivery.warnings } : {}
-  };
-}
-async function runSourceWatchEvaluationPass(input) {
-  const maxWatches = input.maxWatches ?? 100;
-  const counts = {
-    watches_evaluated: 0,
-    hits_observed: 0,
-    matches_recorded: 0,
-    watermarks_advanced: 0,
-    watches_skipped_inactive: 0
-  };
-  input.store.expireDueWatches(input.executor, { limit: maxWatches });
-  const watches = input.store.listExecutableWatches(input.executor, { limit: maxWatches }).items;
-  for (const watch2 of watches) {
-    counts.watches_evaluated += 1;
-    try {
-      const hits = [...await input.search.search({
-        corpusId: watch2.corpusId,
-        query: watch2.queryText,
-        maxResults: input.maxResultsPerWatch ?? 100
-      })].sort(compareHits);
-      counts.hits_observed += hits.length;
-      let watermark = input.store.getWatermark(input.executor, watch2.watchId, watch2.corpusId);
-      for (const hit of hits) {
-        if (hit.ref.corpusId !== watch2.corpusId)
-          continue;
-        if (hit.sourceObservedAt <= watch2.createdAt || watermark && compareToWatermark(hit, watermark) <= 0)
-          continue;
-        input.store.recordMatch(input.executor, { watchId: watch2.watchId, ref: hit.ref });
-        counts.matches_recorded += 1;
-        if (watch2.mode === "one_shot")
-          break;
-        input.store.recordWatermark(input.executor, {
-          watchId: watch2.watchId,
-          ref: hit.ref,
-          sourceObservedAt: hit.sourceObservedAt
-        });
-        counts.watermarks_advanced += 1;
-        watermark = input.store.getWatermark(input.executor, watch2.watchId, watch2.corpusId);
-      }
-    } catch (error2) {
-      if (!isWatchLifecycleRejection(error2))
-        throw error2;
-      counts.watches_skipped_inactive += 1;
-    }
-  }
-  return {
-    status: counts.matches_recorded > 0 || counts.watermarks_advanced > 0 ? "progress" : "idle",
-    counts
-  };
-}
-function resolveSourceWatchGatewayConnection(config2, options = {}) {
-  const env = options.env ?? process.env;
-  const gateway = asRecord18(asRecord18(config2)?.gateway);
-  const tls = asRecord18(gateway?.tls);
-  if (tls?.enabled !== undefined && typeof tls.enabled !== "boolean") {
-    throw new TypeError("OpenClaw gateway.tls.enabled must be a boolean.");
-  }
-  const tlsEnabled = tls?.enabled === true;
-  const port = resolveGatewayPortValue(options.gatewayPort ?? gateway?.port, env);
-  let certificatePath;
-  if (tlsEnabled) {
-    certificatePath = resolvePublicCertificatePath(tls?.certPath, env, "gateway.tls.certPath");
-    if (!certificatePath) {
-      throw new TypeError("OpenClaw HTTPS gateway requires gateway.tls.certPath.");
-    }
-  }
-  return {
-    baseUrl: normalizeGatewayBaseUrl(`${tlsEnabled ? "https" : "http"}://127.0.0.1:${port}`),
-    ...certificatePath ? { certificatePath } : {}
-  };
-}
-async function loadOpenClawGatewayConfig(env = process.env) {
-  const command2 = resolveOpenClawCommand2(env);
-  let child2;
-  try {
-    child2 = Bun.spawn([command2, "config", "get", "gateway", "--json"], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-      env: Object.fromEntries(Object.entries(env).filter((entry) => entry[1] !== undefined))
-    });
-  } catch {
-    return;
-  }
-  const timer = setTimeout(() => child2.kill(), 15000);
-  try {
-    const [stdout, code] = await Promise.all([
-      new Response(child2.stdout).text(),
-      child2.exited
-    ]);
-    if (code !== 0) {
-      throw new Error("OpenClaw gateway configuration could not be resolved.");
-    }
-    const start = stdout.indexOf("{");
-    const end = stdout.lastIndexOf("}");
-    if (start < 0 || end <= start) {
-      throw new Error("OpenClaw gateway configuration returned no JSON.");
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(stdout.slice(start, end + 1));
-    } catch {
-      throw new Error("OpenClaw gateway configuration returned invalid JSON.");
-    }
-    const record6 = asRecord18(parsed);
-    if (!record6 || record6.ok === false) {
-      throw new Error("OpenClaw gateway configuration was refused.");
-    }
-    const tls = asRecord18(record6.tls);
-    return {
-      gateway: {
-        ...record6.port !== undefined ? { port: record6.port } : {},
-        ...tls ? {
-          tls: {
-            ...tls.enabled !== undefined ? { enabled: tls.enabled } : {},
-            ...tls.certPath !== undefined ? { certPath: tls.certPath } : {}
-          }
-        } : {}
-      }
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function observedAt(hit) {
-  for (const value2 of [
-    hit.provenance?.citation?.updatedAt,
-    hit.internalContent?.savedAt,
-    hit.internalContent?.authoredAt,
-    hit.provenance?.citation?.authoredAt
-  ]) {
-    if (value2 && Number.isFinite(Date.parse(value2)))
-      return new Date(value2).toISOString();
-  }
-  return "1970-01-01T00:00:00.000Z";
-}
-function compareHits(left, right) {
-  return left.sourceObservedAt.localeCompare(right.sourceObservedAt) || left.ref.localItemId.localeCompare(right.ref.localItemId) || left.ref.sourceVersion.localeCompare(right.ref.sourceVersion);
-}
-function compareToWatermark(hit, watermark) {
-  return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
-}
-function sha2568(value2) {
-  return createHash88("sha256").update(value2, "utf8").digest("hex");
-}
-function leaseFence(lease) {
-  return {
-    deliveryKey: lease.deliveryKey,
-    leaseToken: lease.leaseToken,
-    leaseGeneration: lease.leaseGeneration
-  };
-}
-function resolveGatewayPortValue(configuredPort, env) {
-  const envPort = parseGatewayPort(env.OPENCLAW_GATEWAY_PORT);
-  if (envPort !== undefined)
-    return envPort;
-  if (configuredPort !== undefined && configuredPort !== null) {
-    if (typeof configuredPort !== "number" || !Number.isFinite(configuredPort) || !Number.isSafeInteger(configuredPort)) {
-      throw new TypeError("OpenClaw gateway.port must be an integer port.");
-    }
-    if (configuredPort > 0 && configuredPort <= 65535)
-      return configuredPort;
-  }
-  return 18789;
-}
-function parseGatewayPort(raw) {
-  const trimmed2 = raw?.trim();
-  if (!trimmed2)
-    return;
-  const numeric = /^\d+$/.test(trimmed2) ? trimmed2 : /^(?:[^:[\]]+|\[[^\]]+\]):(\d+)$/.exec(trimmed2)?.[1];
-  if (!numeric)
-    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port.");
-  const port = Number(numeric);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
-    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port from 1 through 65535.");
-  }
-  return port;
-}
-function resolvePublicCertificatePath(value2, env, field) {
-  if (value2 === undefined || value2 === null)
-    return;
-  if (typeof value2 !== "string" || !value2.trim()) {
-    throw new TypeError(`OpenClaw ${field} must be a non-empty path.`);
-  }
-  const trimmed2 = value2.trim();
-  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir43();
-  const expanded = trimmed2 === "~" || trimmed2.startsWith("~/") || trimmed2.startsWith("~\\") ? `${home2}${trimmed2.slice(1)}` : trimmed2;
-  return resolvePath3(expanded);
-}
-function resolveOpenClawCommand2(env) {
-  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir43();
-  return resolveOpenClawExecutable({ env, homeDir: home2 }) ?? "openclaw";
-}
-function normalizeGatewayBaseUrl(value2) {
-  const url2 = new URL(value2);
-  if (!["http:", "https:"].includes(url2.protocol) || !["127.0.0.1", "localhost", "[::1]"].includes(url2.hostname)) {
-    throw new TypeError("Source watch delivery gateway must use loopback HTTP(S).");
-  }
-  if (url2.pathname !== "/" || url2.search || url2.hash || url2.username || url2.password) {
-    throw new TypeError("Source watch delivery gateway base URL must not contain credentials, path, query, or fragment.");
-  }
-  return url2.origin;
-}
-function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
-  const url2 = new URL(urlValue);
-  if (url2.protocol !== "https:")
-    throw new TypeError("Verified HTTPS request requires an HTTPS URL.");
-  const headers = {};
-  new Headers(init.headers).forEach((value2, key2) => {
-    headers[key2] = value2;
-  });
-  const hostname = url2.hostname.startsWith("[") && url2.hostname.endsWith("]") ? url2.hostname.slice(1, -1) : url2.hostname;
-  const servername = hostname.includes(":") ? undefined : hostname;
-  const body = init.body;
-  if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
-    throw new TypeError("Source watch HTTPS request body must be text or bytes.");
-  }
-  return new Promise((resolve28, reject) => {
-    let settled = false;
-    let timer;
-    let removeAbortListener;
-    let request;
-    const cleanup = () => {
-      if (timer !== undefined)
-        clearTimeout(timer);
-      removeAbortListener?.();
-    };
-    const fail = (error2) => {
-      if (settled)
-        return;
-      settled = true;
-      cleanup();
-      request?.destroy();
-      reject(error2);
-    };
-    const succeed = (response) => {
-      if (settled)
-        return;
-      settled = true;
-      cleanup();
-      resolve28(response);
-    };
-    const abort = () => {
-      const error2 = new Error("Source watch HTTPS request aborted.");
-      error2.name = "AbortError";
-      fail(error2);
-    };
-    try {
-      request = httpsRequest2({
-        protocol: "https:",
-        hostname,
-        ...url2.port ? { port: Number(url2.port) } : {},
-        path: `${url2.pathname}${url2.search}`,
-        method: init.method ?? "GET",
-        headers,
-        ca,
-        rejectUnauthorized: true,
-        ...servername ? { servername } : {},
-        checkServerIdentity
-      }, (incoming) => {
-        const chunks2 = [];
-        incoming.on("data", (chunk) => chunks2.push(Buffer.from(chunk)));
-        incoming.on("end", () => {
-          try {
-            const responseHeaders = new Headers;
-            for (const [key2, value2] of Object.entries(incoming.headers)) {
-              if (Array.isArray(value2))
-                value2.forEach((item) => responseHeaders.append(key2, item));
-              else if (value2 !== undefined)
-                responseHeaders.set(key2, value2);
-            }
-            succeed(new Response(Buffer.concat(chunks2), {
-              status: incoming.statusCode ?? 0,
-              statusText: incoming.statusMessage ?? "",
-              headers: responseHeaders
-            }));
-          } catch (error2) {
-            fail(error2);
-          }
-        });
-        incoming.on("error", fail);
-      });
-      request.on("error", fail);
-      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-        timer = setTimeout(() => abort(), timeoutMs);
-        request.setTimeout(timeoutMs, abort);
-      }
-      if (init.signal) {
-        if (init.signal.aborted)
-          abort();
-        else {
-          const abortFromUpstream = () => abort();
-          init.signal.addEventListener("abort", abortFromUpstream, { once: true });
-          removeAbortListener = () => init.signal?.removeEventListener("abort", abortFromUpstream);
-        }
-      }
-      if (settled)
-        return;
-      if (body === undefined)
-        request.end();
-      else
-        request.end(typeof body === "string" ? body : Buffer.from(body));
-    } catch (error2) {
-      fail(error2);
-    }
-  });
-}
-function safeErrorKind(value2) {
-  const normalized2 = value2.toLowerCase().replace(/[^a-z0-9._:-]+/g, "_").slice(0, 128);
-  return normalized2 || "watch_delivery_failed";
-}
-function isWatchLifecycleRejection(error2) {
-  return error2 instanceof Error && /cannot accept a new match|cannot advance its watermark|source watch target does not exist/i.test(error2.message);
-}
-function isDeliveryFenceRejection(error2) {
-  return error2 instanceof Error && /lease fence|not actively leased|another executor|lease has expired/i.test(error2.message);
-}
-function asRecord18(value2) {
-  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
-}
-var SOURCE_WATCH_DELIVERY_ROUTE = "/plugins/olympus/watch-delivery", SOURCE_WATCH_DELIVERY_HEADLINE = "Olympus watch matched newly indexed evidence.", SOURCE_WATCH_DELIVERY_LEASE_MS, SOURCE_WATCH_DELIVERY_RETRY_MS, SOURCE_WATCH_POLICY;
-var init_source_watch_runtime = __esm(() => {
-  init_source_watch();
-  init_openclaw_executable();
-  init_http_timeout();
-  init_worker_auth();
-  init_source_corpus_registry();
-  init_router();
-  SOURCE_WATCH_DELIVERY_LEASE_MS = Math.max(SOURCE_WATCH_MIN_LEASE_MS, 60000);
-  SOURCE_WATCH_DELIVERY_RETRY_MS = Math.max(SOURCE_WATCH_MIN_RETRY_MS, 60000);
-  SOURCE_WATCH_POLICY = Object.freeze({
-    raw_source_exposed: false,
-    source_text_returned: false,
-    message_bodies_returned: false,
-    evidence_pointers_only: true
-  });
-});
+var init_session_marker = () => {};
 
 // src/control-ui/browser-controller.ts
 function mountDashboardController(options) {
@@ -156418,11 +154801,11 @@ function mountDashboardController(options) {
       if (!next || next.querySelector("[data-first-run-sheet]"))
         continue;
       const openSheets = new Set(Array.from(region.querySelectorAll(".sheet.on")).map((sheet) => sheet.id).concat(region.matches(".sheet.on") ? [region.id] : []));
-      const open7 = new Set(Array.from(region.querySelectorAll("details[open]")).map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
+      const open5 = new Set(Array.from(region.querySelectorAll("details[open]")).map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
       const fresh2 = document.importNode(next, true);
       region.replaceWith(fresh2);
       fresh2.querySelectorAll("details").forEach((node) => {
-        if (open7.has(node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""))
+        if (open5.has(node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""))
           node.open = true;
       });
       [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].filter((sheet) => sheet.classList.contains("sheet") && openSheets.has(sheet.id)).forEach((sheet) => setSheetOpen(sheet, true));
@@ -156488,10 +154871,10 @@ function mountDashboardController(options) {
   function queryAll(selector) {
     return Array.from(root.querySelectorAll(selector));
   }
-  function setSheetOpen(sheet, open7) {
-    sheet.classList.toggle("on", open7);
-    sheet.setAttribute("aria-hidden", open7 ? "false" : "true");
-    if (!open7) {
+  function setSheetOpen(sheet, open5) {
+    sheet.classList.toggle("on", open5);
+    sheet.setAttribute("aria-hidden", open5 ? "false" : "true");
+    if (!open5) {
       const choice = sheet.querySelector("[data-setup-choice], [data-setup-lead]");
       const walkthrough = sheet.querySelector("[data-setup-walkthrough]");
       if (choice && walkthrough) {
@@ -156506,7 +154889,7 @@ function mountDashboardController(options) {
       return;
     queryAll("[data-sheet-toggle]").forEach((toggle) => {
       if (toggle.dataset.sheetToggle === `#${sheet.id}`)
-        toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
+        toggle.setAttribute("aria-expanded", open5 ? "true" : "false");
     });
   }
   function say(form, message2) {
@@ -157298,13 +155681,13 @@ function mountDashboardController(options) {
       return;
     }
     const openSheets = queryAll(".sheet.on").map((sheet) => sheet.id);
-    const open7 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
+    const open5 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
     const active = activeElement();
     const focused = focusKey(active);
     root.innerHTML = result.body;
     queryAll("details").forEach((node) => {
       const key2 = node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || "";
-      if (open7.has(key2))
+      if (open5.has(key2))
         node.open = true;
     });
     for (const id of openSheets) {
@@ -157447,29 +155830,62 @@ function mountDashboardController(options) {
         messagingRequest(card, "status");
     });
   }
-  async function messagingRequest(card, operation, extra = {}) {
-    if (!canWrite || disposed || !options.transport.messaging)
+  const MESSAGING_BUSY_WORDS = { chats: "Loading chats…", scope: "Saving…", status: "Checking…", start: "Starting…", respond: "Checking…", cancel: "Cancelling…" };
+  function startButtonBusy(button, operation) {
+    if (!button)
       return;
+    button.dataset.idleLabel = button.textContent ?? "";
+    button.textContent = MESSAGING_BUSY_WORDS[operation] ?? "Working…";
+    button.disabled = true;
+    button.classList.add("busy");
+    button.setAttribute("aria-busy", "true");
+  }
+  function endButtonBusy(button) {
+    if (!button || !button.classList.contains("busy"))
+      return;
+    button.textContent = button.dataset.idleLabel ?? button.textContent;
+    delete button.dataset.idleLabel;
+    button.disabled = false;
+    button.classList.remove("busy");
+    button.removeAttribute("aria-busy");
+  }
+  const messagingQueuedButton = new Map;
+  async function messagingRequest(card, operation, extra = {}, button) {
+    if (!canWrite || disposed || !options.transport.messaging) {
+      endButtonBusy(button);
+      return;
+    }
     if (messagingBusy.has(card)) {
-      if (operation !== "status")
+      if (operation !== "status") {
+        const replaced = messagingQueuedButton.get(card);
+        if (replaced && replaced !== button)
+          endButtonBusy(replaced);
+        if (button)
+          messagingQueuedButton.set(card, button);
+        else
+          messagingQueuedButton.delete(card);
         messagingQueued.set(card, () => {
-          messagingRequest(card, operation, extra);
+          messagingQueuedButton.delete(card);
+          messagingRequest(card, operation, extra, button);
         });
+      } else
+        endButtonBusy(button);
       return;
     }
     const source = card.dataset.messagingSource;
-    if (source !== "telegram" && source !== "whatsapp")
+    if (source !== "telegram" && source !== "whatsapp" || card.querySelector("[data-messaging-open-controls]")) {
+      endButtonBusy(button);
       return;
-    if (card.querySelector("[data-messaging-open-controls]"))
-      return;
+    }
     const timer = messagingTimers.get(card);
     if (timer)
       clearTimeout(timer);
     messagingTimers.delete(card);
     messagingBusy.add(card);
     const status = card.querySelector("[data-messaging-status]");
+    const wasPaired = card.hasAttribute("data-messaging-paired");
     if (status && operation !== "status")
-      status.textContent = "Working…";
+      status.textContent = "";
     try {
       const params = { source, ...extra };
       let result;
@@ -157509,40 +155925,17 @@ function mountDashboardController(options) {
         messagingActive.add(card);
       else
         messagingActive.delete(card);
-      if (["paired", "complete", "completed"].includes(state)) {
-        const row = card.querySelector(".actionrow");
-        const hasStatus = !!row?.querySelector('form[data-messaging-kind="status"]');
-        const start = hasStatus ? null : row?.querySelector('form[data-messaging-kind="start"]');
-        if (start) {
-          start.dataset.messagingKind = "status";
-          const button = start.querySelector("button");
-          if (button) {
-            button.textContent = "Check connection";
-            button.classList.remove("primary");
-          }
-        }
-        const toggle = hasStatus ? null : row?.querySelector('[data-sheet-toggle="#telegram-setup"]');
-        if (toggle) {
-          const form = document.createElement("form");
-          form.method = "dialog";
-          form.dataset.messagingKind = "status";
-          toggle.removeAttribute("data-sheet-toggle");
-          toggle.textContent = "Check connection";
-          toggle.type = "submit";
-          toggle.classList.remove("primary");
-          toggle.replaceWith(form);
-          form.append(toggle);
-        }
-        row?.querySelector('[data-messaging-kind="chats"] button')?.classList.add("primary");
-        const chats = row?.querySelector('[data-messaging-kind="chats"]');
-        if (chats)
-          row?.prepend(chats);
-        if (!card.querySelector("[data-messaging-account]")) {
-          const account = document.createElement("p");
-          account.dataset.messagingAccount = "";
+      if (["paired", "complete", "completed"].includes(state) && !card.hasAttribute("data-messaging-paired")) {
+        card.setAttribute("data-messaging-paired", "");
+        card.querySelectorAll("[data-paired-only]").forEach((element) => {
+          element.hidden = element.matches('[data-messaging-kind="chats"]') && !!card.querySelector("[data-messaging-chats] [data-kind-picker]");
+        });
+        card.querySelectorAll("[data-unpaired-only]").forEach((element) => {
+          element.hidden = true;
+        });
+        const account = card.querySelector("[data-messaging-account]");
+        if (account && account.textContent === "Not paired yet")
           account.textContent = source === "whatsapp" ? "Your linked WhatsApp account" : "Your linked Telegram account";
-          row?.before(account);
-        }
       }
       const field = typeof body.field === "string" ? body.field : "";
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
@@ -157615,7 +156008,7 @@ function mountDashboardController(options) {
         cardCancel.hidden = ["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
       const cancelledLead = body.capturePaused === true ? "Setup cancelled. Your chat choices were not changed, but capture of this account stays paused until pairing again succeeds" : "Setup cancelled. Capture permission was not changed";
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : body.capturePaused === true ? "Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? cancelledLead + ", and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? cancelledLead + ". Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : cancelledLead + ". If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : cancelledLead + ". If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : body.capturePaused === true ? "Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "" : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : (state === "paired" || state === "complete" || state === "completed") && operation !== "scope" && operation !== "chats" ? wasPaired ? operation === "status" && button ? "Connected." : "" : "Paired. Choose the chats Olympus reads." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? cancelledLead + ", and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? cancelledLead + ". Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : cancelledLead + ". If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : cancelledLead + ". If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "" : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -157653,11 +156046,11 @@ function mountDashboardController(options) {
             hint.textContent = hints2[field];
             form.append(hint);
           }
-          const button = document.createElement("button");
-          button.type = "submit";
-          button.textContent = "Continue";
-          button.className = "btn";
-          form.append(button);
+          const button2 = document.createElement("button");
+          button2.type = "submit";
+          button2.textContent = "Continue";
+          button2.className = "btn";
+          form.append(button2);
           inputSlot.append(form);
           input.focus();
         }
@@ -157668,80 +156061,21 @@ function mountDashboardController(options) {
         chatSlot.replaceChildren();
       if (chatSlot) {
         chatSlot.dataset.pendingChoice = String(choosingScope);
-        chatSlot.classList.toggle("messagingchoices", choosingScope);
       }
       if (Array.isArray(body.chats) && typeof body.wholeAccount === "boolean" && Array.isArray(body.chatScopes)) {
         const slot = card.querySelector("[data-messaging-chats]");
         if (slot) {
-          slot.replaceChildren();
-          const form = document.createElement("form");
-          form.method = "dialog";
-          form.dataset.messagingKind = "scope";
-          if (!choosingScope) {
-            const allLabel = document.createElement("label");
-            const all = document.createElement("input");
-            all.type = "checkbox";
-            all.name = "wholeAccount";
-            all.checked = body.wholeAccount === true;
-            allLabel.append(all, " Read all chats, including new chats");
-            form.append(allLabel);
-          }
-          const selected = Array.isArray(body.chatScopes) ? body.chatScopes : [];
-          for (const entry of body.chats) {
-            if (!entry || typeof entry !== "object")
-              continue;
-            const chat = entry;
-            if (typeof chat.chatScope !== "string")
-              continue;
-            const chatLabel = typeof chat.title === "string" && chat.title.trim() ? chat.title : "Chat " + chat.chatScope.split(":").at(-1);
-            const line2 = document.createElement("label");
-            line2.style.display = "block";
-            const check = document.createElement("input");
-            check.type = "checkbox";
-            check.name = "chatScope";
-            check.value = chat.chatScope;
-            check.checked = selected.includes(chat.chatScope);
-            line2.append(check, " " + chatLabel);
-            form.append(line2);
-          }
-          const button = document.createElement("button");
-          button.type = "submit";
-          button.className = "btn";
-          button.textContent = choosingScope ? "Read selected chats" : "Save chat choices";
-          form.append(button);
-          if (choosingScope) {
-            const pick2 = document.createElement("details");
-            const summary = document.createElement("summary");
-            summary.className = "btn primary";
-            summary.textContent = "Pick chats (recommended)";
-            pick2.append(summary, form);
-            slot.append(pick2);
-            if (!body.chats.length) {
-              const empty = document.createElement("p");
-              empty.textContent = "No chats are available to select yet. You can cancel and try pairing again later.";
-              form.prepend(empty);
-              button.disabled = true;
-            }
-            const allForm = document.createElement("form");
-            allForm.method = "dialog";
-            allForm.dataset.messagingKind = "scope";
-            const all = document.createElement("input");
-            all.type = "checkbox";
-            all.name = "wholeAccount";
-            all.checked = true;
-            all.hidden = true;
-            const allButton = document.createElement("button");
-            allButton.type = "submit";
-            allButton.className = "btn";
-            allButton.textContent = "Everything in this account";
-            const explanation = document.createElement("p");
-            explanation.className = "hint";
-            explanation.textContent = "Allow Olympus to read every chat, including new chats.";
-            allForm.append(all, allButton);
-            slot.append(allForm, explanation);
-          } else
-            slot.append(form);
+          slot.replaceChildren(buildChatPicker(source, body, choosingScope));
+          const chooseChats = card.querySelector('form[data-messaging-kind="chats"]');
+          if (chooseChats)
+            chooseChats.hidden = true;
         }
+      }
+      if (operation === "scope" && ["paired", "complete", "completed"].includes(state)) {
+        card.querySelector("[data-messaging-chats]")?.replaceChildren();
+        const chooseChats = card.querySelector('form[data-messaging-kind="chats"]');
+        if (chooseChats)
+          chooseChats.hidden = false;
       }
       if (state === "cancelled" && body.cleaning === true || operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "not_paired", "scope_selection_required"].includes(state)) {
         messagingTimers.set(card, setTimeout(() => {
@@ -157757,6 +156091,7 @@ function mountDashboardController(options) {
         status.textContent = "Could not reach pairing on this computer. Try again.";
     } finally {
       messagingBusy.delete(card);
+      endButtonBusy(button);
       const queued = messagingQueued.get(card);
       messagingQueued.delete(card);
       if (queued && !disposed)
@@ -157768,18 +156103,215 @@ function mountDashboardController(options) {
     const kind = form.dataset.messagingKind;
     if (!card)
       return;
+    const button = form.querySelector('button[type="submit"]:not([data-kind-open])');
+    if (button?.classList.contains("busy"))
+      return;
+    form.closest("details.rowmenu")?.removeAttribute("open");
     if (kind === "respond") {
       const input = form.querySelector('input[name="value"]');
       if (!input)
         return;
       const value2 = input.value;
       input.value = "";
-      messagingRequest(card, "respond", { ...form.dataset.field ? { field: form.dataset.field } : {}, value: value2 });
+      startButtonBusy(button, kind);
+      messagingRequest(card, "respond", { ...form.dataset.field ? { field: form.dataset.field } : {}, value: value2 }, button);
     } else if (kind === "scope") {
-      const wholeAccount = form.querySelector('[name="wholeAccount"]')?.checked === true;
-      messagingRequest(card, "scope", { wholeAccount, chatScopes: wholeAccount ? [] : Array.from(form.querySelectorAll('[name="chatScope"]:checked')).map((input) => input.value) });
-    } else if (kind === "start" || kind === "chats" || kind === "cancel" || kind === "status")
-      messagingRequest(card, kind);
+      const choice = chatPickerChoice(form);
+      if (!choice) {
+        const status = card.querySelector("[data-messaging-status]");
+        if (status)
+          status.textContent = "Choose all chats, a kind, or at least one chat.";
+        return;
+      }
+      startButtonBusy(button, kind);
+      messagingRequest(card, "scope", choice, button);
+    } else if (kind === "start" || kind === "chats" || kind === "cancel" || kind === "status") {
+      startButtonBusy(button, kind);
+      messagingRequest(card, kind, {}, button);
+    }
+  }
+  const CHAT_KIND_LABELS = {
+    dm: ["One-to-one", "one-to-one chats"],
+    group: ["Groups", "groups"],
+    channel: ["Channels", "channels"],
+    bot: ["Bots", "bots"],
+    community: ["Communities", "communities"]
+  };
+  const SOURCE_KINDS = { telegram: ["dm", "group", "channel", "bot"], whatsapp: ["dm", "group", "community"] };
+  const SUGGESTED_KINDS = ["dm", "group"];
+  function whenLabel(iso2) {
+    if (typeof iso2 !== "string")
+      return "";
+    const time3 = Date.parse(iso2);
+    if (Number.isNaN(time3))
+      return "";
+    const days = Math.floor((Date.now() - time3) / 86400000);
+    if (days < 1)
+      return "today";
+    if (days < 2)
+      return "yesterday";
+    if (days < 7)
+      return `${days} days ago`;
+    return new Date(time3).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+  }
+  function chatPickerChoice(form) {
+    const whole = form.querySelector('[name="wholeAccount"]')?.checked === true;
+    if (whole)
+      return { wholeAccount: true, chatScopes: [], chatKinds: [] };
+    const chatKinds = Array.from(form.querySelectorAll('[name="chatKind"]:checked')).map((input) => input.value);
+    const chatScopes = Array.from(form.querySelectorAll('[name="chatScope"]:checked')).filter((input) => !chatKinds.includes(input.closest("[data-kind-group]")?.dataset.kindGroup ?? "")).map((input) => input.value);
+    return chatKinds.length || chatScopes.length ? { wholeAccount: false, chatScopes, chatKinds } : undefined;
+  }
+  function buildChatPicker(source, body, choosingScope) {
+    const make = (tag, className, text3) => {
+      const element = document.createElement(tag);
+      if (className)
+        element.className = className;
+      if (text3 !== undefined)
+        element.textContent = text3;
+      return element;
+    };
+    const kinds = SOURCE_KINDS[source] ?? [];
+    const selected = new Set(Array.isArray(body.chatScopes) ? body.chatScopes.filter((value2) => typeof value2 === "string") : []);
+    const kindsOn = new Set(choosingScope ? SUGGESTED_KINDS.filter((kind) => kinds.includes(kind)) : Array.isArray(body.chatKinds) ? body.chatKinds.filter((value2) => typeof value2 === "string") : []);
+    const whole = !choosingScope && body.wholeAccount === true;
+    const chats = (Array.isArray(body.chats) ? body.chats : []).flatMap((entry) => {
+      if (!entry || typeof entry !== "object")
+        return [];
+      const chat = entry;
+      if (typeof chat.chatScope !== "string")
+        return [];
+      const title = typeof chat.title === "string" && chat.title.trim() ? chat.title : "Chat " + chat.chatScope.split(":").at(-1);
+      return [{ scope: chat.chatScope, title, kind: typeof chat.kind === "string" ? chat.kind : "", at: typeof chat.lastMessageAt === "string" ? chat.lastMessageAt : "" }];
+    });
+    const form = make("form", "kindpicker");
+    form.method = "dialog";
+    form.dataset.messagingKind = "scope";
+    form.dataset.kindPicker = "";
+    const switchInput = (name, value2, checked, label) => {
+      const input = make("input", "switch");
+      input.type = "checkbox";
+      input.name = name;
+      input.value = value2;
+      input.checked = checked;
+      input.setAttribute("role", "switch");
+      input.setAttribute("aria-label", label);
+      return input;
+    };
+    const allRow = make("label", "kindrow allrow");
+    const allText = make("span", "kindtext");
+    allText.append(make("b", "", "Read all chats, including new ones"), make("small", "", "Every chat now and every chat you start or join later"));
+    const all = switchInput("wholeAccount", "true", whole, "Read all chats, including new ones");
+    allRow.append(allText, all);
+    form.append(allRow, make("p", "kindcap", "Or choose by kind"));
+    const groups = [];
+    const known = new Set(kinds);
+    const order = [...kinds, ...chats.some((chat) => !known.has(chat.kind)) ? ["other"] : []];
+    for (const kind of order) {
+      const members = chats.filter((chat) => kind === "other" ? !known.has(chat.kind) : chat.kind === kind);
+      const recent = members.some((chat) => chat.at);
+      members.sort((a, b) => recent ? b.at.localeCompare(a.at) || a.title.localeCompare(b.title) : a.title.localeCompare(b.title));
+      const [label, plural2] = CHAT_KIND_LABELS[kind] ?? ["Other chosen chats", "chats"];
+      const group = make("div", "kindgroup");
+      group.dataset.kindGroup = kind;
+      const row = make("div", "kindrow");
+      const open5 = make("button", "kindopen");
+      open5.type = "button";
+      open5.dataset.kindOpen = "";
+      open5.setAttribute("aria-expanded", "false");
+      const title = make("span", "kindtext");
+      const name = make("b", "", label);
+      name.append(" ", make("span", "kindcount", String(members.length)));
+      const note = make("small", "kindnote");
+      title.append(name, note);
+      open5.append(title, make("span", "kindchev", "›"));
+      row.append(open5);
+      const toggle = kind === "other" ? undefined : switchInput("chatKind", kind, whole || kindsOn.has(kind), `All ${plural2}, including new ones`);
+      if (toggle)
+        row.append(toggle);
+      const list = make("div", "kindlist");
+      list.hidden = true;
+      const search = make("input", "kindsearch");
+      search.type = "search";
+      search.placeholder = `Search ${plural2}`;
+      search.setAttribute("aria-label", `Search ${plural2}`);
+      search.dataset.kindSearch = "";
+      list.append(search, make("p", "kindcap", members.length ? recent ? "Most recent first" : "By name" : `No ${plural2} yet. New ones are read when this kind is on.`));
+      const lines = make("fieldset", "kindlines");
+      const boxes = [];
+      for (const chat of members) {
+        const line2 = make("label", "chatline");
+        line2.dataset.chatTitle = chat.title.toLowerCase();
+        const box = make("input");
+        box.type = "checkbox";
+        box.name = "chatScope";
+        box.value = chat.scope;
+        box.checked = selected.has(chat.scope);
+        boxes.push(box);
+        line2.append(box, make("span", "chatname", chat.title), make("span", "chatwhen", whenLabel(chat.at)));
+        lines.append(line2);
+      }
+      list.append(lines);
+      group.append(row, list);
+      form.append(group);
+      groups.push({ kind, ...toggle ? { toggle } : {}, note, boxes, list, open: open5 });
+    }
+    const refresh = () => {
+      for (const group of groups) {
+        const [, plural2] = CHAT_KIND_LABELS[group.kind] ?? ["", "chats"];
+        const on = group.toggle?.checked === true;
+        const chosen = group.boxes.filter((box) => box.checked).length;
+        const lines = group.list.querySelector("fieldset");
+        if (lines)
+          lines.disabled = on;
+        group.note.classList.toggle("partial", !on && chosen > 0);
+        group.note.textContent = on ? `All ${plural2}, including new ones` : !group.toggle ? `${chosen} chosen` : chosen > 0 ? `${chosen} of ${group.boxes.length} chosen · new ${plural2} are not read` : `Off · new ${plural2} are not read`;
+      }
+    };
+    form.addEventListener("change", (event) => {
+      const target = event.target;
+      if (target === all && all.checked) {
+        for (const group of groups)
+          if (group.toggle)
+            group.toggle.checked = true;
+      }
+      if (target.name === "chatKind" && !target.checked)
+        all.checked = false;
+      if (target.name === "chatScope" && !target.checked)
+        all.checked = false;
+      refresh();
+    });
+    form.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!target.matches("[data-kind-search]"))
+        return;
+      const words2 = target.value.trim().toLowerCase();
+      target.closest(".kindlist")?.querySelectorAll(".chatline").forEach((line2) => {
+        line2.hidden = !!words2 && !(line2.dataset.chatTitle ?? "").includes(words2);
+      });
+    });
+    form.addEventListener("click", (event) => {
+      const open5 = event.target.closest("[data-kind-open]");
+      if (!open5)
+        return;
+      const group = groups.find((candidate) => candidate.open === open5);
+      if (!group)
+        return;
+      group.list.hidden = !group.list.hidden;
+      open5.setAttribute("aria-expanded", String(!group.list.hidden));
+      if (!group.list.hidden)
+        group.list.querySelector("[data-kind-search]")?.focus();
+    });
+    refresh();
+    if (body.coverage === "contacts_and_joined_groups")
+      form.append(make("p", "hint", "The list shows saved contacts and groups and may omit unsaved chats. A chat that is not listed is still read when its kind is on."));
+    form.append(make("p", "hint kindprivacy", "Choosing chats never decides privacy. Every message is still judged on its own."));
+    const bar = make("div", "pickbar kindsave");
+    const save = make("button", "btn primary", "Save");
+    save.type = "submit";
+    bar.append(make("span", "hint", choosingScope ? "Nothing is read until you press Save" : "Changes save when you press Save"), save);
+    form.append(bar);
+    return form;
   }
   async function openMessagingControls(form) {
     if (pendingForms.has(form))
@@ -158048,9 +156580,9 @@ function mountDashboardController(options) {
       return;
     }
     const menu = target.closest("details.rowmenu");
-    queryAll("details.rowmenu[open]").forEach((open7) => {
-      if (open7 !== menu || target.closest("[data-sheet-toggle],a[href]"))
-        open7.open = false;
+    queryAll("details.rowmenu[open]").forEach((open5) => {
+      if (open5 !== menu || target.closest("[data-sheet-toggle],a[href]"))
+        open5.open = false;
     });
     const toggle = target.closest("[data-sheet-toggle]");
     if (toggle) {
@@ -158058,22 +156590,22 @@ function mountDashboardController(options) {
       const sheet = selector ? query(selector) : null;
       if (!sheet)
         return;
-      const open7 = !sheet.classList.contains("on");
-      if (open7) {
+      const open5 = !sheet.classList.contains("on");
+      if (open5) {
         queryAll(".sheet.on").forEach((other) => {
           if (other !== sheet && !other.contains(toggle))
             setSheetOpen(other, false);
         });
       }
-      setSheetOpen(sheet, open7);
-      toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
-      if (open7) {
+      setSheetOpen(sheet, open5);
+      toggle.setAttribute("aria-expanded", open5 ? "true" : "false");
+      if (open5) {
         if (!sheet.hasAttribute("tabindex"))
           sheet.setAttribute("tabindex", "-1");
         sheet.focus();
       }
       const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
-      if (open7 && form && !form.closest("[hidden]") && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
+      if (open5 && form && !form.closest("[hidden]") && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
@@ -158289,10 +156821,10 @@ function mountDashboardController(options) {
   };
   const onAddModelClick = (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    const open7 = target?.closest("[data-add-model-open]");
-    if (open7) {
-      const provider = open7.dataset.addModelOpen ?? "";
-      const dialog = open7.closest(".pickrow")?.querySelector(`dialog[data-add-model="${provider}"]`);
+    const open5 = target?.closest("[data-add-model-open]");
+    if (open5) {
+      const provider = open5.dataset.addModelOpen ?? "";
+      const dialog = open5.closest(".pickrow")?.querySelector(`dialog[data-add-model="${provider}"]`);
       if (!dialog || typeof dialog.showModal !== "function" || dialog.open)
         return;
       dialog.showModal();
@@ -158485,34 +157017,6 @@ function mountDashboardController(options) {
   };
 }
 var DASHBOARD_REDRAW_EVENT = "olympus:redraw";
-
-// src/core/computer-identity.ts
-import { spawnSync as spawnSync20 } from "node:child_process";
-import { hostname, userInfo as userInfo3 } from "node:os";
-function dashboardComputerIdentity() {
-  if (fixedIdentity !== undefined)
-    return fixedIdentity;
-  let name = hostname();
-  if (process.platform === "darwin") {
-    const result = spawnSync20("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
-    if (result.status === 0 && result.stdout.trim())
-      name = result.stdout.trim();
-  }
-  let account = "unknown account";
-  try {
-    account = userInfo3().username;
-  } catch {}
-  return `${name} · ${account}`;
-}
-var fixedIdentity;
-var init_computer_identity = () => {};
-
-// src/workers/dashboard/session-marker.ts
-import { createHash as createHash89 } from "node:crypto";
-function dashboardSessionMarker(csrfToken) {
-  return createHash89("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
-}
-var init_session_marker = () => {};
 
 // src/workers/dashboard/theme.ts
 function dashboardThemeVariable(token) {
@@ -158841,15 +157345,6 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 [data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
-/* The native disclosure shares the choice row; its list spans both columns. */
-.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start; gap: 12px; }
-.messagingchoices > details, .messagingchoices > details::details-content { display: contents; }
-.messagingchoices > details > summary { grid-column: 1; grid-row: 1; margin: 0; box-sizing: border-box; }
-.messagingchoices > form { grid-column: 2; grid-row: 1; margin: 0 !important; }
-.messagingchoices > form > .btn { margin: 0; }
-.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3); margin: 0; }
-.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3; margin: 0; }
-.messagingchoices > details:not([open]) > form { display: none; }
 .actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
 .setupactions > .primary { margin-left: auto; }
@@ -158882,7 +157377,52 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
 .messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
-.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }
+/* Messaging source card and dialog (#1075, #1086): one header with the ⋯ menu,
+   one primary action per state, and a chooser by kind that fits a phone. */
+dialog.adddialog.msgdialog { padding: 0; }
+dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; }
+.msghead { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.msgtitle { flex: 1 1 auto; min-width: 0; }
+.msgtitle h3 { margin: 0; }
+.messaging-card .msgtitle p { margin: 2px 0 0; color: var(--t3); overflow-wrap: anywhere; }
+.messaging-card .msghead details { margin: 0; }
+.msghead .iconbtn, .msghead .rowmenu > summary { flex: none; min-width: 36px; text-align: center; }
+.messaging-card .msgactions { flex-wrap: wrap; }
+.messaging-card .msgactions > .btn, .messaging-card .msgactions > form { flex: 1 1 100%; max-width: 100%; }
+.messaging-card .msgactions > .btn, .messaging-card .msgactions > form > .btn { width: 100%; }
+.messaging-card .btn.busy { opacity: .8; cursor: progress; border-style: solid; color: var(--t2); }
+.messaging-card .btn.primary.busy { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.messaging-card .btn.busy::before { content: ''; display: inline-block; width: .9em; height: .9em; margin-right: .5em; vertical-align: -.1em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: msgspin .8s linear infinite; }
+@keyframes msgspin { to { transform: rotate(360deg); } }
+.kindpicker { display: grid; gap: 10px; margin: 12px 0 0 !important; }
+.kindrow { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.kindgroup { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.kindgroup > .kindrow { border: 0; background: none; }
+.kindtext { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; text-align: left; }
+.kindtext small { color: var(--t2); font-size: var(--fs-body); }
+.kindtext .kindcount { color: var(--t3); font-weight: 400; }
+.kindnote.partial { color: var(--warn); }
+.kindopen { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; padding: 0; border: 0; background: none; color: var(--t1); font: inherit; cursor: pointer; }
+.kindchev { color: var(--t3); transition: transform .15s; }
+.kindopen[aria-expanded="true"] .kindchev { transform: rotate(90deg); }
+.messaging-card .kindcap { margin: 4px 0 0; color: var(--t3); }
+.kindlist { padding: 0 14px 12px; display: grid; gap: 6px; }
+.kindlist[hidden] { display: none; }
+.kindsearch { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--t1); font: inherit; }
+.kindlines { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; }
+.kindlines[disabled] { opacity: .55; }
+.chatline { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.chatline[hidden] { display: none; }
+.chatline .chatname { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.chatline .chatwhen { flex: none; color: var(--t3); font-size: var(--fs-caption); }
+.switch { appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 44px; height: 26px; margin: 0; border-radius: 13px; background: var(--line); cursor: pointer; transition: background .15s; }
+.switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch:checked { background: var(--accent-fill); }
+.switch:checked::after { transform: translateX(18px); }
+.switch:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.messaging-card .kindsave { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.messaging-card .kindsave .hint { color: var(--t3); }
+.messaging-card .kindsave .btn { margin-left: auto; }
 .messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
 .messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
@@ -158934,8 +157474,8 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash90 } from "node:crypto";
-function escapeHtml2(value2) {
+import { createHash as createHash88 } from "node:crypto";
+function escapeHtml(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function escapeScriptJson(value2) {
@@ -158981,17 +157521,17 @@ function externalLink(input) {
   const href = safeExternalHref(input.url);
   if (href === undefined)
     return "";
-  return `<a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(input.label)}</a>`;
+  return `<a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(input.label)}</a>`;
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash90("sha256").update(normalised).digest("hex");
+  return createHash88("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
-  const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
+  const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
   const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : dashboardSessionMarker(input.poll.controlSessionCsrfToken);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
@@ -159009,9 +157549,9 @@ function pageShell(input) {
   const content = `<div class="frame">
       <div class="page">
       ${input.nav ? `${input.nav}
-      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml2(input.meta)}</span>` : ""}</div>` : `<div class="top">
-        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `
-        <span class="meta">${escapeHtml2(input.meta)}</span>` : ""}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml(input.meta)}</span>` : ""}</div>` : `<div class="top">
+        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `
+        <span class="meta">${escapeHtml(input.meta)}</span>` : ""}
       </div>`}
       ${input.body}
       </div>
@@ -159023,11 +157563,11 @@ function pageShell(input) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml2(documentTitle)}</title>
+    <title>${escapeHtml(documentTitle)}</title>
     <style>${styles}</style>
   </head>
   <body>
-    <div data-olympus-dashboard-root data-signature="${escapeHtml2(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml2(sessionMarker)}">${content}</div>
+    <div data-olympus-dashboard-root data-signature="${escapeHtml(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml(sessionMarker)}">${content}</div>
     ${scripts}
   </body>
 </html>`;
@@ -159061,20 +157601,20 @@ function statusGlyph(status, fraction) {
 function actionButton(input) {
   const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
   if (action?.blockedReason !== undefined && (action.kind !== "none" || action.sheet !== undefined)) {
-    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml2(action.label)}</button>` + `<span class="hint">${escapeHtml2(action.blockedReason)}</span></span>`;
+    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>` + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
   }
   if (action?.kind === "link") {
     const href = safeHref(action.href);
-    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml2(href)}">${escapeHtml2(action.label)}</a>`;
+    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml(href)}">${escapeHtml(action.label)}</a>`;
   }
   if (action === undefined || action.kind === "none") {
     if (action?.sheet === undefined)
       return "";
     const sheetId = safeId2(action.sheet);
-    return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml2(action.label)}</button>`;
+    return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml(action.label)}</button>`;
   }
-  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml2(action.label)}</button>`;
-  const source = `<input type="hidden" name="source" value="${escapeHtml2(action.source ?? "")}">`;
+  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml(action.label)}</button>`;
+  const source = `<input type="hidden" name="source" value="${escapeHtml(action.source ?? "")}">`;
   const message2 = `<span class="actmsg" data-action-message role="status"></span>`;
   const key2 = action.kind === "api_key" ? `<input class="keyfield" type="password" name="api_key" required placeholder="API key" aria-label="API key">` : "";
   return `<form class="rowform" data-connect-kind="${action.kind}">${source}${key2}${button}${message2}</form>`;
@@ -159085,42 +157625,42 @@ function dashboardControlGate(input) {
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
-  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
+  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 function rowMenu(label, itemsHtml) {
   if (itemsHtml.trim() === "")
     return "";
-  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml2(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
+  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
 }
 function setupRow(input) {
   const href = safeHref(input.href);
   const blurb = input.blurb.trim();
   const link = input.blurbLink === undefined ? "" : externalLink(input.blurbLink);
-  const blurbText = blurb === "" ? "" : escapeHtml2(blurb);
+  const blurbText = blurb === "" ? "" : escapeHtml(blurb);
   const instructions = [blurbText, link].filter((part) => part !== "").join(" ");
   const summary = (input.summary ?? "").trim();
   const caveat = (input.caveat ?? "").trim();
   const lead = [
-    caveat === "" ? "" : `<span class="caveat">${escapeHtml2(caveat)}.</span>`,
-    summary === "" ? "" : escapeHtml2(summary)
+    caveat === "" ? "" : `<span class="caveat">${escapeHtml(caveat)}.</span>`,
+    summary === "" ? "" : escapeHtml(summary)
   ].filter((part) => part !== "").join(" ");
   const blurbBody = lead === "" ? instructions : `${lead}${instructions === "" ? "" : detailsDisclosure("How to set this up", `<p>${instructions}</p>`)}`;
   const blurbSpan = blurbBody === "" ? "" : `<span class="blurb">${blurbBody}</span>`;
-  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml2(input.sourceId)}"` : "";
-  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml2(href)}"` : ""}>` + `${statusGlyph("Off")}` + (href ? `<a class="name" href="${escapeHtml2(href)}">${escapeHtml2(input.label)}</a>` : `<span class="name">${escapeHtml2(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}` + `</div>`;
+  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml(input.sourceId)}"` : "";
+  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `${statusGlyph("Off")}` + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}` + `</div>`;
 }
 function blockerBanner(input) {
-  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml2(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
+  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
 }
 function detailsDisclosure(summary, body) {
   if (body.trim() === "")
     return "";
-  return `<details class="howto"><summary>${escapeHtml2(summary)}</summary>${body}</details>`;
+  return `<details class="howto"><summary>${escapeHtml(summary)}</summary>${body}</details>`;
 }
 function connectorSheet(input) {
   const id = safeId2(input.id);
   const promptId = `${id}-prompt`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `<p>${escapeHtml2(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml2(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `<p>${escapeHtml(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
 }
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
@@ -159128,24 +157668,24 @@ function setupStepsSheet(input) {
   const current2 = input.initialStep ?? 0;
   const redirectStep = input.steps.findIndex((step) => step.redirect_uri && input.redirect);
   const shortcutTarget = redirectStep >= 0 ? redirectStep : count - 1;
-  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml2(input.shortcut)}</button></p>` : "";
+  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml(input.shortcut)}</button></p>` : "";
   const formId = `${id}-form`;
   const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
-    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
+    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url2)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
     const extraLinks = (step.links ?? []).map((link2) => {
       const href = safeExternalHref(link2.url);
-      return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link2.label)} ↗</a></p>` : "";
+      return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link2.label)} ↗</a></p>` : "";
     }).join("");
-    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
+    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
     const action = input.stepActions?.[index];
-    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml2(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml2(step.text)}</p>` : "";
+    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml(step.text)}</p>` : "";
     const heading = input.guided ? "h2" : "h4";
-    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index !== current2 ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ""}${index !== current2 ? " hidden" : ""}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
   const progress = input.guided ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current2 + 1}">${input.steps.map((_, i2) => `<span data-setup-segment${i2 <= current2 ? ' class="filled"' : ""}></span>`).join("")}</div>` : `<progress data-setup-progress max="${count}" value="${current2 + 1}"></progress>`;
-  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current2 + 1} OF ${count}` : `Step ${current2 + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current2 === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current2 === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${current2 === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml2(input.footer)}</p>` : ""}</div>`;
+  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current2 + 1} OF ${count}` : `Step ${current2 + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current2 === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current2 === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml(initialAction?.formId ?? formId)}" data-setup-submit${current2 === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml(input.footer)}</p>` : ""}</div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -159153,41 +157693,41 @@ function connectSetupSheet(input) {
   const inputs = input.fields.map((field) => {
     const value2 = field.secret && input.savedSecrets?.includes(field.name) ? DASHBOARD_SAVED_SECRET_FIELD_VALUE : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
-    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
+    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value2 === undefined ? "" : ` value="${escapeHtml(value2)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join("");
   const hasError = Boolean(input.notice?.trim());
-  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
-  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml2(input.providerNote)}</p>` : "";
+  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
-  const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
-  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
-  const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
-  const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
-  const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
+  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
+  const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
+  const submitLabel = escapeHtml(input.submitLabel ?? "Connect");
+  const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
   const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {}, ...input.shortcut ? { shortcut: input.shortcut } : {} }) : `${registration}${redirect}${byoForm()}`;
-  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml2(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml2(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
-  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
+  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml(input.lead.title)}</h4><p>${escapeHtml(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
     if (input.credentialFile)
-      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml2(input.heading)}</h4>${providerNote}<p>${escapeHtml2(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
+      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml(input.heading)}</h4>${providerNote}<p>${escapeHtml(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml(input.publisher.byoSummary)}</summary><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
   }
   if (input.credentialFile)
     return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? " hidden" : ""}>${walkthrough}</div>${cancel}</div></div>`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
     return "";
-  const uriBlock = `<div class="promptbox" id="${id}-redirect">${escapeHtml2(registration.redirect_uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+  const uriBlock = `<div class="promptbox" id="${id}-redirect">${escapeHtml(registration.redirect_uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
   if (!registration.required) {
-    return `<p class="hint">${escapeHtml2(registration.skip_note ?? "No registration needed on this machine.")}</p>` + `<p class="hint">Redirect URI</p>` + uriBlock;
+    return `<p class="hint">${escapeHtml(registration.skip_note ?? "No registration needed on this machine.")}</p>` + `<p class="hint">Redirect URI</p>` + uriBlock;
   }
   const consoleUrl = safeExternalHref(registration.console.url);
-  const consoleStep = consoleUrl === undefined ? escapeHtml2(registration.console.label) : `${escapeHtml2(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml2(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml2(new URL(consoleUrl).host)} →</a>`;
-  return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml2(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml2(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml2(registration.finish)}</li>` + `</ol>`;
+  const consoleStep = consoleUrl === undefined ? escapeHtml(registration.console.label) : `${escapeHtml(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml(new URL(consoleUrl).host)} →</a>`;
+  return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml(registration.finish)}</li>` + `</ol>`;
 }
 function dashboardNeedsSetupSheet(source, action, options = {}) {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
@@ -159263,7 +157803,7 @@ function redirectUriInput(action) {
 }
 function standaloneLockedNotice() {
   const C = DASHBOARD_HOST_GATE_COPY;
-  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml2(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml2(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml2(C.open)}</a> ` + `${escapeHtml2(C.fallbackBefore)}<code>${escapeHtml2(C.fallbackCommand)}</code>${escapeHtml2(C.fallbackAfter)}</span></div></div>`;
+  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml(C.open)}</a> ` + `${escapeHtml(C.fallbackBefore)}<code>${escapeHtml(C.fallbackCommand)}</code>${escapeHtml(C.fallbackAfter)}</span></div></div>`;
 }
 function standaloneDashboardControllerScript(input) {
   const mountSource = mountDashboardController.toString().replaceAll("</script", "<\\/script");
@@ -159335,10 +157875,8 @@ function standaloneDashboardControllerScript(input) {
         root: root,
         transport: {
           async openLocalControls() {
-            // The live session's CSRF token is the owner proof with the cookie (#1187).
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
-              headers: { 'X-Olympus-CSRF': csrfToken },
             });
             // The local session is a new one: later requests carry its CSRF token, not the launch session's,
             // and the poll expects the server's marker for it, so it does not reload the page.
@@ -159431,900 +157969,8 @@ var init_components = __esm(() => {
   SAFE_COLOR = /^(?:#[0-9A-Fa-f]{3,8}|var\(--[a-z0-9-]+\))$/;
 });
 
-// src/workers/dashboard/outside-help-tools.ts
-function shellWord(value2) {
-  return /^[A-Za-z0-9_@%+:,./-]+$/.test(value2) ? value2 : `'${value2.replaceAll("'", "'\\''")}'`;
-}
-function outsideHelpDaemonCommand(tools) {
-  const entry = tools?.tools.find((item) => item.tool === "zkapi-clientd");
-  const program = entry?.source === "configured" ? entry.path : entry?.executable;
-  return program ? shellWord(program) : "zkapi-clientd";
-}
-function installable(entry) {
-  return entry.source === "missing" || entry.source === "outdated";
-}
-function outsideHelpToolsNeedAttention(tools) {
-  if (!tools)
-    return false;
-  return tools.install.state === "running" || tools.install.state === "failed" || tools.tools.some(installable);
-}
-function progressLine(install) {
-  if (install.state === "running") {
-    const phase = fill(C.phase[install.phase], { tool: install.tool });
-    const percent = install.phase === "downloading" && install.percent !== undefined ? ` ${fill(C.percent, { percent: String(install.percent) })}` : "";
-    return `<p class="pnote" data-outside-install-progress role="status">${escapeHtml2(phase + percent)}</p>`;
-  }
-  if (install.state === "failed") {
-    return `<p class="pnote ohwarn" data-outside-install-failed="${escapeHtml2(install.code)}" role="status">${escapeHtml2(`${C.failedPrefix} ${install.message}`)}</p>`;
-  }
-  return "";
-}
-function installButton(tools, canEdit, replacing) {
-  if (tools.install.state === "running")
-    return "";
-  const missing = tools.tools.some((entry) => entry.source === "missing");
-  const outdated = tools.tools.filter((entry) => entry.source === "outdated").map((entry) => entry.label);
-  if (!missing && outdated.length === 0 && !replacing)
-    return "";
-  const label = tools.install.state === "failed" ? C.retry : missing ? C.install : outdated.length > 0 ? fill(C.update, { tools: outdated.join(" and ") }) : fill(C.installOwn, { tools: replacing.label });
-  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled2}>${escapeHtml2(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
-}
-function sourceWords(entry) {
-  return fill(C.source[entry.source], { path: entry.path ?? "", installed: entry.installedVersion ?? "", version: entry.version ?? "" });
-}
-function renderOutsideHelpTools(tools, input) {
-  if (!tools)
-    return "";
-  const install = tools.install;
-  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
-  const launcher = input.requireLauncher ? tools.tools.find((entry) => entry.tool === "zkapi-clientd" && entry.offered === true) : undefined;
-  const missing = Boolean(launcher) || tools.tools.some(installable);
-  const parts = [
-    `<p class="pnote"><strong>${escapeHtml2(C.title)}</strong></p>`,
-    `<p class="pnote">${escapeHtml2(C.intro)}</p>`,
-    `<ul class="ohfacts" data-outside-tool-list>${lines}</ul>`,
-    progressLine(install)
-  ];
-  if (install.state === "done" && !missing)
-    parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml2(C.done)}</p>`);
-  if (!missing && install.state !== "running")
-    parts.push(`<p class="pnote ohsmall">${escapeHtml2(C.allInstalled)}</p>`);
-  parts.push(installButton(tools, input.canEdit, launcher));
-  return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml2(install.state)}">${parts.join("")}</div>`;
-}
-function renderOutsideHelpToolsFix(tools, input) {
-  if (!tools || !outsideHelpToolsNeedAttention(tools))
-    return "";
-  const missing = tools.tools.filter((entry) => entry.source === "missing").map((entry) => entry.label);
-  const outdated = tools.tools.filter((entry) => entry.source === "outdated").map((entry) => entry.label);
-  const said = [
-    ...missing.length > 0 ? [fill(missing.length === 1 ? C.fixOne : C.fixMany, { tools: missing.join(" and ") })] : [],
-    ...outdated.length > 0 ? [fill(C.fixOutdated, { tools: outdated.join(" and ") })] : []
-  ];
-  const text3 = said.length === 0 ? C.fixWorking : said.join(" ");
-  return `<li data-outside-tools="fix" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(text3)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
-}
-function renderOutsideHelpToolsReplace(tools, tool, input) {
-  const entry = tools?.tools.find((item) => item.tool === tool);
-  if (!tools || entry?.source !== "system" || entry.offered !== true)
-    return "";
-  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
-}
-function renderOutsideHelpToolsScript(tools, input) {
-  if (!tools || !input.canEdit || input.csrfToken === undefined)
-    return "";
-  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
-}
-function outsideHelpToolsClientScript(config2) {
-  return `(function () {
-  // The dashboard runs this again after it swaps in a fresh page: one instance binds the new forms, and one poll runs.
-  if (typeof window.__olympusOutsideHelpTools === 'function') { window.__olympusOutsideHelpTools(); return; }
-  var config = ${escapeScriptJson(JSON.stringify(config2))};
-  var timer = null;
-  function sections() { return Array.prototype.slice.call(document.querySelectorAll('[data-outside-tools]')); }
-  function say(form, text, bad) {
-    var out = form && form.querySelector('[data-action-message]');
-    if (!out) return;
-    out.textContent = text;
-    out.setAttribute('data-state', bad ? 'error' : 'ok');
-  }
-  function schedule() { if (!timer) timer = setTimeout(poll, config.pollMs); }
-  async function poll() {
-    timer = null;
-    var running = sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; });
-    try {
-      var response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' });
-      var doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-      var fresh = doc.querySelectorAll('[data-outside-tools]');
-      var states = Array.prototype.map.call(fresh, function (node) { return node.getAttribute('data-install-state'); });
-      if (running && states.indexOf('done') !== -1) { window.location.reload(); return; }
-      Array.prototype.forEach.call(fresh, function (next) {
-        var current = document.querySelector('[data-outside-tools="' + next.getAttribute('data-outside-tools') + '"]');
-        if (current) current.replaceWith(document.importNode(next, true));
-      });
-      // A part that needed fixing and now does not: the page changes shape.
-      if (running && fresh.length !== sections().length) { window.location.reload(); return; }
-    } catch (error) {
-      // The next round tries again.
-    }
-    bind();
-  }
-  async function submit(event) {
-    event.preventDefault();
-    var form = event.currentTarget;
-    var buttons = document.querySelectorAll('form[data-outside-tools-form] button');
-    buttons.forEach(function (button) { button.disabled = true; });
-    say(form, config.copy.starting, false);
-    try {
-      var response = await fetch(config.path, {
-        method: 'POST', credentials: 'same-origin', cache: 'no-store',
-        headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirm: true }),
-      });
-      var result = {};
-      try { result = await response.json(); } catch (error) { result = {}; }
-      if (!response.ok || !result.ok) {
-        say(form, (result.error && result.error.message) || config.copy.failed, true);
-        buttons.forEach(function (button) { button.disabled = false; });
-        return;
-      }
-      say(form, result.status_message || config.copy.starting, false);
-      sections().forEach(function (node) { node.setAttribute('data-install-state', 'running'); });
-      schedule();
-    } catch (error) {
-      say(form, config.copy.failed, true);
-      buttons.forEach(function (button) { button.disabled = false; });
-    }
-  }
-  function bind() {
-    document.querySelectorAll('form[data-outside-tools-form]').forEach(function (form) {
-      if (form.hasAttribute('data-bound')) return;
-      form.setAttribute('data-bound', '');
-      form.addEventListener('submit', submit);
-    });
-    if (sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; })) schedule();
-  }
-  window.__olympusOutsideHelpTools = bind;
-  bind();
-})();`;
-}
-var DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH = "/dashboard/consult/tools/install", DASHBOARD_OUTSIDE_HELP_TOOLS_COPY, C, DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS = 1500;
-var init_outside_help_tools = __esm(() => {
-  init_components();
-  init_vocabulary();
-  DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
-    title: "Install the parts",
-    intro: "Olympus needs two small programs on your computer: Tor, which hides where your question comes from, and zkAPI, which pays without revealing who you are. Olympus downloads the official builds, checks each against the fingerprint it ships with, and keeps them in its own folder. Installing turns nothing on.",
-    source: {
-      olympus: "Installed (Olympus)",
-      system: "Installed (your system)",
-      missing: "Not installed",
-      not_offered: "No download for this computer; install it yourself",
-      outdated: "Needs an update (Olympus installed {installed}; anonymous answers need {version})",
-      configured: "Set in your zkAPI route ({path})",
-      configured_missing: "Not found at {path}, the path set in your zkAPI route"
-    },
-    configuredMissing: "The {tool} program at {path} (set in your zkAPI route) was not found. Install it there, or remove that path from the route to use the one Olympus installs.",
-    configuredOld: "The {tool} program at {path} (set in your zkAPI route) is not the build anonymous answers need. Remove that path from the route to use the one Olympus installs, or point it at {version}. Nothing was sent.",
-    systemOld: "The {tool} program found on this computer cannot run anonymous answers. Olympus can install its own checked build ({version}), which it uses instead. Nothing was sent.",
-    line: "{tool}: {state}",
-    install: "Install Tor and zkAPI",
-    update: "Update {tools}",
-    installOwn: "Install Olympus's {tools}",
-    retry: "Try again",
-    allInstalled: "Both are installed. Nothing else changed.",
-    phase: {
-      downloading: "Downloading {tool}…",
-      checking: "Checking {tool}…",
-      installing: "Installing {tool}…"
-    },
-    percent: "{percent}%",
-    done: "Installed.",
-    failedPrefix: "Not installed.",
-    starting: "Starting…",
-    failed: "The install could not start. Reload the page and try again.",
-    fixOne: "{tools} is not installed on this computer.",
-    fixMany: "{tools} are not installed on this computer.",
-    fixOutdated: "{tools} needs an update before anonymous answers can run.",
-    fixWorking: "Installing Tor and zkAPI."
-  };
-  C = DASHBOARD_OUTSIDE_HELP_TOOLS_COPY;
-});
-
-// src/workers/dashboard/outside-help.ts
-function outsideHelpStateLine(summary) {
-  return DASHBOARD_OUTSIDE_HELP_COPY.state[summary.state];
-}
-function summaryOf(status) {
-  if (status.unavailable)
-    return { state: "unavailable" };
-  if (status.settings.state === "invalid")
-    return { state: "invalid" };
-  if (status.route.state === "not_configured")
-    return { state: "route_not_configured" };
-  const readiness = status.route.readiness;
-  if (readiness && readiness.fences.length > 0)
-    return { state: "fence_held" };
-  if (status.settings.state === "on" && !status.route.acknowledgements.complete)
-    return { state: "needs_acceptance" };
-  if (status.settings.state === "on" && (status.route.readinessUnavailable || readiness && readiness.blockers.some((code) => code !== "acknowledgements_incomplete"))) {
-    return { state: "blocked" };
-  }
-  return { state: status.settings.state };
-}
-function outsideHelpBlockerWords(code) {
-  return DASHBOARD_OUTSIDE_HELP_COPY.blockers[code] ?? fill(DASHBOARD_OUTSIDE_HELP_COPY.blockerOther, { code });
-}
-function shortDate(iso2) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso2);
-  const month = match ? MONTHS3[Number(match[2]) - 1] : undefined;
-  return match && month ? `${Number(match[3])} ${month}` : iso2;
-}
-function shortTime(iso2) {
-  return `${shortDate(iso2.slice(0, 10))} ${iso2.slice(11, 16)}`.trim();
-}
-function renderOutsideHelpCard(status, input) {
-  if (input.part === "privacy")
-    return renderOutsideHelpPrivacyPart(status, input);
-  const summary = summaryOf(status);
-  const canEdit = input.csrfToken !== undefined && input.localSession === true;
-  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
-  const route = status.route;
-  const on = status.settings.state === "on";
-  const unavailable3 = summary.state === "unavailable";
-  const parts = [];
-  if (input.untitled !== true)
-    parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
-  if (canUnlock && (on || !unavailable3 || status.confinementInstallRequired)) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  }
-  const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
-  const missingRoute = !unavailable3 && route.state === "not_configured";
-  const writerHref = input.part === "account" && input.otherPartHref ? `${input.otherPartHref.split("#")[0]}#outside-writer` : undefined;
-  if (missingRoute)
-    parts.push(renderProblems(status, access, writerHref));
-  parts.push(renderStatusBlock(status, summary, access));
-  if (status.restartPending)
-    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
-  if (unavailable3) {
-    if (status.confinementInstallRequired)
-      parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
-    const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
-    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
-  }
-  if (!missingRoute)
-    parts.push(renderProblems(status, access, writerHref));
-  if (route.state === "configured" && !route.acknowledgements.complete)
-    parts.push(renderStatementsToAccept(access));
-  const more = [];
-  if (!on)
-    more.push(renderBeforeTurningOn());
-  if (input.part === "account") {
-    parts.push(savedLanguagesForSwitch(status));
-    if (input.otherPartHref)
-      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
-  } else {
-    more.push(renderLevel(status, canEdit));
-    if (status.standard)
-      more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
-    if (status.writer)
-      more.push(renderWriter(status.writer, canEdit));
-    more.push(renderLanguages(status, canEdit));
-  }
-  if (route.state === "configured")
-    more.push(renderLimits(route, canEdit));
-  if (route.state === "configured" && route.acknowledgements.complete)
-    more.push(renderAccepted());
-  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit }), outsideHelpDaemonCommand(status.tools)));
-  more.push(renderDetails(status));
-  parts.push(`<div class="ohmore">${more.join("")}</div>`);
-  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
-}
-function savedLanguagesForSwitch(status) {
-  const chosen = new Set(status.settings.languages);
-  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
-}
-function renderOutsideHelpPrivacyPart(status, input) {
-  const canEdit = input.csrfToken !== undefined && input.localSession === true;
-  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
-  const summary = summaryOf(status);
-  const on = status.settings.state === "on";
-  const parts = [];
-  if (canUnlock) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  }
-  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
-  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
-  if (status.writer?.modelProblem) {
-    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
-  }
-  const more = [renderLevel(status, canEdit)];
-  if (status.standard)
-    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
-  if (status.writer)
-    more.push(renderWriter(status.writer, canEdit));
-  const invalid4 = status.settings.state === "invalid";
-  const save = canEdit && !invalid4 ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
-  parts.push(`<div class="ohmore">${more.join("")}</div>`);
-  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}`;
-}
-function outsideHelpScriptConfig(csrfToken) {
-  return {
-    csrfToken: csrfToken ?? "",
-    paths: DASHBOARD_OUTSIDE_HELP_PATHS,
-    copy: {
-      saving: DASHBOARD_OUTSIDE_HELP_COPY.saving,
-      failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed,
-      failedStatus: DASHBOARD_OUTSIDE_HELP_COPY.saveFailedStatus,
-      unreachable: DASHBOARD_OUTSIDE_HELP_COPY.saveUnreachable,
-      restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting,
-      restartRecovery: DASHBOARD_OUTSIDE_HELP_COPY.restartRecovery,
-      staleWindow: DASHBOARD_OUTSIDE_HELP_COPY.staleWindow,
-      on: DASHBOARD_OUTSIDE_HELP_COPY.state.on,
-      off: DASHBOARD_OUTSIDE_HELP_COPY.state.off
-    },
-    writerPollMs: OUTSIDE_HELP_WRITER_POLL_MS
-  };
-}
-function renderStatusBlock(status, summary, access) {
-  const route = status.route;
-  const on = status.settings.state === "on";
-  const invalid4 = status.settings.state === "invalid";
-  const unavailable3 = summary.state === "unavailable";
-  const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable3 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
-  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
-  const usage = !unavailable3 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
-  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable3 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
-  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
-}
-function usageLine(ready) {
-  const count = ready.requestsToday.count;
-  const today = count === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : `${count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count) })} ${fill(DASHBOARD_OUTSIDE_HELP_COPY.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}`;
-  const expiry = ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : undefined;
-  return expiry ? `${today} · ${expiry}` : today;
-}
-function unlockFirst(label, primary = true) {
-  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml2(label)}</button>`;
-}
-function problemLine(words2, fix, access, input = {}) {
-  const canEdit = access === "edit";
-  let action = "";
-  if (fix?.kind === "post" && access === "unlock") {
-    action = unlockFirst(fix.label, fix.primary !== false);
-  } else if (fix?.kind === "post" && canEdit) {
-    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml2(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml2(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
-  } else if (fix?.kind === "open") {
-    action = `<button type="button" class="btn" data-outside-open="${escapeHtml2(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml2(fix.focus)}"` : ""}>${escapeHtml2(fix.label)}</button>`;
-  } else if (fix?.kind === "recheck") {
-    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
-  }
-  return `<li${input.attrs ?? ""}><span>${escapeHtml2(words2)}</span>${action}</li>`;
-}
-function renderProblems(status, access, writerHref) {
-  const canEdit = access === "edit";
-  const route = status.route;
-  const items = [];
-  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
-  if (tools)
-    items.push(tools);
-  if (route.state === "not_configured") {
-    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
-  } else if (route.readinessUnavailable || !route.readiness) {
-    items.push(problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown, { kind: "recheck" }, access, { attrs: ' data-outside-blocker="readiness_unavailable"' }));
-  } else {
-    const ready = route.readiness;
-    const blockers = ready.blockers;
-    const caps = blockers.filter((code) => CAP_BLOCKERS.has(code));
-    let replacedOld = false;
-    for (const code of blockers) {
-      if (code === "acknowledgements_incomplete")
-        continue;
-      if (CAP_BLOCKERS.has(code) && code !== caps[0])
-        continue;
-      const attrs = ` data-outside-blocker="${escapeHtml2(code)}"`;
-      const tool = TOOL_BLOCKERS.get(code);
-      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
-      if (entry?.source === "missing" || entry?.source === "outdated")
-        continue;
-      if (entry?.source === "configured_missing") {
-        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
-        continue;
-      }
-      if (OLD_DAEMON_BLOCKERS.has(code) && entry?.source === "configured") {
-        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredOld, { tool: entry.label, path: entry.path ?? "", version: entry.version ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
-        continue;
-      }
-      if (OLD_DAEMON_BLOCKERS.has(code)) {
-        const replace = renderOutsideHelpToolsReplace(status.tools, "zkapi-clientd", { canEdit, attrs });
-        if (replace) {
-          if (!replacedOld)
-            items.push(replace);
-          replacedOld = true;
-          continue;
-        }
-      }
-      if (code === "unresolved_session") {
-        items.push(renderFenceLine(ready, access));
-        continue;
-      }
-      if (code === "unresolved_session_other_wallet") {
-        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
-        continue;
-      }
-      const words2 = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
-      const fix = CAP_BLOCKERS.has(code) ? { kind: "post", form: "route", label: DASHBOARD_OUTSIDE_HELP_COPY.removeLimits, attrs: " data-outside-nolimit" } : FUNDING_BLOCKERS.has(code) ? { kind: "open", section: "limits", label: DASHBOARD_OUTSIDE_HELP_COPY.enterFundingDate, focus: "funding_date" } : SETUP_BLOCKERS.has(code) ? { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps } : { kind: "recheck" };
-      items.push(problemLine(words2, fix, access, { attrs }));
-    }
-  }
-  if (status.writer?.modelProblem && writerHref === undefined) {
-    items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
-  } else if (status.writer?.modelProblem && writerHref !== undefined) {
-    items.push(`<li data-outside-model-problem><span>${escapeHtml2(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml2(writerHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
-  }
-  if (items.length === 0)
-    return "";
-  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
-}
-function renderFenceLine(ready, access) {
-  const canEdit = access === "edit";
-  const mine = ready.fences.find((fence) => fence.thisWallet);
-  const words2 = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
-  if (access === "unlock")
-    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words2)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
-  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml2(mine.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words2)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
-}
-function renderSection(input) {
-  return `<details class="ohsect" id="outside-${escapeHtml2(input.id)}" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
-}
-function renderStatements(inputs) {
-  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml2(entry.id)}">${escapeHtml2(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml2(entry.id)}">`).join("") : "");
-}
-function renderStatementsToAccept(access) {
-  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
-}
-function renderAccepted() {
-  return renderSection({
-    id: "statements",
-    title: DASHBOARD_OUTSIDE_HELP_COPY.costTitle,
-    summary: fill(DASHBOARD_OUTSIDE_HELP_COPY.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }),
-    body: `<div data-outside-acknowledged="yes">${renderStatements(false)}</div>`
-  });
-}
-function renderBeforeTurningOn() {
-  return renderSection({
-    id: "before",
-    title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle,
-    summary: "",
-    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line2) => `<li>${escapeHtml2(line2)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
-  });
-}
-function renderLevel(status, canEdit) {
-  const invalid4 = status.settings.state === "invalid";
-  const current2 = status.settings.level;
-  const blocked = !canEdit || invalid4 ? ' disabled aria-disabled="true"' : "";
-  const options = ["unnamed", "general"].map((level) => {
-    const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
-    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current2 ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
-  }).join("");
-  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid4 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
-  return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current2].short, body });
-}
-function renderStandard(standard, level, canEdit) {
-  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.standard;
-  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
-    const copy = C2.modes[mode];
-    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled2}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
-  }).join("");
-  const text3 = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
-  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<p class="pnote">${escapeHtml2(C2.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C2.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled2}>${escapeHtml2(text3)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(C2.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
-  const summary = level === "general" ? fill(C2.unusedAtStrict, { mode: C2.modes[standard.mode].short }) : C2.modes[standard.mode].short;
-  return renderSection({ id: "standard", title: C2.title, summary, body });
-}
-function renderSetupSteps(secretRef, toolsHtml, daemon) {
-  const values = { secretRef, daemon };
-  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => step.replace(/\{(secretRef|daemon)\}/g, (_match, key2) => values[key2]));
-  return renderSection({
-    id: "steps",
-    title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
-    summary: "",
-    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
-  });
-}
-function renderLimits(route, canEdit) {
-  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  const capped2 = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
-  const limit = capped2 ? [
-    ...route.dailyRequestCap !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsRequests, { n: String(route.dailyRequestCap) })] : [],
-    ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
-  ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
-  const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
-  const noLimit = capped2 && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
-  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
-  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled2}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled2}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
-  return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
-}
-function openAiModel(model) {
-  return typeof model === "string" && /^openai\//i.test(model.trim());
-}
-function anthropicModel(model) {
-  return typeof model === "string" && /^anthropic\//i.test(model.trim());
-}
-function renderWriter(writer, canEdit) {
-  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
-  const choice = writer.choice;
-  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel;
-  const effectiveClaudeModel = writer.effectiveClaudeModel ?? writer.claudeFrontierModel;
-  const parts = [`<p class="pnote">${escapeHtml2(C2.intro)}</p>`];
-  parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml2(choice ? fill(C2.currentOwn, { model: choice.model, address: choice.baseUrl }) : C2.currentBuiltIn)}</p>`);
-  if (choice?.secretRef && choice.keyPresent === false)
-    parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml2(fill(C2.keyMissing, { secretRef: choice.secretRef }))}</p>`);
-  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C2.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C2.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C2.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled2}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C2.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled2}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C2.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml2(C2.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml2(writer.claudeFrontierModel ?? "")}"${disabled2}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml2(fill(C2.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled2}>${escapeHtml2(C2.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled2}>${escapeHtml2(C2.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
-  parts.push(renderWriterCheck(writer, canEdit));
-  const summary = choice ? choice.model : C2.builtInShort;
-  return renderSection({ id: "writer", title: C2.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
-}
-function renderWriterCheck(writer, canEdit) {
-  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
-  if (!writer.testAvailable)
-    return "";
-  const disabled2 = canEdit && writer.choice && writer.check.state !== "running" ? "" : ' disabled aria-disabled="true"';
-  const check = writer.check;
-  const parts = [`<div class="sect">${escapeHtml2(C2.testTitle)}</div>`, `<p class="pnote">${escapeHtml2(C2.testIntro)}</p>`];
-  if (!writer.choice)
-    parts.push(`<p class="pnote ohsmall">${escapeHtml2(C2.testNeedsChoice)}</p>`);
-  if (check.state === "running") {
-    parts.push(`<p class="pnote" role="status">${escapeHtml2(check.total > 0 ? fill(C2.testProgress, { done: String(check.done), total: String(check.total) }) : C2.testStarting)}</p>`);
-  } else if (check.state === "failed") {
-    parts.push(`<p class="pnote ohwarn" role="status">${escapeHtml2(check.message)}</p>`);
-  } else if (check.state === "done") {
-    const report = check.report;
-    parts.push(`<p class="pnote" data-outside-writer-summary>${escapeHtml2(fill(C2.testSummary, {
-      cases: String(report.cases),
-      written: String(report.written),
-      declined: String(report.declined),
-      failed: String(report.failed),
-      passed: String(report.gatePassed),
-      refused: String(report.gateRefused)
-    }))}</p>`);
-    parts.push(report.canaryLeaks.length === 0 ? `<p class="pnote good" data-outside-writer-leaks="0">${escapeHtml2(C2.testNoLeaks)}</p>` : `<p class="pnote ohwarn" data-outside-writer-leaks="${report.canaryLeaks.length}">${escapeHtml2(fill(C2.testLeaks, { n: String(report.canaryLeaks.length) }))}</p>`);
-    if (report.documentQuestions.length > 0)
-      parts.push(`<p class="pnote ohwarn" data-outside-writer-document-questions>${escapeHtml2(fill(C2.testDocumentQuestions, { n: String(report.documentQuestions.length) }))}</p>`);
-    const rows = report.results.map((result) => {
-      const verdict = result.outcome === "questions" ? result.gate === "pass" ? C2.testPassed : fill(C2.testRefused, { reasons: result.gateReasons.join(", ") }) : result.outcome === "declined" ? C2.testDeclined : fill(C2.testFailed, { reason: result.reason ?? result.outcome });
-      const questions = result.questions.map((question) => `<li>${escapeHtml2(question)}</li>`).join("");
-      return `<li data-outside-writer-case="${escapeHtml2(result.id)}"><strong>${escapeHtml2(result.id)}</strong>: ${escapeHtml2(verdict)}${result.canaryLeak ? ` <span class="attn">${escapeHtml2(C2.testLeakMark)}</span>` : ""}` + `${result.asksAboutDocuments ? ` <span class="attn">${escapeHtml2(C2.testDocumentMark)}</span>` : ""}${questions ? `<ul class="ohlist">${questions}</ul>` : ""}</li>`;
-    }).join("");
-    parts.push(`<ul class="ohfacts" data-outside-writer-results>${rows}</ul>`);
-  }
-  parts.push(`<form class="ohform" data-outside-form="writer-test"><div class="pbuttons"><button type="submit" class="btn"${disabled2}>${escapeHtml2(check.state === "done" || check.state === "failed" ? C2.testAgain : C2.test)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  return `<div data-outside-writer-check="${escapeHtml2(check.state)}">${parts.join("")}</div>`;
-}
-function renderLanguages(status, canEdit) {
-  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  const chosen = new Set(status.settings.languages);
-  const languages = status.languages.map((entry) => {
-    const name = LANGUAGE_NAMES[entry.language];
-    const off = !entry.installed;
-    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled2}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
-  }).join("");
-  const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
-  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key2]) => domainNames[key2] ?? key2);
-  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key2]) => domainNames[key2] ?? key2);
-  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key2]) => key2).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
-  const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
-  return renderSection({
-    id: "languages",
-    title: DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle,
-    summary: named.join(", "),
-    open: false,
-    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
-  });
-}
-function renderDetails(status) {
-  const route = status.route;
-  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
-  const more = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line2) => `<li>${escapeHtml2(line2)}</li>`).join("")}</ul>`;
-  let facts = "";
-  if (route.state === "configured" && route.readiness && !route.readinessUnavailable) {
-    const ready = route.readiness;
-    const list = [
-      ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
-      ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
-      ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
-      fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
-      ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown,
-      fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }),
-      ...ready.fences.map((fence) => fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: shortTime(fence.at) })),
-      ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: shortTime(ready.lastSession.at), result: ready.lastSession.result })] : []
-    ];
-    facts = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`;
-  }
-  return renderSection({ id: "details", title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle, summary: "", body: about + more + facts });
-}
-function outsideHelpClientScript(config2) {
-  return `(function () {
-  var config = ${escapeScriptJson(JSON.stringify(config2))};
-  var root = document.querySelector('[data-outside-help]');
-  if (!root) return;
-  function message(form, text, bad) {
-    var out = form.querySelector('[data-action-message]');
-    if (!out) return;
-    out.textContent = text;
-    out.setAttribute('data-state', bad ? 'error' : 'ok');
-  }
-  function numberOrNull(value) {
-    var trimmed = String(value || '').trim();
-    if (trimmed === '') return null;
-    var n = Number(trimmed);
-    return isFinite(n) ? n : NaN;
-  }
-  function checked(name) {
-    return Array.prototype.map.call(root.querySelectorAll('input[name="' + name + '"]:checked'), function (input) { return input.value; });
-  }
-  function field(name) {
-    var input = root.querySelector('[name="' + name + '"]');
-    return input ? input.value : '';
-  }
-  // The statement ids an Accept posts: the ones listed in that form.
-  function statementIds(container) {
-    return Array.prototype.map.call(container.querySelectorAll('input[name="acknowledged"]'), function (input) { return input.value; });
-  }
-  // The server's own words for a refusal; the generic line only when there are none.
-  function bridgeRestart(response) {
-    return response && (response.status === 421 || ((response.status === 403 || response.status === 503) && response.headers && response.headers.get('X-Olympus-Owner-Refused') === '1'));
-  }
-  function failure(response, result) {
-    if (bridgeRestart(response)) return config.copy.staleWindow;
-    if (result && result.error && typeof result.error.message === 'string' && result.error.message) return result.error.message;
-    if (result && typeof result.message === 'string' && result.message) return result.message;
-    if (result && typeof result.error === 'string' && result.error) return result.error;
-    return response && response.status ? config.copy.failedStatus.replace('{status}', String(response.status)) : config.copy.failed;
-  }
-  // A problem's button that opens the section holding its fix: open it,
-  // bring it into view, and put the cursor in the field that needs the owner.
-  root.querySelectorAll('[data-outside-open]').forEach(function (button) {
-    button.addEventListener('click', function () {
-      var section = root.querySelector('details[data-outside-section="' + button.getAttribute('data-outside-open') + '"]');
-      if (!section) return;
-      section.open = true;
-      if (section.scrollIntoView) section.scrollIntoView({ block: 'start' });
-      var focus = button.getAttribute('data-outside-focus');
-      var target = focus ? section.querySelector('[name="' + focus + '"]') : section.querySelector('summary');
-      if (target && target.focus) target.focus();
-    });
-  });
-  // Locked: a fix's first click opens the local session (the reload then shows the real button).
-  var unlockForm = root.querySelector('form[data-outside-form="unlock"]');
-  root.querySelectorAll('[data-outside-needs-unlock]').forEach(function (button) {
-    button.addEventListener('click', function () {
-      if (!unlockForm) return;
-      if (unlockForm.requestSubmit) unlockForm.requestSubmit(); else unlockForm.dispatchEvent(new Event('submit', { cancelable: true }));
-      if (unlockForm.scrollIntoView) unlockForm.scrollIntoView({ block: 'start' });
-    });
-  });
-  // Check again: readiness runs on every read of the page.
-  root.querySelectorAll('[data-outside-recheck]').forEach(function (button) {
-    button.addEventListener('click', function () { window.location.reload(); });
-  });
-  // Each post carries the whole card's state for its route, wherever on the
-  // card the fields sit: the switch reads the language boxes, and a limits
-  // save reads the funding date and both limits. Only an Accept posts the
-  // statements; any other save leaves the recorded acceptance as it is.
-  function bodyFor(form, kind, submitter) {
-    if (kind === 'enable') {
-      var invalid = form.getAttribute('data-outside-invalid') === 'yes';
-      var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
-      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
-      if (invalid) body.replace_invalid = true;
-      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
-      return body;
-    }
-    if (kind === 'route') {
-      if (form.hasAttribute('data-outside-accept')) return { acknowledged: statementIds(form) };
-      if (form.hasAttribute('data-outside-nolimit')) return { daily_request_cap: null, daily_spend_cap_usd: null };
-      return {
-        funding_date: String(field('funding_date') || ''),
-        daily_request_cap: numberOrNull(field('daily_request_cap')),
-        daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
-      };
-    }
-    if (kind === 'level') {
-      var picked = form.querySelector('input[name="level"]:checked');
-      // On or off as the switch says now: the status line once the switch has
-      // updated it in place, else the saved setting (a paused card is still
-      // on), so saving a level never flips the switch.
-      var state = root.querySelector('[data-outside-state-text]');
-      var said = state ? state.getAttribute('data-outside-state') : '';
-      var current = said === 'on' || said === 'off' ? said : form.getAttribute('data-outside-current');
-      return { enabled: current === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
-    }
-    if (kind === 'writer') {
-      var clearing = submitter && submitter.hasAttribute('data-outside-writer-clear');
-      var revisionNow = Number(root.getAttribute('data-revision') || '0');
-      var frontier = String(field('chatgpt_frontier_model') || '').trim();
-      var claudeFrontier = String(field('claude_frontier_model') || '').trim();
-      if (clearing) return { revision: revisionNow, writer: null };
-      var writerBody = { base_url: String(field('writer_base_url') || '').trim(), model: String(field('writer_model') || '').trim(), secret_ref: String(field('writer_secret_ref') || '').trim() };
-      var writerSave = {
-        revision: revisionNow,
-        chatgpt_frontier_model: frontier === '' ? null : frontier,
-        claude_frontier_model: claudeFrontier === '' ? null : claudeFrontier,
-      };
-      // No server named: the writer stays as it is (the built-in one), and only the zkAPI models are saved.
-      if (writerBody.base_url !== '' || writerBody.model !== '' || writerBody.secret_ref !== '') writerSave.writer = writerBody;
-      return writerSave;
-    }
-    if (kind === 'standard') {
-      var mode = form.querySelector('input[name="standard_mode"]:checked');
-      var chosen = mode ? mode.value : form.getAttribute('data-outside-standard');
-      var instruction = String(field('standard_instruction') || '');
-      // An edited preset is saved as the user's own instruction.
-      if (chosen === 'light_cleanup' && instruction.trim() !== String(form.getAttribute('data-outside-preset') || '').trim()) chosen = 'custom';
-      var standardBody = { revision: Number(root.getAttribute('data-revision') || '0'), standard_mode: chosen };
-      if (chosen === 'custom') standardBody.standard_instruction = instruction;
-      return standardBody;
-    }
-    if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
-    if (kind === 'unlock') return {};
-    return { confirm: true };
-  }
-  // A save redraws the card: the dashboard swaps in the fresh page and runs this script again for it.
-  // A page without the dashboard's controller does not claim the request, and reloads.
-  function redraw() {
-    var live = document.querySelector('[data-outside-help]') || document.body;
-    if (live.dispatchEvent(new CustomEvent(${JSON.stringify(DASHBOARD_REDRAW_EVENT)}, { bubbles: true, cancelable: true }))) window.location.reload();
-  }
-  // After a restart the worker is briefly away: wait for it to answer, then redraw.
-  function redrawWhenBack(delay, form) {
-    var tries = 0;
-    function poll() {
-      tries += 1;
-      fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
-        if (bridgeRestart(response)) { message(form, config.copy.restartRecovery, true); return; }
-        if (response.ok || tries > 40) redraw(); else setTimeout(poll, 1500);
-      }, function () { if (tries > 40) redraw(); else setTimeout(poll, 1500); });
-    }
-    setTimeout(poll, delay);
-  }
-  // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
-  // (in memory), which says it again in the same form, with its section open.
-  function formKey(form) {
-    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : form.hasAttribute('data-outside-save-languages') ? ':languages' : '');
-  }
-  function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
-  (function showSaved() {
-    var saved = window.__olympusOutsideHelpSaved;
-    window.__olympusOutsideHelpSaved = null;
-    if (!saved || typeof saved.text !== 'string' || saved.text === '') return;
-    var target = Array.prototype.find.call(root.querySelectorAll('form[data-outside-form]'), function (form) { return formKey(form) === saved.key; });
-    if (!target) return;
-    var section = target.closest('details');
-    if (section) section.open = true;
-    message(target, saved.text, false);
-  })();
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
-  // While the writer check runs (only after the owner's click), the page re-reads itself.
-  if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
-    setTimeout(function () { window.location.reload(); }, config.writerPollMs);
-  }
-  // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.
-  async function send(path, body) {
-    var response;
-    try {
-      response = await fetch(path, body === null
-        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }
-        : {
-          method: 'POST', credentials: 'same-origin', cache: 'no-store',
-          headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-    } catch (error) {
-      return { ok: false, text: config.copy.unreachable, result: {} };
-    }
-    var result = {};
-    try { result = await response.json(); } catch (error) { result = {}; }
-    if (!response.ok || !result || !result.ok) return { ok: false, text: failure(response, result), result: result || {} };
-    return { ok: true, text: result.status_message || '', result: result };
-  }
-  root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
-    form.addEventListener('submit', async function (event) {
-      event.preventDefault();
-      var kind = form.getAttribute('data-outside-form');
-      var confirmText = form.getAttribute('data-outside-confirm');
-      if (confirmText && !window.confirm(confirmText)) return;
-      var buttons = form.querySelectorAll('button');
-      buttons.forEach(function (button) { button.disabled = true; });
-      function fail(text) {
-        message(form, text, true);
-        buttons.forEach(function (button) { button.disabled = false; });
-      }
-      message(form, config.copy.saving, false);
-      try {
-        // The local unlock sends no body and no bearer, only the live session's
-        // CSRF token (#1187). Every other form carries the CSRF token and a body.
-        var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
-        var outcome = await send(paths[kind], body);
-        if (!outcome.ok) return fail(outcome.text);
-        var text = outcome.text;
-        var result = outcome.result;
-        message(form, text, false);
-        if (kind === 'enable' && body && !body.replace_invalid) {
-          // Say the new state at once, before the reload that redraws the card.
-          var line = root.querySelector('[data-outside-state-text]');
-          if (line) line.textContent = body.enabled ? config.copy.on : config.copy.off;
-          if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
-        }
-        if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-        // The switch's new state shows on the redrawn card; Save languages leaves nothing to see but its confirmation.
-        if ((kind !== 'enable' || form.hasAttribute('data-outside-save-languages')) && kind !== 'unlock') keepSaved(form, text);
-        if (result.restarting) {
-          message(form, text + ' ' + config.copy.restarting, false);
-          redrawWhenBack(4000, form);
-        } else {
-          redrawWhenBack(900, form);
-        }
-      } catch (error) {
-        fail(config.copy.failed);
-      }
-    });
-  });
-})();`;
-}
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS3, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
-var init_outside_help = __esm(() => {
-  init_zkapi_consult_settings();
-  init_components();
-  init_vocabulary();
-  init_vocabulary();
-  init_outside_help_tools();
-  DASHBOARD_OUTSIDE_HELP_PATHS = {
-    unlock: "/dashboard/control/session/local",
-    enable: "/dashboard/consult",
-    route: "/dashboard/consult/route",
-    addRoute: "/dashboard/consult/route/add",
-    recover: "/dashboard/consult/recover",
-    abandon: "/dashboard/consult/abandon",
-    installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
-    writer: "/dashboard/consult/writer",
-    standard: "/dashboard/consult/standard",
-    writerTest: "/dashboard/consult/writer/test"
-  };
-  LANGUAGE_NAMES = {
-    en: "English",
-    nl: "Dutch",
-    fr: "French",
-    es: "Spanish",
-    "pt-PT": "Portuguese (Portugal)",
-    "pt-BR": "Portuguese (Brazil)",
-    de: "German",
-    it: "Italian"
-  };
-  MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
-  FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
-  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
-  TOOL_BLOCKERS = new Map([
-    ["daemon_not_found", "zkapi-clientd"],
-    ["tor_not_found", "tor"],
-    ["daemon_version_unsupported", "zkapi-clientd"],
-    ["daemon_supervisor_unsupported", "zkapi-clientd"]
-  ]);
-  OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
-});
-
 // src/workers/http.ts
-import { createHmac as createHmac5, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHmac as createHmac5, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -160344,7 +157990,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes30(32).toString("base64url"), authToken ?? "");
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes28(32).toString("base64url"), authToken ?? "");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -160410,10 +158056,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))))
         return dashboardControlForbiddenResponse("origin_mismatch");
-      const owner2 = authorizeDashboardControlSession(request, sessionSecret, now(), true);
-      if (owner2.status === "origin_mismatch" || owner2.status === "csrf_mismatch")
-        return dashboardControlForbiddenResponse(owner2.status);
-      if (owner2.status !== "allowed")
+      if (!hasOwnerControlSession(request, sessionSecret, now()))
         return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
@@ -160605,6 +158248,9 @@ function dashboardLaunchRefusedResponse(status) {
 function isDashboardLocalControlSessionRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
 }
+function hasOwnerControlSession(request, sessionSecret, nowMs) {
+  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === "allowed";
+}
 function isLoopbackOrigin(origin) {
   try {
     const host = new URL(origin).hostname.toLowerCase();
@@ -160688,11 +158334,14 @@ function isDashboardPrivacyItemRoute(request) {
 function isDashboardMessagingRoute(request) {
   return request.method === "POST" && DASHBOARD_MESSAGING_PATHS.includes(new URL(request.url).pathname);
 }
+function isDashboardPeopleRoute(request) {
+  return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_PEOPLE_PATH;
+}
 function isDashboardArchiveImportLocalRoute(request) {
   return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardSelfUpdateRoute(request) || isDashboardPrivacyItemRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save", "/dashboard/models/choice", "/dashboard/models/addable", "/dashboard/settings/proposal/apply", "/dashboard/settings/proposal/discard"].includes(new URL(request.url).pathname);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request) || isDashboardSelfUpdateRoute(request) || isDashboardPrivacyItemRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save", "/dashboard/models/choice", "/dashboard/models/addable", "/dashboard/settings/proposal/apply", "/dashboard/settings/proposal/discard"].includes(new URL(request.url).pathname);
 }
 function isDashboardSelfUpdateRoute(request) {
   const path = new URL(request.url).pathname;
@@ -160705,13 +158354,13 @@ function dashboardLocalGradeRefusal(request) {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
     });
   }
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request) && !isDashboardPrivacyItemRoute(request))
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request) && !isDashboardPrivacyItemRoute(request) && !isDashboardPeopleRoute(request))
     return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: "mac_dashboard_only",
-      message: isDashboardArchiveImportLocalRoute(request) ? "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser." : isDashboardPrivacyItemRoute(request) ? "One item's privacy label is changed only in the dashboard on this computer, in an unlocked browser." : isDashboardAppsReceivedRoute(request) ? "What AI apps received opens only in the dashboard on this computer, in an unlocked browser." : "Private answers open only in the dashboard on this computer, in an unlocked browser."
+      message: isDashboardArchiveImportLocalRoute(request) ? "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser." : isDashboardPrivacyItemRoute(request) ? "One item's privacy label is changed only in the dashboard on this computer, in an unlocked browser." : isDashboardAppsReceivedRoute(request) ? "What AI apps received opens only in the dashboard on this computer, in an unlocked browser." : isDashboardPeopleRoute(request) ? "People opens only in the dashboard on this computer, in an unlocked browser." : "Private answers open only in the dashboard on this computer, in an unlocked browser."
     }
   }), {
     status: 403,
@@ -160812,7 +158461,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes30(24).toString("base64url"),
+    nonce: randomBytes28(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(sessionSecret, origin),
     grade
@@ -161131,7 +158780,7 @@ function optionalEnv(value2) {
   const trimmed2 = value2?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_SELF_UPDATE_PATHS, DASHBOARD_SELF_UPDATE_LOCAL_ONLY = "Olympus updates itself only from the dashboard on this computer, in an unlocked browser.", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_APPS_RECEIVED_ROUTE = "/dashboard/apps-received", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, DASHBOARD_PRIVACY_ITEM_PATHS, DASHBOARD_MESSAGING_PATHS, GRADE_CODES;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_SELF_UPDATE_PATHS, DASHBOARD_SELF_UPDATE_LOCAL_ONLY = "Olympus updates itself only from the dashboard on this computer, in an unlocked browser.", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_APPS_RECEIVED_ROUTE = "/dashboard/apps-received", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, DASHBOARD_PRIVACY_ITEM_PATHS, DASHBOARD_MESSAGING_PATHS, DASHBOARD_PEOPLE_PATH = "/dashboard/people", GRADE_CODES;
 var init_http = __esm(() => {
   init_session_marker();
   init_request_peer();
@@ -161239,7 +158888,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const doc2 = document;
   const root = doc2.getElementById("app");
   const P = config2.page;
-  const C2 = config2.connection;
+  const C = config2.connection;
   const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
   const BUSY_GRACE_MS = 120000;
   const LOADING_SLOW_AFTER_MS = 8000;
@@ -161284,12 +158933,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId3++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve28, reject) => {
+    return new Promise((resolve26, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve28, reject, timer };
+      pending[id] = { resolve: resolve26, reject, timer };
     });
   }
   function notify(method, params) {
@@ -161307,10 +158956,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return value2;
     };
     post2({ jsonrpc: "2.0", id, method: "olympus/upload-file", params: { upload_id: uploadId, path, modified, file: file2 } });
-    return new Promise((resolve28) => {
+    return new Promise((resolve26) => {
       pending[id] = {
-        resolve: (result) => resolve28(finish(result && typeof result === "object" ? result : { ok: false })),
-        reject: () => resolve28(finish({ ok: false })),
+        resolve: (result) => resolve26(finish(result && typeof result === "object" ? result : { ok: false })),
+        reject: () => resolve26(finish({ ok: false })),
         timer: null
       };
     });
@@ -161857,7 +159506,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const current2 = connectionState();
     if (GLOBAL_STATES.indexOf(current2) < 0)
       return "";
-    return (C2[current2] || C2.relay_unavailable).disabledReason;
+    return (C[current2] || C.relay_unavailable).disabledReason;
   }
   function rowReason(text3) {
     if (state.hostReadOnly && state.hostKind === "computer")
@@ -161934,9 +159583,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (state.confirming === key2) {
         const run2 = action;
         wrap.className = "fix confirm";
-        const sourceWords2 = source ? String(source.label || "") : "";
-        const importsGo = source && sourceImportsMeta(source.id) ? " " + fill2(P.deleteDataImports, { source: sourceWords2 }) : "";
-        const named = sourceWords2 && fix.tool === config2.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords2 }) + importsGo : sourceWords2 && fix.tool === config2.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords2 }) : "";
+        const sourceWords = source ? String(source.label || "") : "";
+        const importsGo = source && sourceImportsMeta(source.id) ? " " + fill2(P.deleteDataImports, { source: sourceWords }) : "";
+        const named = sourceWords && fix.tool === config2.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) + importsGo : sourceWords && fix.tool === config2.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
         add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run2, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
@@ -161962,7 +159611,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const current2 = connectionState();
     if (!current2 || current2 === "ready")
       return null;
-    const copy = C2[current2] || C2.relay_unavailable;
+    const copy = C[current2] || C.relay_unavailable;
     const starting = current2 === "installing" || current2 === "restarting";
     const tone = starting ? "info" : "warn";
     const banner = el("section", "banner " + tone);
@@ -161976,18 +159625,18 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(body, el("p", "muted", label + " · " + pct + "%"), progressBar(conn.progress.percent, label));
     }
     if (current2 === "mac_offline" && typeof conn.lastSeenAt === "string" && ago(conn.lastSeenAt)) {
-      add(body, el("p", "muted", fill2(C2.mac_offline.lastSeen, { when: ago(conn.lastSeenAt) })));
+      add(body, el("p", "muted", fill2(C.mac_offline.lastSeen, { when: ago(conn.lastSeenAt) })));
     }
     const actions = el("div", "actions");
     if (current2 === "relay_unavailable") {
-      add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C2.actions.retry.label, "refresh", refresh, "main"));
+      add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C.actions.retry.label, "refresh", refresh, "main"));
     } else if (current2 === "not_connected") {
-      add(actions, state.busy === "connection-action" ? button(P.working, "connection-action", null, "main") : button(C2.actions.connect.label, "connection-action", () => callTool(config2.toolName, {}, "connection-action"), "main"));
+      add(actions, state.busy === "connection-action" ? button(P.working, "connection-action", null, "main") : button(C.actions.connect.label, "connection-action", () => callTool(config2.toolName, {}, "connection-action"), "main"));
       const install = compact2() ? "" : helpHref(conn.installHref);
       if (install)
-        add(actions, button(C2.not_connected.install, "connection-install", () => openLink(install), "plain"));
-    } else if (current2 !== "installing" && conn.action && C2.actions[conn.action.id]) {
-      const words2 = C2.actions[conn.action.id];
+        add(actions, button(C.not_connected.install, "connection-install", () => openLink(install), "plain"));
+    } else if (current2 !== "installing" && conn.action && C.actions[conn.action.id]) {
+      const words2 = C.actions[conn.action.id];
       const href = conn.action.href;
       let onClick;
       if (conn.action.id === "retry")
@@ -162016,7 +159665,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const failure2 = state.lastFailure;
     if (!failure2)
       return null;
-    const words2 = C2.relay_unavailable.why;
+    const words2 = C.relay_unavailable.why;
     let line2;
     if (failure2.kind === "no_answer")
       line2 = fill2(words2.no_answer, { seconds: Math.round(config2.resultTimeoutMs / 1000) });
@@ -162095,9 +159744,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return null;
     const W = H.copy;
     const sentence = count2 === 1 ? W.waiting.one : fill2(W.waiting.many, { count: Math.floor(count2) });
-    const open7 = button(W.open, "need:waiting", () => openLink(href), "warn");
-    open7.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
-    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open7));
+    const open5 = button(W.open, "need:waiting", () => openLink(href), "warn");
+    open5.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
+    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open5));
     const row = add(el("li", "row need"), body);
     row.setAttribute("data-waiting-private", String(Math.floor(count2)));
     return row;
@@ -163484,8 +161133,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return null;
     const W = config2.privacy.copy;
     const blocked = globalReason();
-    const open7 = button(P.home.openPrivacy, "need:privacy-pending", blocked ? null : () => openPrivacy("need:privacy-pending"), "plain");
-    const body = add(el("div", "need-body"), el("p", "row-text", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })), add(el("span", "fix"), open7));
+    const open5 = button(P.home.openPrivacy, "need:privacy-pending", blocked ? null : () => openPrivacy("need:privacy-pending"), "plain");
+    const body = add(el("div", "need-body"), el("p", "row-text", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })), add(el("span", "fix"), open5));
     const row = add(el("li", "row need"), body);
     row.setAttribute("data-privacy-pending", String(pending2));
     return row;
@@ -163558,15 +161207,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     row.setAttribute("data-home-index", progress.phase === "initial" ? "initial" : "refresh");
     if (!stages.length && !faster)
       return row;
-    const open7 = !!state.open["progress-details"];
+    const open5 = !!state.open["progress-details"];
     const toggle = button(P.details, "progress-details", () => {
       state.open["progress-details"] = !state.open["progress-details"];
       render("progress-details");
     }, "plain");
-    toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
+    toggle.setAttribute("aria-expanded", open5 ? "true" : "false");
     toggle.setAttribute("aria-controls", "progress-details");
     add(row.firstChild, toggle);
-    if (!open7)
+    if (!open5)
       return row;
     const box = el("div", "home-details");
     box.id = "progress-details";
@@ -163672,12 +161321,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const key2 = "more-on-computer";
     const line2 = add(el("div", "section more-on-computer"), el("p", "muted", P.moreOnComputer));
     const remote = remoteMode();
-    const open7 = button(P.moreOnComputerOpen, key2, remote ? () => toggleRemote(key2) : () => openLink(href), "plain");
-    open7.className = "btn link";
-    open7.setAttribute("aria-label", P.moreOnComputerOpenLabel);
+    const open5 = button(P.moreOnComputerOpen, key2, remote ? () => toggleRemote(key2) : () => openLink(href), "plain");
+    open5.className = "btn link";
+    open5.setAttribute("aria-label", P.moreOnComputerOpenLabel);
     if (remote)
-      open7.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
-    return add(line2, open7, remote ? remoteBox(key2, href) : null);
+      open5.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
+    return add(line2, open5, remote ? remoteBox(key2, href) : null);
   }
   function computerSection() {
     if (!onComputer())
@@ -163693,9 +161342,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const words2 = W.rows[key2];
       const text3 = add(el("div", "row-text"), el("p", "", words2.title), el("p", "muted", words2.line));
       const href = state.hostLinks[key2];
-      const open7 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
-      open7.setAttribute("aria-label", W.open + " " + words2.title);
-      add(list, add(el("li", "row"), text3, open7));
+      const open5 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
+      open5.setAttribute("aria-label", W.open + " " + words2.title);
+      add(list, add(el("li", "row"), text3, open5));
     }
     return add(section, list);
   }
@@ -164709,16 +162358,16 @@ function chatgptPickerProgram(kit) {
     if (gone() || !entry)
       return Promise.resolve();
     if (entry.isFile) {
-      return new Promise((resolve28) => {
+      return new Promise((resolve26) => {
         const path = prefix + entry.name;
         const skip = () => {
           skipped2.push(path);
-          resolve28();
+          resolve26();
         };
         try {
           entry.file((file2) => {
             found.push({ file: file2, path });
-            resolve28();
+            resolve26();
           }, skip);
         } catch {
           skip();
@@ -164735,18 +162384,18 @@ function chatgptPickerProgram(kit) {
       skipped2.push(here);
       return Promise.resolve();
     }
-    const next = () => new Promise((resolve28, reject) => {
+    const next = () => new Promise((resolve26, reject) => {
       const unread = () => {
         skipped2.push(here);
-        resolve28();
+        resolve26();
       };
       try {
         reader.readEntries((batch) => {
           if (!batch.length || gone()) {
-            resolve28();
+            resolve26();
             return;
           }
-          batch.reduce((chain, child2) => chain.then(() => entryFiles(child2, here, found, gone, skipped2)), Promise.resolve()).then(() => next()).then(resolve28, reject);
+          batch.reduce((chain, child2) => chain.then(() => entryFiles(child2, here, found, gone, skipped2)), Promise.resolve()).then(() => next()).then(resolve26, reject);
         }, unread);
       } catch {
         unread();
@@ -165846,18 +163495,18 @@ function chatgptPickerProgram(kit) {
       return target;
     };
     if (node.has_children) {
-      const open7 = el("button", "fname");
-      open7.type = "button";
-      open7.setAttribute("data-key", "picker:open:" + key2);
-      label(open7);
+      const open5 = el("button", "fname");
+      open5.type = "button";
+      open5.setAttribute("data-key", "picker:open:" + key2);
+      label(open5);
       const chevron = el("span", "chev", "›");
       chevron.setAttribute("aria-hidden", "true");
-      add(open7, chevron);
+      add(open5, chevron);
       if (p.loading || p.saving)
-        open7.disabled = true;
+        open5.disabled = true;
       else
-        open7.addEventListener("click", () => drill(key2));
-      add(li, open7);
+        open5.addEventListener("click", () => drill(key2));
+      add(li, open5);
     } else
       add(li, label(el("p", "fname leaf")));
     if (node.selectable !== false)
@@ -165896,18 +163545,18 @@ function chatgptPickerProgram(kit) {
     const busy2 = p.loading || p.saving;
     let label;
     if (node.has_children) {
-      const open7 = el("button", "fname");
-      open7.type = "button";
-      open7.setAttribute("data-key", "picker:open:" + key2);
-      open7.setAttribute("aria-label", fill2(Q.openFolder, { name: node.name }));
+      const open5 = el("button", "fname");
+      open5.type = "button";
+      open5.setAttribute("data-key", "picker:open:" + key2);
+      open5.setAttribute("aria-label", fill2(Q.openFolder, { name: node.name }));
       if (busy2)
-        open7.disabled = true;
+        open5.disabled = true;
       else
-        open7.addEventListener("click", () => drill(key2));
+        open5.addEventListener("click", () => drill(key2));
       const chevron = el("span", "fopen", "›");
       chevron.setAttribute("aria-hidden", "true");
-      add(open7, chevron);
-      label = open7;
+      add(open5, chevron);
+      label = open5;
     } else {
       label = el("p", "fname leaf");
       const spacer = el("span", "fopen-gap");
@@ -167229,13 +164878,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.description = area.value;
         const wasLoading = s.questionLoading;
         requestQuestions();
-        const open7 = s.confirmStep;
+        const open5 = s.confirmStep;
         const could = canSave();
         changed();
         s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
         const noted = !!s.questionsError;
         s.questionsError = "";
-        if (!wasLoading || open7 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+        if (!wasLoading || open5 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
           kit.render("privacy:description");
       });
       add(description, add(field, area));
@@ -168094,6 +165743,898 @@ textarea.text{resize:vertical;min-height:4.5rem}
 `;
 });
 
+// src/workers/dashboard/outside-help-tools.ts
+function shellWord(value2) {
+  return /^[A-Za-z0-9_@%+:,./-]+$/.test(value2) ? value2 : `'${value2.replaceAll("'", "'\\''")}'`;
+}
+function outsideHelpDaemonCommand(tools) {
+  const entry = tools?.tools.find((item) => item.tool === "zkapi-clientd");
+  const program = entry?.source === "configured" ? entry.path : entry?.executable;
+  return program ? shellWord(program) : "zkapi-clientd";
+}
+function installable(entry) {
+  return entry.source === "missing" || entry.source === "outdated";
+}
+function outsideHelpToolsNeedAttention(tools) {
+  if (!tools)
+    return false;
+  return tools.install.state === "running" || tools.install.state === "failed" || tools.tools.some(installable);
+}
+function progressLine(install) {
+  if (install.state === "running") {
+    const phase = fill(C.phase[install.phase], { tool: install.tool });
+    const percent = install.phase === "downloading" && install.percent !== undefined ? ` ${fill(C.percent, { percent: String(install.percent) })}` : "";
+    return `<p class="pnote" data-outside-install-progress role="status">${escapeHtml(phase + percent)}</p>`;
+  }
+  if (install.state === "failed") {
+    return `<p class="pnote ohwarn" data-outside-install-failed="${escapeHtml(install.code)}" role="status">${escapeHtml(`${C.failedPrefix} ${install.message}`)}</p>`;
+  }
+  return "";
+}
+function installButton(tools, canEdit, replacing) {
+  if (tools.install.state === "running")
+    return "";
+  const missing = tools.tools.some((entry) => entry.source === "missing");
+  const outdated = tools.tools.filter((entry) => entry.source === "outdated").map((entry) => entry.label);
+  if (!missing && outdated.length === 0 && !replacing)
+    return "";
+  const label = tools.install.state === "failed" ? C.retry : missing ? C.install : outdated.length > 0 ? fill(C.update, { tools: outdated.join(" and ") }) : fill(C.installOwn, { tools: replacing.label });
+  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
+  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled2}>${escapeHtml(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function sourceWords(entry) {
+  return fill(C.source[entry.source], { path: entry.path ?? "", installed: entry.installedVersion ?? "", version: entry.version ?? "" });
+}
+function renderOutsideHelpTools(tools, input) {
+  if (!tools)
+    return "";
+  const install = tools.install;
+  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml(entry.tool)}" data-outside-tool-source="${escapeHtml(entry.source)}">` + `${escapeHtml(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
+  const launcher = input.requireLauncher ? tools.tools.find((entry) => entry.tool === "zkapi-clientd" && entry.offered === true) : undefined;
+  const missing = Boolean(launcher) || tools.tools.some(installable);
+  const parts = [
+    `<p class="pnote"><strong>${escapeHtml(C.title)}</strong></p>`,
+    `<p class="pnote">${escapeHtml(C.intro)}</p>`,
+    `<ul class="ohfacts" data-outside-tool-list>${lines}</ul>`,
+    progressLine(install)
+  ];
+  if (install.state === "done" && !missing)
+    parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml(C.done)}</p>`);
+  if (!missing && install.state !== "running")
+    parts.push(`<p class="pnote ohsmall">${escapeHtml(C.allInstalled)}</p>`);
+  parts.push(installButton(tools, input.canEdit, launcher));
+  return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml(install.state)}">${parts.join("")}</div>`;
+}
+function renderOutsideHelpToolsFix(tools, input) {
+  if (!tools || !outsideHelpToolsNeedAttention(tools))
+    return "";
+  const missing = tools.tools.filter((entry) => entry.source === "missing").map((entry) => entry.label);
+  const outdated = tools.tools.filter((entry) => entry.source === "outdated").map((entry) => entry.label);
+  const said = [
+    ...missing.length > 0 ? [fill(missing.length === 1 ? C.fixOne : C.fixMany, { tools: missing.join(" and ") })] : [],
+    ...outdated.length > 0 ? [fill(C.fixOutdated, { tools: outdated.join(" and ") })] : []
+  ];
+  const text3 = said.length === 0 ? C.fixWorking : said.join(" ");
+  return `<li data-outside-tools="fix" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(text3)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
+}
+function renderOutsideHelpToolsReplace(tools, tool, input) {
+  const entry = tools?.tools.find((item) => item.tool === tool);
+  if (!tools || entry?.source !== "system" || entry.offered !== true)
+    return "";
+  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
+}
+function renderOutsideHelpToolsScript(tools, input) {
+  if (!tools || !input.canEdit || input.csrfToken === undefined)
+    return "";
+  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
+}
+function outsideHelpToolsClientScript(config2) {
+  return `(function () {
+  // The dashboard runs this again after it swaps in a fresh page: one instance binds the new forms, and one poll runs.
+  if (typeof window.__olympusOutsideHelpTools === 'function') { window.__olympusOutsideHelpTools(); return; }
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var timer = null;
+  function sections() { return Array.prototype.slice.call(document.querySelectorAll('[data-outside-tools]')); }
+  function say(form, text, bad) {
+    var out = form && form.querySelector('[data-action-message]');
+    if (!out) return;
+    out.textContent = text;
+    out.setAttribute('data-state', bad ? 'error' : 'ok');
+  }
+  function schedule() { if (!timer) timer = setTimeout(poll, config.pollMs); }
+  async function poll() {
+    timer = null;
+    var running = sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; });
+    try {
+      var response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' });
+      var doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      var fresh = doc.querySelectorAll('[data-outside-tools]');
+      var states = Array.prototype.map.call(fresh, function (node) { return node.getAttribute('data-install-state'); });
+      if (running && states.indexOf('done') !== -1) { window.location.reload(); return; }
+      Array.prototype.forEach.call(fresh, function (next) {
+        var current = document.querySelector('[data-outside-tools="' + next.getAttribute('data-outside-tools') + '"]');
+        if (current) current.replaceWith(document.importNode(next, true));
+      });
+      // A part that needed fixing and now does not: the page changes shape.
+      if (running && fresh.length !== sections().length) { window.location.reload(); return; }
+    } catch (error) {
+      // The next round tries again.
+    }
+    bind();
+  }
+  async function submit(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var buttons = document.querySelectorAll('form[data-outside-tools-form] button');
+    buttons.forEach(function (button) { button.disabled = true; });
+    say(form, config.copy.starting, false);
+    try {
+      var response = await fetch(config.path, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      });
+      var result = {};
+      try { result = await response.json(); } catch (error) { result = {}; }
+      if (!response.ok || !result.ok) {
+        say(form, (result.error && result.error.message) || config.copy.failed, true);
+        buttons.forEach(function (button) { button.disabled = false; });
+        return;
+      }
+      say(form, result.status_message || config.copy.starting, false);
+      sections().forEach(function (node) { node.setAttribute('data-install-state', 'running'); });
+      schedule();
+    } catch (error) {
+      say(form, config.copy.failed, true);
+      buttons.forEach(function (button) { button.disabled = false; });
+    }
+  }
+  function bind() {
+    document.querySelectorAll('form[data-outside-tools-form]').forEach(function (form) {
+      if (form.hasAttribute('data-bound')) return;
+      form.setAttribute('data-bound', '');
+      form.addEventListener('submit', submit);
+    });
+    if (sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; })) schedule();
+  }
+  window.__olympusOutsideHelpTools = bind;
+  bind();
+})();`;
+}
+var DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH = "/dashboard/consult/tools/install", DASHBOARD_OUTSIDE_HELP_TOOLS_COPY, C, DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS = 1500;
+var init_outside_help_tools = __esm(() => {
+  init_components();
+  init_vocabulary();
+  DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
+    title: "Install the parts",
+    intro: "Olympus needs two small programs on your computer: Tor, which hides where your question comes from, and zkAPI, which pays without revealing who you are. Olympus downloads the official builds, checks each against the fingerprint it ships with, and keeps them in its own folder. Installing turns nothing on.",
+    source: {
+      olympus: "Installed (Olympus)",
+      system: "Installed (your system)",
+      missing: "Not installed",
+      not_offered: "No download for this computer; install it yourself",
+      outdated: "Needs an update (Olympus installed {installed}; anonymous answers need {version})",
+      configured: "Set in your zkAPI route ({path})",
+      configured_missing: "Not found at {path}, the path set in your zkAPI route"
+    },
+    configuredMissing: "The {tool} program at {path} (set in your zkAPI route) was not found. Install it there, or remove that path from the route to use the one Olympus installs.",
+    configuredOld: "The {tool} program at {path} (set in your zkAPI route) is not the build anonymous answers need. Remove that path from the route to use the one Olympus installs, or point it at {version}. Nothing was sent.",
+    systemOld: "The {tool} program found on this computer cannot run anonymous answers. Olympus can install its own checked build ({version}), which it uses instead. Nothing was sent.",
+    line: "{tool}: {state}",
+    install: "Install Tor and zkAPI",
+    update: "Update {tools}",
+    installOwn: "Install Olympus's {tools}",
+    retry: "Try again",
+    allInstalled: "Both are installed. Nothing else changed.",
+    phase: {
+      downloading: "Downloading {tool}…",
+      checking: "Checking {tool}…",
+      installing: "Installing {tool}…"
+    },
+    percent: "{percent}%",
+    done: "Installed.",
+    failedPrefix: "Not installed.",
+    starting: "Starting…",
+    failed: "The install could not start. Reload the page and try again.",
+    fixOne: "{tools} is not installed on this computer.",
+    fixMany: "{tools} are not installed on this computer.",
+    fixOutdated: "{tools} needs an update before anonymous answers can run.",
+    fixWorking: "Installing Tor and zkAPI."
+  };
+  C = DASHBOARD_OUTSIDE_HELP_TOOLS_COPY;
+});
+
+// src/workers/dashboard/outside-help.ts
+function outsideHelpStateLine(summary) {
+  return DASHBOARD_OUTSIDE_HELP_COPY.state[summary.state];
+}
+function summaryOf(status) {
+  if (status.unavailable)
+    return { state: "unavailable" };
+  if (status.settings.state === "invalid")
+    return { state: "invalid" };
+  if (status.route.state === "not_configured")
+    return { state: "route_not_configured" };
+  const readiness = status.route.readiness;
+  if (readiness && readiness.fences.length > 0)
+    return { state: "fence_held" };
+  if (status.settings.state === "on" && !status.route.acknowledgements.complete)
+    return { state: "needs_acceptance" };
+  if (status.settings.state === "on" && (status.route.readinessUnavailable || readiness && readiness.blockers.some((code) => code !== "acknowledgements_incomplete"))) {
+    return { state: "blocked" };
+  }
+  return { state: status.settings.state };
+}
+function outsideHelpBlockerWords(code) {
+  return DASHBOARD_OUTSIDE_HELP_COPY.blockers[code] ?? fill(DASHBOARD_OUTSIDE_HELP_COPY.blockerOther, { code });
+}
+function shortDate(iso2) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso2);
+  const month = match ? MONTHS3[Number(match[2]) - 1] : undefined;
+  return match && month ? `${Number(match[3])} ${month}` : iso2;
+}
+function shortTime(iso2) {
+  return `${shortDate(iso2.slice(0, 10))} ${iso2.slice(11, 16)}`.trim();
+}
+function renderOutsideHelpCard(status, input) {
+  if (input.part === "privacy")
+    return renderOutsideHelpPrivacyPart(status, input);
+  const summary = summaryOf(status);
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
+  const route = status.route;
+  const on = status.settings.state === "on";
+  const unavailable3 = summary.state === "unavailable";
+  const parts = [];
+  if (input.untitled !== true)
+    parts.push(`<h2 class="ptitle">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
+  if (canUnlock && (on || !unavailable3 || status.confinementInstallRequired)) {
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
+  const missingRoute = !unavailable3 && route.state === "not_configured";
+  const writerHref = input.part === "account" && input.otherPartHref ? `${input.otherPartHref.split("#")[0]}#outside-writer` : undefined;
+  if (missingRoute)
+    parts.push(renderProblems(status, access, writerHref));
+  parts.push(renderStatusBlock(status, summary, access));
+  if (status.restartPending)
+    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+  if (unavailable3) {
+    if (status.confinementInstallRequired)
+      parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
+    const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
+    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
+  }
+  if (!missingRoute)
+    parts.push(renderProblems(status, access, writerHref));
+  if (route.state === "configured" && !route.acknowledgements.complete)
+    parts.push(renderStatementsToAccept(access));
+  const more = [];
+  if (!on)
+    more.push(renderBeforeTurningOn());
+  if (input.part === "account") {
+    parts.push(savedLanguagesForSwitch(status));
+    if (input.otherPartHref)
+      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml(input.otherPartHref)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
+  } else {
+    more.push(renderLevel(status, canEdit));
+    if (status.standard)
+      more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
+    if (status.writer)
+      more.push(renderWriter(status.writer, canEdit));
+    more.push(renderLanguages(status, canEdit));
+  }
+  if (route.state === "configured")
+    more.push(renderLimits(route, canEdit));
+  if (route.state === "configured" && route.acknowledgements.complete)
+    more.push(renderAccepted());
+  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit }), outsideHelpDaemonCommand(status.tools)));
+  more.push(renderDetails(status));
+  parts.push(`<div class="ohmore">${more.join("")}</div>`);
+  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
+}
+function savedLanguagesForSwitch(status) {
+  const chosen = new Set(status.settings.languages);
+  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
+}
+function renderOutsideHelpPrivacyPart(status, input) {
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
+  const summary = summaryOf(status);
+  const on = status.settings.state === "on";
+  const parts = [];
+  if (canUnlock) {
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
+  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml(input.otherPartHref)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
+  if (status.writer?.modelProblem) {
+    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
+  }
+  const more = [renderLevel(status, canEdit)];
+  if (status.standard)
+    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
+  if (status.writer)
+    more.push(renderWriter(status.writer, canEdit));
+  const invalid4 = status.settings.state === "invalid";
+  const save = canEdit && !invalid4 ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
+  parts.push(`<div class="ohmore">${more.join("")}</div>`);
+  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join("")}</div>${script2}`;
+}
+function outsideHelpScriptConfig(csrfToken) {
+  return {
+    csrfToken: csrfToken ?? "",
+    paths: DASHBOARD_OUTSIDE_HELP_PATHS,
+    copy: {
+      saving: DASHBOARD_OUTSIDE_HELP_COPY.saving,
+      failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed,
+      failedStatus: DASHBOARD_OUTSIDE_HELP_COPY.saveFailedStatus,
+      unreachable: DASHBOARD_OUTSIDE_HELP_COPY.saveUnreachable,
+      restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting,
+      restartRecovery: DASHBOARD_OUTSIDE_HELP_COPY.restartRecovery,
+      staleWindow: DASHBOARD_OUTSIDE_HELP_COPY.staleWindow,
+      on: DASHBOARD_OUTSIDE_HELP_COPY.state.on,
+      off: DASHBOARD_OUTSIDE_HELP_COPY.state.off
+    },
+    writerPollMs: OUTSIDE_HELP_WRITER_POLL_MS
+  };
+}
+function renderStatusBlock(status, summary, access) {
+  const route = status.route;
+  const on = status.settings.state === "on";
+  const invalid4 = status.settings.state === "invalid";
+  const unavailable3 = summary.state === "unavailable";
+  const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const button = access === "read" || unavailable3 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
+  const usage = !unavailable3 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml(usage)}</p>` : "") + (!unavailable3 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function usageLine(ready) {
+  const count = ready.requestsToday.count;
+  const today = count === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : `${count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count) })} ${fill(DASHBOARD_OUTSIDE_HELP_COPY.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}`;
+  const expiry = ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : undefined;
+  return expiry ? `${today} · ${expiry}` : today;
+}
+function unlockFirst(label, primary = true) {
+  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml(label)}</button>`;
+}
+function problemLine(words2, fix, access, input = {}) {
+  const canEdit = access === "edit";
+  let action = "";
+  if (fix?.kind === "post" && access === "unlock") {
+    action = unlockFirst(fix.label, fix.primary !== false);
+  } else if (fix?.kind === "post" && canEdit) {
+    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
+  } else if (fix?.kind === "open") {
+    action = `<button type="button" class="btn" data-outside-open="${escapeHtml(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml(fix.focus)}"` : ""}>${escapeHtml(fix.label)}</button>`;
+  } else if (fix?.kind === "recheck") {
+    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
+  }
+  return `<li${input.attrs ?? ""}><span>${escapeHtml(words2)}</span>${action}</li>`;
+}
+function renderProblems(status, access, writerHref) {
+  const canEdit = access === "edit";
+  const route = status.route;
+  const items = [];
+  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
+  if (tools)
+    items.push(tools);
+  if (route.state === "not_configured") {
+    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
+  } else if (route.readinessUnavailable || !route.readiness) {
+    items.push(problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown, { kind: "recheck" }, access, { attrs: ' data-outside-blocker="readiness_unavailable"' }));
+  } else {
+    const ready = route.readiness;
+    const blockers = ready.blockers;
+    const caps = blockers.filter((code) => CAP_BLOCKERS.has(code));
+    let replacedOld = false;
+    for (const code of blockers) {
+      if (code === "acknowledgements_incomplete")
+        continue;
+      if (CAP_BLOCKERS.has(code) && code !== caps[0])
+        continue;
+      const attrs = ` data-outside-blocker="${escapeHtml(code)}"`;
+      const tool = TOOL_BLOCKERS.get(code);
+      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
+      if (entry?.source === "missing" || entry?.source === "outdated")
+        continue;
+      if (entry?.source === "configured_missing") {
+        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
+        continue;
+      }
+      if (OLD_DAEMON_BLOCKERS.has(code) && entry?.source === "configured") {
+        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredOld, { tool: entry.label, path: entry.path ?? "", version: entry.version ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
+        continue;
+      }
+      if (OLD_DAEMON_BLOCKERS.has(code)) {
+        const replace = renderOutsideHelpToolsReplace(status.tools, "zkapi-clientd", { canEdit, attrs });
+        if (replace) {
+          if (!replacedOld)
+            items.push(replace);
+          replacedOld = true;
+          continue;
+        }
+      }
+      if (code === "unresolved_session") {
+        items.push(renderFenceLine(ready, access));
+        continue;
+      }
+      if (code === "unresolved_session_other_wallet") {
+        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml(fence.scope)}" data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
+        continue;
+      }
+      const words2 = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
+      const fix = CAP_BLOCKERS.has(code) ? { kind: "post", form: "route", label: DASHBOARD_OUTSIDE_HELP_COPY.removeLimits, attrs: " data-outside-nolimit" } : FUNDING_BLOCKERS.has(code) ? { kind: "open", section: "limits", label: DASHBOARD_OUTSIDE_HELP_COPY.enterFundingDate, focus: "funding_date" } : SETUP_BLOCKERS.has(code) ? { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps } : { kind: "recheck" };
+      items.push(problemLine(words2, fix, access, { attrs }));
+    }
+  }
+  if (status.writer?.modelProblem && writerHref === undefined) {
+    items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
+  } else if (status.writer?.modelProblem && writerHref !== undefined) {
+    items.push(`<li data-outside-model-problem><span>${escapeHtml(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml(writerHref)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
+  }
+  if (items.length === 0)
+    return "";
+  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
+}
+function renderFenceLine(ready, access) {
+  const canEdit = access === "edit";
+  const mine = ready.fences.find((fence) => fence.thisWallet);
+  const words2 = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
+  if (access === "unlock")
+    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml(words2)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
+  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml(mine.scope)}" data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml(words2)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
+}
+function renderSection(input) {
+  return `<details class="ohsect" id="outside-${escapeHtml(input.id)}" data-outside-section="${escapeHtml(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml(input.title)}</span><span class="ohsect-sum">${escapeHtml(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
+}
+function renderStatements(inputs) {
+  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml(entry.id)}">${escapeHtml(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml(entry.id)}">`).join("") : "");
+}
+function renderStatementsToAccept(access) {
+  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function renderAccepted() {
+  return renderSection({
+    id: "statements",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.costTitle,
+    summary: fill(DASHBOARD_OUTSIDE_HELP_COPY.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }),
+    body: `<div data-outside-acknowledged="yes">${renderStatements(false)}</div>`
+  });
+}
+function renderBeforeTurningOn() {
+  return renderSection({
+    id: "before",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle,
+    summary: "",
+    body: `<p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line2) => `<li>${escapeHtml(line2)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
+  });
+}
+function renderLevel(status, canEdit) {
+  const invalid4 = status.settings.state === "invalid";
+  const current2 = status.settings.level;
+  const blocked = !canEdit || invalid4 ? ' disabled aria-disabled="true"' : "";
+  const options = ["unnamed", "general"].map((level) => {
+    const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current2 ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+  }).join("");
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid4 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current2].short, body });
+}
+function renderStandard(standard, level, canEdit) {
+  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.standard;
+  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
+  const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
+    const copy = C2.modes[mode];
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled2}>` + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+  }).join("");
+  const text3 = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
+  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml(standard.mode)}" data-outside-preset="${escapeHtml(standard.preset)}">` + `<p class="pnote">${escapeHtml(C2.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml(C2.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled2}>${escapeHtml(text3)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml(C2.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const summary = level === "general" ? fill(C2.unusedAtStrict, { mode: C2.modes[standard.mode].short }) : C2.modes[standard.mode].short;
+  return renderSection({ id: "standard", title: C2.title, summary, body });
+}
+function renderSetupSteps(secretRef, toolsHtml, daemon) {
+  const values = { secretRef, daemon };
+  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => step.replace(/\{(secretRef|daemon)\}/g, (_match, key2) => values[key2]));
+  return renderSection({
+    id: "steps",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
+    summary: "",
+    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>`
+  });
+}
+function renderLimits(route, canEdit) {
+  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
+  const capped2 = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
+  const limit = capped2 ? [
+    ...route.dailyRequestCap !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsRequests, { n: String(route.dailyRequestCap) })] : [],
+    ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
+  ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
+  const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
+  const noLimit = capped2 && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
+  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml(route.fundingDate ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml(String(route.dailyRequestCap)) : ""}"${disabled2}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml(String(route.dailySpendCapUsd)) : ""}"${disabled2}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
+}
+function openAiModel(model) {
+  return typeof model === "string" && /^openai\//i.test(model.trim());
+}
+function anthropicModel(model) {
+  return typeof model === "string" && /^anthropic\//i.test(model.trim());
+}
+function renderWriter(writer, canEdit) {
+  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
+  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
+  const choice = writer.choice;
+  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel;
+  const effectiveClaudeModel = writer.effectiveClaudeModel ?? writer.claudeFrontierModel;
+  const parts = [`<p class="pnote">${escapeHtml(C2.intro)}</p>`];
+  parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml(choice ? fill(C2.currentOwn, { model: choice.model, address: choice.baseUrl }) : C2.currentBuiltIn)}</p>`);
+  if (choice?.secretRef && choice.keyPresent === false)
+    parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml(fill(C2.keyMissing, { secretRef: choice.secretRef }))}</p>`);
+  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml(C2.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml(choice?.baseUrl ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml(C2.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml(choice?.model ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml(C2.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml(choice?.secretRef ?? "")}"${disabled2}>` + `<p class="pnote ohsmall">${escapeHtml(C2.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml(C2.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml(writer.chatgptFrontierModel ?? "")}"${disabled2}>` + `<p class="pnote ohsmall">${escapeHtml(C2.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml(fill(C2.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml(C2.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml(writer.claudeFrontierModel ?? "")}"${disabled2}>` + `<p class="pnote ohsmall">${escapeHtml(C2.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml(fill(C2.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled2}>${escapeHtml(C2.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled2}>${escapeHtml(C2.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
+  parts.push(renderWriterCheck(writer, canEdit));
+  const summary = choice ? choice.model : C2.builtInShort;
+  return renderSection({ id: "writer", title: C2.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
+}
+function renderWriterCheck(writer, canEdit) {
+  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
+  if (!writer.testAvailable)
+    return "";
+  const disabled2 = canEdit && writer.choice && writer.check.state !== "running" ? "" : ' disabled aria-disabled="true"';
+  const check = writer.check;
+  const parts = [`<div class="sect">${escapeHtml(C2.testTitle)}</div>`, `<p class="pnote">${escapeHtml(C2.testIntro)}</p>`];
+  if (!writer.choice)
+    parts.push(`<p class="pnote ohsmall">${escapeHtml(C2.testNeedsChoice)}</p>`);
+  if (check.state === "running") {
+    parts.push(`<p class="pnote" role="status">${escapeHtml(check.total > 0 ? fill(C2.testProgress, { done: String(check.done), total: String(check.total) }) : C2.testStarting)}</p>`);
+  } else if (check.state === "failed") {
+    parts.push(`<p class="pnote ohwarn" role="status">${escapeHtml(check.message)}</p>`);
+  } else if (check.state === "done") {
+    const report = check.report;
+    parts.push(`<p class="pnote" data-outside-writer-summary>${escapeHtml(fill(C2.testSummary, {
+      cases: String(report.cases),
+      written: String(report.written),
+      declined: String(report.declined),
+      failed: String(report.failed),
+      passed: String(report.gatePassed),
+      refused: String(report.gateRefused)
+    }))}</p>`);
+    parts.push(report.canaryLeaks.length === 0 ? `<p class="pnote good" data-outside-writer-leaks="0">${escapeHtml(C2.testNoLeaks)}</p>` : `<p class="pnote ohwarn" data-outside-writer-leaks="${report.canaryLeaks.length}">${escapeHtml(fill(C2.testLeaks, { n: String(report.canaryLeaks.length) }))}</p>`);
+    if (report.documentQuestions.length > 0)
+      parts.push(`<p class="pnote ohwarn" data-outside-writer-document-questions>${escapeHtml(fill(C2.testDocumentQuestions, { n: String(report.documentQuestions.length) }))}</p>`);
+    const rows = report.results.map((result) => {
+      const verdict = result.outcome === "questions" ? result.gate === "pass" ? C2.testPassed : fill(C2.testRefused, { reasons: result.gateReasons.join(", ") }) : result.outcome === "declined" ? C2.testDeclined : fill(C2.testFailed, { reason: result.reason ?? result.outcome });
+      const questions = result.questions.map((question) => `<li>${escapeHtml(question)}</li>`).join("");
+      return `<li data-outside-writer-case="${escapeHtml(result.id)}"><strong>${escapeHtml(result.id)}</strong>: ${escapeHtml(verdict)}${result.canaryLeak ? ` <span class="attn">${escapeHtml(C2.testLeakMark)}</span>` : ""}` + `${result.asksAboutDocuments ? ` <span class="attn">${escapeHtml(C2.testDocumentMark)}</span>` : ""}${questions ? `<ul class="ohlist">${questions}</ul>` : ""}</li>`;
+    }).join("");
+    parts.push(`<ul class="ohfacts" data-outside-writer-results>${rows}</ul>`);
+  }
+  parts.push(`<form class="ohform" data-outside-form="writer-test"><div class="pbuttons"><button type="submit" class="btn"${disabled2}>${escapeHtml(check.state === "done" || check.state === "failed" ? C2.testAgain : C2.test)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  return `<div data-outside-writer-check="${escapeHtml(check.state)}">${parts.join("")}</div>`;
+}
+function renderLanguages(status, canEdit) {
+  const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
+  const chosen = new Set(status.settings.languages);
+  const languages = status.languages.map((entry) => {
+    const name = LANGUAGE_NAMES[entry.language];
+    const off = !entry.installed;
+    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled2}>` + `<span>${escapeHtml(name)}${off ? ` <span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
+  }).join("");
+  const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key2]) => domainNames[key2] ?? key2);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key2]) => domainNames[key2] ?? key2);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key2]) => key2).join(","))}">` + `${escapeHtml(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
+  return renderSection({
+    id: "languages",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle,
+    summary: named.join(", "),
+    open: false,
+    body: `<p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
+  });
+}
+function renderDetails(status) {
+  const route = status.route;
+  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
+  const more = `<div class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line2) => `<li>${escapeHtml(line2)}</li>`).join("")}</ul>`;
+  let facts = "";
+  if (route.state === "configured" && route.readiness && !route.readinessUnavailable) {
+    const ready = route.readiness;
+    const list = [
+      ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
+      ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+      ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
+      fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+      ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown,
+      fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }),
+      ...ready.fences.map((fence) => fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: shortTime(fence.at) })),
+      ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: shortTime(ready.lastSession.at), result: ready.lastSession.result })] : []
+    ];
+    facts = `<div class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml(fact)}</li>`).join("")}</ul>`;
+  }
+  return renderSection({ id: "details", title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle, summary: "", body: about + more + facts });
+}
+function outsideHelpClientScript(config2) {
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var root = document.querySelector('[data-outside-help]');
+  if (!root) return;
+  function message(form, text, bad) {
+    var out = form.querySelector('[data-action-message]');
+    if (!out) return;
+    out.textContent = text;
+    out.setAttribute('data-state', bad ? 'error' : 'ok');
+  }
+  function numberOrNull(value) {
+    var trimmed = String(value || '').trim();
+    if (trimmed === '') return null;
+    var n = Number(trimmed);
+    return isFinite(n) ? n : NaN;
+  }
+  function checked(name) {
+    return Array.prototype.map.call(root.querySelectorAll('input[name="' + name + '"]:checked'), function (input) { return input.value; });
+  }
+  function field(name) {
+    var input = root.querySelector('[name="' + name + '"]');
+    return input ? input.value : '';
+  }
+  // The statement ids an Accept posts: the ones listed in that form.
+  function statementIds(container) {
+    return Array.prototype.map.call(container.querySelectorAll('input[name="acknowledged"]'), function (input) { return input.value; });
+  }
+  // The server's own words for a refusal; the generic line only when there are none.
+  function bridgeRestart(response) {
+    return response && (response.status === 421 || ((response.status === 403 || response.status === 503) && response.headers && response.headers.get('X-Olympus-Owner-Refused') === '1'));
+  }
+  function failure(response, result) {
+    if (bridgeRestart(response)) return config.copy.staleWindow;
+    if (result && result.error && typeof result.error.message === 'string' && result.error.message) return result.error.message;
+    if (result && typeof result.message === 'string' && result.message) return result.message;
+    if (result && typeof result.error === 'string' && result.error) return result.error;
+    return response && response.status ? config.copy.failedStatus.replace('{status}', String(response.status)) : config.copy.failed;
+  }
+  // A problem's button that opens the section holding its fix: open it,
+  // bring it into view, and put the cursor in the field that needs the owner.
+  root.querySelectorAll('[data-outside-open]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var section = root.querySelector('details[data-outside-section="' + button.getAttribute('data-outside-open') + '"]');
+      if (!section) return;
+      section.open = true;
+      if (section.scrollIntoView) section.scrollIntoView({ block: 'start' });
+      var focus = button.getAttribute('data-outside-focus');
+      var target = focus ? section.querySelector('[name="' + focus + '"]') : section.querySelector('summary');
+      if (target && target.focus) target.focus();
+    });
+  });
+  // Locked: a fix's first click opens the local session (the reload then shows the real button).
+  var unlockForm = root.querySelector('form[data-outside-form="unlock"]');
+  root.querySelectorAll('[data-outside-needs-unlock]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (!unlockForm) return;
+      if (unlockForm.requestSubmit) unlockForm.requestSubmit(); else unlockForm.dispatchEvent(new Event('submit', { cancelable: true }));
+      if (unlockForm.scrollIntoView) unlockForm.scrollIntoView({ block: 'start' });
+    });
+  });
+  // Check again: readiness runs on every read of the page.
+  root.querySelectorAll('[data-outside-recheck]').forEach(function (button) {
+    button.addEventListener('click', function () { window.location.reload(); });
+  });
+  // Each post carries the whole card's state for its route, wherever on the
+  // card the fields sit: the switch reads the language boxes, and a limits
+  // save reads the funding date and both limits. Only an Accept posts the
+  // statements; any other save leaves the recorded acceptance as it is.
+  function bodyFor(form, kind, submitter) {
+    if (kind === 'enable') {
+      var invalid = form.getAttribute('data-outside-invalid') === 'yes';
+      var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
+      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
+      if (invalid) body.replace_invalid = true;
+      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
+      return body;
+    }
+    if (kind === 'route') {
+      if (form.hasAttribute('data-outside-accept')) return { acknowledged: statementIds(form) };
+      if (form.hasAttribute('data-outside-nolimit')) return { daily_request_cap: null, daily_spend_cap_usd: null };
+      return {
+        funding_date: String(field('funding_date') || ''),
+        daily_request_cap: numberOrNull(field('daily_request_cap')),
+        daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
+      };
+    }
+    if (kind === 'level') {
+      var picked = form.querySelector('input[name="level"]:checked');
+      // On or off as the switch says now: the status line once the switch has
+      // updated it in place, else the saved setting (a paused card is still
+      // on), so saving a level never flips the switch.
+      var state = root.querySelector('[data-outside-state-text]');
+      var said = state ? state.getAttribute('data-outside-state') : '';
+      var current = said === 'on' || said === 'off' ? said : form.getAttribute('data-outside-current');
+      return { enabled: current === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
+    }
+    if (kind === 'writer') {
+      var clearing = submitter && submitter.hasAttribute('data-outside-writer-clear');
+      var revisionNow = Number(root.getAttribute('data-revision') || '0');
+      var frontier = String(field('chatgpt_frontier_model') || '').trim();
+      var claudeFrontier = String(field('claude_frontier_model') || '').trim();
+      if (clearing) return { revision: revisionNow, writer: null };
+      var writerBody = { base_url: String(field('writer_base_url') || '').trim(), model: String(field('writer_model') || '').trim(), secret_ref: String(field('writer_secret_ref') || '').trim() };
+      var writerSave = {
+        revision: revisionNow,
+        chatgpt_frontier_model: frontier === '' ? null : frontier,
+        claude_frontier_model: claudeFrontier === '' ? null : claudeFrontier,
+      };
+      // No server named: the writer stays as it is (the built-in one), and only the zkAPI models are saved.
+      if (writerBody.base_url !== '' || writerBody.model !== '' || writerBody.secret_ref !== '') writerSave.writer = writerBody;
+      return writerSave;
+    }
+    if (kind === 'standard') {
+      var mode = form.querySelector('input[name="standard_mode"]:checked');
+      var chosen = mode ? mode.value : form.getAttribute('data-outside-standard');
+      var instruction = String(field('standard_instruction') || '');
+      // An edited preset is saved as the user's own instruction.
+      if (chosen === 'light_cleanup' && instruction.trim() !== String(form.getAttribute('data-outside-preset') || '').trim()) chosen = 'custom';
+      var standardBody = { revision: Number(root.getAttribute('data-revision') || '0'), standard_mode: chosen };
+      if (chosen === 'custom') standardBody.standard_instruction = instruction;
+      return standardBody;
+    }
+    if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
+    if (kind === 'unlock') return {};
+    return { confirm: true };
+  }
+  // A save redraws the card: the dashboard swaps in the fresh page and runs this script again for it.
+  // A page without the dashboard's controller does not claim the request, and reloads.
+  function redraw() {
+    var live = document.querySelector('[data-outside-help]') || document.body;
+    if (live.dispatchEvent(new CustomEvent(${JSON.stringify(DASHBOARD_REDRAW_EVENT)}, { bubbles: true, cancelable: true }))) window.location.reload();
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then redraw.
+  function redrawWhenBack(delay, form) {
+    var tries = 0;
+    function poll() {
+      tries += 1;
+      fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (bridgeRestart(response)) { message(form, config.copy.restartRecovery, true); return; }
+        if (response.ok || tries > 40) redraw(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) redraw(); else setTimeout(poll, 1500); });
+    }
+    setTimeout(poll, delay);
+  }
+  // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
+  // (in memory), which says it again in the same form, with its section open.
+  function formKey(form) {
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : form.hasAttribute('data-outside-save-languages') ? ':languages' : '');
+  }
+  function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
+  (function showSaved() {
+    var saved = window.__olympusOutsideHelpSaved;
+    window.__olympusOutsideHelpSaved = null;
+    if (!saved || typeof saved.text !== 'string' || saved.text === '') return;
+    var target = Array.prototype.find.call(root.querySelectorAll('form[data-outside-form]'), function (form) { return formKey(form) === saved.key; });
+    if (!target) return;
+    var section = target.closest('details');
+    if (section) section.open = true;
+    message(target, saved.text, false);
+  })();
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
+  // While the writer check runs (only after the owner's click), the page re-reads itself.
+  if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
+    setTimeout(function () { window.location.reload(); }, config.writerPollMs);
+  }
+  // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.
+  async function send(path, body) {
+    var response;
+    try {
+      response = await fetch(path, body === null
+        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+        : {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+    } catch (error) {
+      return { ok: false, text: config.copy.unreachable, result: {} };
+    }
+    var result = {};
+    try { result = await response.json(); } catch (error) { result = {}; }
+    if (!response.ok || !result || !result.ok) return { ok: false, text: failure(response, result), result: result || {} };
+    return { ok: true, text: result.status_message || '', result: result };
+  }
+  root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var kind = form.getAttribute('data-outside-form');
+      var confirmText = form.getAttribute('data-outside-confirm');
+      if (confirmText && !window.confirm(confirmText)) return;
+      var buttons = form.querySelectorAll('button');
+      buttons.forEach(function (button) { button.disabled = true; });
+      function fail(text) {
+        message(form, text, true);
+        buttons.forEach(function (button) { button.disabled = false; });
+      }
+      message(form, config.copy.saving, false);
+      try {
+        // The local unlock presents no credential at all: the boundary wants a
+        // loopback browser and nothing else. Every other form carries the CSRF token.
+        var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
+        var outcome = await send(paths[kind], body);
+        if (!outcome.ok) return fail(outcome.text);
+        var text = outcome.text;
+        var result = outcome.result;
+        message(form, text, false);
+        if (kind === 'enable' && body && !body.replace_invalid) {
+          // Say the new state at once, before the reload that redraws the card.
+          var line = root.querySelector('[data-outside-state-text]');
+          if (line) line.textContent = body.enabled ? config.copy.on : config.copy.off;
+          if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
+        }
+        if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        // The switch's new state shows on the redrawn card; Save languages leaves nothing to see but its confirmation.
+        if ((kind !== 'enable' || form.hasAttribute('data-outside-save-languages')) && kind !== 'unlock') keepSaved(form, text);
+        if (result.restarting) {
+          message(form, text + ' ' + config.copy.restarting, false);
+          redrawWhenBack(4000, form);
+        } else {
+          redrawWhenBack(900, form);
+        }
+      } catch (error) {
+        fail(config.copy.failed);
+      }
+    });
+  });
+})();`;
+}
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS3, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
+var init_outside_help = __esm(() => {
+  init_zkapi_consult_settings();
+  init_components();
+  init_vocabulary();
+  init_vocabulary();
+  init_outside_help_tools();
+  DASHBOARD_OUTSIDE_HELP_PATHS = {
+    unlock: "/dashboard/control/session/local",
+    enable: "/dashboard/consult",
+    route: "/dashboard/consult/route",
+    addRoute: "/dashboard/consult/route/add",
+    recover: "/dashboard/consult/recover",
+    abandon: "/dashboard/consult/abandon",
+    installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
+    writer: "/dashboard/consult/writer",
+    standard: "/dashboard/consult/standard",
+    writerTest: "/dashboard/consult/writer/test"
+  };
+  LANGUAGE_NAMES = {
+    en: "English",
+    nl: "Dutch",
+    fr: "French",
+    es: "Spanish",
+    "pt-PT": "Portuguese (Portugal)",
+    "pt-BR": "Portuguese (Brazil)",
+    de: "German",
+    it: "Italian"
+  };
+  MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
+  FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
+  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
+  TOOL_BLOCKERS = new Map([
+    ["daemon_not_found", "zkapi-clientd"],
+    ["tor_not_found", "tor"],
+    ["daemon_version_unsupported", "zkapi-clientd"],
+    ["daemon_supervisor_unsupported", "zkapi-clientd"]
+  ]);
+  OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
+});
+
 // src/workers/dashboard/update-now.ts
 function esc2(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -168224,7 +166765,7 @@ function updateNoticeProgram(config2) {
     if (local && csrf)
       return false;
     try {
-      const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrf } });
+      const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" });
       const body = response.ok ? await response.json() : undefined;
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrf = body.csrf_token;
@@ -168569,6 +167110,46 @@ function dashboardHostBridge(config2, io) {
   };
 }
 
+// src/workers/dashboard/source-logos.ts
+function sourceLogoTile(sourceId, status) {
+  const brand = BRANDS[sourceId];
+  const glyph = GLYPHS[sourceId];
+  const letter = LETTERS[sourceId];
+  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
+  const kind = brand ? "brand" : glyph ? "glyph" : "letter";
+  return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
+}
+var BRANDS, GLYPHS, LETTERS, SOURCE_LOGO_CSS = `
+.logotile { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: #fff; }
+.logotile svg { width: 22px; height: 22px; }
+.logotile.glyph { background: color-mix(in srgb, var(--t2, #888) 22%, transparent); color: var(--t1, #eee); }
+.logotile.letter { background: transparent; }
+.logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
+.logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
+.logodot.ok { background: #3fb950; }
+.logodot.attention { background: #e3a03a; }
+.logodot.off { background: #8b8b8b; }
+`;
+var init_source_logos = __esm(() => {
+  init_components();
+  BRANDS = {
+    "gmail.email": { color: "#EA4335", path: "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" },
+    "google_drive.docs": { color: "#4285F4", path: "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" },
+    "dropbox.files": { color: "#0061FF", path: "M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" },
+    "x.bookmarks": { color: "#000000", path: "M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" },
+    "telegram.messages": { color: "#26A5E4", path: "M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" },
+    "whatsapp.personal.messages": { color: "#25D366", path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" },
+    "evernote.notes": { color: "#00A82D", path: "M8.222 5.393c0 .239-.02.637-.256.895-.257.24-.652.259-.888.259H4.552c-.73 0-1.165 0-1.46.04-.159.02-.356.1-.455.14-.04.019-.04 0-.02-.02L8.38.796c.02-.02.04-.02.02.02-.04.099-.118.298-.138.457-.04.298-.04.736-.04 1.472v2.647zm5.348 17.869c-.67-.438-1.026-1.015-1.164-1.373a2.924 2.924 0 01-.217-1.095 3.007 3.007 0 013-3.004c.493 0 .888.398.888.895a.88.88 0 01-.454.776c-.099.06-.237.1-.336.12-.098.02-.473.06-.65.218-.198.16-.356.418-.356.697 0 .298.118.577.316.776.355.358.829.557 1.342.557a2.436 2.436 0 002.427-2.447c0-1.214-.809-2.29-1.875-2.766-.158-.08-.414-.14-.651-.2a8.04 8.04 0 00-.592-.1c-.829-.1-2.901-.755-3.04-2.605 0 0-.611 2.785-1.835 3.54-.118.06-.276.12-.454.16-.177.04-.374.06-.434.06-1.993.12-4.105-.517-5.565-2.03 0 0-.987-.815-1.5-3.103-.118-.558-.355-1.553-.493-2.488-.06-.338-.08-.597-.099-.836 0-.975.592-1.631 1.342-1.73h4.026c.69 0 1.086-.18 1.342-.42.336-.317.415-.775.415-1.312V1.354C9.05.617 9.703 0 10.669 0h.474c.197 0 .434.02.651.04.158.02.296.06.533.12 1.204.298 1.46 1.532 1.46 1.532s2.27.398 3.415.597c1.085.199 3.77.378 4.282 3.104 1.204 6.487.474 12.775.415 12.775-.849 6.129-5.901 5.83-5.901 5.83a4.1 4.1 0 01-2.428-.736zm4.54-13.034c-.652-.06-1.204.2-1.402.697-.04.1-.079.219-.059.278.02.06.06.08.099.1.237.12.631.179 1.204.239.572.06.967.1 1.223.06.04 0 .08-.02.119-.08.04-.06.02-.18.02-.28-.06-.536-.553-.934-1.204-1.014z" }
+  };
+  GLYPHS = {
+    "local.files": "M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2h8A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
+    "archive.imports": "M3 7l9-4 9 4v10l-9 4-9-4zm9 2.2L5.4 6.6 12 9.4l6.6-2.8zM5 8.6v7.1l6 2.7v-7.1zm14 0-6 2.7v7.1l6-2.7z"
+  };
+  LETTERS = {
+    "readwise.library": { letter: "R", color: "#111111" }
+  };
+});
+
 // src/workers/dashboard/messaging.ts
 function telegramSetupSheet() {
   const walkthrough = setupStepsSheet({
@@ -168585,14 +167166,30 @@ function telegramSetupSheet() {
   });
   return '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + "<div data-messaging-view><div data-messaging-input></div></div>" + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
 }
-function renderMessagingCard(source, localSession, connection = { paired: false }) {
+function renderMessagingCard(source, localSession, connection = { paired: false }, options = {}) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
   const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
-  const form = (kind, text3) => `<form method="dialog" data-messaging-kind="${kind}"${kind === "cancel" ? " hidden" : ""}><button class="btn${(connection.paired ? kind === "chats" : kind === "start") ? " primary" : ""}" type="submit">${text3}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (connection.paired ? `<p data-messaging-account>${connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account`}</p>` : "") + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<p data-messaging-status role="status" aria-live="polite"></p><div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + form("chats", "Choose chats")}</div>${telegramSetupSheet()}<div data-messaging-chats></div></section>` : `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + form("start", "Pair again") : form("start", `Pair ${label}`) + form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
+  const paired = connection.paired;
+  const pairedOnly = paired ? " data-paired-only" : " data-paired-only hidden";
+  const unpairedOnly = paired ? " data-unpaired-only hidden" : " data-unpaired-only";
+  const accountLine = paired ? connection.account ? `Linked account: ${escapeHtml(connection.account)}` : `Your linked ${label} account` : "Not paired yet";
+  const close = options.closable ? '<button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button>' : "";
+  const pairAgain = source === "telegram" ? '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<form method="dialog" data-messaging-kind="start"><button class="btn" type="submit">Pair again</button></form>';
+  const menu = localSession ? `<details class="rowmenu msgmenu"${pairedOnly}><summary class="btn" aria-label="More actions for ${label}">⋯</summary><div class="menu">` + '<form method="dialog" data-messaging-kind="status"><button class="btn" type="submit">Check connection</button></form>' + pairAgain + "</div></details>" : "";
+  const head = `<div class="msghead">${sourceLogoTile(sourceId)}<div class="msgtitle"><h3>${escapeHtml(label)}</h3><p class="pnote" data-messaging-account>${accountLine}</p></div>${menu}${close}</div>`;
+  const intro = source === "telegram" ? "Pair once with your Telegram app keys and a login code. Then choose which chats Olympus reads. Nothing is read until you choose." : "Pair once with a QR code from WhatsApp on your phone. Then choose which chats Olympus reads. Nothing is read until you choose.";
+  const open5 = `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"${paired ? " data-messaging-paired" : ""}>${head}`;
+  if (!localSession) {
+    return open5 + `<p>${intro}</p><p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>`;
+  }
+  const chats = `<form method="dialog" data-messaging-kind="chats"${pairedOnly}><button class="btn primary" type="submit">Choose chats</button></form>`;
+  const cancel = '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form>';
+  const status = '<p data-messaging-status role="status" aria-live="polite"></p>';
+  return open5 + `<p class="msgintro"${unpairedOnly}>${intro}</p>` + (source === "telegram" ? `${status}<div class="actionrow msgactions"><button class="btn primary"${unpairedOnly} type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>${chats}</div>${telegramSetupSheet()}<div data-messaging-chats></div></section>` : `<div class="actionrow msgactions"><form method="dialog" data-messaging-kind="start"${unpairedOnly}><button class="btn primary" type="submit">Pair ${label}</button></form>${chats}${cancel}</div><div data-messaging-view>${status}<img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
 }
 var init_messaging = __esm(() => {
   init_components();
+  init_source_logos();
 });
 
 // src/workers/dashboard/top-nav.ts
@@ -168610,8 +167207,8 @@ function dashboardTabHref(tab, token) {
 }
 function dashboardTopNav(input) {
   const tabs = DASHBOARD_TABS.map((tab) => {
-    const href = escapeHtml2(dashboardTabHref(tab.id, input.token));
-    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml2(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml2(tab.label)}</a>`;
+    const href = escapeHtml(dashboardTabHref(tab.id, input.token));
+    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml(tab.label)}</a>`;
   }).join("");
   const lock = !input.unlocked ? '<span class="navlock" data-state="locked"><span aria-hidden="true">\uD83D\uDD12</span> Locked</span>' : input.lockable === false ? '<span class="navlock" data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked</span>' : `<div class="navlock" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked<span class="navsep" aria-hidden="true">·</span>` + '<form class="navlockform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">' + '<button class="navlockbtn" type="submit">Lock</button><span class="actmsg" data-action-message role="status"></span></form></div>';
   return `<header class="topnav"><span class="navbrand">Olympus</span><nav class="navtabs" aria-label="Olympus">${tabs}</nav><span class="navgrow"></span>${lock}</header>`;
@@ -168644,6 +167241,402 @@ var init_top_nav = __esm(() => {
     { id: "privacy", label: "Privacy" },
     { id: "settings", label: "Settings" }
   ];
+});
+
+// src/workers/archive-import/staging.ts
+import { randomBytes as randomBytes29 } from "node:crypto";
+import { existsSync as existsSync96, mkdirSync as mkdirSync61, readdirSync as readdirSync28, realpathSync as realpathSync21, rmSync as rmSync39, statSync as statSync40, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { open as open5 } from "node:fs/promises";
+import { sep as sep20, join as join129, resolve as resolve26 } from "node:path";
+function sanitizeUploadPath(raw) {
+  const bad = () => {
+    throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+  };
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS)
+    return bad();
+  if (/[\u0000-\u001f\u007f]/.test(raw))
+    return bad();
+  if (raw.startsWith("/") || raw.startsWith("\\") || /^[A-Za-z]:/.test(raw))
+    return bad();
+  const parts = raw.split("/");
+  if (parts.length > MAX_DEPTH)
+    return bad();
+  for (const part of parts) {
+    if (part === "" || part === "." || part === "..")
+      return bad();
+    if (part.split("\\").some((piece) => piece === ".."))
+      return bad();
+    if (Buffer.byteLength(part, "utf8") > MAX_NAME_BYTES)
+      return bad();
+  }
+  return parts;
+}
+function createArchiveUploads(options) {
+  const freeBytes = options.freeBytes ?? ((path) => {
+    const stats = statfsSync4(path);
+    return Number(stats.bavail) * Number(stats.bsize);
+  });
+  const headroomFor = (path) => {
+    if (options.headroomBytes !== undefined)
+      return options.headroomBytes;
+    if (options.freeBytes)
+      return ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES;
+    try {
+      const stats = statfsSync4(path);
+      return Math.min(ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, Number(stats.blocks) * Number(stats.bsize) / 4);
+    } catch {
+      return ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES;
+    }
+  };
+  const pause = options.pause ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const now = options.now ?? (() => Date.now());
+  const sessions = new Map;
+  let rootPath;
+  let closed = false;
+  const stagingRoot = () => {
+    if (rootPath)
+      return rootPath;
+    mkdirSync61(options.root, { recursive: true, mode: 448 });
+    rootPath = realpathSync21.native(options.root);
+    return rootPath;
+  };
+  const contained = (parent, child2) => child2 === parent || child2.startsWith(parent + sep20);
+  const session = (uploadId) => {
+    const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
+    if (!found)
+      throw new ArchiveUploadError("unknown_upload", ARCHIVE_UPLOAD_COPY.unknown_upload, 404);
+    return found;
+  };
+  const drop = (found) => {
+    sessions.delete(found.id);
+    rmSync39(found.dir, { recursive: true, force: true });
+  };
+  const roomFor = async (found, needed, signal) => {
+    let waited = false;
+    try {
+      for (;; ) {
+        if (found.cancelled || closed || signal?.aborted)
+          return false;
+        let free;
+        try {
+          free = freeBytes(found.files);
+        } catch {
+          return true;
+        }
+        if (free - needed >= headroomFor(found.files))
+          return true;
+        waited = true;
+        found.paused = true;
+        found.lastTouch = now();
+        await pause(SPACE_POLL_MS);
+      }
+    } finally {
+      if (waited)
+        found.paused = false;
+    }
+  };
+  const receive = async (uploadId, relPath, body, receiveOptions = {}) => {
+    const found = session(uploadId);
+    if (found.cancelled)
+      throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+    const segments = sanitizeUploadPath(relPath);
+    const key2 = segments.join("/");
+    const offset = receiveOptions.offset ?? 0;
+    const final = receiveOptions.final ?? true;
+    if (!Number.isSafeInteger(offset) || offset < 0)
+      throw new ArchiveUploadError("bad_offset", ARCHIVE_UPLOAD_COPY.bad_offset, 400);
+    const declared = receiveOptions.declaredBytes;
+    if (declared !== undefined && Number.isFinite(declared) && declared > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES)
+      throw new ArchiveUploadError("chunk_too_large", ARCHIVE_UPLOAD_COPY.chunk_too_large, 413);
+    if (offset === 0) {
+      if (found.paths.has(key2))
+        throw new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409);
+      found.paths.add(key2);
+      found.partials.set(key2, { written: 0, busy: true });
+    } else {
+      const partial2 = found.partials.get(key2);
+      if (!partial2 || partial2.busy || partial2.written !== offset)
+        throw new ArchiveUploadError("bad_offset", ARCHIVE_UPLOAD_COPY.bad_offset, 409);
+      partial2.busy = true;
+    }
+    found.active += 1;
+    found.lastTouch = now();
+    let handle;
+    let target = "";
+    let created = false;
+    let written = 0;
+    let reader;
+    const stop = () => {
+      reader?.cancel().catch(() => {
+        return;
+      });
+    };
+    found.abort.add(stop);
+    try {
+      const parent = join129(found.files, ...segments.slice(0, -1));
+      try {
+        mkdirSync61(parent, { recursive: true, mode: 448 });
+        if (!contained(realpathSync21.native(found.files), realpathSync21.native(parent)))
+          throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+      } catch (error2) {
+        if (error2 instanceof ArchiveUploadError)
+          throw error2;
+        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path, 409);
+      }
+      target = join129(parent, segments[segments.length - 1]);
+      if (!contained(found.files, resolve26(target)))
+        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+      if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0, receiveOptions.signal)) {
+        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      }
+      try {
+        handle = await open5(target, offset === 0 ? "wx" : "r+", 384);
+      } catch (error2) {
+        const code = error2?.code;
+        throw code === "EEXIST" ? new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409) : new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 500);
+      }
+      created = offset === 0;
+      if (offset > 0)
+        created = true;
+      if (body) {
+        reader = body.getReader();
+        let sinceCheck = 0;
+        for (;; ) {
+          let step;
+          try {
+            step = await reader.read();
+          } catch {
+            throw new ArchiveUploadError("unreadable", ARCHIVE_UPLOAD_COPY.unreadable, 400);
+          }
+          if (step.done)
+            break;
+          const chunk = step.value;
+          if (found.cancelled)
+            throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+          found.lastTouch = now();
+          if (written + chunk.byteLength > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES)
+            throw new ArchiveUploadError("chunk_too_large", ARCHIVE_UPLOAD_COPY.chunk_too_large, 413);
+          sinceCheck += chunk.byteLength;
+          if (sinceCheck >= SPACE_CHECK_EVERY_BYTES) {
+            sinceCheck = 0;
+            if (!await roomFor(found, chunk.byteLength, receiveOptions.signal))
+              throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+          }
+          try {
+            let done = 0;
+            while (done < chunk.byteLength) {
+              const { bytesWritten } = await handle.write(chunk, done, chunk.byteLength - done, offset + written + done);
+              done += bytesWritten;
+            }
+          } catch {
+            throw new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 507);
+          }
+          written += chunk.byteLength;
+          found.bytes += chunk.byteLength;
+        }
+        if (found.cancelled)
+          throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      }
+      await handle.close();
+      handle = undefined;
+      if (!final) {
+        found.partials.set(key2, { written: offset + written, busy: false });
+        return { bytes: written };
+      }
+      found.partials.delete(key2);
+      const modified = receiveOptions.modified;
+      if (modified !== undefined && Number.isFinite(modified) && modified > 0 && modified < 4102444800000) {
+        try {
+          const when = new Date(modified);
+          utimesSync(target, when, when);
+        } catch {}
+      }
+      found.fileCount += 1;
+      return { bytes: written };
+    } catch (error2) {
+      if (handle)
+        await handle.close().catch(() => {
+          return;
+        });
+      if (created && existsSync96(target))
+        rmSync39(target, { force: true });
+      found.paths.delete(key2);
+      found.partials.delete(key2);
+      found.bytes -= offset + written;
+      throw found.cancelled ? new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409) : error2;
+    } finally {
+      found.abort.delete(stop);
+      found.active -= 1;
+      found.lastTouch = now();
+    }
+  };
+  return {
+    begin() {
+      if (closed)
+        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      const root = stagingRoot();
+      const uploadId = randomBytes29(16).toString("hex");
+      const dir = join129(root, uploadId);
+      mkdirSync61(join129(dir, "files"), { recursive: true, mode: 448 });
+      sessions.set(uploadId, {
+        id: uploadId,
+        dir,
+        files: join129(dir, "files"),
+        fileCount: 0,
+        bytes: 0,
+        active: 0,
+        paused: false,
+        cancelled: false,
+        lastTouch: now(),
+        abort: new Set,
+        paths: new Set,
+        partials: new Map
+      });
+      return { uploadId };
+    },
+    receive,
+    status(uploadId) {
+      const found = session(uploadId);
+      return {
+        state: found.paused ? "paused_disk_full" : found.active > 0 ? "receiving" : "idle",
+        files: found.fileCount,
+        bytes: found.bytes
+      };
+    },
+    cancel(uploadId, keep) {
+      if (typeof uploadId !== "string" || !ID2.test(uploadId))
+        return false;
+      const found = sessions.get(uploadId);
+      const dir = found?.dir ?? (existsSync96(options.root) ? join129(stagingRoot(), uploadId) : undefined);
+      if (!dir)
+        return false;
+      if (keep?.(dir)) {
+        if (found) {
+          found.cancelled = true;
+          for (const stop of [...found.abort])
+            stop();
+          sessions.delete(uploadId);
+        }
+        return false;
+      }
+      if (found) {
+        found.cancelled = true;
+        for (const stop of [...found.abort])
+          stop();
+        sessions.delete(uploadId);
+      }
+      rmSync39(dir, { recursive: true, force: true });
+      return true;
+    },
+    chosenPath(uploadId) {
+      const found = session(uploadId);
+      if (found.cancelled)
+        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      if (found.active > 0 || found.partials.size > 0)
+        throw new ArchiveUploadError("upload_closed", "Files are still arriving. Wait until the upload has finished.", 409);
+      const entries = readdirSync28(found.files);
+      const top = entries.length === 1 ? join129(found.files, entries[0]) : found.files;
+      const canonical2 = realpathSync21.native(top);
+      if (!contained(realpathSync21.native(found.dir), canonical2))
+        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+      return canonical2;
+    },
+    handOver(uploadId) {
+      const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
+      if (!found)
+        return;
+      found.cancelled = true;
+      for (const stop of [...found.abort])
+        stop();
+      sessions.delete(uploadId);
+    },
+    release(uploadId, keep) {
+      if (typeof uploadId !== "string" || !ID2.test(uploadId))
+        return;
+      const found = sessions.get(uploadId);
+      const dir = found?.dir ?? (existsSync96(options.root) ? join129(stagingRoot(), uploadId) : undefined);
+      if (!dir || keep?.(dir))
+        return;
+      sessions.delete(uploadId);
+      rmSync39(dir, { recursive: true, force: true });
+    },
+    sweep(needed) {
+      if (!rootPath && !existsSync96(options.root))
+        return;
+      let root;
+      try {
+        root = stagingRoot();
+      } catch {
+        return;
+      }
+      let names;
+      try {
+        names = readdirSync28(root);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (!ID2.test(name))
+          continue;
+        const dir = join129(root, name);
+        const found = sessions.get(name);
+        if (found && (found.active > 0 || now() - found.lastTouch < ARCHIVE_UPLOAD_IDLE_MS))
+          continue;
+        try {
+          if (!statSync40(dir).isDirectory())
+            continue;
+        } catch {
+          continue;
+        }
+        if (needed(dir)) {
+          sessions.delete(name);
+          continue;
+        }
+        if (found)
+          found.cancelled = true;
+        sessions.delete(name);
+        rmSync39(dir, { recursive: true, force: true });
+      }
+    },
+    close() {
+      closed = true;
+      for (const found of sessions.values()) {
+        found.cancelled = true;
+        for (const stop of [...found.abort])
+          stop();
+      }
+    }
+  };
+}
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY;
+var init_staging = __esm(() => {
+  ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+  ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+  SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
+  ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
+  ID2 = /^[0-9a-f]{32}$/;
+  ArchiveUploadError = class ArchiveUploadError extends Error {
+    code;
+    status;
+    constructor(code, message2, status = 400) {
+      super(message2);
+      this.code = code;
+      this.status = status;
+      this.name = "ArchiveUploadError";
+    }
+  };
+  ARCHIVE_UPLOAD_COPY = {
+    bad_path: "Olympus could not take a file with that name or place in the folder. Choose the folder again.",
+    duplicate_file: "The same file came twice in one upload. Choose the folder again.",
+    bad_offset: "A part of a file arrived out of order. Choose the folder again.",
+    chunk_too_large: "A part of a file was larger than Olympus takes in one piece. Choose the folder again.",
+    unknown_upload: "This upload is no longer here. Choose the folder again.",
+    upload_closed: "This upload was already finished. Choose the folder again.",
+    cancelled: "This upload was cancelled.",
+    unreadable: "Olympus could not read what was sent. Choose the folder again.",
+    write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
+  };
 });
 
 // src/workers/dashboard/host-page.ts
@@ -168775,7 +167768,7 @@ function hostProgram(input, bridge, mount) {
   function localUnlock(name) {
     if (localSession || input.localTools.indexOf(name) < 0)
       return Promise.resolve();
-    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrfToken = body.csrf_token;
         localSession = true;
@@ -168817,16 +167810,16 @@ function hostProgram(input, bridge, mount) {
   function uploadFile(upload, progress) {
     if (expired || stopped[upload.uploadId])
       return Promise.resolve({ ok: false, cancelled: !!stopped[upload.uploadId] });
-    return localUnlock(input.uploadTool).then(() => new Promise((resolve28) => {
+    return localUnlock(input.uploadTool).then(() => new Promise((resolve27) => {
       if (!csrfToken || stopped[upload.uploadId]) {
-        resolve28({ ok: false, cancelled: !!stopped[upload.uploadId] });
+        resolve27({ ok: false, cancelled: !!stopped[upload.uploadId] });
         return;
       }
       const size = upload.file.size;
       const piece = input.uploadChunkBytes > 0 ? input.uploadChunkBytes : size || 1;
       function send2(offset) {
         if (stopped[upload.uploadId]) {
-          resolve28({ ok: false, cancelled: true });
+          resolve27({ ok: false, cancelled: true });
           return;
         }
         const end = Math.min(size, offset + piece);
@@ -168853,12 +167846,12 @@ function hostProgram(input, bridge, mount) {
           forget();
           if (request.status === 401 || request.status === 403) {
             lockPage();
-            resolve28({ ok: false });
+            resolve27({ ok: false });
             return;
           }
           if (request.status >= 200 && request.status < 300) {
             if (last)
-              resolve28({ ok: true });
+              resolve27({ ok: true });
             else
               send2(end);
             return;
@@ -168871,15 +167864,15 @@ function hostProgram(input, bridge, mount) {
           } catch {
             message2 = undefined;
           }
-          resolve28(message2 ? { ok: false, message: message2 } : { ok: false });
+          resolve27(message2 ? { ok: false, message: message2 } : { ok: false });
         };
         request.onerror = () => {
           forget();
-          resolve28({ ok: false });
+          resolve27({ ok: false });
         };
         request.onabort = () => {
           forget();
-          resolve28({ ok: false, cancelled: true });
+          resolve27({ ok: false, cancelled: true });
         };
         request.send(offset === 0 && last ? upload.file : upload.file.slice(offset, end));
       }
@@ -168904,7 +167897,7 @@ function hostProgram(input, bridge, mount) {
       landing = { sourceId: input.allSourcesLanding.id };
   }
   function openLocalSession() {
-    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrfToken = body.csrf_token;
         localSession = true;
@@ -169036,9 +168029,9 @@ function hostProgram(input, bridge, mount) {
   const how = document.getElementById("gate-how");
   if (toggle && how) {
     toggle.addEventListener("click", () => {
-      const open7 = how.hidden;
-      how.hidden = !open7;
-      toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
+      const open6 = how.hidden;
+      how.hidden = !open6;
+      toggle.setAttribute("aria-expanded", open6 ? "true" : "false");
     });
   }
   const copy = document.querySelector("[data-gate-copy]");
@@ -169255,7 +168248,8 @@ var init_host_page = __esm(() => {
     appsReceived: "apps-received",
     connector: "connector",
     help: "help",
-    settings: "settings"
+    settings: "settings",
+    people: "people"
   };
   HOST_CSS = `
 :root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
@@ -169314,6 +168308,2045 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
     "form-action 'none'",
     "frame-ancestors 'none'"
   ].join("; ");
+});
+
+// src/workers/dashboard/static-styles.ts
+var LOCAL_PAGE_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.privacy { max-width: 760px; }
+.privacy .sect { margin-top: 24px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
+@media (max-width: 700px) {
+  .srow { grid-template-columns: minmax(0, 1fr); }
+  .srow .sact { grid-column: 1; grid-row: 2; justify-content: flex-start; }
+}
+`, AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
+.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-body); color: var(--t2); }
+.agentchoice > summary::-webkit-details-marker { display: none; }
+.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
+.agentchoice[open] > summary::after { transform: rotate(90deg); }
+.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
+.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
+.agentchoice > summary .name { font-weight: 600; }
+.agentchoice .agentbody { padding: 2px 14px 14px; }
+.agentchoice .agentbody > p { margin: 0 0 10px; }
+.agentchoice .steps li { margin-bottom: 14px; }
+.agentchoice .steps .rowform { margin-top: 8px; }
+.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
+.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.agentsecret[hidden] { display: none; }
+.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
+.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
+#agents { margin-top: 26px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; }
+.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
+.remoteterms[hidden] { display: none; }
+.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
+.remoteterms .rowform { margin-top: 4px; }
+.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
+[data-first-run-computer] fieldset,[data-computer-use] fieldset,[data-judge-choice] fieldset{border:0;padding:0;margin:0;min-width:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
+[data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
+[data-first-run-sheet] [hidden]{display:none!important}
+.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
+.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
+.modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
+.modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
+.modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
+.modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
+.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet .modelaction{margin:0}
+.modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
+.modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
+.modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
+`, DASHBOARD_OUTSIDE_HELP_CSS = `
+/* The status line: the state and today's count, the switch beside them. */
+.outside .ohpanel { margin: 0 0 12px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+.outside .ohstatewrap { display: grid; gap: 2px; min-width: 0; flex: 1 1 320px; }
+.outside .ohhead > .pbuttons { flex: none; }
+.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
+.outside .dot.on { background: var(--good); }
+.outside .dot.off { background: transparent; border: 2px solid var(--off); }
+.outside .dot.attn { background: var(--warn-fill); }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.outside .ohline.attn { color: var(--warn); font-weight: 600; }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
+.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+/* Problems: one tinted list, a line each, its one button in the line. */
+.outside .ohfix { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
+.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
+.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
+.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
+@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
+.outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
+/* The statements, in full only until accepted. */
+.outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
+.outside .ohaccept .sect { margin-top: 0; }
+.outside .ohaccept .ohlist { margin-bottom: 4px; }
+.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
+.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
+.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
+.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
+.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
+/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
+.outside details.ohsect { border-top: 1px solid var(--line); }
+.outside .ohmore { margin: 20px 0 0; }
+.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
+.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.outside details.ohsect > summary::-webkit-details-marker { display: none; }
+.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
+.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
+.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
+.outside .ohsect-sum:empty { display: none; }
+.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
+.outside .ohsect-body { padding: 0 0 16px 18px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
+.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohform.ohinline { margin: 0 0 12px; }
+.outside .ohform .keyfield { width: 100%; max-width: 220px; }
+.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
+.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
+.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.outside .ohoff { color: var(--t3); }
+.outside .actmsg[data-state="error"] { color: var(--bad); }
+.outside .ohunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .hint { color: var(--t2); }
+.outside .ohunlock .actmsg:empty { display: none; }
+@media (max-width: 700px) {
+  .outside .ohpanel { padding: 14px; }
+  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
+  .outside .ohline { margin-left: 0; }
+  .outside .btn { white-space: normal; text-align: left; }
+  .outside .ohsect-body { padding-left: 0; }
+}
+`;
+
+// src/workers/dashboard/pages/people.ts
+function renderDashboardPeoplePage(options) {
+  const basePath = options?.basePath;
+  const token = readToken(basePath);
+  const csrf = options?.controlSessionCsrfToken;
+  const sourcesHref = dashboardLocalPageHref("connect", token);
+  const view4 = csrf !== undefined && options?.peopleLocalSession === true ? options.people : undefined;
+  const sub = view4 ? `${escapeHtml(C3.breadcrumbSources)} › ${escapeHtml(C3.title)} · ${escapeHtml(C3.count(view4.total, view4.sourceCount))}` : `${escapeHtml(C3.breadcrumbSources)} › ${escapeHtml(C3.title)}`;
+  const head = `<div class="pphead"><div class="ppgrow"><h2>${escapeHtml(C3.title)}</h2><p class="ppsub">${sub}</p></div>` + `<a class="ppclose" href="${escapeHtml(sourcesHref)}" aria-label="${escapeHtml(C3.close)}">✕</a></div>`;
+  let inner;
+  if (csrf === undefined || options?.peopleLocalSession !== true) {
+    inner = `<p class="ppempty">${escapeHtml(C3.locked)} <a href="${escapeHtml(sourcesHref)}">${escapeHtml(C3.lockedLink)}</a></p>`;
+  } else if (!view4) {
+    inner = `<p class="ppempty">${escapeHtml(C3.unavailable)}</p>`;
+  } else {
+    inner = peopleBody(view4);
+  }
+  const body = `<section class="pp" data-people>${`<div class="ppsheet">${head}<div class="ppbody">${inner}` + `<p class="ppmsg" data-pp-msg role="status"></p>` + `<p class="ppnote">${escapeHtml(C3.privacy)}</p></div></div>`}</section>`;
+  return pageShell({
+    title: "Olympus",
+    crumb: C3.crumb,
+    ...basePath === undefined ? {} : { basePath },
+    nav: dashboardTopNav({ active: "sources", unlocked: csrf !== undefined, lockable: false, ...token ? { token } : {} }),
+    meta: "",
+    body,
+    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, PEOPLE_CSS],
+    ...view4 && csrf !== undefined ? { scripts: [`<script>${peopleClientScript(csrf)}</script>`] } : {}
+  });
+}
+function dashboardPeopleRow(token) {
+  return `<div class="srow nodot" data-people-row><div class="smain"><b>${escapeHtml(C3.row)}</b><p class="pnote">${escapeHtml(C3.rowLine)}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml(dashboardLocalPageHref("people", token))}">${escapeHtml(C3.rowOpen)}</a></div></div>`;
+}
+function peopleBody(view4) {
+  const parts = [];
+  if (view4.suggestions.length > 0) {
+    const asks = view4.suggestions.slice(0, 3).map((suggestion) => `<div class="ppask" data-pp-ask>` + `<p>${escapeHtml(C3.question)} <b>${escapeHtml(suggestion.a.name)}</b> ${escapeHtml(C3.on)} ${escapeHtml(suggestion.a.source)} ${escapeHtml(C3.sameAs)} <b>${escapeHtml(suggestion.b.name)}</b> (${escapeHtml(suggestion.b.detail)}) ${escapeHtml(C3.in)} ${escapeHtml(suggestion.b.source)}?` + `<span class="hint">${escapeHtml(C3.onlyName)}</span></p>` + `<div class="ppaskbtns">` + `<button class="btn" type="button" data-pp-op="not_same" data-identity-a="${escapeHtml(suggestion.identityA)}" data-identity-b="${escapeHtml(suggestion.identityB)}">${escapeHtml(C3.notSame)}</button>` + `<button class="btn primary" type="button" data-pp-op="same" data-identity-a="${escapeHtml(suggestion.identityA)}" data-identity-b="${escapeHtml(suggestion.identityB)}">${escapeHtml(C3.same)}</button>` + `</div></div>`).join("");
+    parts.push(`<div class="ppcard" data-pp-suggestions><h3>${escapeHtml(C3.samePerson)}<span class="hint">${escapeHtml(C3.toCheck(view4.suggestions.length))}</span></h3>${asks}</div>`);
+  }
+  const me = view4.people.find((person) => person.isOwner);
+  if (me)
+    parts.push(`<div class="ppcard" data-pp-you><p class="ppname">${escapeHtml(C3.you)}</p>${chips(me)}</div>`);
+  const others = view4.people.filter((person) => !person.isOwner);
+  if (others.length === 0) {
+    parts.push(`<p class="ppempty">${escapeHtml(C3.empty)}</p>`);
+    return parts.join("");
+  }
+  parts.push(`<input class="ppfind" type="search" data-pp-find placeholder="${escapeHtml(C3.find)}" aria-label="${escapeHtml(C3.find)}">`);
+  const mergeOptions = others.map((person) => `<option value="${escapeHtml(person.identities[0]?.identityKey ?? "")}">${escapeHtml(`${person.displayName} · ${[...new Set(person.identities.map((chip) => chip.source))].join(", ")}`)}</option>`).join("");
+  parts.push(`<template data-pp-merge-options>${mergeOptions}</template>`);
+  for (const person of others)
+    parts.push(personRow(person));
+  parts.push(`<p class="ppempty" data-pp-nomatch hidden>${escapeHtml(C3.noMatch)}</p>`);
+  return parts.join("");
+}
+function chips(person) {
+  return `<div class="ppchips">${person.identities.map((chip) => `<span class="ppchip" title="${escapeHtml(`${chip.source} ${chip.detail}`)}"><i class="ppdot" style="background:${SOURCE_DOTS[chip.provider] ?? "var(--t3)"}"></i><span>${escapeHtml(chip.source === chip.detail ? chip.source : `${chip.source} ${chip.detail}`)}</span></span>`).join("")}</div>`;
+}
+function personRow(person) {
+  const first = person.identities[0]?.identityKey ?? "";
+  const linked = linkedSentence(person.linkedBy);
+  const why = person.named ? [linked || C3.onlyOneSource, C3.messages(person.messages)].join(" · ") : [C3.noName, ...linked ? [linked] : [], C3.messages(person.messages)].join(" · ");
+  const search = [person.displayName, ...person.identities.map((chip) => `${chip.source} ${chip.detail}`)].join(" ").toLowerCase();
+  const splits = person.identities.length > 1 ? person.identities.map((chip) => `<button class="btn" type="button" data-pp-op="split" data-identity="${escapeHtml(chip.identityKey)}">${escapeHtml(C3.split(`${chip.source} ${chip.detail}`))}</button>`).join("") : "";
+  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml(C3.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml(person.personId)}">${escapeHtml(C3.renamePrompt)}</label>` + `<input id="rn-${escapeHtml(person.personId)}" name="name" maxlength="160" value="${escapeHtml(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C3.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml(person.personId)}">${escapeHtml(C3.mergeWith)}</label>` + `<select id="mg-${escapeHtml(person.personId)}" name="identity_b" required></select>` + `<input type="hidden" name="identity_a" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C3.merge)}</button></form>` + splits + "</div></details>";
+  return `<div class="ppcard pprow" data-pp-person="${escapeHtml(person.personId)}" data-pp-search="${escapeHtml(search)}">` + `<div><p class="ppname">${escapeHtml(person.displayName)}</p>${chips(person)}<p class="ppwhy">${escapeHtml(why)}</p></div>${menu}</div>`;
+}
+function linkedSentence(reasons) {
+  const prefix = "Linked by ";
+  if (reasons.length === 0)
+    return "";
+  const rest = reasons.slice(1).map((reason) => reason.startsWith(prefix) ? reason.slice(prefix.length) : reason.charAt(0).toLowerCase() + reason.slice(1));
+  return [reasons[0], ...rest].join(" and ");
+}
+function peopleClientScript(csrfToken) {
+  const config2 = escapeScriptJson(JSON.stringify({ csrfToken, path: DASHBOARD_PEOPLE_PATH2, copy: { failed: C3.failed, unreachable: C3.unreachable, saving: C3.saving } }));
+  return `(function () {
+  var config = ${config2};
+  var root = document.querySelector('[data-people]');
+  if (!root) return;
+  var msg = root.querySelector('[data-pp-msg]');
+  function say(text, error) { if (!msg) return; msg.textContent = text; if (error) msg.setAttribute('data-state', 'error'); else msg.removeAttribute('data-state'); }
+  async function send(body) {
+    say(config.copy.saving, false);
+    var response;
+    try {
+      response = await fetch(config.path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (error) { say(config.copy.unreachable, true); return; }
+    var result = {};
+    try { result = await response.json(); } catch (error) { result = {}; }
+    if (response.ok && result && result.ok === true) { window.location.reload(); return; }
+    say((result && result.error && result.error.message) || config.copy.failed, true);
+  }
+  root.addEventListener('click', function (event) {
+    var button = event.target && event.target.closest ? event.target.closest('[data-pp-op]') : null;
+    if (!button) return;
+    var op = button.getAttribute('data-pp-op');
+    if (op === 'split') { send({ op: 'split', identity: button.getAttribute('data-identity') }); return; }
+    send({ op: op, identity_a: button.getAttribute('data-identity-a'), identity_b: button.getAttribute('data-identity-b') });
+  });
+  root.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!form || !form.matches) return;
+    event.preventDefault();
+    var data = new FormData(form);
+    if (form.matches('[data-pp-rename]')) send({ op: 'rename', identity: data.get('identity'), name: data.get('name') });
+    else if (form.matches('[data-pp-merge]')) send({ op: 'merge', identity_a: data.get('identity_a'), identity_b: data.get('identity_b') });
+  });
+  var mergeOptions = root.querySelector('template[data-pp-merge-options]');
+  root.addEventListener('toggle', function (event) {
+    var menu = event.target;
+    if (!menu || !menu.open || !mergeOptions) return;
+    var picker = menu.querySelector('[data-pp-merge] select');
+    if (!picker || picker.options.length > 0) return;
+    var own = menu.querySelector('[data-pp-merge] input[name="identity_a"]');
+    picker.appendChild(mergeOptions.content.cloneNode(true));
+    Array.prototype.forEach.call(picker.options, function (option) { if (own && option.value === own.value) option.disabled = true; });
+  }, true);
+  var find = root.querySelector('[data-pp-find]');
+  if (find) find.addEventListener('input', function () {
+    var wanted = String(find.value || '').trim().toLowerCase();
+    var shown = 0;
+    root.querySelectorAll('[data-pp-person]').forEach(function (row) {
+      var match = !wanted || (row.getAttribute('data-pp-search') || '').indexOf(wanted) >= 0;
+      row.hidden = !match;
+      if (match) shown += 1;
+    });
+    var none = root.querySelector('[data-pp-nomatch]');
+    if (none) none.hidden = shown > 0;
+  });
+})();`;
+}
+function readToken(basePath) {
+  if (!basePath)
+    return;
+  const query = basePath.indexOf("?");
+  if (query < 0)
+    return;
+  return new URLSearchParams(basePath.slice(query + 1)).get("token") ?? undefined;
+}
+var DASHBOARD_PEOPLE_PATH2 = "/dashboard/people", PEOPLE_COPY, C3, SOURCE_DOTS, PEOPLE_CSS = `
+.pp { width: 100%; max-width: min(760px, 100%); min-width: 0; }
+.pp .ppsheet { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.pp .pphead { display: flex; align-items: flex-start; gap: 12px; padding: 18px 22px 14px; border-bottom: 1px solid var(--line); }
+.pp .pphead h2 { margin: 0; font-size: var(--fs-section); }
+.pp .pphead .ppsub { margin: 2px 0 0; color: var(--t2); }
+.pp .pphead .ppgrow { flex: 1; min-width: 0; }
+.pp .ppclose { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%; color: var(--t2); text-decoration: none; font-size: 1.1em; }
+.pp .ppclose:hover { color: var(--t1); background: var(--panel2); }
+.pp .ppbody { display: grid; gap: 12px; padding: 16px 22px 22px; }
+.pp .ppcard { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.pp .ppcard h3 { margin: 0 0 6px; font-size: var(--fs-row); }
+.pp .ppcard h3 .hint { font-weight: 400; margin-left: 4px; font-size: var(--fs-body); }
+.pp .ppask { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; align-items: center; }
+.pp .ppask + .ppask { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.pp .ppask p { margin: 0; overflow-wrap: anywhere; }
+.pp .ppask .hint { display: block; }
+.pp .ppaskbtns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pp .ppaskbtns .btn { border-radius: 999px; padding: 8px 18px; }
+.pp .ppname { margin: 0 0 6px; font-weight: 600; font-size: var(--fs-row); overflow-wrap: anywhere; }
+.pp .ppchips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.pp .ppchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--t2); font-size: var(--fs-body); }
+.pp .ppchip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 22ch; }
+.pp .ppdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--t3); }
+.pp .ppwhy { margin: 0; color: var(--t2); }
+.pp .ppfind { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--field); border-radius: 8px; background: var(--bg); color: var(--t1); font: inherit; }
+.pp .ppfind:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.pp .pprow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; }
+.pp .pprow[hidden] { display: none; }
+.pp details.rowmenu > summary { border: 1px solid var(--line); border-radius: 50%; width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; padding: 0; cursor: pointer; }
+.pp .ppedit { display: grid; gap: 6px; padding: 6px; }
+.pp .ppedit input, .pp .ppedit select { padding: 6px 8px; border: 1px solid var(--field); border-radius: 6px; background: var(--bg); color: var(--t1); font: inherit; min-width: 0; }
+.pp .ppnote { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
+.pp .ppmsg { margin: 0; color: var(--t2); }
+.pp .ppmsg[data-state="error"] { color: var(--bad); }
+.pp .ppmsg:empty { display: none; }
+.pp .ppempty { color: var(--t2); margin: 0; }
+@media (max-width: 560px) {
+  .pp .ppask { grid-template-columns: minmax(0, 1fr); }
+  .pp .ppaskbtns { justify-content: flex-start; }
+  .pp .pphead, .pp .ppbody { padding-left: 14px; padding-right: 14px; }
+}
+`;
+var init_people = __esm(() => {
+  init_components();
+  init_host_page();
+  init_top_nav();
+  PEOPLE_COPY = {
+    crumb: "People",
+    title: "People",
+    breadcrumbSources: "Sources tab",
+    count: (people, sources) => `${people.toLocaleString("en-US")} ${people === 1 ? "person" : "people"} from ${sources} ${sources === 1 ? "source" : "sources"}`,
+    close: "Close",
+    samePerson: "Same person?",
+    toCheck: (n) => `${n} to check`,
+    question: "Is",
+    on: "on",
+    sameAs: "the same person as",
+    in: "in",
+    onlyName: "Only the name matches",
+    notSame: "Not the same",
+    same: "Same person",
+    you: "You",
+    find: "Find a person",
+    noMatch: "No one matches.",
+    messages: (n) => `${n.toLocaleString("en-US")} ${n === 1 ? "message" : "messages"}`,
+    noName: "No name yet",
+    onlyOneSource: "One identity",
+    more: "More actions",
+    rename: "Rename",
+    renamePrompt: "New name",
+    save: "Save",
+    cancel: "Cancel",
+    mergeWith: "Merge with…",
+    mergeChoose: "Merge with",
+    merge: "Merge",
+    split: (chip) => `Split off ${chip}`,
+    privacy: "Linking people never decides privacy. Every message is still judged on its own. The people list stays on this computer.",
+    locked: "People opens only in the dashboard on this computer, unlocked.",
+    lockedLink: "Go to Sources to unlock",
+    unavailable: "The people list is not ready yet. It builds after your sources sync.",
+    empty: "No people yet. They appear after a chat or email source syncs.",
+    failed: "That change did not save. Try again.",
+    unreachable: "Olympus did not answer. Try again in a moment.",
+    saving: "Saving…",
+    row: "People",
+    rowLine: "Who is who across your sources",
+    rowOpen: "Open"
+  };
+  C3 = PEOPLE_COPY;
+  SOURCE_DOTS = {
+    gmail: "#EA4335",
+    telegram: "#26A5E4",
+    whatsapp: "#25D366",
+    apple_messages: "#34C759"
+  };
+});
+
+// src/workers/dashboard/models-on-computer.ts
+function routeMembers(config2) {
+  const route = config2.routes?.secure_local;
+  if (route?.pool) {
+    const members = route.pool.members ?? [];
+    if (route.pool.order)
+      return { ids: route.pool.order.filter((id) => members.includes(id)), ordered: true };
+    return { ids: [...members], ordered: members.length <= 1 };
+  }
+  return { ids: [...route?.analyst ?? []], ordered: true };
+}
+function hostOf(baseUrl) {
+  if (!baseUrl)
+    return;
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host && !LOOPBACK_HOSTS2.has(host) ? host : undefined;
+  } catch {
+    return;
+  }
+}
+function memberName(config2, id, builtIn) {
+  const profile = config2.modelProfiles?.[id];
+  if (!profile)
+    return;
+  const model = "model" in profile && typeof profile.model === "string" && profile.model.trim() ? profile.model.trim() : undefined;
+  switch (profile.provider) {
+    case "local-openai-compatible": {
+      if (builtIn.answers)
+        return `${builtIn.name ?? "the built-in model"} on this computer`;
+      const host = hostOf(profile.baseUrl);
+      return `${model ?? "your model server"} on ${host ?? "this computer"}`;
+    }
+    case "venice":
+      return "Venice";
+    case "openclaw-infer":
+      return model ?? "your OpenClaw agent's model";
+    default:
+      return model ?? String(profile.provider);
+  }
+}
+function dashboardModelsOnComputer(input) {
+  const rows = input.readiness ?? [];
+  const privateRow = rows.find((row) => row.name === "Private answers");
+  const transcriptionRow = rows.find((row) => row.name === "Transcription");
+  const config2 = input.config;
+  let privateAnswers = { unknown: true };
+  let usesLocal = false;
+  if (config2) {
+    if (config2.routes?.secure_local?.mode === "disabled")
+      privateAnswers = { off: true };
+    else {
+      const { ids, ordered } = routeMembers(config2);
+      usesLocal = ids.some((id) => config2.modelProfiles?.[id]?.provider === "local-openai-compatible");
+      const names = ids.map((id) => memberName(config2, id, { answers: input.builtInAnswers, ...privateRow?.model ? { name: privateRow.model } : {} })).filter((name) => !!name);
+      if (!ordered && names.length > 1)
+        privateAnswers = { any: names };
+      else if (names.length)
+        privateAnswers = { first: names[0], ...names[1] ? { fallback: names[1] } : {} };
+    }
+  }
+  const out = { privateAnswers };
+  if (privateRow) {
+    const state = privateRow.state === "unavailable" ? `not available: ${privateRow.cause ?? privateRow.detail}` : BUILT_IN_STATES[privateRow.state] ?? privateRow.state;
+    out.builtIn = { name: privateRow.model ?? "Built-in private model", state, used: usesLocal && input.builtInAnswers };
+  }
+  if (transcriptionRow) {
+    const line2 = transcriptionRow.state === "unavailable" ? transcriptionRow.cause ? `off: ${transcriptionRow.cause}` : transcriptionRow.detail : TRANSCRIPTION_STATES[transcriptionRow.state] ?? transcriptionRow.state;
+    out.transcription = { line: line2 };
+  }
+  return out;
+}
+var LOOPBACK_HOSTS2, BUILT_IN_STATES, TRANSCRIPTION_STATES;
+var init_models_on_computer = __esm(() => {
+  LOOPBACK_HOSTS2 = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
+  BUILT_IN_STATES = {
+    ready: "downloaded",
+    loading: "downloaded",
+    not_started: "not downloaded",
+    downloading: "downloading",
+    verifying: "checking the download",
+    failed: "download failed"
+  };
+  TRANSCRIPTION_STATES = {
+    ready: "ready",
+    loading: "starting",
+    not_needed: "not downloaded: it downloads when you add audio",
+    not_downloaded: "not downloaded",
+    interrupted: "download interrupted",
+    downloading: "downloading",
+    verifying: "checking the download",
+    failed: "download failed",
+    load_failed: "couldn't start"
+  };
+});
+
+// src/workers/settings-proposal-holder.ts
+import { randomUUID as randomUUID33 } from "node:crypto";
+function modeLabel(id) {
+  return PRIVACY_PRESET_LABELS[id] ?? id;
+}
+function judgeLabel(choice, cap) {
+  if (choice === "local")
+    return "Local (free)";
+  return cap === null ? "Venice, no spending limit" : `Venice, up to $${cap}`;
+}
+function createSettingsProposalHolder(targets, now = () => new Date) {
+  let held;
+  let lastApplied;
+  async function rowsFor(input) {
+    const rows = [];
+    if (input.computer_use && Object.keys(input).length > 1) {
+      throw new SettingsProposalError("How this computer runs goes in two proposals: propose computer_use on its own first, and once it is applied, propose the other changes.");
+    }
+    if (input.private_answer_mode) {
+      if (!targets.saveAnswerMode)
+        throw new SettingsProposalError("This Olympus cannot change the Private-answer mode from the dashboard.");
+      if (targets.computerSetup?.().computer_use_pending === true) {
+        throw new SettingsProposalError("Choose how this computer runs first: propose computer_use on its own, and once it is applied, propose private_answer_mode.");
+      }
+      rows.push({ key: "private_answer_mode", label: "Private-answer mode", current: targets.answerMode().label, proposed: modeLabel(input.private_answer_mode) });
+    }
+    if (input.computer_use) {
+      const setup = targets.computerSetup?.();
+      if (!setup?.engine_server_mode || !targets.saveComputerUse)
+        throw new SettingsProposalError("computer_use can be set only in the standalone Olympus app on a Mac.");
+      if (setup.computer_use_pending !== true) {
+        throw new SettingsProposalError("How this Mac runs was already chosen. Change it with the Engine switch on the dashboard Settings page.");
+      }
+      rows.push({ key: "computer_use", label: "How this computer runs", current: "Not chosen yet", proposed: input.computer_use === "server" ? "Always-on server" : "Everyday computer" });
+    }
+    if (input.privacy_judge && (input.models || input.private_answer_mode)) {
+      throw new SettingsProposalError("The privacy judge goes in two proposals: propose the other changes first, and once they are applied, propose privacy_judge on its own.");
+    }
+    if (input.privacy_judge) {
+      const judge3 = targets.judge?.();
+      if (!judge3 || !targets.saveJudge)
+        throw new SettingsProposalError("This Olympus has no privacy judge setting.");
+      if (input.privacy_judge.choice === "venice" && !judge3.cloudAvailable) {
+        throw new SettingsProposalError("Venice judging needs a Venice key and an allowed Venice model first. Connect Venice, then propose again.");
+      }
+      rows.push({
+        key: "privacy_judge",
+        label: "Privacy judge",
+        current: judgeLabel(judge3.choice, judge3.uncapped ? null : judge3.capDollars),
+        proposed: judgeLabel(input.privacy_judge.choice, input.privacy_judge.spending_limit_dollars)
+      });
+    }
+    if (input.models) {
+      const choices = targets.modelChoices ? await targets.modelChoices() : undefined;
+      if (!choices || !targets.saveModel)
+        throw new SettingsProposalError("This Olympus has no model pickers.");
+      for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
+        const value2 = input.models[provider];
+        if (value2 === undefined)
+          continue;
+        const list = choices[provider];
+        if (!list)
+          throw new SettingsProposalError(`There is no ${MODEL_LABELS[provider]} picker on this computer yet. Set it up first, then propose again.`);
+        const option = list.options.find((candidate) => candidate.value === value2);
+        if (!option)
+          throw new SettingsProposalError(`models.${provider} must be one of: ${list.options.map((candidate) => candidate.value).join(", ")}.`);
+        const current2 = list.options.find((candidate) => candidate.value === list.current);
+        rows.push({ key: `models.${provider}`, label: MODEL_LABELS[provider], current: current2?.label ?? list.current, proposed: option.label });
+      }
+    }
+    return rows;
+  }
+  return {
+    async propose(input, from) {
+      const proposal = {
+        id: randomUUID33(),
+        created_at: now().toISOString(),
+        ...from ? { from } : {},
+        input,
+        rows: await rowsFor(input)
+      };
+      held = proposal;
+      lastApplied = undefined;
+      return proposal;
+    },
+    current() {
+      return held;
+    },
+    lastApplied() {
+      if (!lastApplied || now().getTime() - lastApplied.at > 15 * 60000)
+        return;
+      return lastApplied.result;
+    },
+    discard(id) {
+      if (!held || held.id !== id)
+        return false;
+      held = undefined;
+      return true;
+    },
+    async apply(id) {
+      if (!held || held.id !== id)
+        return;
+      const proposal = held;
+      held = undefined;
+      const input = proposal.input;
+      const results = [];
+      const record6 = async (key2, run2) => {
+        const row = proposal.rows.find((candidate) => candidate.key === key2);
+        try {
+          const saved = await run2();
+          results.push({ ...row, applied: saved.ok, ...saved.message ? { message: saved.message } : {} });
+        } catch (error2) {
+          results.push({ ...row, applied: false, message: error2 instanceof Error ? error2.message : "This setting could not be saved." });
+        }
+      };
+      const writes = async () => {
+        for (const provider of SETTINGS_PROPOSAL_MODEL_PROVIDERS) {
+          const value2 = input.models?.[provider];
+          if (value2 !== undefined)
+            await record6(`models.${provider}`, () => targets.saveModel(provider, value2));
+        }
+        if (input.privacy_judge) {
+          const judge3 = input.privacy_judge;
+          await record6("privacy_judge", () => targets.saveJudge(judge3.choice, judge3.spending_limit_dollars));
+        }
+        if (input.computer_use)
+          await record6("computer_use", () => targets.saveComputerUse(input.computer_use));
+        if (input.private_answer_mode)
+          await record6("private_answer_mode", () => targets.saveAnswerMode(input.private_answer_mode));
+      };
+      await (targets.deferReloads ? targets.deferReloads(writes) : writes());
+      const result = { ok: results.every((row) => row.applied), rows: results };
+      lastApplied = { at: now().getTime(), result };
+      return result;
+    }
+  };
+}
+var MODEL_LABELS;
+var init_settings_proposal_holder = __esm(() => {
+  init_privacy_language();
+  init_settings_proposal();
+  MODEL_LABELS = { local: "Local model", venice: "Venice model", zkapi: "zkAPI model" };
+});
+
+// src/workers/remote-oauth/consent-page.ts
+import { randomBytes as randomBytes30 } from "node:crypto";
+function hostnameOf(host) {
+  try {
+    return new URL(`https://${host}`).hostname;
+  } catch {
+    return host;
+  }
+}
+function escapeHtml2(value2) {
+  return value2.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-referrer") {
+  const formAction = redirectOrigin ? `'self' ${redirectOrigin}` : "'self'";
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": [
+      "default-src 'none'",
+      `style-src 'nonce-${nonce}'`,
+      `form-action ${formAction}`,
+      "frame-ancestors 'none'",
+      "base-uri 'none'"
+    ].join("; "),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": referrerPolicy,
+    "Cache-Control": "no-store",
+    "Cross-Origin-Opener-Policy": "same-origin"
+  };
+}
+function renderConsentPage(input) {
+  const nonce = randomBytes30(16).toString("base64");
+  const name = escapeHtml2(input.clientName);
+  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml2(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
+  const redirectHostname = hostnameOf(input.redirectHost);
+  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml2(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml2(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
+  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml2(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
+  const error2 = input.error ? `<p class="err" role="alert">${escapeHtml2(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connect to Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Connect ${name} to Olympus?</h1>
+<div class="card">
+<div class="name">${name}</div>
+${provenance}
+<p class="meta">After you approve, you return to <strong>${escapeHtml2(input.redirectHost)}</strong></p>
+</div>
+${mismatchWarning}${loopbackWarning}
+<p>${name} will be able to ask Olympus questions under your privacy rules. For Private items it gets only answers written from them, which can repeat what they say, and nothing Olympus recognizes as a Secret. Labels are automatic and can be wrong. You can remove it any time with <code>olympus connections revoke</code>.</p>
+<form method="post" action="/connect/authorize">
+<input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
+${error2}
+<label for="pairing_code">Pairing code</label>
+<input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
+<p class="hint">Get one by running <code>olympus connections pair</code> on the computer running Olympus, or by asking your OpenClaw agent. Codes last 10 minutes and work once.</p>
+${TERMS_ASSENT}
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Approve</button>
+<button class="deny" type="submit" name="action" value="deny" formnovalidate>Deny</button>
+</div>
+</form>
+<p class="small">Olympus runs on your own computer. This page was served by it.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
+function renderLoopbackConsentPage(input) {
+  const nonce = randomBytes30(16).toString("base64");
+  const name = escapeHtml2(input.clientName);
+  const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
+  const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
+<p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
+` : "";
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connect to Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Connect ${name} to Olympus?</h1>
+<div class="card">
+<div class="name">${name}</div>
+${input.verifiedHost ? `<div class="host">${escapeHtml2(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
+<p class="meta">After you approve, you return to <strong>${escapeHtml2(input.redirectHost)}</strong></p>
+</div>
+${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml2(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
+<p><strong>Connecting links Olympus on this ${computer} to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
+<p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
+${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
+<p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
+<p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
+<form method="post" action="${escapeHtml2(input.action ?? "/connect/authorize")}">
+<input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
+${ownerNeeded}${TERMS_ASSENT}
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Connect</button>
+<button class="deny" type="submit" name="action" value="deny">Cancel</button>
+</div>
+</form>
+<p class="small">This page is served by Olympus on this ${computer}, and only here.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+}
+function renderDemoSignInPage(input) {
+  const nonce = randomBytes30(16).toString("base64");
+  const name = escapeHtml2(input.clientName);
+  const error2 = input.error ? `<p class="err" role="alert">${escapeHtml2(input.error)}</p>` : "";
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="${DEMO_REFERRER_POLICY}">
+<title>Olympus demo sign-in</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Sign in to the Olympus demo</h1>
+<div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
+<div class="card">
+<div class="name">${name}</div>
+<p class="meta">After you sign in, you return to <strong>${escapeHtml2(input.redirectHost)}</strong></p>
+</div>
+<form method="post" action="${escapeHtml2(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
+<input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
+${error2}
+<label for="username">Username</label>
+<input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
+<label for="password">Password</label>
+<input class="plain" type="password" id="password" name="password" autocomplete="current-password" maxlength="1024" required>
+<div class="actions">
+<button class="approve" type="submit" name="action" value="approve">Sign in and connect</button>
+<button class="deny" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+</div>
+</form>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin, DEMO_REFERRER_POLICY) };
+}
+function renderConsentErrorPage(message2) {
+  const nonce = randomBytes30(16).toString("base64");
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Olympus could not connect this app</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>Olympus could not connect this app</h1>
+<div class="card"><p>${escapeHtml2(message2)}</p></div>
+<p class="small">Close this page and try adding the connector again.</p>
+</main>
+</body>
+</html>`;
+  return { body, headers: consentSecurityHeaders(nonce) };
+}
+function renderConsentSuccessPage(connected2) {
+  const nonce = randomBytes30(16).toString("base64");
+  const heading = connected2 ? "Connected" : "Approved";
+  const message2 = connected2 ? "You already approved this connection. You can close this page and return to the app." : "You approved this connection. Return to the app to finish. If it doesn't show Olympus as connected, start connecting again from the app.";
+  return {
+    body: `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${heading} · Olympus</title>
+<style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+<h1>${heading}</h1>
+<div class="card"><p>${message2}</p></div>
+</main>
+</body>
+</html>`,
+    headers: consentSecurityHeaders(nonce)
+  };
+}
+var CONSENT_PAGE_STYLE = `
+:root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafaf8; --card: #ffffff;
+  --line: #deded8; --accent: #1f4fd1; --warn-bg: #fff4d6; --warn-fg: #6b4a00; --err: #b3261e; }
+@media (prefers-color-scheme: dark) { :root { --fg: #ededea; --muted: #a8a8a2; --bg: #141413; --card: #1d1d1b;
+  --line: #34342f; --accent: #8fb0ff; --warn-bg: #3a2f10; --warn-fg: #f3d68a; --err: #ff8a80; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 26rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+h1 { font-size: 1.35rem; line-height: 1.3; margin: 0 0 1rem; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+.name { font-weight: 600; font-size: 1.1rem; overflow-wrap: anywhere; }
+.host { font: 600 1.1rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: .35rem; overflow-wrap: anywhere; }
+.host.unverified { color: var(--warn-fg); font-family: system-ui, sans-serif; }
+.meta { color: var(--muted); font-size: .92rem; margin: .25rem 0 0; overflow-wrap: anywhere; }
+.warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 10px; padding: .75rem; font-size: .92rem; margin-bottom: 1rem; }
+.err { color: var(--err); font-weight: 600; margin: 0 0 .75rem; }
+label { display: block; font-weight: 600; margin-bottom: .35rem; }
+input[type=text] { width: 100%; font: 600 1.35rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
+  padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg);
+  text-transform: uppercase; }
+input.plain { width: 100%; font: 1rem/1.3 system-ui, sans-serif; letter-spacing: normal; text-transform: none;
+  padding: .6rem .7rem; margin-bottom: .9rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); }
+.hint { color: var(--muted); font-size: .88rem; margin: .4rem 0 1.25rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.actions { display: flex; gap: .75rem; }
+button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; border-radius: 10px; cursor: pointer; }
+.approve { background: var(--accent); color: #fff; border: 0; }
+.deny { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
+p.small a { color: var(--accent); }
+`, TERMS_ASSENT = '<p class="small">By connecting, you agree to the Olympus <a href="https://olympusplugin.ai/terms/" target="_blank" rel="noopener noreferrer">Terms of Service</a> and acknowledge the <a href="https://olympusplugin.ai/privacy/" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>', DEMO_REFERRER_POLICY = "same-origin";
+var init_consent_page = () => {};
+
+// src/core/google-pilot-client.ts
+import { createHash as createHash89 } from "node:crypto";
+function isRetiredGooglePilotClientId(clientId) {
+  const trimmed2 = clientId?.trim();
+  if (!trimmed2)
+    return false;
+  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash89("sha256").update(trimmed2).digest("hex"));
+}
+function resolveGooglePilotClientId(packaged, shipped) {
+  const substituted = packaged.trim();
+  if (substituted !== "" && substituted !== GOOGLE_PILOT_CLIENT_ID_SENTINEL)
+    return substituted;
+  const fallback = shipped.trim();
+  return fallback === "" ? undefined : fallback;
+}
+function packagedGooglePilotClientId() {
+  return resolveGooglePilotClientId(PACKAGED_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID);
+}
+var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256, PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
+var init_google_pilot_client = __esm(() => {
+  RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+    "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+  ]);
+});
+
+// src/core/messaging-account-move.ts
+import { readFileSync as readFileSync84 } from "node:fs";
+import { homedir as homedir42 } from "node:os";
+import { join as join130, resolve as resolve27 } from "node:path";
+function namesDefaultLegacySession(source, value2, env) {
+  const trimmed2 = value2.trim();
+  if (trimmed2 === "")
+    return false;
+  if (source === "telegram") {
+    const base = trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
+    return resolve27(base) === resolve27(legacyTelegramSessionBase(env));
+  }
+  return resolve27(whatsappStateDirFromValue(trimmed2)) === resolve27(legacyWhatsAppDefaultStateDir(env));
+}
+function movedSessionValue(source, value2, env) {
+  try {
+    const entry = findRegistryAccount(readSourceRegistry(env), source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
+    if (!entry || entry.layout !== "folder" || entry.migration?.state !== "done")
+      return value2;
+  } catch {
+    return value2;
+  }
+  return namesDefaultLegacySession(source, value2, env) ? folderSessionValue(source, env) : value2;
+}
+function folderSessionValue(source, env) {
+  const account = { source_id: source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: "folder" };
+  return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
+}
+function handleRegistryPath(env) {
+  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join130(env.HOME?.trim() || homedir42(), ".config", "olympus", "handles.json");
+}
+async function sessionPathKeys(source, secretStore) {
+  const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
+  try {
+    for (const key2 of await secretStore.list())
+      if (key2.startsWith(`${source}.`) && key2.endsWith(".session_path"))
+        keys.add(key2);
+  } catch {}
+  return [...keys].sort();
+}
+function grantSessionValues(grant, sessionEnv) {
+  const env = grant.producer.env;
+  const fromEnv = env && typeof env[sessionEnv] === "string" ? [env[sessionEnv]] : [];
+  return [...grant.sessionPath !== undefined ? [grant.sessionPath] : [], ...fromEnv];
+}
+async function messagingMoveFacts(env, secretStore) {
+  const facts = {};
+  const unpaired = readUnpairedSources(handleRegistryPath(env));
+  for (const { sourceId, source, sessionEnv } of SOURCES) {
+    facts[sourceId] = await factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv);
+  }
+  return facts;
+}
+async function factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv) {
+  const read = readCaptureGrantFile(captureGrantPathFromEnv(source, env));
+  if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source) {
+    return { unreadable: "Its capture grant cannot be read, so it cannot be told where its session is." };
+  }
+  if (read.kind === "valid") {
+    if (grantSessionValues(read.grant, sessionEnv).some((value2) => !namesDefaultLegacySession(source, value2, env))) {
+      return { pin: "Its capture grant names a session path of its own, so its files stay there." };
+    }
+    const producerEnv = read.grant.producer.env ?? {};
+    const other = legacyOverrideEnvNames(sourceId).find((name) => name !== sessionEnv && typeof producerEnv[name] === "string" && producerEnv[name].trim() !== "");
+    if (other)
+      return { pin: `Its capture grant starts capture with ${other}, so its files stay where that names.` };
+  }
+  try {
+    for (const key2 of await sessionPathKeys(source, secretStore)) {
+      const value2 = (await secretStore.get(key2))?.trim();
+      if (value2 && !namesDefaultLegacySession(source, value2, env)) {
+        return { pin: "It was connected with a session path of its own, so its files stay there." };
+      }
+    }
+  } catch {
+    return { unreadable: "The session path it was connected with cannot be read from the secret store." };
+  }
+  if (unpaired.status === "unreadable")
+    return { unreadable: "The record of its last Unpair cannot be read." };
+  if (unpaired.status === "ok" && unpaired.records.some((record6) => record6.source_id === sourceId && record6.state !== "unpaired")) {
+    return { pin: "An Unpair that did not finish names its files, so they stay where it can find them." };
+  }
+  return {};
+}
+async function repointMovedMessagingAccounts(env, secretStore) {
+  const report = { rewritten: [], errors: [] };
+  let accounts;
+  try {
+    accounts = readSourceRegistry(env).accounts;
+  } catch {
+    return report;
+  }
+  for (const { sourceId, source, sessionEnv } of SOURCES) {
+    const entry = findRegistryAccount({ schema: 2, accounts }, sourceId, DEFAULT_ACCOUNT_SLOT);
+    if (!entry || entry.state !== "active" || entry.layout !== "folder" || entry.migration?.state !== "done")
+      continue;
+    try {
+      if (repointGrant(env, source, sessionEnv))
+        report.rewritten.push(`${sourceId}: capture grant`);
+    } catch (error2) {
+      report.errors.push({ sourceId, message: `capture grant: ${error2?.code ?? "error"}` });
+    }
+    try {
+      for (const key2 of await sessionPathKeys(source, secretStore)) {
+        const value2 = await secretStore.get(key2);
+        if (value2 === undefined || !namesDefaultLegacySession(source, value2, env))
+          continue;
+        await secretStore.set(key2, folderSessionValue(source, env));
+        report.rewritten.push(`${sourceId}: ${key2}`);
+      }
+    } catch (error2) {
+      report.errors.push({ sourceId, message: `secret store: ${error2?.code ?? "error"}` });
+    }
+  }
+  return report;
+}
+function repointGrant(env, source, sessionEnv) {
+  const path = captureGrantPathFromEnv(source, env);
+  let before;
+  try {
+    before = readFileSync84(path, "utf8");
+  } catch {
+    return false;
+  }
+  const read = readCaptureGrantFile(path);
+  if (read.kind !== "valid" || read.grant.source !== source)
+    return false;
+  const values = grantSessionValues(read.grant, sessionEnv);
+  if (values.length === 0 || !values.every((value2) => namesDefaultLegacySession(source, value2, env)))
+    return false;
+  const { sessionPath: _dropped, ...rest } = read.grant;
+  const producerEnv = { ...read.grant.producer.env ?? {} };
+  delete producerEnv[sessionEnv];
+  const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
+  if (readFileSync84(path, "utf8") !== before)
+    return false;
+  writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
+`);
+  return true;
+}
+var SOURCES;
+var init_messaging_account_move = __esm(() => {
+  init_atomic_file();
+  init_messaging_capture_grant_file();
+  init_olympus_layout();
+  init_source_registry();
+  init_unpaired_sources();
+  SOURCES = [
+    { sourceId: TELEGRAM_SOURCE_ID, source: "telegram", sessionEnv: "OLYMPUS_TELEGRAM_SESSION_PATH" },
+    { sourceId: WHATSAPP_SOURCE_ID, source: "whatsapp", sessionEnv: "OLYMPUS_WHATSAPP_STATE_DIR" }
+  ];
+});
+
+// src/workers/source-index/answer-latency-log.ts
+import {
+  chmod as chmod2,
+  mkdir as mkdir5,
+  open as open6,
+  rename as rename2,
+  stat as stat6,
+  unlink
+} from "node:fs/promises";
+import { dirname as dirname96 } from "node:path";
+function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
+  const audit = result.audit;
+  const skipped2 = audit.skipped_corpora.map((skip) => ({
+    corpus_id: skip.corpus_id,
+    reason: skip.reason
+  }));
+  const fallback = audit.answer_synthesis.analyst_fallback;
+  const decision = result.opsec.release_decision.decision;
+  return {
+    kind: "source_answer_latency",
+    logged_at: now().toISOString(),
+    latency_ms: audit.latency_ms,
+    ...audit.phase_timings ? { phase_timings: audit.phase_timings } : {},
+    searched_corpora: [...audit.searched_corpora],
+    skipped_corpora: skipped2,
+    lane_timeouts: skipped2.filter((skip) => skip.reason === "lane_timeout").map((skip) => skip.corpus_id),
+    analyst_backend: audit.answer_synthesis.analyst_backend,
+    ...fallback ? {
+      analyst_fallback: {
+        from: fallback.from,
+        to: fallback.to,
+        reason: fallback.reason,
+        ...fallback.elapsed_ms !== undefined ? { elapsed_ms: fallback.elapsed_ms } : {},
+        ...fallback.timeout_ms !== undefined ? { timeout_ms: fallback.timeout_ms } : {}
+      }
+    } : {},
+    release_decision: decision,
+    released: decision === "allow" || decision === "redact",
+    ...caller ? { caller: copyCaller(caller) } : {}
+  };
+}
+function copyCaller(caller) {
+  return {
+    surface: caller.surface,
+    ...caller.connection_id ? { connection_id: caller.connection_id } : {},
+    ...caller.display_name ? { display_name: caller.display_name } : {}
+  };
+}
+function buildSourceAnswerLatencyTraceRecord(input) {
+  const now = (input.now ?? (() => new Date))();
+  const latencyMs = nonNegativeMs2(now.getTime() - input.trace.receivedAtMs);
+  const attempts = input.trace.retrievalAttempts.map(copyRetrievalAttempt);
+  const evidenceBudget = nonNegativeMs2(input.trace.phaseTimings?.evidence_pack_ms ?? sumAttemptMs(attempts));
+  const retrievalBuckets = fitRetrievalAttemptsToBudget(attempts, evidenceBudget);
+  const rawPhases = {
+    lane_setup_ms: nonNegativeMs2(input.trace.phaseTimings?.lane_setup_ms ?? 0),
+    bulk_gate_ms: nonNegativeMs2(input.trace.phaseTimings?.bulk_gate_ms ?? 0),
+    keyword_retrieval_ms: retrievalBuckets.keyword,
+    hybrid_retrieval_ms: retrievalBuckets.hybrid,
+    selected_retrieval_ms: retrievalBuckets.selected,
+    self_heal_ms: nonNegativeMs2(input.trace.phaseTimings?.self_heal_ms ?? 0),
+    self_heal_rebuild_ms: retrievalBuckets.selfHealRebuild,
+    analyst_ms: nonNegativeMs2(input.trace.phaseTimings?.analyst_ms ?? input.trace.routeResolutionMs + input.trace.analystLegs.reduce((sum2, leg) => sum2 + leg.elapsed_ms, 0)),
+    release_gate_ms: nonNegativeMs2(input.trace.phaseTimings?.release_gate_ms ?? 0),
+    sqlite_backoff_ms: nonNegativeMs2(input.trace.sqliteBackoffMs),
+    record_build_ms: nonNegativeMs2(input.trace.recordBuildMs),
+    append_ms: nonNegativeMs2(input.trace.appendMs)
+  };
+  const fittedPhases = fitPhaseBucketsToWall(rawPhases, latencyMs);
+  const assignedMs = Object.values(fittedPhases).reduce((sum2, value2) => sum2 + value2, 0);
+  const unattributedMs = Math.max(0, latencyMs - assignedMs);
+  return {
+    kind: "source_answer_latency_trace",
+    schema_version: 2,
+    correlation_id: input.trace.correlationId,
+    ...input.compatV1LoggedAt ? { compat_v1_logged_at: input.compatV1LoggedAt } : {},
+    logged_at: now.toISOString(),
+    sample_kind: input.sampleKind ?? "natural",
+    outcome: input.outcome,
+    ...input.error !== undefined ? { error_class: sourceAnswerTraceErrorClass(input.error) } : {},
+    latency_ms: latencyMs,
+    sqlite: {
+      retry_count: Math.max(0, Math.floor(input.trace.sqliteRetryCount)),
+      backoff_ms: nonNegativeMs2(input.trace.sqliteBackoffMs)
+    },
+    query_planner: {
+      elapsed_ms: nonNegativeMs2(input.trace.queryPlannerMs),
+      formulation_count: Math.max(0, Math.floor(input.trace.queryFormulationCount)),
+      awaited_count: Math.max(0, Math.floor(input.trace.queryPlannerAwaitedCount)),
+      ignored_after_strong_literal_count: Math.max(0, Math.floor(input.trace.queryPlannerIgnoredAfterStrongLiteralCount)),
+      failed_count: Math.max(0, Math.floor(input.trace.queryPlannerFailedCount))
+    },
+    retrieval_attempts: attempts,
+    analyst_route: {
+      resolution_ms: nonNegativeMs2(input.trace.routeResolutionMs),
+      ordered_route: input.trace.orderedRoute.map((step) => ({
+        profile_id: step.profile_id,
+        backend: step.backend,
+        model_id: step.model_id
+      }))
+    },
+    analyst_legs: input.trace.analystLegs.map((leg) => ({
+      profile_id: leg.profile_id,
+      backend: leg.backend,
+      model_id: leg.model_id,
+      budget_ms: nonNegativeMs2(leg.budget_ms),
+      elapsed_ms: nonNegativeMs2(leg.elapsed_ms),
+      outcome: leg.outcome,
+      ...leg.error_class ? { error_class: leg.error_class } : {}
+    })),
+    residual_analyst_orphan_count: Math.max(0, Math.floor(input.trace.residualAnalystOrphanCount)),
+    ...input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {},
+    ...input.caller ? { caller: copyCaller(input.caller) } : {},
+    phase_ms: {
+      ...fittedPhases,
+      unattributed_ms: unattributedMs
+    }
+  };
+}
+async function appendSourceAnswerLatencyLine(path, record6, options = {}) {
+  const line2 = `${JSON.stringify(record6)}
+`;
+  const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
+  await mkdir5(dirname96(path), { recursive: true, mode: 448 });
+  await makeExistingLedgerPrivate(path);
+  if (Number.isFinite(maxBytes) && maxBytes > 0) {
+    await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line2), maxBytes);
+  }
+  const handle = await open6(path, "a", 384);
+  try {
+    await handle.chmod(384);
+    await handle.appendFile(line2, "utf8");
+  } finally {
+    await handle.close();
+  }
+}
+function createFileSourceAnswerLatencyLog(path, options = {}) {
+  let writeFailureCount = 0;
+  let lastFailureClass;
+  let queue = Promise.resolve();
+  const noteFailure = (error2) => {
+    writeFailureCount += 1;
+    lastFailureClass = sourceAnswerTraceErrorClass(error2);
+    console.error(`[source-answer-latency] write failed error_class=${lastFailureClass}`);
+  };
+  return {
+    record(entry) {
+      queue = queue.then(async () => {
+        try {
+          await appendSourceAnswerLatencyLine(path, entry, options);
+        } catch (error2) {
+          noteFailure(error2);
+        }
+      });
+      return queue;
+    },
+    health() {
+      return {
+        write_failure_count: writeFailureCount,
+        ...lastFailureClass ? { last_failure_class: lastFailureClass } : {}
+      };
+    },
+    recordFailure(error2) {
+      noteFailure(error2);
+    }
+  };
+}
+function resolveSourceAnswerLatencyLogPath(env = process.env) {
+  const raw = env.OLYMPUS_SOURCE_ANSWER_LATENCY_LOG_PATH?.trim();
+  if (raw) {
+    const lowered = raw.toLowerCase();
+    if (lowered === "off" || lowered === "none" || lowered === "disabled" || lowered === "false" || lowered === "0") {
+      return;
+    }
+    return raw;
+  }
+  return sharedDataPath("answer-latency", env);
+}
+async function makeExistingLedgerPrivate(path) {
+  try {
+    await chmod2(path, 384);
+  } catch (error2) {
+    if (!isMissingFileError(error2))
+      throw error2;
+  }
+}
+async function rotateLatencyLedgerIfNeeded(path, incomingBytes, maxBytes) {
+  let currentBytes = 0;
+  try {
+    currentBytes = (await stat6(path)).size;
+  } catch (error2) {
+    if (!isMissingFileError(error2))
+      throw error2;
+    return;
+  }
+  if (currentBytes + incomingBytes <= maxBytes)
+    return;
+  const predecessor = `${path}.1`;
+  try {
+    await unlink(predecessor);
+  } catch (error2) {
+    if (!isMissingFileError(error2))
+      throw error2;
+  }
+  await rename2(path, predecessor);
+  await chmod2(predecessor, 384);
+}
+function isMissingFileError(error2) {
+  return error2?.code === "ENOENT";
+}
+function copyRetrievalAttempt(attempt) {
+  return {
+    kind: attempt.kind,
+    elapsed_ms: nonNegativeMs2(attempt.elapsed_ms),
+    hydration_ms: nonNegativeMs2(attempt.hydration_ms),
+    queries: attempt.queries.map((query) => ({
+      ordinal: Math.max(1, Math.floor(query.ordinal)),
+      elapsed_ms: nonNegativeMs2(query.elapsed_ms),
+      corpus_timings: query.corpus_timings.map((timing) => ({
+        corpus_id: timing.corpus_id,
+        elapsed_ms: nonNegativeMs2(timing.elapsed_ms),
+        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs2(timing.adapter_reported_ms) } : {},
+        outcome: timing.outcome,
+        ...timing.error_class ? { error_class: timing.error_class } : {}
+      }))
+    }))
+  };
+}
+function sumAttemptMs(attempts) {
+  return attempts.reduce((sum2, attempt) => sum2 + nonNegativeMs2(attempt.elapsed_ms), 0);
+}
+function fitRetrievalAttemptsToBudget(attempts, budgetMs) {
+  const raw = {
+    keyword: attempts.filter((attempt) => attempt.kind === "keyword").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0),
+    hybrid: attempts.filter((attempt) => attempt.kind === "hybrid").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0),
+    selected: attempts.filter((attempt) => attempt.kind === "selected").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0),
+    selfHealRebuild: attempts.filter((attempt) => attempt.kind === "self_heal_rebuild").reduce((sum2, attempt) => sum2 + attempt.elapsed_ms, 0)
+  };
+  const rawTotal = raw.keyword + raw.hybrid + raw.selected + raw.selfHealRebuild;
+  if (rawTotal === 0 || rawTotal <= budgetMs)
+    return raw;
+  const ratio = budgetMs / rawTotal;
+  const fitted = {
+    keyword: Math.floor(raw.keyword * ratio),
+    hybrid: Math.floor(raw.hybrid * ratio),
+    selected: Math.floor(raw.selected * ratio),
+    selfHealRebuild: Math.floor(raw.selfHealRebuild * ratio)
+  };
+  const fittedTotal = fitted.keyword + fitted.hybrid + fitted.selected + fitted.selfHealRebuild;
+  fitted.keyword += Math.max(0, budgetMs - fittedTotal);
+  return fitted;
+}
+function fitPhaseBucketsToWall(phases, wallMs) {
+  const total = Object.values(phases).reduce((sum2, value2) => sum2 + value2, 0);
+  if (total <= wallMs || total === 0)
+    return phases;
+  const ratio = wallMs / total;
+  const entries = Object.entries(phases);
+  const fitted = Object.fromEntries(entries.map(([key2, value2]) => [
+    key2,
+    Math.floor(value2 * ratio)
+  ]));
+  const fittedTotal = Object.values(fitted).reduce((sum2, value2) => sum2 + value2, 0);
+  const firstNonZero = entries.find(([, value2]) => value2 > 0)?.[0];
+  if (firstNonZero)
+    fitted[firstNonZero] = (fitted[firstNonZero] ?? 0) + Math.max(0, wallMs - fittedTotal);
+  return fitted;
+}
+function nonNegativeMs2(value2) {
+  return Number.isFinite(value2) ? Math.max(0, Math.round(value2)) : 0;
+}
+var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
+var init_answer_latency_log = __esm(() => {
+  init_olympus_layout();
+  init_answer_latency_trace();
+  DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
+});
+
+// src/workers/local-files/approved-scope-filter.ts
+var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC;
+var init_approved_scope_filter2 = __esm(() => {
+  init_locator_path_scope_codec();
+  LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
+});
+
+// src/workers/local-files/locator-result-projector.ts
+import { pathToFileURL as pathToFileURL3 } from "node:url";
+function locatorFromScopePath(value2) {
+  if (!value2?.startsWith("/"))
+    return;
+  let split;
+  try {
+    split = splitScopePath(value2);
+  } catch {
+    return;
+  }
+  if (split.path === "/")
+    return;
+  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
+  const locator = {
+    display_path: split.path,
+    parent_display_path: parent
+  };
+  if (!split.volumeId) {
+    locator.finder_url = pathToFileURL3(split.path).href;
+    locator.parent_finder_url = pathToFileURL3(parent).href;
+  }
+  return locator;
+}
+var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC;
+var init_locator_result_projector2 = __esm(() => {
+  init_scope();
+  init_paths();
+  LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
+    create(input) {
+      return Object.freeze({
+        project(candidate) {
+          if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
+            return;
+          const locator = locatorFromScopePath(candidate.readLocatorUri());
+          return locator ? { locator } : undefined;
+        }
+      });
+    }
+  });
+});
+
+// src/workers/source-watch-runtime.ts
+import { createHash as createHash90 } from "node:crypto";
+import { readFileSync as readFileSync85 } from "node:fs";
+import { request as httpsRequest2 } from "node:https";
+import { homedir as homedir43 } from "node:os";
+import { resolve as resolvePath3 } from "node:path";
+import { checkServerIdentity } from "node:tls";
+function trustedSourceWatchOwnerFromRequest(request) {
+  const ownerId2 = request.headers.get(SOURCE_WATCH_OWNER_HEADER);
+  const routeKind = request.headers.get(SOURCE_WATCH_ROUTE_KIND_HEADER);
+  const routeTargetId = request.headers.get(SOURCE_WATCH_ROUTE_TARGET_HEADER);
+  const routeAccountId = request.headers.get(SOURCE_WATCH_ROUTE_ACCOUNT_HEADER);
+  if (!ownerId2 || !routeKind || !routeTargetId)
+    throw new Error("Missing authenticated watch route.");
+  return createTrustedSourceWatchOwnerContext({
+    ownerId: ownerId2,
+    routeKind,
+    routeTargetId,
+    ...routeAccountId ? { routeAccountId } : {}
+  });
+}
+function createSourceWatchSearchFromAnalystLanes(lanes) {
+  return {
+    async search(input) {
+      const corpusId = canonicalSourceCorpusId(input.corpusId);
+      const configured = lanes({
+        question: input.query,
+        corpus_id: corpusId,
+        retrieval_mode: "keyword",
+        include_internal: true,
+        include_secure_local: true,
+        max_results: input.maxResults
+      });
+      const corpus = configured.registry.require(corpusId);
+      const routed = await routeSourceIndexSearch({
+        registry: configured.registry,
+        adapters: configured.adapters,
+        request: {
+          query: input.query,
+          maxResults: input.maxResults,
+          corpusIds: [corpusId],
+          context: {
+            allowedTrustDomains: [corpus.trustDomain],
+            allowedCorpusIds: [corpusId],
+            allowCloudQueries: true
+          }
+        },
+        ...configured.visibilityGate ? { visibilityGate: configured.visibilityGate } : {}
+      });
+      return routed.hits.map((hit) => ({
+        ref: {
+          corpusId: hit.corpusId,
+          localItemId: hit.sourceItem.localItemId,
+          sourceVersion: hit.sourceItem.sourceVersion ?? hit.provenance?.chunk?.contentHash ?? sha2568(JSON.stringify(hit.sourceItem))
+        },
+        sourceObservedAt: observedAt(hit)
+      }));
+    }
+  };
+}
+function sourceWatchPublicView(watch2, delivery) {
+  return {
+    watch_id: watch2.watchId,
+    corpus_id: watch2.corpusId,
+    query_sha256: sha2568(watch2.queryText),
+    mode: watch2.mode,
+    status: watch2.status,
+    created_at: watch2.createdAt,
+    updated_at: watch2.updatedAt,
+    ...watch2.expiresAt ? { expires_at: watch2.expiresAt } : {},
+    ...watch2.cancelledAt ? { cancelled_at: watch2.cancelledAt } : {},
+    ...watch2.cancelReason ? { cancel_reason: watch2.cancelReason } : {},
+    ...watch2.completedAt ? { completed_at: watch2.completedAt } : {},
+    delivery: {
+      pending_count: delivery.pendingCount,
+      in_flight_count: delivery.inFlightCount,
+      retry_count: delivery.retryCount,
+      delivered_count: delivery.deliveredCount,
+      dead_letter_count: delivery.deadLetterCount,
+      cancelled_count: delivery.cancelledCount,
+      attempts: delivery.attempts,
+      ...delivery.lastErrorKind ? { last_error_kind: delivery.lastErrorKind } : {}
+    }
+  };
+}
+function createSourceWatchPublicView(input) {
+  const watch2 = input.store.createWatch(input.create, input.owner);
+  return sourceWatchPublicView(watch2, input.store.deliverySummary(input.owner, watch2.watchId));
+}
+function listSourceWatchPublicViews(input) {
+  const page2 = input.store.listWatches(input.owner, {
+    ...input.limit !== undefined ? { limit: input.limit } : {},
+    ...input.cursor ? { cursor: input.cursor } : {}
+  });
+  return {
+    kind: "source_watches",
+    watches: page2.items.map((watch2) => sourceWatchPublicView(watch2, input.store.deliverySummary(input.owner, watch2.watchId))),
+    ...page2.nextCursor ? { next_cursor: page2.nextCursor } : {},
+    policy: SOURCE_WATCH_POLICY
+  };
+}
+function sourceWatchEvidencePointerPayload(lease) {
+  return {
+    headline: SOURCE_WATCH_DELIVERY_HEADLINE,
+    watch_id: deliveryString(lease.watchId, 256),
+    corpus_id: deliveryString(lease.corpusId, 256),
+    query_text: deliveryQueryText(lease.queryText),
+    watch_mode: deliveryWatchMode(lease.watchMode),
+    match_count: 1,
+    items: [{
+      local_item_id: deliveryString(lease.ref.localItemId, 4096),
+      source_version: deliveryTimestamp(lease.ref.sourceVersion),
+      matched_at: deliveryTimestamp(lease.matchedAt)
+    }]
+  };
+}
+function deliveryString(value2, maximum) {
+  if (typeof value2 !== "string" || value2.length < 1 || value2.length > maximum || /[\u0000-\u001f\u007f]/u.test(value2)) {
+    throw new TypeError("Invalid watch delivery string.");
+  }
+  return value2;
+}
+function deliveryQueryText(value2) {
+  if (typeof value2 !== "string" || value2.length < 1 || value2.length > SOURCE_WATCH_MAX_QUERY_LENGTH) {
+    throw new TypeError("Invalid watch delivery query.");
+  }
+  const sanitized = value2.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
+  if (!sanitized)
+    throw new TypeError("Invalid watch delivery query.");
+  return sanitized;
+}
+function deliveryWatchMode(value2) {
+  if (value2 !== "one_shot" && value2 !== "continuous")
+    throw new TypeError("Invalid watch delivery mode.");
+  return value2;
+}
+function deliveryTimestamp(value2) {
+  const bounded = deliveryString(value2, 64);
+  if (!Number.isFinite(Date.parse(bounded)))
+    throw new TypeError("Invalid watch delivery timestamp.");
+  return bounded;
+}
+
+class OpenClawSourceWatchDeliveryTransport {
+  fetchImpl;
+  authToken;
+  baseUrl;
+  caPem;
+  timeoutMs;
+  constructor(options = {}) {
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.authToken = normalizeWorkerAuthToken(options.authToken);
+    const env = options.env ?? process.env;
+    const configured = options.gatewayConfig === undefined ? undefined : resolveSourceWatchGatewayConnection(options.gatewayConfig, {
+      env,
+      ...options.gatewayPort !== undefined ? { gatewayPort: options.gatewayPort } : {}
+    });
+    const configuredUrl = configured?.baseUrl;
+    const baseUrl = normalizeGatewayBaseUrl(options.baseUrl ?? configuredUrl ?? defaultOpenClawGatewayBaseUrl(env));
+    if (configuredUrl && options.baseUrl && new URL(options.baseUrl).protocol !== new URL(configuredUrl).protocol) {
+      throw new TypeError("Source watch delivery gateway URL does not match gateway.tls.enabled.");
+    }
+    this.baseUrl = baseUrl;
+    const trustPath = options.publicCertificatePath ?? configured?.certificatePath;
+    if (new URL(baseUrl).protocol === "https:") {
+      if (!trustPath) {
+        throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
+      }
+      try {
+        this.caPem = readFileSync85(trustPath, "utf8");
+      } catch {
+        throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
+      }
+      if (!this.caPem.trim()) {
+        throw new TypeError("Source watch HTTPS gateway public certificate is empty.");
+      }
+    }
+    this.timeoutMs = options.timeoutMs ?? 30000;
+  }
+  async send(lease) {
+    if (lease.route.kind === "openclaw_task") {
+      return { status: "failed", errorKind: "openclaw_task_deferred" };
+    }
+    if (!this.authToken) {
+      return { status: "failed", errorKind: "watch_delivery_auth_unconfigured" };
+    }
+    let response;
+    try {
+      const requestInit = withWorkerAuthHeader({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          route: lease.route,
+          downstream_idempotency_key: lease.downstreamIdempotencyKey,
+          payload: sourceWatchEvidencePointerPayload(lease)
+        }),
+        redirect: "error"
+      }, this.authToken);
+      const url2 = `${this.baseUrl}${SOURCE_WATCH_DELIVERY_ROUTE}`;
+      response = this.caPem ? await requestVerifiedHttps(url2, requestInit, this.timeoutMs, this.caPem) : await fetchWithTimeout(this.fetchImpl, url2, requestInit, this.timeoutMs);
+    } catch {
+      return { status: "failed", errorKind: "openclaw_gateway_unreachable" };
+    }
+    if (!response.ok) {
+      return { status: "failed", errorKind: `openclaw_gateway_http_${response.status}` };
+    }
+    const result = await response.json().catch(() => {
+      return;
+    });
+    const record6 = asRecord18(result);
+    if (record6?.status !== "sent") {
+      const outcome = typeof record6?.status === "string" ? record6.status : "invalid_response";
+      return { status: "failed", errorKind: safeErrorKind(`openclaw_${outcome}`) };
+    }
+    const receipt = asRecord18(record6.receipt);
+    return {
+      status: "delivered",
+      receipt: {
+        transport: "openclaw_sdk_durable",
+        outcome: "sent",
+        platform_message_ids: Array.isArray(receipt?.platform_message_ids) ? receipt.platform_message_ids.filter((value2) => typeof value2 === "string") : [],
+        downstream_idempotency: "unsupported_by_openclaw_sdk"
+      }
+    };
+  }
+}
+function createOpenClawSourceWatchDeliveryTransport(options = {}) {
+  let initialized;
+  const initialize = async () => {
+    const env = options.env ?? process.env;
+    const gatewayConfig = await loadOpenClawGatewayConfig(env);
+    return new OpenClawSourceWatchDeliveryTransport({
+      ...options.authToken ? { authToken: options.authToken } : {},
+      ...options.env ? { env: options.env } : {},
+      ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
+      ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
+      ...gatewayConfig ? { gatewayConfig } : {}
+    });
+  };
+  return {
+    async send(lease) {
+      if (!initialized) {
+        const attempt = initialize();
+        initialized = attempt.catch(() => {
+          initialized = undefined;
+          return {
+            send: async () => ({
+              status: "failed",
+              errorKind: "openclaw_gateway_config_unavailable"
+            })
+          };
+        });
+      }
+      return (await initialized).send(lease);
+    }
+  };
+}
+async function postOpenClawGatewayPluginRoute(input) {
+  const env = input.env ?? process.env;
+  const gatewayConfig = input.gatewayConfig !== undefined ? input.gatewayConfig : await loadOpenClawGatewayConfig(env).catch(() => {
+    return;
+  });
+  const connection = resolveSourceWatchGatewayConnection(gatewayConfig, { env });
+  const init = withWorkerAuthHeader({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input.body),
+    redirect: "error"
+  }, input.authToken);
+  const url2 = `${connection.baseUrl}${input.path}`;
+  const timeoutMs = input.timeoutMs ?? 30000;
+  if (connection.certificatePath) {
+    return requestVerifiedHttps(url2, init, timeoutMs, readFileSync85(connection.certificatePath, "utf8"));
+  }
+  return fetchWithTimeout(input.fetchImpl ?? fetch, url2, init, timeoutMs);
+}
+function defaultOpenClawGatewayBaseUrl(env = process.env, gatewayConfig) {
+  return resolveSourceWatchGatewayConnection(gatewayConfig, { env }).baseUrl;
+}
+async function runSourceWatchDeliveryPass(input) {
+  const leases = input.store.leaseDeliveries(input.executor, {
+    leaseDurationMs: input.leaseDurationMs ?? SOURCE_WATCH_DELIVERY_LEASE_MS,
+    ...input.limit !== undefined ? { limit: input.limit } : {}
+  });
+  const counts = {
+    deliveries_leased: leases.length,
+    deliveries_delivered: 0,
+    deliveries_retried: 0,
+    deliveries_dead_lettered: 0,
+    delivery_fences_rejected: 0
+  };
+  for (const lease of leases) {
+    let result;
+    try {
+      result = await input.transport.send(lease);
+    } catch {
+      result = { status: "failed", errorKind: "transport_exception" };
+    }
+    try {
+      if (result.status === "delivered") {
+        input.store.recordDelivered(input.executor, leaseFence(lease));
+        counts.deliveries_delivered += 1;
+        continue;
+      }
+      const failure2 = input.store.recordDeliveryFailure(input.executor, {
+        ...leaseFence(lease),
+        retryAfterMs: input.retryAfterMs ?? SOURCE_WATCH_DELIVERY_RETRY_MS,
+        errorKind: safeErrorKind(result.errorKind),
+        errorHash: sha2568(result.errorKind)
+      });
+      if (failure2.status === "dead_letter")
+        counts.deliveries_dead_lettered += 1;
+      else
+        counts.deliveries_retried += 1;
+    } catch (error2) {
+      if (!isDeliveryFenceRejection(error2))
+        throw error2;
+      counts.delivery_fences_rejected += 1;
+    }
+  }
+  return {
+    status: leases.length > 0 ? "progress" : "idle",
+    counts,
+    ...leases.some((lease) => lease.route.kind === "openclaw_task") ? { warnings: ["openclaw_task watch delivery is deferred; the attempt was recorded for bounded retry/dead-letter handling."] } : {}
+  };
+}
+async function runSourceWatchSchedulerPass(input) {
+  let evaluation;
+  let delivery;
+  const failures = [];
+  try {
+    evaluation = await runSourceWatchEvaluationPass(input);
+  } catch (error2) {
+    failures.push(error2);
+  }
+  try {
+    delivery = await runSourceWatchDeliveryPass(input);
+  } catch (error2) {
+    failures.push(error2);
+  }
+  if (failures.length === 1)
+    throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Source watch evaluation and delivery both failed.");
+  if (!evaluation || !delivery)
+    throw new Error("Source watch scheduler pass did not produce a result.");
+  return {
+    status: evaluation.status === "progress" || delivery.status === "progress" ? "progress" : "idle",
+    counts: { ...evaluation.counts, ...delivery.counts },
+    ...delivery.warnings ? { warnings: delivery.warnings } : {}
+  };
+}
+async function runSourceWatchEvaluationPass(input) {
+  const maxWatches = input.maxWatches ?? 100;
+  const counts = {
+    watches_evaluated: 0,
+    hits_observed: 0,
+    matches_recorded: 0,
+    watermarks_advanced: 0,
+    watches_skipped_inactive: 0
+  };
+  input.store.expireDueWatches(input.executor, { limit: maxWatches });
+  const watches = input.store.listExecutableWatches(input.executor, { limit: maxWatches }).items;
+  for (const watch2 of watches) {
+    counts.watches_evaluated += 1;
+    try {
+      const hits = [...await input.search.search({
+        corpusId: watch2.corpusId,
+        query: watch2.queryText,
+        maxResults: input.maxResultsPerWatch ?? 100
+      })].sort(compareHits);
+      counts.hits_observed += hits.length;
+      let watermark = input.store.getWatermark(input.executor, watch2.watchId, watch2.corpusId);
+      for (const hit of hits) {
+        if (hit.ref.corpusId !== watch2.corpusId)
+          continue;
+        if (hit.sourceObservedAt <= watch2.createdAt || watermark && compareToWatermark(hit, watermark) <= 0)
+          continue;
+        input.store.recordMatch(input.executor, { watchId: watch2.watchId, ref: hit.ref });
+        counts.matches_recorded += 1;
+        if (watch2.mode === "one_shot")
+          break;
+        input.store.recordWatermark(input.executor, {
+          watchId: watch2.watchId,
+          ref: hit.ref,
+          sourceObservedAt: hit.sourceObservedAt
+        });
+        counts.watermarks_advanced += 1;
+        watermark = input.store.getWatermark(input.executor, watch2.watchId, watch2.corpusId);
+      }
+    } catch (error2) {
+      if (!isWatchLifecycleRejection(error2))
+        throw error2;
+      counts.watches_skipped_inactive += 1;
+    }
+  }
+  return {
+    status: counts.matches_recorded > 0 || counts.watermarks_advanced > 0 ? "progress" : "idle",
+    counts
+  };
+}
+function resolveSourceWatchGatewayConnection(config2, options = {}) {
+  const env = options.env ?? process.env;
+  const gateway = asRecord18(asRecord18(config2)?.gateway);
+  const tls = asRecord18(gateway?.tls);
+  if (tls?.enabled !== undefined && typeof tls.enabled !== "boolean") {
+    throw new TypeError("OpenClaw gateway.tls.enabled must be a boolean.");
+  }
+  const tlsEnabled = tls?.enabled === true;
+  const port = resolveGatewayPortValue(options.gatewayPort ?? gateway?.port, env);
+  let certificatePath;
+  if (tlsEnabled) {
+    certificatePath = resolvePublicCertificatePath(tls?.certPath, env, "gateway.tls.certPath");
+    if (!certificatePath) {
+      throw new TypeError("OpenClaw HTTPS gateway requires gateway.tls.certPath.");
+    }
+  }
+  return {
+    baseUrl: normalizeGatewayBaseUrl(`${tlsEnabled ? "https" : "http"}://127.0.0.1:${port}`),
+    ...certificatePath ? { certificatePath } : {}
+  };
+}
+async function loadOpenClawGatewayConfig(env = process.env) {
+  const command2 = resolveOpenClawCommand2(env);
+  let child2;
+  try {
+    child2 = Bun.spawn([command2, "config", "get", "gateway", "--json"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      env: Object.fromEntries(Object.entries(env).filter((entry) => entry[1] !== undefined))
+    });
+  } catch {
+    return;
+  }
+  const timer = setTimeout(() => child2.kill(), 15000);
+  try {
+    const [stdout, code] = await Promise.all([
+      new Response(child2.stdout).text(),
+      child2.exited
+    ]);
+    if (code !== 0) {
+      throw new Error("OpenClaw gateway configuration could not be resolved.");
+    }
+    const start = stdout.indexOf("{");
+    const end = stdout.lastIndexOf("}");
+    if (start < 0 || end <= start) {
+      throw new Error("OpenClaw gateway configuration returned no JSON.");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(stdout.slice(start, end + 1));
+    } catch {
+      throw new Error("OpenClaw gateway configuration returned invalid JSON.");
+    }
+    const record6 = asRecord18(parsed);
+    if (!record6 || record6.ok === false) {
+      throw new Error("OpenClaw gateway configuration was refused.");
+    }
+    const tls = asRecord18(record6.tls);
+    return {
+      gateway: {
+        ...record6.port !== undefined ? { port: record6.port } : {},
+        ...tls ? {
+          tls: {
+            ...tls.enabled !== undefined ? { enabled: tls.enabled } : {},
+            ...tls.certPath !== undefined ? { certPath: tls.certPath } : {}
+          }
+        } : {}
+      }
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function observedAt(hit) {
+  for (const value2 of [
+    hit.provenance?.citation?.updatedAt,
+    hit.internalContent?.savedAt,
+    hit.internalContent?.authoredAt,
+    hit.provenance?.citation?.authoredAt
+  ]) {
+    if (value2 && Number.isFinite(Date.parse(value2)))
+      return new Date(value2).toISOString();
+  }
+  return "1970-01-01T00:00:00.000Z";
+}
+function compareHits(left, right) {
+  return left.sourceObservedAt.localeCompare(right.sourceObservedAt) || left.ref.localItemId.localeCompare(right.ref.localItemId) || left.ref.sourceVersion.localeCompare(right.ref.sourceVersion);
+}
+function compareToWatermark(hit, watermark) {
+  return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
+}
+function sha2568(value2) {
+  return createHash90("sha256").update(value2, "utf8").digest("hex");
+}
+function leaseFence(lease) {
+  return {
+    deliveryKey: lease.deliveryKey,
+    leaseToken: lease.leaseToken,
+    leaseGeneration: lease.leaseGeneration
+  };
+}
+function resolveGatewayPortValue(configuredPort, env) {
+  const envPort = parseGatewayPort(env.OPENCLAW_GATEWAY_PORT);
+  if (envPort !== undefined)
+    return envPort;
+  if (configuredPort !== undefined && configuredPort !== null) {
+    if (typeof configuredPort !== "number" || !Number.isFinite(configuredPort) || !Number.isSafeInteger(configuredPort)) {
+      throw new TypeError("OpenClaw gateway.port must be an integer port.");
+    }
+    if (configuredPort > 0 && configuredPort <= 65535)
+      return configuredPort;
+  }
+  return 18789;
+}
+function parseGatewayPort(raw) {
+  const trimmed2 = raw?.trim();
+  if (!trimmed2)
+    return;
+  const numeric = /^\d+$/.test(trimmed2) ? trimmed2 : /^(?:[^:[\]]+|\[[^\]]+\]):(\d+)$/.exec(trimmed2)?.[1];
+  if (!numeric)
+    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port.");
+  const port = Number(numeric);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port from 1 through 65535.");
+  }
+  return port;
+}
+function resolvePublicCertificatePath(value2, env, field) {
+  if (value2 === undefined || value2 === null)
+    return;
+  if (typeof value2 !== "string" || !value2.trim()) {
+    throw new TypeError(`OpenClaw ${field} must be a non-empty path.`);
+  }
+  const trimmed2 = value2.trim();
+  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir43();
+  const expanded = trimmed2 === "~" || trimmed2.startsWith("~/") || trimmed2.startsWith("~\\") ? `${home2}${trimmed2.slice(1)}` : trimmed2;
+  return resolvePath3(expanded);
+}
+function resolveOpenClawCommand2(env) {
+  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir43();
+  return resolveOpenClawExecutable({ env, homeDir: home2 }) ?? "openclaw";
+}
+function normalizeGatewayBaseUrl(value2) {
+  const url2 = new URL(value2);
+  if (!["http:", "https:"].includes(url2.protocol) || !["127.0.0.1", "localhost", "[::1]"].includes(url2.hostname)) {
+    throw new TypeError("Source watch delivery gateway must use loopback HTTP(S).");
+  }
+  if (url2.pathname !== "/" || url2.search || url2.hash || url2.username || url2.password) {
+    throw new TypeError("Source watch delivery gateway base URL must not contain credentials, path, query, or fragment.");
+  }
+  return url2.origin;
+}
+function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
+  const url2 = new URL(urlValue);
+  if (url2.protocol !== "https:")
+    throw new TypeError("Verified HTTPS request requires an HTTPS URL.");
+  const headers = {};
+  new Headers(init.headers).forEach((value2, key2) => {
+    headers[key2] = value2;
+  });
+  const hostname2 = url2.hostname.startsWith("[") && url2.hostname.endsWith("]") ? url2.hostname.slice(1, -1) : url2.hostname;
+  const servername = hostname2.includes(":") ? undefined : hostname2;
+  const body = init.body;
+  if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
+    throw new TypeError("Source watch HTTPS request body must be text or bytes.");
+  }
+  return new Promise((resolve28, reject) => {
+    let settled = false;
+    let timer;
+    let removeAbortListener;
+    let request;
+    const cleanup = () => {
+      if (timer !== undefined)
+        clearTimeout(timer);
+      removeAbortListener?.();
+    };
+    const fail = (error2) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      request?.destroy();
+      reject(error2);
+    };
+    const succeed = (response) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      resolve28(response);
+    };
+    const abort = () => {
+      const error2 = new Error("Source watch HTTPS request aborted.");
+      error2.name = "AbortError";
+      fail(error2);
+    };
+    try {
+      request = httpsRequest2({
+        protocol: "https:",
+        hostname: hostname2,
+        ...url2.port ? { port: Number(url2.port) } : {},
+        path: `${url2.pathname}${url2.search}`,
+        method: init.method ?? "GET",
+        headers,
+        ca,
+        rejectUnauthorized: true,
+        ...servername ? { servername } : {},
+        checkServerIdentity
+      }, (incoming) => {
+        const chunks2 = [];
+        incoming.on("data", (chunk) => chunks2.push(Buffer.from(chunk)));
+        incoming.on("end", () => {
+          try {
+            const responseHeaders = new Headers;
+            for (const [key2, value2] of Object.entries(incoming.headers)) {
+              if (Array.isArray(value2))
+                value2.forEach((item) => responseHeaders.append(key2, item));
+              else if (value2 !== undefined)
+                responseHeaders.set(key2, value2);
+            }
+            succeed(new Response(Buffer.concat(chunks2), {
+              status: incoming.statusCode ?? 0,
+              statusText: incoming.statusMessage ?? "",
+              headers: responseHeaders
+            }));
+          } catch (error2) {
+            fail(error2);
+          }
+        });
+        incoming.on("error", fail);
+      });
+      request.on("error", fail);
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => abort(), timeoutMs);
+        request.setTimeout(timeoutMs, abort);
+      }
+      if (init.signal) {
+        if (init.signal.aborted)
+          abort();
+        else {
+          const abortFromUpstream = () => abort();
+          init.signal.addEventListener("abort", abortFromUpstream, { once: true });
+          removeAbortListener = () => init.signal?.removeEventListener("abort", abortFromUpstream);
+        }
+      }
+      if (settled)
+        return;
+      if (body === undefined)
+        request.end();
+      else
+        request.end(typeof body === "string" ? body : Buffer.from(body));
+    } catch (error2) {
+      fail(error2);
+    }
+  });
+}
+function safeErrorKind(value2) {
+  const normalized2 = value2.toLowerCase().replace(/[^a-z0-9._:-]+/g, "_").slice(0, 128);
+  return normalized2 || "watch_delivery_failed";
+}
+function isWatchLifecycleRejection(error2) {
+  return error2 instanceof Error && /cannot accept a new match|cannot advance its watermark|source watch target does not exist/i.test(error2.message);
+}
+function isDeliveryFenceRejection(error2) {
+  return error2 instanceof Error && /lease fence|not actively leased|another executor|lease has expired/i.test(error2.message);
+}
+function asRecord18(value2) {
+  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
+}
+var SOURCE_WATCH_DELIVERY_ROUTE = "/plugins/olympus/watch-delivery", SOURCE_WATCH_DELIVERY_HEADLINE = "Olympus watch matched newly indexed evidence.", SOURCE_WATCH_DELIVERY_LEASE_MS, SOURCE_WATCH_DELIVERY_RETRY_MS, SOURCE_WATCH_POLICY;
+var init_source_watch_runtime = __esm(() => {
+  init_source_watch();
+  init_openclaw_executable();
+  init_http_timeout();
+  init_worker_auth();
+  init_source_corpus_registry();
+  init_router();
+  SOURCE_WATCH_DELIVERY_LEASE_MS = Math.max(SOURCE_WATCH_MIN_LEASE_MS, 60000);
+  SOURCE_WATCH_DELIVERY_RETRY_MS = Math.max(SOURCE_WATCH_MIN_RETRY_MS, 60000);
+  SOURCE_WATCH_POLICY = Object.freeze({
+    raw_source_exposed: false,
+    source_text_returned: false,
+    message_bodies_returned: false,
+    evidence_pointers_only: true
+  });
 });
 
 // src/workers/agent-connections.ts
@@ -169630,7 +170663,7 @@ function renderDashboardAgentsSection(input) {
   };
   return [
     '<div class="sect" id="agents">Agents</div>',
-    `<p class="pnote">${escapeHtml2(platform3 === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
+    `<p class="pnote">${escapeHtml(platform3 === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
     remoteAccessRow(view4.remoteAccess, view4.remoteAccessManual),
     `<div data-agent-connections-list>${connectionList(view4, input.now)}</div>`,
     connectSheet(view4.remoteAccess, host, view4.privateAccess)
@@ -169639,10 +170672,10 @@ function renderDashboardAgentsSection(input) {
 }
 function remoteAccessRow(access, manual) {
   const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf2(access.mcpUrl)}.` : access.state === "off" ? "Off. Agents in the cloud cannot ask Olympus. Connections on this computer and your tailnet work separately." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
-  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml2(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml2(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
+  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
   const workerEnv = access.state === "on" && access.setBy === "worker_env";
-  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml2(manual)}</span>` : "";
-  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml2(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
+  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml(manual)}</span>` : "";
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
 }
 function remoteAccessControls(access) {
   const status = `<span class="actmsg" data-action-message role="status"></span>`;
@@ -169653,7 +170686,7 @@ function remoteAccessControls(access) {
   }
   const review = access.state === "not_connected" && access.needsTerms ? `<form class="rowform" data-agent-kind="remote-on"><button class="btn primary" type="submit">Review agreement</button>${status}</form>` : "";
   const confirmation2 = "Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.";
-  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml2(confirmation2)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
+  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml(confirmation2)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
 }
 function termsPanel() {
   return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
@@ -169678,14 +170711,14 @@ function privateChoices(access) {
   return ["loopback", "tailnet"].map((route) => {
     const status = access[route];
     const label = route === "loopback" ? "Agent on another account of this computer" : "Agent on my tailnet";
-    const body = status.state !== "available" ? `<p>${escapeHtml2(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url2, i2) => copyBox(`agent-private-${route}-url-${i2}`, url2, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
+    const body = status.state !== "available" ? `<p>${escapeHtml(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url2, i2) => copyBox(`agent-private-${route}-url-${i2}`, url2, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
     return `<details class="agentchoice" data-poll-key="agent-private-${route}" data-agent="private-${route}">` + `<summary><span class="name">${label}</span></summary><div class="agentbody">${body}</div></details>`;
   }).join("");
 }
 function agentChoice(agent, access, host, privateAvailable) {
   const hints2 = [agent.detail, needsOwnTunnel(agent, access) ? "needs your own tunnel" : undefined].filter(Boolean).join(" · ");
-  const detail = hints2 ? ` <span class="hint">${escapeHtml2(hints2)}</span>` : "";
-  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml2(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
+  const detail = hints2 ? ` <span class="hint">${escapeHtml(hints2)}</span>` : "";
+  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
 }
 function ownTunnel(access) {
   return access.state === "on" && (access.ownTunnel === true || access.setBy === "worker_env");
@@ -169701,22 +170734,22 @@ function agentBody(agent, access, host, privateAvailable) {
   if (access.state !== "on")
     return remoteUnavailable(access, privateAvailable) + instructionsStep(agent, false);
   if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
-    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   if (agent.method === "oauth") {
-    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${host.platform === "linux" ? approvalStep(agent, host, true) : escapeHtml2(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${host.platform === "linux" ? approvalStep(agent, host, true) : escapeHtml(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   if (agent.method === "key") {
     const url2 = agent.address === "openapi" ? access.openapiUrl : access.mcpUrl;
-    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url2, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml2(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url2, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   return `<p>If the agent can add a connector that signs in, use the connector address and a pairing code. If it takes an address and a key, create a key.</p>` + `<ol class="steps">` + `<li>Connector (MCP) address:${copyBox("agent-other-url", access.mcpUrl, "Copy address")}` + `OpenAPI address, for agents that read an API description:${copyBox("agent-other-openapi", access.openapiUrl, "Copy address")}</li>` + (host.platform === "linux" ? `<li>${approvalStep(agent, host, true)}</li>` : "") + `<li data-agent-step>Approve a connector with a pairing code.${pairForm(agent.id)}</li>` + `<li data-agent-step>Or create a key and give it to the agent as a bearer token.${keyForm(agent.id, "Agent")}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
 }
 function approvalStep(agent, host, pairing = false) {
   if (host.platform !== "linux")
-    return escapeHtml2(agent.approveViaRelay ?? "");
+    return escapeHtml(agent.approveViaRelay ?? "");
   if (!host.headless)
-    return pairing ? "Open the Olympus approval page in this computer's browser, through the owner's approval route." : escapeHtml2(agent.approveViaRelay ?? "");
+    return pairing ? "Open the Olympus approval page in this computer's browser, through the owner's approval route." : escapeHtml(agent.approveViaRelay ?? "");
   const handoff = host.approvalHandoff?.();
   if (!handoff)
     return "Approval on this computer is not ready. Configure the owner-only SSH socket forward on the Olympus host, then return here.";
@@ -169729,33 +170762,33 @@ function localBody(agent, host) {
 }
 function tunnelNeeded(host, privateAvailable) {
   const text4 = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor. " : "Olympus's relay connects only ChatGPT, Claude and Grok. ") + (privateAvailable ? "For OpenClaw, Hermes or another agent on this computer, choose Agent on another account of this computer. " + "For an agent on your Tailscale network, choose Agent on my tailnet. " : "") + "Other agents in the cloud need a tunnel you run yourself; ask the person who manages that agent to connect it. " + "Claude Code and Codex on this computer need no tunnel.";
-  return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text4)}</p>`;
+  return `<p class="why" data-agent-needs-tunnel>${escapeHtml(text4)}</p>`;
 }
 function remoteUnavailable(access, privateAvailable) {
   const text4 = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
-  return `<p class="why" data-remote-unavailable>${escapeHtml2(text4)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
+  return `<p class="why" data-remote-unavailable>${escapeHtml(text4)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
 }
 function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
-  const body = `${escapeHtml2(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
-  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml2(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
+  const body = `${escapeHtml(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
+  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
   return inStep ? `${body}${skill}` : `<p>${body}</p>${skill}`;
 }
 function copyBox(id, text4, label, primary = false) {
   const prose = text4.includes(" ") && !text4.startsWith("http") ? " prose" : "";
-  return `<div class="promptbox${prose}" id="${id}">${escapeHtml2(text4)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml2(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+  return `<div class="promptbox${prose}" id="${id}">${escapeHtml(text4)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
 }
 function pairForm(agentId) {
   return `<form class="rowform" data-agent-kind="pair">` + `<button class="btn primary" type="submit">Get pairing code</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-code`, "Pairing code");
 }
 function keyForm(agentId, name) {
-  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml2(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
+  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
 }
 function secretSlot(id, label, setup = false) {
-  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i2) => `<label>${client}<input class="keyfield" id="${id}-setup-${i2}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i2}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
+  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i2) => `<label>${client}<input class="keyfield" id="${id}-setup-${i2}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i2}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
 }
 function connectAgentButton(label, primary) {
-  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml2(label)}</button></p>`;
+  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml(label)}</button></p>`;
 }
 function connectionList(view4, now) {
   if (view4.unavailable) {
@@ -169774,7 +170807,7 @@ function connectionRow(connection, now) {
   const route = connection.route === "loopback" ? "another account of this computer" : connection.route === "tailnet" ? "my tailnet" : "relay or own tunnel";
   const why = `${route} · added ${calendarDate(connection.createdAt)} · ${used}`;
   const confirmation2 = `Revoke ${connection.name}? It will no longer be able to ask Olympus. You can connect it again later.`;
-  return `<div class="attncard plain" data-agent-connection="${escapeHtml2(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml2(connection.name)}</span><span class="why"> — ${escapeHtml2(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml2(confirmation2)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml2(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+  return `<div class="attncard plain" data-agent-connection="${escapeHtml(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml(connection.name)}</span><span class="why"> — ${escapeHtml(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml(confirmation2)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function calendarDate(iso2) {
   const date5 = new Date(iso2);
@@ -170143,136 +171176,6 @@ var CHATGPT_MARKDOWN_CSS = `
 .answer.md a{color:inherit;text-decoration:underline}
 `;
 
-// src/workers/dashboard/static-styles.ts
-var LOCAL_PAGE_CSS = `
-.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
-.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
-.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
-.srow .sact { grid-column: 2; grid-row: 1; flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.srow .sact form { margin: 0; }
-.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
-.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
-.srow.nodot .sline { margin-left: 0; }
-.privacy { max-width: 760px; }
-.privacy .sect { margin-top: 24px; }
-.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
-.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
-.pnote { color: var(--t2); margin: 0 0 12px; }
-.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
-.ptextline { flex: 1 1 240px; width: auto; }
-.ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
-.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.pbuttons a.btn { text-decoration: none; }
-@media (max-width: 700px) {
-  .srow { grid-template-columns: minmax(0, 1fr); }
-  .srow .sact { grid-column: 1; grid-row: 2; justify-content: flex-start; }
-}
-`, AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
-.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-body); color: var(--t2); }
-.agentchoice > summary::-webkit-details-marker { display: none; }
-.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
-.agentchoice[open] > summary::after { transform: rotate(90deg); }
-.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
-.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
-.agentchoice > summary .name { font-weight: 600; }
-.agentchoice .agentbody { padding: 2px 14px 14px; }
-.agentchoice .agentbody > p { margin: 0 0 10px; }
-.agentchoice .steps li { margin-bottom: 14px; }
-.agentchoice .steps .rowform { margin-top: 8px; }
-.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
-.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-.agentsecret[hidden] { display: none; }
-.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
-.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
-#agents { margin-top: 26px; }
-[data-remote-access] > .rowform { flex: 0 0 auto; }
-.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
-.remoteterms[hidden] { display: none; }
-.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
-.remoteterms .rowform { margin-top: 4px; }
-.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
-[data-first-run-computer] fieldset,[data-computer-use] fieldset,[data-judge-choice] fieldset{border:0;padding:0;margin:0;min-width:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
-[data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
-[data-first-run-sheet] [hidden]{display:none!important}
-.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
-.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
-.modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
-.modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
-.modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
-.modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
-.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet .modelaction{margin:0}
-.modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
-.modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
-.modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
-`, DASHBOARD_OUTSIDE_HELP_CSS = `
-/* The status line: the state and today's count, the switch beside them. */
-.outside .ohpanel { margin: 0 0 12px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
-.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
-.outside .ohstatewrap { display: grid; gap: 2px; min-width: 0; flex: 1 1 320px; }
-.outside .ohhead > .pbuttons { flex: none; }
-.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
-.outside .dot.on { background: var(--good); }
-.outside .dot.off { background: transparent; border: 2px solid var(--off); }
-.outside .dot.attn { background: var(--warn-fill); }
-.outside .ohline { margin: 0 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
-.outside .ohline.attn { color: var(--warn); font-weight: 600; }
-.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
-.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-/* Problems: one tinted list, a line each, its one button in the line. */
-.outside .ohfix { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
-.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
-.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
-.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
-.outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
-@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
-.outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
-/* The statements, in full only until accepted. */
-.outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
-.outside .ohaccept .sect { margin-top: 0; }
-.outside .ohaccept .ohlist { margin-bottom: 4px; }
-.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
-.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
-.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
-.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
-.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
-.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
-/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
-.outside details.ohsect { border-top: 1px solid var(--line); }
-.outside .ohmore { margin: 20px 0 0; }
-.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
-.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
-.outside details.ohsect > summary::-webkit-details-marker { display: none; }
-.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
-.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
-.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
-.outside .ohsect-sum:empty { display: none; }
-.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
-.outside .ohsect-body { padding: 0 0 16px 18px; }
-.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
-.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
-.outside .ohform.ohinline { margin: 0 0 12px; }
-.outside .ohform .keyfield { width: 100%; max-width: 220px; }
-.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
-.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
-.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.outside .ohoff { color: var(--t3); }
-.outside .actmsg[data-state="error"] { color: var(--bad); }
-.outside .ohunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-.outside .ohunlock .hint { color: var(--t2); }
-.outside .ohunlock .actmsg:empty { display: none; }
-@media (max-width: 700px) {
-  .outside .ohpanel { padding: 14px; }
-  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
-  .outside .ohline { margin-left: 0; }
-  .outside .btn { white-space: normal; text-align: left; }
-  .outside .ohsect-body { padding-left: 0; }
-}
-`;
-
 // src/workers/dashboard/pages/private-answers.ts
 function renderDashboardPrivateAnswersPage(options) {
   const basePath = options?.basePath;
@@ -170280,17 +171183,17 @@ function renderDashboardPrivateAnswersPage(options) {
     title: "Olympus",
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
     ...basePath === undefined ? {} : { basePath },
-    nav: dashboardTopNav({ active: "privacy", unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...readToken(basePath) ? { token: readToken(basePath) } : {} }),
+    nav: dashboardTopNav({ active: "privacy", unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...readToken2(basePath) ? { token: readToken2(basePath) } : {} }),
     meta: "",
-    body: dashboardPrivacyTabs("questions", readToken(basePath)) + renderPrivateAnswersBody(options),
+    body: dashboardPrivacyTabs("questions", readToken2(basePath)) + renderPrivateAnswersBody(options),
     styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
   });
 }
 function dashboardPrivacyTabs(active, token) {
-  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>` : `<a class="ptab" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>`;
-  return `<nav class="ptabs" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("apps", dashboardLocalPageHref("appsReceived", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabApps) + "</nav>";
+  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>` : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
+  return `<nav class="ptabs" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("apps", dashboardLocalPageHref("appsReceived", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabApps) + "</nav>";
 }
-function readToken(basePath) {
+function readToken2(basePath) {
   if (!basePath)
     return;
   const query = basePath.indexOf("?");
@@ -170305,13 +171208,13 @@ function renderPrivateAnswersBody(options) {
   let script2 = "";
   let ready = false;
   if (csrfToken === undefined) {
-    const gate = `${dashboardLocalPageHref("keys", readToken(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
+    const gate = `${dashboardLocalPageHref("keys", readToken2(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
+    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
   } else if (!localSession) {
-    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
-    script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
+    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
+    script2 = `<script>${privateAnswersClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
-    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
     ready = true;
     script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
@@ -170320,12 +171223,12 @@ function renderPrivateAnswersBody(options) {
   return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}</div>${script2}`;
 }
 function renderAsk(options, enabled, inbox) {
-  const models = dashboardLocalPageHref("keys", readToken(options?.basePath));
+  const models = dashboardLocalPageHref("keys", readToken2(options?.basePath));
   const states = options?.privateAnswers?.destinations ?? { computer: "not_set_up", venice: "not_set_up" };
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
   const zkModel = zk?.route.state === "configured" ? zk.route.model : undefined;
-  const zkSetup = `${dashboardLocalPageHref("settings", readToken(options?.basePath))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
+  const zkSetup = `${dashboardLocalPageHref("settings", readToken2(options?.basePath))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
   const zkModelHref = `${models}#zkapi-model`;
   const zkPaused = zkState === "needs_acceptance" || zkState === "blocked" || zkState === "fence_held";
   const destinations = [
@@ -170338,50 +171241,50 @@ function renderAsk(options, enabled, inbox) {
   const cards = destinations.map((d) => {
     const actions = {
       ready: "",
-      not_set_up: `<a class="btn" href="${escapeHtml2(d.href)}">${escapeHtml2(d.setup)}</a><span class="pareason" role="status">${escapeHtml2(d.reason)}</span>`,
-      not_allowed: `<a class="btn" href="${escapeHtml2(models + "#private-routing")}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
-      busy: `<span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
+      not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
+      not_allowed: `<a class="btn" href="${escapeHtml(models + "#private-routing")}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
+      busy: `<span class="pareason" role="status">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
     };
     const state = d.state;
     const action = enabled ? actions[state] : "";
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
-    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot3]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot3}" aria-hidden="true"></span>${escapeHtml2(text4)}</span>`).join("");
-    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
-    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml2(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot3]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot3}" aria-hidden="true"></span>${escapeHtml(text4)}</span>`).join("");
+    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("");
   const answeredBy = first ? DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy.replace("{name}", label(first)) : DASHBOARD_PRIVATE_ANSWERS_COPY.noneReady;
-  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
-  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml2(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
+  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
+  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
 }
 function renderLevelChoice(level, settingsHref) {
-  const option = (value2, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value2}"${value2 === level ? " checked" : ""}><span><b>${escapeHtml2(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
-  const standardHint = escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml2(settingsHref)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
-  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
+  const option = (value2, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value2}"${value2 === level ? " checked" : ""}><span><b>${escapeHtml(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
+  const standardHint = escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml(settingsHref)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
+  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
 }
 function renderFailureNotice(reason) {
   const failure2 = privateAnswerFailure(reason);
-  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml2(failure2.message)} ${failure2.href ? `<a href="${escapeHtml2(failure2.href)}">${escapeHtml2(failure2.action)}</a>` : escapeHtml2(failure2.action)}</p>`;
+  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml(failure2.message)} ${failure2.href ? `<a href="${escapeHtml(failure2.href)}">${escapeHtml(failure2.action)}</a>` : escapeHtml(failure2.action)}</p>`;
 }
 function renderWaiting(waiting, now) {
-  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
-  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
+  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
-    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
   }
-  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
-  parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
+  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
+  parts.push(`<p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
   const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
     const status = state === "failed" ? "" : state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
     const from = [question.path === "venice" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName : question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
-    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
-  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
+  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
 }
@@ -170444,7 +171347,7 @@ function privateAnswersClientScript(input) {
       event.preventDefault();
       var button = unlock.querySelector('button');
       if (button) button.disabled = true;
-      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
         if (response.ok) { window.location.reload(); return; }
         var msg = unlock.querySelector('[data-pa-msg]');
         if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }
@@ -170941,46 +171844,6 @@ var init_private_answers = __esm(() => {
   init_vocabulary();
 });
 
-// src/workers/dashboard/source-logos.ts
-function sourceLogoTile(sourceId, status) {
-  const brand = BRANDS[sourceId];
-  const glyph = GLYPHS[sourceId];
-  const letter = LETTERS[sourceId];
-  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml2(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
-  const kind = brand ? "brand" : glyph ? "glyph" : "letter";
-  return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
-}
-var BRANDS, GLYPHS, LETTERS, SOURCE_LOGO_CSS = `
-.logotile { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: #fff; }
-.logotile svg { width: 22px; height: 22px; }
-.logotile.glyph { background: color-mix(in srgb, var(--t2, #888) 22%, transparent); color: var(--t1, #eee); }
-.logotile.letter { background: transparent; }
-.logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
-.logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
-.logodot.ok { background: #3fb950; }
-.logodot.attention { background: #e3a03a; }
-.logodot.off { background: #8b8b8b; }
-`;
-var init_source_logos = __esm(() => {
-  init_components();
-  BRANDS = {
-    "gmail.email": { color: "#EA4335", path: "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" },
-    "google_drive.docs": { color: "#4285F4", path: "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" },
-    "dropbox.files": { color: "#0061FF", path: "M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" },
-    "x.bookmarks": { color: "#000000", path: "M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" },
-    "telegram.messages": { color: "#26A5E4", path: "M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" },
-    "whatsapp.personal.messages": { color: "#25D366", path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" },
-    "evernote.notes": { color: "#00A82D", path: "M8.222 5.393c0 .239-.02.637-.256.895-.257.24-.652.259-.888.259H4.552c-.73 0-1.165 0-1.46.04-.159.02-.356.1-.455.14-.04.019-.04 0-.02-.02L8.38.796c.02-.02.04-.02.02.02-.04.099-.118.298-.138.457-.04.298-.04.736-.04 1.472v2.647zm5.348 17.869c-.67-.438-1.026-1.015-1.164-1.373a2.924 2.924 0 01-.217-1.095 3.007 3.007 0 013-3.004c.493 0 .888.398.888.895a.88.88 0 01-.454.776c-.099.06-.237.1-.336.12-.098.02-.473.06-.65.218-.198.16-.356.418-.356.697 0 .298.118.577.316.776.355.358.829.557 1.342.557a2.436 2.436 0 002.427-2.447c0-1.214-.809-2.29-1.875-2.766-.158-.08-.414-.14-.651-.2a8.04 8.04 0 00-.592-.1c-.829-.1-2.901-.755-3.04-2.605 0 0-.611 2.785-1.835 3.54-.118.06-.276.12-.454.16-.177.04-.374.06-.434.06-1.993.12-4.105-.517-5.565-2.03 0 0-.987-.815-1.5-3.103-.118-.558-.355-1.553-.493-2.488-.06-.338-.08-.597-.099-.836 0-.975.592-1.631 1.342-1.73h4.026c.69 0 1.086-.18 1.342-.42.336-.317.415-.775.415-1.312V1.354C9.05.617 9.703 0 10.669 0h.474c.197 0 .434.02.651.04.158.02.296.06.533.12 1.204.298 1.46 1.532 1.46 1.532s2.27.398 3.415.597c1.085.199 3.77.378 4.282 3.104 1.204 6.487.474 12.775.415 12.775-.849 6.129-5.901 5.83-5.901 5.83a4.1 4.1 0 01-2.428-.736zm4.54-13.034c-.652-.06-1.204.2-1.402.697-.04.1-.079.219-.059.278.02.06.06.08.099.1.237.12.631.179 1.204.239.572.06.967.1 1.223.06.04 0 .08-.02.119-.08.04-.06.02-.18.02-.28-.06-.536-.553-.934-1.204-1.014z" }
-  };
-  GLYPHS = {
-    "local.files": "M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2h8A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
-    "archive.imports": "M3 7l9-4 9 4v10l-9 4-9-4zm9 2.2L5.4 6.6 12 9.4l6.6-2.8zM5 8.6v7.1l6 2.7v-7.1zm14 0-6 2.7v7.1l6-2.7z"
-  };
-  LETTERS = {
-    "readwise.library": { letter: "R", color: "#111111" }
-  };
-});
-
 // src/workers/dashboard/model-pickers.ts
 function currentLabel(list) {
   const option = list.options.find((entry) => entry.value === list.current);
@@ -170995,16 +171858,16 @@ function picker(list, disabled2) {
   const radios = list.options.map((option) => {
     const inUse = option.value === list.current;
     const now = inUse && option.value === "strongest" && list.strongestNow ? ` · now ${list.strongestNow}` : "";
-    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml2(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml2(option.note)}` : ""}`;
-    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml2(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml2(option.label)}</b><span class="pnote">${note}</span></span></label>`;
+    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml(option.note)}` : ""}`;
+    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml(option.label)}</b><span class="pnote">${note}</span></span></label>`;
   }).join("");
-  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml2(t.pick)}</h4><p class="pnote">${escapeHtml2(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml2(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml2(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
+  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml(t.pick)}</h4><p class="pnote">${escapeHtml(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
 }
 function addDialog(provider) {
   const t = TITLES[provider];
-  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml2(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
+  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
   if (provider === "local") {
-    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml2(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
+    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
   }
   if (provider === "venice") {
     return head + '<p class="pnote">Every private model Venice offers you now. Olympus never sends Private items to a model Venice keeps data on.</p>' + `<form data-model-choice data-addable-list="venice"><input type="hidden" name="provider" value="venice"><div data-addable-models><p class="pnote" role="status">Loading Venice's models…</p></div>` + '<div class="pickbar"><button class="btn primary" type="submit">Use this model</button></div><span data-action-message role="status"></span></form></dialog>';
@@ -171014,7 +171877,7 @@ function addDialog(provider) {
 function pickerRow(list, disabled2, extra = "") {
   const t = TITLES[list.provider];
   const id = `model-pick-${list.provider}`;
-  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml2(t.row)}</b><span class="pnote"> · ${escapeHtml2(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled2 ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled2) + addDialog(list.provider) + "</div>";
+  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml(t.row)}</b><span class="pnote"> · ${escapeHtml(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled2 ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled2) + addDialog(list.provider) + "</div>";
 }
 function renderAnswerModelPickers(choices, unlocked) {
   if (!choices)
@@ -171065,7 +171928,7 @@ var init_model_pickers = __esm(() => {
 function renderModelSetup(view4, options = {}) {
   if (!view4)
     return "";
-  const status = `<span hidden data-model-setup-status="${escapeHtml2(JSON.stringify(view4))}"></span>`;
+  const status = `<span hidden data-model-setup-status="${escapeHtml(JSON.stringify(view4))}"></span>`;
   if (view4.computer_use_pending)
     return status + renderComputerUseChoice(view4);
   const engine = renderEngineServerMode(view4);
@@ -171086,14 +171949,14 @@ function renderModelSetup(view4, options = {}) {
     } else {
       action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
     }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${escapeHtml(state)}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>${sheet}`;
   }).join("");
   const localCard = view4.cards.some((card) => card.id === "local");
   const extras = view4.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return status + engine + (view4.ready ? privateModelProgress(view4) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view4.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view4.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view4.attention ? `<p role="status">${escapeHtml2(view4.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+  return status + engine + (view4.ready ? privateModelProgress(view4) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view4.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view4.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view4.attention ? `<p role="status">${escapeHtml(view4.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice() {
-  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
+  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml(option.description)}</p></label>`).join("");
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
   const verify3 = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
@@ -171123,7 +171986,7 @@ function blockerOwnsLocalToggle(view4) {
   return card?.id === "local" && card.state === "not_configured";
 }
 function readyModelRow(card) {
-  const label = escapeHtml2(card.label);
+  const label = escapeHtml(card.label);
   const state = card.id === "local" ? "Ready" : "Ready · key connected";
   const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
   if (card.id === "local") {
@@ -171131,7 +171994,7 @@ function readyModelRow(card) {
   }
   const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
-  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
 }
 function modelStateWord(card) {
   if (card.state === "applying")
@@ -171173,7 +172036,7 @@ function renderModelSetupBlocker(view4, options = {}) {
     return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml2(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml2(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
+    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`
   });
 }
 function modelKeyFieldId(card) {
@@ -171193,13 +172056,13 @@ function modelKeyAction(card, lead) {
 }
 function renderComputerUseChoice(view4) {
   const pending = view4.engine_server_mode?.pending === true;
-  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view4.engine_server_mode?.notice ?? "") + "</span></form></section>";
+  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml(view4.engine_server_mode?.notice ?? "") + "</span></form></section>";
 }
 function renderEngineServerMode(view4) {
   const mode = view4.engine_server_mode;
   if (!mode)
     return "";
-  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.notice ?? "") + "</span></form></section>";
+  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml(mode.notice ?? "") + "</span></form></section>";
 }
 function privateModelWords(view4) {
   const model = view4?.private_model;
@@ -171225,7 +172088,7 @@ function retryPrivateModel() {
 }
 function privateModelProgress(view4) {
   const words2 = privateModelWords(view4);
-  return words2 ? `<div data-private-model-progress role="status"><p>${escapeHtml2(words2)}</p>${view4.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
+  return words2 ? `<div data-private-model-progress role="status"><p>${escapeHtml(words2)}</p>${view4.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
 }
 var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>', SERVER_MODE_HELP = "Olympus starts by itself after a restart, once the disk is unlocked. Your Mac asks for an administrator's password once.", SERVER_CHECKLIST = "<ul data-server-checklist><li>Use a wired network.</li><li>Give this Mac a fixed network address in System Settings.</li><li>After a restart, someone must unlock the disk in person, or use Screen Sharing or SSH unlock on a wired network. After that, Olympus starts by itself.</li></ul>";
 var init_model_setup2 = __esm(() => {
@@ -171244,7 +172107,7 @@ function lockedGate2(options) {
 }
 function localShell(input) {
   const csrf = input.options?.controlSessionCsrfToken;
-  const token = readToken2(input.options?.basePath);
+  const token = readToken3(input.options?.basePath);
   return pageShell({
     title: "Olympus",
     crumb: input.crumb,
@@ -171262,15 +172125,15 @@ function localShell(input) {
 }
 function renderDashboardKeysPage(view4, options) {
   const home2 = options?.basePath ?? "/dashboard";
-  const token = readToken2(options?.basePath);
+  const token = readToken3(options?.basePath);
   const mode = options?.answerMode;
   const body = [
     lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
-    `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
-    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view4.model_setup) + `<div${view4.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view4.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
+    `<section id="whats-private"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(home2)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml(home2)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view4.model_setup) + `<div${view4.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view4.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
     renderZkapiPrivacy(options, token),
-    view4.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    view4.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view4, options)
   ].filter((block) => block !== "").join(`
 `);
@@ -171289,7 +172152,7 @@ function renderZkapiPrivacy(options, token) {
   const card = options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "privacy", otherPartHref: `${dashboardLocalPageHref("settings", token)}#${DASHBOARD_SETTINGS_ZKAPI_ID}` }) : "";
   if (!picker2 && !card)
     return "";
-  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker2}${card}</section>`;
+  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker2}${card}</section>`;
 }
 function sourceDomId(sourceId) {
   return sourceId.replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -171313,22 +172176,22 @@ function needsSetupAgain(source) {
 }
 function connectedSourceRow(source, messagingLocalSession, off, kept = false, basePath = "/dashboard") {
   const id = sourceDomId(source.source_id);
-  const label = escapeHtml2(source.label);
+  const label = escapeHtml(source.label);
   const items = [];
   const dialogs = [];
   const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
   if (!kept)
-    items.push(`<a class="menuitem" href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
+    items.push(`<a class="menuitem" href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
   if (sync)
-    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml2(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
+    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
   const confirm = (kind, title, line2, button, danger, menuLabel = title.endsWith("?") ? title.slice(0, -1) : title) => {
     const dialogId = `${kind === "disconnect_source" ? "disconnect" : "delete"}-${id}`;
-    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml2(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(line2)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml2(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml2(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
-    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml2(menuLabel)}${danger ? "…" : ""}</button>`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml(line2)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
+    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml(menuLabel)}${danger ? "…" : ""}</button>`;
   };
   if (kept) {} else if (MESSAGING_SOURCES.has(source.source_id)) {
     const dialogId = `pairing-${id}`;
-    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-label="${label} pairing"><div class="adddialoghead"><h3>${label}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession, { paired: true }) + "</dialog>");
+    dialogs.push(`<dialog class="adddialog msgdialog" id="${dialogId}" data-closable aria-label="${label} pairing">` + renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession, { paired: true }, { closable: true }) + "</dialog>");
     items.push(`<button class="menuitem" type="button" data-dialog-open="${dialogId}"${off}>Pairing and chats</button>`);
   } else if (source.connection.disconnect) {
     items.push("<hr>" + confirm("disconnect_source", `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, "Disconnect", false));
@@ -171336,29 +172199,30 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false, ba
   if (kept)
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
   const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
-  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>` : "";
+  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${escapeHtml(fixLabel)}</button>` : "";
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
-  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
+  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
 }
 function renderDashboardConnectPage(view4, options) {
   const blocked = view4.model_setup !== undefined && !view4.model_setup.ready;
   const basePath = options?.basePath ?? "/dashboard";
-  const token = readToken2(options?.basePath);
+  const token = readToken3(options?.basePath);
   const off = unlocked(options) ? "" : " disabled";
   const sources = view4.sources.filter((source) => source.source_id !== "venice.api");
   const connected2 = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
   const setupable = sources.filter((source) => source.connection.state === "reauth_required" || needsSetupAgain(source) || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
   const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off, false, basePath)).concat(kept.map((source) => connectedSourceRow(source, false, off, true, basePath)));
-  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
-  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view4, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
-  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
+  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml(source.label)}</b><span class="pnote">${escapeHtml(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
+  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view4, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
     renderModelSetupBlocker(view4.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
+    dashboardPeopleRow(token),
     rows.map((entry) => entry.dialogs).join(""),
     sheet,
     connectorDialog()
@@ -171374,8 +172238,8 @@ function renderDashboardConnectPage(view4, options) {
   });
 }
 function renderModelsOnComputer(models, token) {
-  const rules = escapeHtml2(`${dashboardLocalPageHref("keys", token)}#private-routing`);
-  const row = (key2, title, line2, extra = "") => `<div class="srow nodot" data-model-row="${key2}"><div class="smain"><b>${escapeHtml2(title)}</b> — ${escapeHtml2(line2)}${extra}</div></div>`;
+  const rules = escapeHtml(`${dashboardLocalPageHref("keys", token)}#private-routing`);
+  const row = (key2, title, line2, extra = "") => `<div class="srow nodot" data-model-row="${key2}"><div class="smain"><b>${escapeHtml(title)}</b> — ${escapeHtml(line2)}${extra}</div></div>`;
   const rows = [];
   const answers = models?.privateAnswers;
   const change = ` <a href="${rules}">Change on Privacy rules</a>`;
@@ -171396,7 +172260,7 @@ function renderModelsOnComputer(models, token) {
     rows.push(row("transcription", "Transcription", models.transcription.line));
   return `<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3><div class="srows">${rows.join("")}</div></section>`;
 }
-function readToken2(basePath) {
+function readToken3(basePath) {
   if (!basePath)
     return;
   const query = basePath.indexOf("?");
@@ -171415,7 +172279,7 @@ function renderDashboardAgentsPage(options) {
 }
 function connectorDialog() {
   const id = CONNECTOR_DIALOG_ID;
-  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml2(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml2(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
+  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
 }
 function refusalNotice(source) {
   if (!source.connection.provider_refusal)
@@ -171556,13 +172420,13 @@ function connectAction(source) {
 }
 function renderDashboardSettingsPage(options) {
   const now = options?.now ?? new Date;
-  const token = readToken2(options?.basePath);
+  const token = readToken3(options?.basePath);
   const settings = options?.settings;
-  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
+  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml(section.label)}</a>`).join("")}</nav>`;
   const agents = `<section class="setpane" id="agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>') : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
   const models = renderModelsOnComputer(settings?.models, token);
   const csrfToken = options?.controlSessionCsrfToken;
-  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml2(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
+  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
   const update = settings?.update;
   const updater = settings?.updater;
   const notice = updater && (update || updater.status && updater.status.state !== "idle") ? renderUpdateNotice({
@@ -171575,7 +172439,7 @@ function renderDashboardSettingsPage(options) {
     idPrefix: "settings-update"
   }) : update ? renderUpdateNotice({ command: update.command, available: { version: update.version }, selfUpdate: false, idPrefix: "settings-update" }) : "";
   const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>' + (notice || '<p class="pnote">Olympus is up to date.</p>') + "</section>";
-  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const proposal = renderSettingsProposal(options?.settingsProposal);
   const body = lockedGate2(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
   return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS, UPDATE_NOTICE_CSS], options });
@@ -171583,17 +172447,17 @@ function renderDashboardSettingsPage(options) {
 function renderSettingsProposal(state) {
   const proposal = state?.current;
   if (proposal) {
-    const who = proposal.from ? escapeHtml2(proposal.from) : "An agent on this computer";
+    const who = proposal.from ? escapeHtml(proposal.from) : "An agent on this computer";
     const judge3 = proposal.input.privacy_judge;
     const veniceJudge = judge3?.choice === "venice" ? `$${judge3.spending_limit_dollars}` : undefined;
-    const rows2 = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.current)}</td><td><b>${escapeHtml2(row.proposed)}</b></td></tr>`).join("");
-    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml2(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
-    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows2}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml2(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
+    const rows2 = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${escapeHtml(row.current)}</td><td><b>${escapeHtml(row.proposed)}</b></td></tr>`).join("");
+    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
+    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows2}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
   }
   const applied = state?.lastApplied;
   if (!applied)
     return "";
-  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml2(row.message ?? "not saved")}`}</td></tr>`).join("");
+  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${escapeHtml(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml(row.message ?? "not saved")}`}</td></tr>`).join("");
   return `<section class="propcard" aria-label="Applied settings" id="proposed-settings"><h3 class="sect">${applied.ok ? "Settings applied" : "Some settings were not applied"}</h3>` + `<table class="proptable"><tbody>${rows}</tbody></table></section>`;
 }
 function renderDashboardHelpPage(options) {
@@ -171604,7 +172468,7 @@ function renderDashboardHelpPage(options) {
     meta: "",
     options,
     styles: [],
-    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
+    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
   });
 }
 function sourceSupportBlock(source) {
@@ -171612,7 +172476,7 @@ function sourceSupportBlock(source) {
     return "";
   const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, "-")}`;
   const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
-  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml2(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
+  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
 }
 function renderJudgeChoice(view4, options) {
   const status = options?.judgeSetup;
@@ -171626,17 +172490,17 @@ function renderJudgeChoice(view4, options) {
   const stopped = status.stop === "storage" ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>' : status.stop === "payment" ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>' : status.stop === "cap" ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : "";
   const nights = `${hours(estimate.shortHours / 8)} to ${hours(estimate.longHours / 8)} nights`;
   const venicePrice = estimate.cloudDollars === null ? "Cost unavailable" : `About ${money(estimate.cloudDollars)}`;
-  const row = (term, value2) => `<span class="judgeterm">${escapeHtml2(term)}</span><span>${value2}</span>`;
-  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml2(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${lead}</span><span class="judgerows">${rows}</span><span class="judgefit">${fit}</span></label>`;
-  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead), row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `About ${nights} of 8 hours (${hours(estimate.shortHours)} to ${hours(estimate.longHours)} hours)`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit), true);
-  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, "Venice reads every item to sort it, including items it marks Private.", row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${venicePrice}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `About ${hours(estimate.cloudHours)} hours`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)) + (status.cloudModel ? row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeModel, escapeHtml2(status.cloudModel)) : ""), escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit), cloud);
+  const row = (term, value2) => `<span class="judgeterm">${escapeHtml(term)}</span><span>${value2}</span>`;
+  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${lead}</span><span class="judgerows">${rows}</span><span class="judgefit">${fit}</span></label>`;
+  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead), row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `About ${nights} of 8 hours (${hours(estimate.shortHours)} to ${hours(estimate.longHours)} hours)`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit), true);
+  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, "Venice reads every item to sort it, including items it marks Private.", row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${venicePrice}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `About ${hours(estimate.cloudHours)} hours`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)) + (status.cloudModel ? row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeModel, escapeHtml(status.cloudModel)) : ""), escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit), cloud);
   const spent = status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : `${status.stop === "storage" ? "Spending amounts are unavailable." : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} Olympus stops before going past this limit. Items not yet sorted then stay Private and wait for this computer.`;
-  const cap = `<label class="judgecap">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? "" : status.capDollars}"></label><p class="pnote">${spent}</p>`;
+  const cap = `<label class="judgecap">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? "" : status.capDollars}"></label><p class="pnote">${spent}</p>`;
   const reply = '<span data-action-message role="status"></span>';
-  const dialog = (pick2, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick2}" aria-labelledby="judge-dialog-${pick2}"><h3 id="judge-dialog-${pick2}">${escapeHtml2(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
-  const confirm = status.choice === "venice" ? dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton) + `<div class="judgekeep">${cap}<button class="btn" type="submit">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button></div>` : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: about ${money(estimate.cloudDollars)} for the ${items.toLocaleString("en-US")} items found so far`}.</p>${cap}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton);
-  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
-    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
+  const dialog = (pick2, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick2}" aria-labelledby="judge-dialog-${pick2}"><h3 id="judge-dialog-${pick2}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
+  const confirm = status.choice === "venice" ? dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton) + `<div class="judgekeep">${cap}<button class="btn" type="submit">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button></div>` : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: about ${money(estimate.cloudDollars)} for the ${items.toLocaleString("en-US")} items found so far`}.</p>${cap}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton);
+  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
+    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ""}${stopped}
     <div class="judgeopts">${local}${venice}</div>
     ${cloud || status.stop === "storage" ? "" : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
@@ -171678,6 +172542,7 @@ var CONNECTOR_DIALOG_ID = "build-connector", CONNECTOR_DIALOG_HEADING = "Build a
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
 `, CONNECTOR_OPENER, SETTINGS_SECTIONS, SETTINGS_CSS;
 var init_local = __esm(() => {
+  init_people();
   init_judge_spending();
   init_source_failure();
   init_source_dashboard();
@@ -171761,7 +172626,7 @@ ${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .set
 // src/workers/dashboard/pages/apps-received.ts
 function renderDashboardAppsReceivedPage(options) {
   const basePath = options?.basePath;
-  const token = readToken3(basePath);
+  const token = readToken4(basePath);
   return pageShell({
     title: "Olympus",
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
@@ -171772,7 +172637,7 @@ function renderDashboardAppsReceivedPage(options) {
     styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, PRIVACY_TABS_CSS, APPS_RECEIVED_CSS]
   });
 }
-function readToken3(basePath) {
+function readToken4(basePath) {
   if (!basePath)
     return;
   const query = basePath.indexOf("?");
@@ -171783,19 +172648,19 @@ function readToken3(basePath) {
 function renderBody(options) {
   const csrfToken = options?.controlSessionCsrfToken;
   const local = csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const head = `<h3 class="sect arhead">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.title)}</h3><p class="pnote arintro">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.intro)}</p>`;
+  const head = `<h3 class="sect arhead">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.title)}</h3><p class="pnote arintro">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.intro)}</p>`;
   if (csrfToken === undefined) {
-    const gate = `${dashboardLocalPageHref("keys", readToken3(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
+    const gate = `${dashboardLocalPageHref("keys", readToken4(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
+    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
   }
   if (!local) {
-    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
+    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript("", true)}</script>`;
   }
   if (options?.appsReceivedAvailable !== true) {
-    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
+    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
   }
-  const choices = [7, 30, 90, 0].map((days) => `<option value="${days}"${days === 30 ? " selected" : ""}>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.retention[String(days)])}</option>`).join("");
-  return `<div class="privacy ar" data-apps-received>${head}` + `<div class="arbar"><span class="arkept"><label for="ar-retention">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.keptFor)}</label>` + `<select id="ar-retention" data-ar-retention aria-label="${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.keptLabel)}" disabled>${choices}</select>` + `<span>· ${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.includedInDeleteAll)}</span></span>` + `<button type="button" class="arclear" data-ar-clear hidden>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.clear)}</button></div>` + `<p class="pnote" data-ar-none hidden></p>` + `<ul class="arlist" data-ar-list aria-live="polite"></ul>` + `<p class="armsg" data-ar-msg role="status"></p></div>` + `<script>${clientScript(csrfToken, false)}</script>`;
+  const choices = [7, 30, 90, 0].map((days) => `<option value="${days}"${days === 30 ? " selected" : ""}>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.retention[String(days)])}</option>`).join("");
+  return `<div class="privacy ar" data-apps-received>${head}` + `<div class="arbar"><span class="arkept"><label for="ar-retention">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.keptFor)}</label>` + `<select id="ar-retention" data-ar-retention aria-label="${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.keptLabel)}" disabled>${choices}</select>` + `<span>· ${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.includedInDeleteAll)}</span></span>` + `<button type="button" class="arclear" data-ar-clear hidden>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.clear)}</button></div>` + `<p class="pnote" data-ar-none hidden></p>` + `<ul class="arlist" data-ar-list aria-live="polite"></ul>` + `<p class="armsg" data-ar-msg role="status"></p></div>` + `<script>${clientScript(csrfToken, false)}</script>`;
 }
 function clientScript(csrfToken, unlockOnly) {
   const config2 = { csrfToken, path: POST_PATH2, unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock, unlockOnly, copy: DASHBOARD_APPS_RECEIVED_COPY };
@@ -171811,7 +172676,7 @@ function clientScript(csrfToken, unlockOnly) {
     event.preventDefault();
     var button = unlock.querySelector('button');
     if (button) button.disabled = true;
-    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
+    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
       if (response.ok) { window.location.reload(); return; }
       say(copy.failed, true); if (button) button.disabled = false;
     }, function () { say(copy.unreachable, true); if (button) button.disabled = false; });
@@ -172004,6 +172869,8 @@ function dashboardHtmlRoutePage(url2) {
     return "connector";
   if (params.has(DASHBOARD_LOCAL_PAGES.settings))
     return "settings";
+  if (params.has(DASHBOARD_LOCAL_PAGES.people))
+    return "people";
   return "host";
 }
 function dashboardReadToken(url2) {
@@ -172040,6 +172907,12 @@ function renderDashboardLocalPage(page2, input) {
       return renderDashboardAppsReceivedPage(options);
     case "settings":
       return renderDashboardSettingsPage(options);
+    case "people":
+      return renderDashboardPeoplePage({
+        ...options,
+        ...input.people ? { people: input.people } : {},
+        peopleLocalSession: input.peopleLocalSession === true
+      });
   }
 }
 var DASHBOARD_LEGACY_QUERY_PARAMS;
@@ -172049,6 +172922,7 @@ var init_dashboard = __esm(() => {
   init_local();
   init_private_answers();
   init_apps_received();
+  init_people();
   init_host_page();
   init_vocabulary();
   DASHBOARD_LEGACY_QUERY_PARAMS = ["source", "background", "sensitivity", "setup", "privacy", "embedding-ledger"];
@@ -175449,12 +176323,15 @@ function buildNoteItem(input, draft, place, savedAt) {
 `);
   const providerItemId = sha2569(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
   const contentHash = sha2569(text4);
+  const conversation = draft.conversation;
+  const threadId = conversation ? `conversation:${providerItemId}` : undefined;
   const item = {
     identity: {
       family: input.format.family,
       provider: input.format.provider,
       accountScope: input.accountScope,
       providerItemId,
+      ...threadId ? { providerThreadId: threadId, providerConversationId: threadId } : {},
       localItemId: `${input.accountScope}:${providerItemId}`,
       sourceVersion: contentHash.slice(0, 32)
     },
@@ -175467,6 +176344,14 @@ function buildNoteItem(input, draft, place, savedAt) {
       ...draft.createdAt ? { createdAt: draft.createdAt } : {},
       ...draft.updatedAt ? { updatedAt: draft.updatedAt } : {},
       ...draft.blockCount !== undefined ? { blockCount: draft.blockCount } : {},
+      ...conversation ? {
+        chat: title || "(untitled)",
+        sender: conversation.ownerLabel,
+        senderLabel: conversation.ownerLabel,
+        senderIsOwner: true,
+        fromMe: true,
+        participants: conversation.participants
+      } : {},
       contentHash
     }),
     fetchedAt: new Date().toISOString()
@@ -176603,7 +177488,7 @@ var init_live_sync3 = __esm(() => {
 import { createHash as createHash95, randomBytes as randomBytes31, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync88, statSync as statSync41 } from "node:fs";
 import { homedir as homedir44 } from "node:os";
-import { join as join131, resolve as resolve28 } from "node:path";
+import { basename as basename20, dirname as dirname99, join as join132, resolve as resolve28 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -177270,6 +178155,23 @@ function createEmailSourceWorker(options = {}) {
               }
             }));
           }
+          if (page2 === "people") {
+            const localSession = controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
+            let people;
+            if (localSession && sourceDashboard?.people) {
+              try {
+                people = sourceDashboard.people.view();
+              } catch {
+                people = undefined;
+              }
+            }
+            return html2(renderDashboardLocalPage("people", {
+              url: url2,
+              options: { ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {} },
+              ...people ? { people } : {},
+              peopleLocalSession: localSession
+            }));
+          }
           if (page2 === "help" && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local"))
             return renderHelp(request, url2);
           if (page2 === "json" || page2 === "keys" || page2 === "connect" || page2 === "help") {
@@ -177828,6 +178730,17 @@ function createEmailSourceWorker(options = {}) {
             headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
           });
         }
+        if (request.method === "POST" && url2.pathname === DASHBOARD_PEOPLE_PATH2) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            return json2({ ok: false, error: { code: "mac_dashboard_only", message: "People opens only in the dashboard on this computer, in an unlocked browser." } }, 403);
+          }
+          if (!sourceDashboard?.people) {
+            throw new EmailSourceWorkerError(501, "people_not_supported", "People is not available in this worker yet.");
+          }
+          const record8 = await parseObjectBody(request);
+          const outcome = sourceDashboard.people.handle(record8);
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+        }
         if (request.method === "POST" && url2.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
           const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
@@ -178235,6 +179148,12 @@ function createEmailSourceWorker(options = {}) {
                   throw new EmailSourceWorkerError(409, "capture_stop_unconfirmed", "Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.");
                 }
               }
+              let phoneUnlinked;
+              const whatsappSessionDb = sourceId === "telegram.messages" ? undefined : session.paths.find((path) => basename20(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== "gone");
+              if (whatsappSessionDb && sourceDashboard.unlinkWhatsAppDevice) {
+                phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname99(whatsappSessionDb)).catch(() => "failed");
+              }
+              const phoneNote = phoneUnlinked === "offline" || phoneUnlinked === "failed" ? " Olympus could not reach WhatsApp to remove itself from your phone: remove Olympus in WhatsApp → Settings → Linked devices." : "";
               const removedSessionPaths = [];
               const unremovedSessionPaths = [];
               for (const target of removalPlan.plan.targets) {
@@ -178308,7 +179227,8 @@ function createEmailSourceWorker(options = {}) {
                 ...outstandingPaths.length > 0 ? { unremoved_session_paths: outstandingPaths } : {},
                 scheduling_refreshed: sourceScheduler !== undefined,
                 ...outstandingSteps.length > 0 ? { failed_steps: outstandingSteps } : {},
-                status_message: complete ? "Unpaired. Waiting for the next refresh." : outstandingPaths.length > 0 ? `Unpair incomplete — remove by hand: ${outstandingPaths.join(", ")}` : failedSteps.includes("connected_handle") ? "Unpair incomplete — the pairing session was deleted, but its registry handle could not be removed. Re-run Unpair, or remove the handle with the CLI." : "Unpair incomplete — the pairing session was deleted, but its stored reference could not be removed. Re-run Unpair once the secret store is reachable.",
+                ...phoneUnlinked ? { phone_unlinked: phoneUnlinked } : {},
+                status_message: complete ? (phoneUnlinked === "removed" ? "Unpaired, and removed from your phone's linked devices. Waiting for the next refresh." : "Unpaired. Waiting for the next refresh.") + phoneNote : outstandingPaths.length > 0 ? `Unpair incomplete — remove by hand: ${outstandingPaths.join(", ")}` : failedSteps.includes("connected_handle") ? "Unpair incomplete — the pairing session was deleted, but its registry handle could not be removed. Re-run Unpair, or remove the handle with the CLI." : "Unpair incomplete — the pairing session was deleted, but its stored reference could not be removed. Re-run Unpair once the secret store is reachable.",
                 policy: {
                   scheduled_reads_stopped: true,
                   manual_reads_stopped: true,
@@ -178318,7 +179238,7 @@ function createEmailSourceWorker(options = {}) {
                   connected_handle_removed: !outstandingSteps.includes("connected_handle"),
                   indexed_data_deleted: false,
                   captured_messages_deleted: false,
-                  provider_device_still_linked: true,
+                  provider_device_still_linked: phoneUnlinked !== "removed",
                   capture_service_stopped: false,
                   restart_required: false,
                   raw_runtime_secrets_exposed: false
@@ -180914,7 +181834,7 @@ function dashboardStorageNotices() {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync88(join131(homedir44(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync88(join132(homedir44(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -181501,6 +182421,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = "/dashboard/settings/proposal/apply", DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = "/dashboard/settings/proposal/discard", DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
+  init_people();
   init_source_failure();
   init_models_on_computer();
   init_google_own_app();
@@ -181521,6 +182442,7 @@ var init_email_source = __esm(() => {
   init_analyst();
   init_types();
   init_file_lease();
+  init_olympus_layout();
   init_email_policy();
   init_google_pilot_client();
   init_publisher_oauth_client();
@@ -181775,9 +182697,9 @@ var init_analyst_anthropic = __esm(() => {
 
 // src/core/model-choices.ts
 import { readFileSync as readFileSync89 } from "node:fs";
-import { dirname as dirname99, join as join132 } from "node:path";
+import { dirname as dirname100, join as join133 } from "node:path";
 function modelChoicesPath(policyPath) {
-  return join132(dirname99(policyPath), "model-choices.json");
+  return join133(dirname100(policyPath), "model-choices.json");
 }
 function readModelChoices(policyPath) {
   try {
@@ -182094,7 +183016,7 @@ var init_locations = __esm(() => {
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
 import { existsSync as existsSync99, readFileSync as readFileSync90 } from "node:fs";
-import { dirname as dirname100, join as join133 } from "node:path";
+import { dirname as dirname101, join as join134 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -182309,11 +183231,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join133(dir, "node_modules");
-    if (!existsSync99(join133(candidate, "@parcel", "watcher")))
+    const candidate = join134(dir, "node_modules");
+    if (!existsSync99(join134(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join133(dirname100(candidate), "package.json"));
+      const requireFrom = createRequire8(join134(dirname101(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -182354,7 +183276,7 @@ var init_watch_hub = __esm(() => {
 // src/workers/local-files/connector.ts
 import { createHash as createHash96, randomUUID as randomUUID34 } from "node:crypto";
 import { realpathSync as realpathSync22, rmSync as rmSync40, readdirSync as readdirSync29 } from "node:fs";
-import { join as join134, posix as posix3 } from "node:path";
+import { join as join135, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -182645,7 +183567,7 @@ function createLocalFilesSourceConnector(options) {
       }
     }
   }
-  const snapshotFile = (gen) => join134(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
+  const snapshotFile = (gen) => join135(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
   const pruneSnapshots = (keep) => {
     if (!options.watch)
       return;
@@ -182653,7 +183575,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync29(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync40(join134(options.watch.snapshotDir, name), { force: true });
+          rmSync40(join135(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -185419,9 +186341,9 @@ var init_source_scheduler = __esm(() => {
 // src/workers/local-files/mac-permissions.ts
 import { existsSync as existsSync100, mkdirSync as mkdirSync64, opendirSync, readFileSync as readFileSync91 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname101, join as join135 } from "node:path";
+import { dirname as dirname102, join as join136 } from "node:path";
 function folderAccessMemoryPath() {
-  return join135(olympusDataDir(), "local-files", "folder-access.json");
+  return join136(olympusDataDir(), "local-files", "folder-access.json");
 }
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
@@ -185509,10 +186431,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join135(this.home, "Desktop")],
-      ["documents", join135(this.home, "Documents")],
-      ["downloads", join135(this.home, "Downloads")],
-      ["icloud", join135(this.home, "Library", "Mobile Documents")]
+      ["desktop", join136(this.home, "Desktop")],
+      ["documents", join136(this.home, "Documents")],
+      ["downloads", join136(this.home, "Downloads")],
+      ["icloud", join136(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -185530,7 +186452,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join135(this.home, "Desktop"), join135(this.home, "Documents"), join135(this.home, "Downloads"), join135(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join136(this.home, "Desktop"), join136(this.home, "Documents"), join136(this.home, "Downloads"), join136(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.serverMode())
@@ -185581,7 +186503,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join135(this.home, "Library", "Safari"), join135(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join136(this.home, "Library", "Safari"), join136(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -185635,7 +186557,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync64(dirname101(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync64(dirname102(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -194803,6 +195725,276 @@ var init_connector11 = __esm(() => {
   })();
 });
 
+// src/workers/archive-import/ai-chats/conversation.ts
+function conversationNote(read, assistantLabel) {
+  const merged = [];
+  for (const turn of read.turns) {
+    const text4 = turn.text.trim();
+    if (text4 === "")
+      continue;
+    const last = merged[merged.length - 1];
+    if (last && last.speaker === turn.speaker)
+      last.text = `${last.text}
+
+${text4}`;
+    else
+      merged.push({ speaker: turn.speaker, text: text4 });
+  }
+  if (merged.length === 0)
+    return read.unsupported > 0 ? { kind: "unsupported" } : { kind: "empty" };
+  const label = (speaker) => speaker === "owner" ? AI_CHAT_OWNER_LABEL : assistantLabel;
+  return {
+    kind: "note",
+    note: {
+      ...read.key !== undefined ? { key: read.key } : {},
+      title: firstString(read.title) ?? "",
+      body: merged.map((turn) => `${label(turn.speaker)}: ${turn.text}`).join(`
+
+`),
+      tags: [],
+      ...read.createdAt !== undefined ? { createdAt: read.createdAt } : {},
+      ...read.updatedAt !== undefined ? { updatedAt: read.updatedAt } : {},
+      ...read.unsupported > 0 ? { unsupported: read.unsupported } : {},
+      conversation: { ownerLabel: AI_CHAT_OWNER_LABEL, participants: [AI_CHAT_OWNER_LABEL, assistantLabel] }
+    }
+  };
+}
+var AI_CHAT_OWNER_LABEL = "You";
+var init_conversation = __esm(() => {
+  init_note();
+});
+
+// src/workers/archive-import/ai-chats/chatgpt.ts
+function contentText(content) {
+  if (!isRecord11(content))
+    return { text: "", unsupported: true };
+  const type = content.content_type;
+  if (typeof type === "string" && UNSHOWN_CONTENT.has(type))
+    return { text: "", unsupported: false };
+  if (type === "code") {
+    const code = typeof content.text === "string" ? content.text.trim() : "";
+    return { text: code === "" ? "" : `\`\`\`
+${code}
+\`\`\``, unsupported: typeof content.text !== "string" };
+  }
+  if (!Array.isArray(content.parts)) {
+    return typeof content.text === "string" ? { text: content.text, unsupported: false } : { text: "", unsupported: true };
+  }
+  const pieces = [];
+  let unsupported = false;
+  for (const part of content.parts) {
+    if (typeof part === "string") {
+      pieces.push(part);
+    } else if (isRecord11(part) && typeof part.text === "string") {
+      pieces.push(part.text);
+    } else if (isRecord11(part) && typeof part.content_type === "string" && part.content_type.includes("image")) {
+      pieces.push(IMAGE_NOT_IMPORTED);
+    } else if (isRecord11(part) && typeof part.content_type === "string" && /audio|video/.test(part.content_type)) {
+      continue;
+    } else if (part !== null && part !== undefined) {
+      unsupported = true;
+    }
+  }
+  return { text: pieces.join(`
+`).trim(), unsupported };
+}
+function visibleThread(mapping, current2) {
+  if (typeof current2 !== "string" || !isRecord11(mapping[current2]))
+    return;
+  const path = [];
+  const seen = new Set;
+  let id = current2;
+  while (typeof id === "string" && isRecord11(mapping[id])) {
+    if (seen.has(id))
+      return;
+    seen.add(id);
+    path.push(id);
+    id = mapping[id].parent;
+  }
+  return path.reverse();
+}
+function parseChatGptConversation(record8) {
+  if (!isRecord11(record8))
+    return { kind: "unreadable" };
+  if (!isRecord11(record8.mapping))
+    return { kind: "unsupported" };
+  const mapping = record8.mapping;
+  const thread2 = visibleThread(mapping, record8.current_node);
+  if (!thread2)
+    return { kind: "unsupported" };
+  const turns2 = [];
+  let unsupported = 0;
+  for (const id of thread2) {
+    const message2 = mapping[id].message;
+    if (message2 === null || message2 === undefined)
+      continue;
+    if (!isRecord11(message2)) {
+      unsupported += 1;
+      continue;
+    }
+    const role = isRecord11(message2.author) ? message2.author.role : undefined;
+    if (role !== "user" && role !== "assistant")
+      continue;
+    if (isRecord11(message2.metadata) && message2.metadata.is_visually_hidden_from_conversation === true)
+      continue;
+    if (typeof message2.recipient === "string" && message2.recipient !== "all")
+      continue;
+    const read = contentText(message2.content);
+    if (read.unsupported)
+      unsupported += 1;
+    turns2.push({ speaker: role === "user" ? "owner" : "assistant", text: read.text });
+  }
+  return conversationNote({
+    key: idText(record8.conversation_id) ?? idText(record8.id),
+    title: record8.title,
+    createdAt: isoTime2(record8.create_time),
+    updatedAt: isoTime2(record8.update_time),
+    turns: turns2,
+    unsupported
+  }, CHATGPT_ASSISTANT_LABEL);
+}
+var CHATGPT_ASSISTANT_LABEL = "ChatGPT", UNSHOWN_CONTENT, IMAGE_NOT_IMPORTED = "[A picture was here; it was not imported.]";
+var init_chatgpt = __esm(() => {
+  init_note();
+  init_conversation();
+  UNSHOWN_CONTENT = new Set([
+    "thoughts",
+    "reasoning_recap",
+    "user_editable_context",
+    "model_editable_context",
+    "tether_browsing_display",
+    "tether_quote",
+    "execution_output",
+    "system_error",
+    "computer_output",
+    "super_widget"
+  ]);
+});
+
+// src/workers/archive-import/ai-chats/claude.ts
+function attachmentLines(message2) {
+  const lines2 = [];
+  for (const key2 of ["attachments", "files"]) {
+    const list = message2[key2];
+    if (!Array.isArray(list))
+      continue;
+    for (const file2 of list) {
+      const name = isRecord11(file2) && typeof file2.file_name === "string" && file2.file_name.trim() !== "" ? file2.file_name.trim() : undefined;
+      lines2.push(name ? `[Attached file ${name}; it was not imported.]` : "[An attached file; it was not imported.]");
+    }
+  }
+  return lines2;
+}
+function blocksText(content) {
+  if (!Array.isArray(content))
+    return { text: undefined, unsupported: false };
+  const pieces = [];
+  let unsupported = false;
+  for (const block of content) {
+    if (!isRecord11(block)) {
+      unsupported = true;
+    } else if (block.type === "text" && typeof block.text === "string") {
+      pieces.push(block.text);
+    } else if (!(typeof block.type === "string" && UNSHOWN_BLOCKS.has(block.type))) {
+      unsupported = true;
+    }
+  }
+  return { text: pieces.length > 0 ? pieces.join(`
+
+`) : undefined, unsupported };
+}
+function visibleThread2(messages) {
+  const byId = new Map;
+  let newest;
+  let newestAt = "";
+  for (const message2 of messages) {
+    if (!isRecord11(message2) || typeof message2.uuid !== "string" || typeof message2.parent_message_uuid !== "string")
+      return messages;
+    byId.set(message2.uuid, message2);
+    const at = isoTime2(message2.created_at) ?? "";
+    if (!newest || at >= newestAt) {
+      newest = message2;
+      newestAt = at;
+    }
+  }
+  if (!newest)
+    return messages;
+  const chain = [];
+  const seen = new Set;
+  for (let at = newest;at; at = byId.get(at.parent_message_uuid)) {
+    if (seen.has(at.uuid))
+      return messages;
+    seen.add(at.uuid);
+    chain.push(at);
+  }
+  return chain.reverse();
+}
+function parseClaudeConversation(record8) {
+  if (!isRecord11(record8))
+    return { kind: "unreadable" };
+  const messages = record8.chat_messages;
+  if (messages !== undefined && messages !== null && !Array.isArray(messages))
+    return { kind: "unsupported" };
+  const turns2 = [];
+  let unsupported = 0;
+  for (const message2 of visibleThread2(Array.isArray(messages) ? messages : [])) {
+    if (!isRecord11(message2) || message2.sender !== "human" && message2.sender !== "assistant") {
+      unsupported += 1;
+      continue;
+    }
+    const blocks = blocksText(message2.content);
+    const words2 = blocks.text ?? (typeof message2.text === "string" ? message2.text : undefined);
+    if (words2 === undefined && (blocks.unsupported || !Array.isArray(message2.content)))
+      unsupported += 1;
+    else if (blocks.unsupported)
+      unsupported += 1;
+    const text4 = [words2 ?? "", ...attachmentLines(message2)].filter((part) => part.trim() !== "").join(`
+`);
+    turns2.push({ speaker: message2.sender === "human" ? "owner" : "assistant", text: text4 });
+  }
+  return conversationNote({
+    key: idText(record8.uuid),
+    title: record8.name,
+    createdAt: isoTime2(record8.created_at),
+    updatedAt: isoTime2(record8.updated_at),
+    turns: turns2,
+    unsupported
+  }, CLAUDE_ASSISTANT_LABEL);
+}
+var CLAUDE_ASSISTANT_LABEL = "Claude", UNSHOWN_BLOCKS;
+var init_claude = __esm(() => {
+  init_note();
+  init_conversation();
+  UNSHOWN_BLOCKS = new Set(["thinking", "redacted_thinking", "tool_use", "tool_result", "server_tool_use", "web_search_tool_result", "token_budget"]);
+});
+
+// src/workers/archive-import/ai-chats/connector.ts
+function createChatGptArchiveConnector(input) {
+  return createNoteArchiveConnector(input, CHATGPT_SPEC);
+}
+function createClaudeArchiveConnector(input) {
+  return createNoteArchiveConnector(input, CLAUDE_SPEC);
+}
+function registerAiChatArchiveConnectors() {
+  registerArchiveFormatConnector("chatgpt-export", createChatGptArchiveConnector);
+  registerArchiveFormatConnector("claude-export", createClaudeArchiveConnector);
+}
+var CHATGPT_CURSOR_PREFIX = "chatgpt1:", CLAUDE_CURSOR_PREFIX = "claude1:", listOnly = (root) => root === "array" ? [[]] : undefined, CHATGPT_SPEC, CLAUDE_SPEC;
+var init_connector12 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_chatgpt();
+  init_claude();
+  CHATGPT_SPEC = {
+    cursorPrefix: CHATGPT_CURSOR_PREFIX,
+    source: { kind: "json", itemPaths: listOnly, accepts: acceptsChatGptJson, parse: parseChatGptConversation }
+  };
+  CLAUDE_SPEC = {
+    cursorPrefix: CLAUDE_CURSOR_PREFIX,
+    source: { kind: "json", itemPaths: listOnly, accepts: acceptsClaudeJson, parse: parseClaudeConversation }
+  };
+});
+
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
@@ -194811,6 +196003,7 @@ function registerArchiveFormatConnectors() {
   registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
   registerEvernoteArchiveConnector();
+  registerAiChatArchiveConnectors();
 }
 var init_format_connectors = __esm(() => {
   init_connector7();
@@ -194819,6 +196012,7 @@ var init_format_connectors = __esm(() => {
   init_connector10();
   init_connector4();
   init_connector11();
+  init_connector12();
 });
 
 // src/workers/archive-import/source-targets.ts
@@ -195469,7 +196663,7 @@ var init_agent = __esm(() => {
 
 // src/workers/archive-import/removal.ts
 import { existsSync as existsSync102 } from "node:fs";
-import { join as join136 } from "node:path";
+import { join as join137 } from "node:path";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record8) => {
     if (record8.status === "removing" || record8.target)
@@ -195528,7 +196722,7 @@ async function runArchiveRemoval(options) {
   counts.extraction_ledgers_cleared += runForgetAccountScopeSteps({ source_id: ARCHIVE_IMPORTS_SOURCE_ID2, slot: "1", corpus_ids: corpusIds }, [accountScope], { env: lane.env }, { dryRun: false }).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
   const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  removeFileDurablySync(join136(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(lane.env))), "weights.json"));
+  removeFileDurablySync(join137(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(lane.env))), "weights.json"));
   counts.decisions_removed += withdrawn.items;
   counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
@@ -197895,9 +199089,9 @@ var init_source_scope_browser = __esm(() => {
 import { spawn as spawn14 } from "node:child_process";
 import { existsSync as existsSync104 } from "node:fs";
 import { homedir as homedir48 } from "node:os";
-import { join as join137 } from "node:path";
+import { join as join138 } from "node:path";
 function helperAppPathForHome(home2 = homedir48()) {
-  return join137(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+  return join138(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command2, args) => {
@@ -197915,7 +199109,7 @@ var init_mac_settings = __esm(() => {
 // src/workers/local-files/scope-browser.ts
 import { lstatSync as lstatSync52, readdirSync as readdirSync31, realpathSync as realpathSync28 } from "node:fs";
 import { homedir as homedir49 } from "node:os";
-import { join as join138 } from "node:path";
+import { join as join139 } from "node:path";
 function safeRealpath(path) {
   try {
     return realpathSync28.native(path);
@@ -197982,7 +199176,7 @@ function localFilesListing(options) {
     }
     const offered = (entry) => !entry.isSymbolicLink() && entry.isDirectory();
     return entries.filter(offered).map((entry) => {
-      const childReal = join138(realPath, entry.name);
+      const childReal = join139(realPath, entry.name);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
       return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
@@ -199609,7 +200803,7 @@ var init_judge_boost = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync5, lstatSync as lstatSync53, mkdirSync as mkdirSync65, readdirSync as readdirSync32, realpathSync as realpathSync29, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync43, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename20, dirname as dirname102, isAbsolute as isAbsolute39, join as join139, relative as relative17, resolve as resolve29, sep as sep21 } from "node:path";
+import { basename as basename21, dirname as dirname103, isAbsolute as isAbsolute39, join as join140, relative as relative17, resolve as resolve29, sep as sep21 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value2 === "" || MIGRATION_ON.includes(value2);
@@ -199636,9 +200830,9 @@ function candidates(sourceId, slot, env) {
     }
   }
   if (sourceId === TELEGRAM_SOURCE_ID) {
-    const legacyDir = dirname102(legacyTelegramSessionBase(env));
-    const folderDir = dirname102(accountSessionPath(account, env));
-    const own3 = basename20(legacyTelegramSessionBase(env));
+    const legacyDir = dirname103(legacyTelegramSessionBase(env));
+    const folderDir = dirname103(accountSessionPath(account, env));
+    const own3 = basename21(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames3(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -199649,7 +200843,7 @@ function candidates(sourceId, slot, env) {
         staged.add(legacyName);
     }
     for (const name of [...staged].sort()) {
-      found.push({ role: "raw", from: join139(legacyDir, name), to: join139(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
+      found.push({ role: "raw", from: join140(legacyDir, name), to: join140(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
     }
   }
   return found;
@@ -199697,23 +200891,23 @@ function relPath(ctx, path) {
 }
 function absPath(ctx, rel) {
   if (!rel.startsWith("@"))
-    return join139(ctx.root, ...rel.split("/"));
+    return join140(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
   const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
-  return join139(root, ...rel.slice(slash + 1).split("/"));
+  return join140(root, ...rel.slice(slash + 1).split("/"));
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
     renameSync21(from, to);
-    syncFolder(dirname102(to));
-    syncFolder(dirname102(from));
+    syncFolder(dirname103(to));
+    syncFolder(dirname103(from));
     return;
   }
   (__accountMigrationTestHooks.link ?? linkSync5)(from, to);
-  syncFolder(dirname102(to));
+  syncFolder(dirname103(to));
   unlinkSync4(from);
 }
 function errorCode2(error2) {
@@ -199752,22 +200946,22 @@ function nearRealPath(path) {
   const rest = [];
   let near = resolve29(path);
   for (;; ) {
-    rest.unshift(basename20(near));
-    const up = dirname102(near);
+    rest.unshift(basename21(near));
+    const up = dirname103(near);
     if (up === near)
       return resolve29(path);
     near = up;
     try {
-      return join139(realpathSync29(near), ...rest);
+      return join140(realpathSync29(near), ...rest);
     } catch {}
   }
 }
 function destinationIsOurs(ctx, destination) {
-  const parent = dirname102(destination);
+  const parent = dirname103(destination);
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
-  return nearRealPath(parent) === join139(nearRealPath(at.root), at.below);
+  return nearRealPath(parent) === join140(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
   let near = resolve29(path);
@@ -199776,7 +200970,7 @@ function nearestExisting(path) {
       statSync43(near);
       return near;
     } catch {
-      const up = dirname102(near);
+      const up = dirname103(near);
       if (up === near)
         return near;
       near = up;
@@ -199820,7 +201014,7 @@ function inspect(ctx, sourceId, slot, entry) {
     const found = look(candidate.from);
     if (found.kind === "absent")
       continue;
-    const name = basename20(candidate.from);
+    const name = basename21(candidate.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
     if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
@@ -199838,7 +201032,7 @@ function inspect(ctx, sourceId, slot, entry) {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
   for (const { candidate, found } of present) {
-    const name = basename20(candidate.from);
+    const name = basename21(candidate.from);
     if (!destinationIsOurs(ctx, candidate.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
     const destination = look(candidate.to);
@@ -199887,7 +201081,7 @@ function checkDatabases(ctx, moves) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
-      return { busy: `${basename20(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename21(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
       checked.push({ file: move.to, result: "damaged" });
       continue;
@@ -199903,7 +201097,7 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
-      return { busy: `${basename20(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename21(move.from)} is in use by another program, so the account stays where it is for now.` };
     checked.push({ file: move.to, result });
   }
   return { checked };
@@ -199936,7 +201130,7 @@ function syncFolderChains(ctx, folders) {
     let current2 = realpathSync29(at.root);
     chain.add(current2);
     for (const part of at.below.split(sep21).filter(Boolean)) {
-      current2 = join139(current2, part);
+      current2 = join140(current2, part);
       chain.add(current2);
     }
   }
@@ -199950,13 +201144,13 @@ function makeFolders(ctx, moves) {
     const real = realpathSync29(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
-      const destination = dirname102(absPath(ctx, move.to));
+      const destination = dirname103(absPath(ctx, move.to));
       if (!destinationIsOurs(ctx, absPath(ctx, move.to)))
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current2 = real;
       for (const part of relative17(ctx.root, destination).split(sep21).filter(Boolean)) {
-        current2 = join139(current2, part);
+        current2 = join140(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
           continue;
@@ -199975,8 +201169,8 @@ function makeFolders(ctx, moves) {
 function syncMoveFolders(ctx, moves) {
   const folders = new Set;
   for (const move of moves) {
-    folders.add(dirname102(absPath(ctx, move.from)));
-    folders.add(dirname102(absPath(ctx, move.to)));
+    folders.add(dirname103(absPath(ctx, move.from)));
+    folders.add(dirname103(absPath(ctx, move.to)));
   }
   try {
     for (const folder of folders) {
@@ -199991,7 +201185,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname102(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep21}`); folder = dirname102(folder)) {
+    for (let folder = dirname103(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep21}`); folder = dirname103(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
@@ -200007,7 +201201,7 @@ function moveOne(ctx, move, direction) {
   const [from, to] = direction === "forward" ? [absPath(ctx, move.from), absPath(ctx, move.to)] : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
-  const name = basename20(move.from);
+  const name = basename21(move.from);
   if (source.kind === "absent") {
     if (target.kind !== "absent")
       return "there";
@@ -200018,7 +201212,7 @@ function moveOne(ctx, move, direction) {
       return "there";
     if (move.kind === "file" && source.kind === "file" && target.kind === "file" && source.dev === target.dev && source.ino === target.ino && (move.ino === "" || String(source.ino) === move.ino)) {
       try {
-        syncFolder(dirname102(to));
+        syncFolder(dirname103(to));
         unlinkSync4(from);
       } catch (error2) {
         throw new MoveFault("failed", "move_failed", `${name} could not be moved (${errorCode2(error2)}).`);
@@ -200056,13 +201250,13 @@ function verifyIdentity(ctx, moves) {
     if (found.kind === "absent" && isDisposable(move))
       continue;
     if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
-      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} is not there after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename21(move.from)} is not there after the move.`);
     }
     if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
-      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} is not the same file after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename21(move.from)} is not the same file after the move.`);
     }
     if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
-      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+      throw new MoveFault("failed", "verify_failed", `${basename21(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
     }
   }
 }
@@ -200070,12 +201264,12 @@ function verifyRestored(ctx, moves) {
   for (const move of moves) {
     const back = look(absPath(ctx, move.from));
     if (isPlanned(look(absPath(ctx, move.to)), move)) {
-      throw new MoveFault("failed", "move_failed", `${basename20(move.from)} is still in the account folder.`);
+      throw new MoveFault("failed", "move_failed", `${basename21(move.from)} is still in the account folder.`);
     }
     if (back.kind === "absent" && isDisposable(move))
       continue;
     if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
-      throw new MoveFault("failed", "move_failed", `${basename20(move.from)} is not back at its old place.`);
+      throw new MoveFault("failed", "move_failed", `${basename21(move.from)} is not back at its old place.`);
     }
   }
 }
@@ -200087,7 +201281,7 @@ function forward(ctx, sourceId, slot, migration) {
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, "forward") === "lost") {
-      throw new MoveFault("failed", "move_failed", `${basename20(move.from)} is in neither place.`);
+      throw new MoveFault("failed", "move_failed", `${basename21(move.from)} is in neither place.`);
     }
     checkpoint(`rename:${index}`);
   });
@@ -200098,9 +201292,9 @@ function forward(ctx, sourceId, slot, migration) {
       continue;
     const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     if (reads === "busy")
-      throw new MoveFault("skipped", "busy", `${basename20(move.from)} is in use by another program, so the account stays where it is for now.`);
+      throw new MoveFault("skipped", "busy", `${basename21(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== "reads") {
-      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} does not open after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename21(move.from)} does not open after the move.`);
     }
   }
   checkpoint("verified");
@@ -200128,7 +201322,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   }
   checkpoint("revert");
   try {
-    syncFolderChains(ctx, moves.map((move) => dirname102(absPath(ctx, move.from))));
+    syncFolderChains(ctx, moves.map((move) => dirname103(absPath(ctx, move.from))));
   } catch (error2) {
     if (error2 instanceof AccountMigrationKilled)
       throw error2;
@@ -200138,7 +201332,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   const lost = [];
   back.forEach((move, index) => {
     if (moveOne(ctx, move, "back") === "lost")
-      lost.push(basename20(move.from));
+      lost.push(basename21(move.from));
     checkpoint(`unrename:${index}`);
   });
   for (const move of moves) {
@@ -200241,12 +201435,12 @@ function foldLogs(ctx, moves) {
       const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
       if (logs.every((log) => log.size === 0))
         continue;
-      return notFolded(`${basename20(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+      return notFolded(`${basename21(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
     if (result === "busy") {
-      return { kind: "skip", reason: "busy", detail: `${basename20(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+      return { kind: "skip", reason: "busy", detail: `${basename21(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
     }
-    return notFolded(`${basename20(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    return notFolded(`${basename21(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return;
 }
@@ -200269,7 +201463,7 @@ function holdCaptureLocks(ctx, sourceId, slot) {
       continue;
     let lock;
     try {
-      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join139(dir, name));
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join140(dir, name));
     } catch {
       return giveBack(skip("unreadable", `Its capture lock (${name}) cannot be taken.`));
     }
@@ -200287,7 +201481,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve29(dirname102(candidate.from));
+      const folder = resolve29(dirname103(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -200299,7 +201493,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
       continue;
     try {
       rmdirSync8(folder);
-      syncFolder(dirname102(folder));
+      syncFolder(dirname103(folder));
     } catch {}
   }
 }
@@ -201462,12 +202656,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname103, join as join140 } from "node:path";
+import { dirname as dirname104, join as join141 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join140(dirname103(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join141(dirname104(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -202234,7 +203428,7 @@ var init_installed_tier_classification = __esm(() => {
 // src/workers/classification/sniffer-resolver.ts
 import { createHash as createHash106 } from "node:crypto";
 import { mkdirSync as mkdirSync66, readFileSync as readFileSync93 } from "node:fs";
-import { dirname as dirname104 } from "node:path";
+import { dirname as dirname105 } from "node:path";
 
 class SnifferCallBudget {
   maxCallsPerDay;
@@ -202271,7 +203465,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync66(dirname104(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync66(dirname105(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -224801,7 +225995,7 @@ var init_setup_backend = __esm(() => {
 
 // src/core/consult-settings-writer.ts
 import { chmodSync as chmodSync40, lstatSync as lstatSync55, mkdirSync as mkdirSync67, statSync as statSync45 } from "node:fs";
-import { dirname as dirname105, isAbsolute as isAbsolute40 } from "node:path";
+import { dirname as dirname106, isAbsolute as isAbsolute40 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -224829,7 +226023,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname105(path));
+  const custody = ensureSettingsDirectory(dirname106(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -224886,7 +226080,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync45(dirname105(directory));
+      statSync45(dirname106(directory));
     } catch {
       return "home_missing";
     }
@@ -224929,7 +226123,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
-import { delimiter as delimiter9, dirname as dirname106 } from "node:path";
+import { delimiter as delimiter9, dirname as dirname107 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -224978,7 +226172,7 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname106(system)) ? system : undefined;
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname107(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
@@ -226339,7 +227533,7 @@ __export(exports_server2, {
 import { release as release2, totalmem as totalmem4 } from "node:os";
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync109, readFileSync as readFileSync96 } from "node:fs";
-import { dirname as dirname107, isAbsolute as isAbsolute41, join as join141 } from "node:path";
+import { dirname as dirname108, isAbsolute as isAbsolute41, join as join142 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -227663,6 +228857,7 @@ async function main() {
   const stopMessagingCapture = async (source) => {
     await captureOwnership.stopForUnpair(source);
   };
+  const unlinkWhatsAppDevice = (stateDir) => unlinkHelper(whatsappBridgePathForPackage(packageRoot, { env: process.env }), { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir });
   const fileSourceScopeAuthority = connectedHandleRegistryPath ? new FileSourceScopeAuthority({
     registryPath: connectedHandleRegistryPath,
     mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE
@@ -228550,18 +229745,24 @@ ${key2}`;
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
   const peopleIndex = openPeopleIndexOrUndefined();
-  const refreshPeople = () => {
-    if (!peopleIndex)
+  const peopleRefresher = peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
+  const refreshPeople = (force = false) => {
+    if (!peopleRefresher)
       return;
     try {
-      refreshPeopleIndex(peopleIndex, connectorStores);
+      if (force)
+        peopleRefresher.refresh();
+      else
+        peopleRefresher.refreshIfChanged();
     } catch (error2) {
       console.warn(`[olympus] people index refresh failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
     }
   };
-  const peopleFirstRefresh = setTimeout(refreshPeople, PEOPLE_INDEX_FIRST_REFRESH_MS);
+  const peopleFirstRefresh = setTimeout(() => refreshPeople(true), PEOPLE_INDEX_FIRST_REFRESH_MS);
   peopleFirstRefresh.unref?.();
-  const peopleRefresh = setInterval(refreshPeople, PEOPLE_INDEX_REFRESH_MS);
+  const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
+  peopleCheck.unref?.();
+  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
   peopleRefresh.unref?.();
   const configuredFileExtractionCorpora = parseFileExtractionCorporaEnv(process.env.OLYMPUS_FILE_EXTRACTION_CORPORA_JSON);
   const dropboxExtractionScopes = dropboxPolicyFullExtractionScopeKeys(dropboxIngestionPolicy);
@@ -229891,9 +231092,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sourceScheduler = olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
     config: olympusConfig,
     sources: schedulerSources,
+    ...!(sourceIndexStatus && sourceIngestionLedger) ? {
+      afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
+      afterTick: () => refreshPeople()
+    } : {},
     ...sourceIndexStatus && sourceIngestionLedger ? {
       afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
       afterTick: async (schedulerStatus) => {
+        refreshPeople();
         const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
         sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
           schedulerStatus,
@@ -230199,7 +231405,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const selfUpdater = createSelfUpdater({
     platform: process.platform,
     runningVersion: runningOlympusVersion(),
-    stateDir: join141(engineServicePaths().logDir, "updates"),
+    stateDir: join142(engineServicePaths().logDir, "updates"),
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available()
   });
@@ -230369,6 +231575,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return dashboardPanelTools.call(name, args, context3);
           }
         },
+        ...peopleIndex ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) } : {},
         ...sourceAnswerLanes ? {
           privateAnswers: {
             destinations: () => localPrivateAnswers?.destinations() ?? { computer: "not_set_up", venice: "not_set_up" },
@@ -230393,6 +231600,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           saveStandard: (update) => dashboardConsult.saveStandard(update)
         },
         stopMessagingCapture,
+        unlinkWhatsAppDevice,
         withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
         captureRuntime: dashboardCaptureRuntime,
         workerRestart: {
@@ -231325,7 +232533,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join141(dirname107(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join142(dirname108(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
@@ -232039,8 +233247,9 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, PEOPLE_INDEX_FIRST_REFRESH_MS = 60000, PEOPLE_INDEX_REFRESH_MS, workerLaunch, dataOwnerLock;
+var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, PEOPLE_INDEX_FIRST_REFRESH_MS = 60000, PEOPLE_INDEX_REFRESH_MS, PEOPLE_INDEX_CHECK_MS = 60000, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
+  init_dashboard_people();
   init_people_index();
   init_judge_setup();
   init_tier_owner_items();
@@ -232075,6 +233284,7 @@ var init_server5 = __esm(async () => {
   init_package_root();
   init_messaging_capture();
   init_messaging_pairing();
+  init_dashboard_messaging_service();
   init_native_worker_service();
   init_model_setup();
   init_connect();
@@ -233039,7 +234249,7 @@ import { createHash as createHash77 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync80, lstatSync as lstatSync41, mkdirSync as mkdirSync48, readFileSync as readFileSync67 } from "node:fs";
 import { homedir as homedir35, platform as osPlatform4 } from "node:os";
-import { dirname as dirname82, isAbsolute as isAbsolute34, join as join111 } from "node:path";
+import { dirname as dirname82, isAbsolute as isAbsolute34, join as join112 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
@@ -233062,7 +234272,7 @@ import {
   writeFileSync as writeFileSync18
 } from "node:fs";
 import { tmpdir as tmpdir14 } from "node:os";
-import { basename as basename18, isAbsolute as isAbsolute33, join as join109 } from "node:path";
+import { basename as basename18, isAbsolute as isAbsolute33, join as join110 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
@@ -233073,8 +234283,8 @@ function prepareWorkerUpgradeArtifact(options) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
   const artifactSha256 = createHash76("sha256").update(artifactBytes).digest("hex");
-  const snapshotDir = mkdtempSync5(join109(tmpdir14(), ".olympus-artifact-snapshot-"));
-  const artifactPath = join109(snapshotDir, "artifact.tgz");
+  const snapshotDir = mkdtempSync5(join110(tmpdir14(), ".olympus-artifact-snapshot-"));
+  const artifactPath = join110(snapshotDir, "artifact.tgz");
   const descriptor = openSync29(artifactPath, "wx", 384);
   try {
     writeFileSync18(descriptor, artifactBytes);
@@ -233085,13 +234295,13 @@ function prepareWorkerUpgradeArtifact(options) {
   syncDirectorySync(snapshotDir);
   try {
     inspectArchive(artifactPath);
-    const versionsDir = join109(options.homeDir, ".local", "share", "olympus", "versions");
-    const workingDirectory = join109(versionsDir, artifactSha256);
+    const versionsDir = join110(options.homeDir, ".local", "share", "olympus", "versions");
+    const workingDirectory = join110(versionsDir, artifactSha256);
     assertVersionParentSafety(options.homeDir, workingDirectory);
     const stagingParent = options.dryRun ? tmpdir14() : versionsDir;
     if (!options.dryRun)
       ensurePrivateDirectoryTreeSync(options.homeDir, versionsDir);
-    const staging = mkdtempSync5(join109(stagingParent, ".olympus-upgrade-"));
+    const staging = mkdtempSync5(join110(stagingParent, ".olympus-upgrade-"));
     try {
       extractArchive(artifactPath, staging);
       assertRegularTree(staging);
@@ -233103,7 +234313,7 @@ function prepareWorkerUpgradeArtifact(options) {
       }
       if (options.dryRun)
         return { artifactSha256, packageVersion, workingDirectory };
-      const metadataPath = join109(staging, ".olympus-artifact-v1.json");
+      const metadataPath = join110(staging, ".olympus-artifact-v1.json");
       writePrivateFileAtomicSync(metadataPath, `${JSON.stringify({
         schema_version: 1,
         artifact_sha256: artifactSha256,
@@ -233228,7 +234438,7 @@ function runTar(args, action) {
 }
 function assertRegularTree(root, budget = { bytes: 0 }) {
   for (const entry of readdirSync25(root, { withFileTypes: true })) {
-    const path = join109(root, entry.name);
+    const path = join110(root, entry.name);
     const stats = lstatSync39(path);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new OperationError("invalid_params", `Upgrade artifact extracted an unsafe entry: ${entry.name}`);
@@ -233244,9 +234454,9 @@ function assertRegularTree(root, budget = { bytes: 0 }) {
   }
 }
 function validateExtractedPackage(root, bunBin, executePreflight) {
-  const packageJson = readJsonRecord(join109(root, "package.json"), "package.json");
-  const manifest2 = readJsonRecord(join109(root, "openclaw.plugin.json"), "openclaw.plugin.json");
-  const cliPath = join109(root, "dist", "cli.js");
+  const packageJson = readJsonRecord(join110(root, "package.json"), "package.json");
+  const manifest2 = readJsonRecord(join110(root, "openclaw.plugin.json"), "openclaw.plugin.json");
+  const cliPath = join110(root, "dist", "cli.js");
   assertRegularFile(cliPath, "dist/cli.js");
   const version = typeof packageJson.version === "string" ? packageJson.version.trim() : "";
   if (packageJson.name !== "olympus" || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
@@ -233291,7 +234501,7 @@ function assertRegularFile(path, label) {
 }
 function makeVersionTreeReadOnly(root) {
   for (const entry of readdirSync25(root, { withFileTypes: true })) {
-    const path = join109(root, entry.name);
+    const path = join110(root, entry.name);
     if (entry.isDirectory()) {
       makeVersionTreeReadOnly(path);
       chmodSync32(path, 365);
@@ -233307,7 +234517,7 @@ function makeVersionTreeReadOnly(root) {
 }
 function syncVersionTree(root) {
   for (const entry of readdirSync25(root, { withFileTypes: true })) {
-    const path = join109(root, entry.name);
+    const path = join110(root, entry.name);
     if (entry.isDirectory()) {
       syncVersionTree(path);
       continue;
@@ -233330,7 +234540,7 @@ function hashVersionTree(root, relativeRoot, digest4) {
   const entries = readdirSync25(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
-    const path = join109(root, entry.name);
+    const path = join110(root, entry.name);
     const stats = lstatSync39(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
       digest4.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
@@ -233349,7 +234559,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync78(workingDirectory)) {
-      replacedPath = join109(versionsDir, `.olympus-replaced-${basename18(workingDirectory)}-${randomUUID27()}`);
+      replacedPath = join110(versionsDir, `.olympus-replaced-${basename18(workingDirectory)}-${randomUUID27()}`);
       renameSync16(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
@@ -233382,7 +234592,7 @@ function removeStagingTree(root) {
   chmodSync32(root, 448);
   for (const entry of readdirSync25(root, { withFileTypes: true })) {
     if (entry.isDirectory())
-      removeStagingTree(join109(root, entry.name));
+      removeStagingTree(join110(root, entry.name));
   }
   rmSync32(root, { recursive: true, force: true });
 }
@@ -233393,10 +234603,10 @@ init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID28 } from "node:crypto";
 import { existsSync as existsSync79, linkSync as linkSync4, lstatSync as lstatSync40, readFileSync as readFileSync66 } from "node:fs";
-import { join as join110 } from "node:path";
+import { join as join111 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
-  const dir = join110(homeDir, ".local", "state", "olympus", "lifecycle");
-  const lockPath = join110(dir, "mutation-v1.lock");
+  const dir = join111(homeDir, ".local", "state", "olympus", "lifecycle");
+  const lockPath = join111(dir, "mutation-v1.lock");
   ensurePrivateDirectoryTreeSync(homeDir, dir);
   const ownerProcessInstance = processInstanceIdentity(process.pid);
   if (!ownerProcessInstance) {
@@ -233411,7 +234621,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       action,
       started_at: now().toISOString()
     };
-    const candidate = join110(dir, `mutation-owner-${owner2.nonce}.tmp`);
+    const candidate = join111(dir, `mutation-owner-${owner2.nonce}.tmp`);
     writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner2, null, 2)}
 `);
     try {
@@ -233427,14 +234637,14 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       if (!isAlreadyExists(error))
         throw error;
       let activeOwner;
-      withFileLeaseSync(join110(dir, "mutation-v1-recovery"), () => {
+      withFileLeaseSync(join111(dir, "mutation-v1-recovery"), () => {
         const current2 = readLifecycleMutationOwner(lockPath);
         if (recordedProcessOwnerIsAlive(current2.pid, current2.process_instance)) {
           activeOwner = current2;
           return;
         }
         removeFileDurablySync(lockPath);
-        const staleCandidate = join110(dir, `mutation-owner-${current2.nonce}.tmp`);
+        const staleCandidate = join111(dir, `mutation-owner-${current2.nonce}.tmp`);
         if (existsSync79(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
@@ -233905,8 +235115,8 @@ function readTransaction(options) {
     throw new OperationError("config_error", "The Olympus lifecycle transaction does not match this installation; refusing recovery.");
   }
   if (transaction.action === "upgrade") {
-    const expectedVersionsDir = join111(homeDir, ".local", "share", "olympus", "versions");
-    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join111(expectedVersionsDir, transaction.artifact_sha256)) {
+    const expectedVersionsDir = join112(homeDir, ".local", "share", "olympus", "versions");
+    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join112(expectedVersionsDir, transaction.artifact_sha256)) {
       throw new OperationError("config_error", "The Olympus upgrade transaction is not bound to valid managed artifact bytes.");
     }
   }
@@ -233962,13 +235172,13 @@ function isRecordedManagedPath(value2) {
   return typeof value2 === "string" && value2.trim() !== "" && isAbsolute34(value2) && !/[\0\r\n]/.test(value2);
 }
 function transactionPaths(homeDir) {
-  const dir = join111(homeDir, ".local", "state", "olympus", "lifecycle");
+  const dir = join112(homeDir, ".local", "state", "olympus", "lifecycle");
   return {
     dir,
-    transaction: join111(dir, "transaction-v1.json"),
-    unitBackup: join111(dir, "worker-unit.backup"),
-    envBackup: join111(dir, "worker-env.backup"),
-    launcherBackup: join111(dir, "cli-launcher.backup")
+    transaction: join112(dir, "transaction-v1.json"),
+    unitBackup: join112(dir, "worker-unit.backup"),
+    envBackup: join112(dir, "worker-env.backup"),
+    launcherBackup: join112(dir, "cli-launcher.backup")
   };
 }
 function assertTransactionParentSafety(homeDir, paths) {
@@ -234637,7 +235847,7 @@ import { spawn as spawn9 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
 import { existsSync as existsSync88, readFileSync as readFileSync72 } from "node:fs";
 import { homedir as homedir39 } from "node:os";
-import { dirname as dirname89, join as join116 } from "node:path";
+import { dirname as dirname89, join as join117 } from "node:path";
 
 // src/core/engine-helper.ts
 init_engine_service();
@@ -234646,7 +235856,7 @@ init_package_root();
 import { spawnSync as spawnSync19 } from "node:child_process";
 import { existsSync as existsSync87, lstatSync as lstatSync43, mkdirSync as mkdirSync52, mkdtempSync as mkdtempSync6, renameSync as renameSync18, rmSync as rmSync33 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
-import { join as join115, resolve as resolve22 } from "node:path";
+import { join as join116, resolve as resolve22 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
 var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command2, args, env) {
@@ -234676,14 +235886,14 @@ function installEngineHelper(options = {}) {
   const target = paths.helperAppPath;
   mkdirSync52(paths.appSupportDir, { recursive: true, mode: 448 });
   recoverInterruptedHelperSwap(paths, options.helperRecovery);
-  const staging = mkdtempSync6(join115(paths.appSupportDir, `${ENGINE_HELPER_STAGING_PREFIX}${process.pid}-`));
-  const aside = join115(staging, ENGINE_HELPER_ASIDE_NAME);
+  const staging = mkdtempSync6(join116(paths.appSupportDir, `${ENGINE_HELPER_STAGING_PREFIX}${process.pid}-`));
+  const aside = join116(staging, ENGINE_HELPER_ASIDE_NAME);
   try {
     let built = false;
     let candidate;
     if (options.from !== undefined) {
       candidate = resolve22(options.from);
-      if (!existsSync87(join115(candidate, "Contents", "Info.plist"))) {
+      if (!existsSync87(join116(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
     } else {
@@ -234692,8 +235902,8 @@ function installEngineHelper(options = {}) {
         throw new OperationError("config_error", "Building the Olympus helper app needs a Developer ID signing identity.", `Set ${MACOS_SIGNING_IDENTITY_ENV}, pass --identity, or pass --from <signed app> to install one that is already built.`);
       }
       const root = options.packageRoot ?? olympusPackageRoot();
-      const script2 = join115(root, "scripts", "build-macos-helper.sh");
-      if (!existsSync87(script2) || !existsSync87(join115(root, "native", "macos-engine-host", "main.c"))) {
+      const script2 = join116(root, "scripts", "build-macos-helper.sh");
+      if (!existsSync87(script2) || !existsSync87(join116(root, "native", "macos-engine-host", "main.c"))) {
         throw new OperationError("config_error", "This install does not include the helper app source.", "Pass --from <signed app>, or build from an Olympus source checkout.");
       }
       const result = run(options.exec, script2, ["--out", staging], { ...process.env, ...env, [MACOS_SIGNING_IDENTITY_ENV]: identity2 });
@@ -234701,7 +235911,7 @@ function installEngineHelper(options = {}) {
         throw new OperationError("config_error", `Building the Olympus helper app failed: ${(result.stderr || result.stdout).trim().split(`
 `).slice(-3).join(" ")}`);
       }
-      candidate = join115(staging, ENGINE_HELPER_APP_NAME);
+      candidate = join116(staging, ENGINE_HELPER_APP_NAME);
       built = true;
     }
     const verify = run(options.exec, "/usr/bin/codesign", ["--verify", "--strict", "--deep", candidate]);
@@ -234723,7 +235933,7 @@ function installEngineHelper(options = {}) {
     if (expectedTeam && details.teamId !== expectedTeam) {
       throw new OperationError("config_error", `The helper app is signed by team ${details.teamId ?? "none"}, not the expected team.`);
     }
-    const executable = join115(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
+    const executable = join116(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
     if (!existsSync87(executable)) {
       throw new OperationError("config_error", `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
     }
@@ -234731,7 +235941,7 @@ function installEngineHelper(options = {}) {
     if (replaced && lstatSync43(target).isSymbolicLink()) {
       throw new OperationError("config_error", `${target} is a link; remove it and run this again.`);
     }
-    const copy = join115(staging, "copy.app");
+    const copy = join116(staging, "copy.app");
     const ditto = run(options.exec, "/usr/bin/ditto", [candidate, copy]);
     if (ditto.status !== 0)
       throw new OperationError("config_error", `Could not copy the helper app: ${ditto.stderr.trim()}`);
@@ -234899,7 +236109,7 @@ async function runEngineCommand(args, deps = {}) {
     const handlerApi = openHandlerFor(deps);
     if (handlerApi)
       beginLinuxOpenHandlerMutation(service);
-    let handler = handlerApi?.install({ ...openHandlerOptions(deps, service), program: { runtimePath: join116(dirname89(result.app_dir), "runtime/bun"), entryPath: join116(result.app_dir, "dist/cli.js"), workingDirectory: result.app_dir } });
+    let handler = handlerApi?.install({ ...openHandlerOptions(deps, service), program: { runtimePath: join117(dirname89(result.app_dir), "runtime/bun"), entryPath: join117(result.app_dir, "dist/cli.js"), workingDirectory: result.app_dir } });
     if (handler?.action === "installed") {
       try {
         syncLinuxOpenHandlerReceipt(service, true);
@@ -237906,8 +239116,17 @@ async function runDashboardCommand(dependencies = {}) {
       throw new OperationError("email_unreachable", "Worker did not provide an owner-proven desktop route.");
     desktopUnavailable = true;
   }
-  const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint2() });
-  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  let socketPath;
+  let socketError;
+  try {
+    socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  } catch (error2) {
+    socketError = error2;
+  }
+  const mintBase = socketPath ? new URL(`http://127.0.0.1:${new URL(base).port || "80"}`).origin : base;
+  const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint2() });
+  if (socketError !== undefined)
+    throw socketError;
   const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || "80"), socketPath, ...process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {} }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {

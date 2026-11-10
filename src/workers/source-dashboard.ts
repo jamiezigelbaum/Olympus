@@ -3307,7 +3307,9 @@ function dashboardUnpairAction(sourceId: V04PublicSourceId, label: string): Dash
     label: `Unpair ${label}`,
     confirmation: `Stop new ${label} reads and delete this computer's ${label} pairing session.`
       + ` Messages already indexed stay, and so does everything already captured.`
-      + ` This is local only: Olympus does not remove the linked device at ${label} — do that in ${providerSurface.label}.`
+      + (telegram
+        ? ` This is local only: Olympus does not remove the linked device at ${label} — do that in ${providerSurface.label}.`
+        : ` Olympus also removes itself from your phone's linked devices; if WhatsApp can't be reached, remove it in ${providerSurface.label}.`)
       + ` ${capture}`,
     provider_unlink_url: providerSurface.url,
     provider_unlink_label: providerSurface.label,

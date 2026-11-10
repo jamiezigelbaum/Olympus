@@ -631,11 +631,14 @@ describe('Delete of a folder messaging account', () => {
     put(join(state, 'spool', '0001.jsonl'));
     put(join(state, 'session.db'));
     put(join(state, 'media', 'audio', 'voice.ogg'));
+    // Pairing history kept for capture (#852) holds history download keys.
+    put(join(state, 'history-pending', 'kept.pb'));
     const store = put(join(state, 'connector-store.db'), '');
     const result = deleteOlympusData({ sourceId: 'whatsapp.messages', homeDir: f.home, env: f.env });
-    expect(result.removed).toEqual(expect.arrayContaining([join(state, 'spool'), join(state, 'session.db'), join(state, 'media'), store]));
+    expect(result.removed).toEqual(expect.arrayContaining([join(state, 'spool'), join(state, 'session.db'), join(state, 'media'), join(state, 'history-pending'), store]));
     expect(existsSync(join(state, 'spool'))).toBe(false);
     expect(existsSync(join(state, 'session.db'))).toBe(false);
+    expect(existsSync(join(state, 'history-pending'))).toBe(false);
   });
 
   test('a legacy account whose raw state an override points into another account\'s folder protects that folder, and is refused itself', () => {
