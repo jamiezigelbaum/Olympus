@@ -3014,7 +3014,11 @@ export class LocalConnectorStore {
     this.now = options.now ?? (() => new Date());
     this.controlPath = options.controlPath ?? controlPathHeadroom;
     this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
-    if (options.tierLedger === null || options.readOnly === true) {
+    // A read-only store judges by no ledger of its own, except in the engine
+    // split's front, where every store is read-only and must still judge
+    // visibility and the release check by its ledger: it reads that ledger
+    // read-only (tierLedger()).
+    if (options.tierLedger === null || (options.readOnly === true && !writableStoreOpensForbidden())) {
       this.tierLedgerDisabled = true;
     } else if (options.tierLedger) {
       this.tierLedgerHandle = options.tierLedger;
@@ -3125,7 +3129,10 @@ export class LocalConnectorStore {
   tierLedger(): TierLedger | undefined {
     if (this.tierLedgerDisabled === true) return undefined;
     if (!this.tierLedgerHandle) {
-      this.tierLedgerHandle = new TierLedger({ dbPath: tierLedgerPathForStore(this.dbPath), now: this.now });
+      const path = tierLedgerPathForStore(this.dbPath);
+      // The front's read-only store: the ledger the background writes, when it exists.
+      if (this.readOnly && (path === ':memory:' || !existsSync(path))) return undefined;
+      this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
       this.tierLedgerOwned = true;
     }
     return this.tierLedgerHandle;
