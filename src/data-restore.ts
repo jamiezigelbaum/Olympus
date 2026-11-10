@@ -17,6 +17,7 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync,
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  EXPORT_MEDIA_DIR,
   exportDurabilityBoundary,
   lifecycleAccountFiles,
   lifecycleEnv,
@@ -39,6 +40,7 @@ import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from './core/sqlite-store.ts';
+import { mediaCacheDir, retainMediaCacheFile } from './core/media-cache.ts';
 import {
   ACCOUNT_BOUND_SOURCE_IDS,
   readSourceAccountBindings,
@@ -61,7 +63,7 @@ export interface DataRestorePlanEntry {
   /** Where this install keeps it. */
   to: string;
   sourceId: string;
-  kind: 'store' | 'judgments' | 'owner_settings';
+  kind: 'store' | 'judgments' | 'owner_settings' | 'media';
   /** An owner settings file this computer already has: kept beside the restored one. */
   keptAs?: string;
   /** Merged into the file at `to` rather than copied over it (the mail picker's "always Private" senders). */
@@ -156,6 +158,16 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         if (!to) throw new OperationError('invalid_params', `The backup names an unknown file beside a store: ${from}.`);
         if (artifact.sidecar === 'tier_ledger') sawJudgments = true;
         plan.push({ from, to, sourceId: artifact.sourceId, kind: 'judgments' });
+        break;
+      }
+      case 'media': {
+        // A prepared picture, named by its digest: it goes into this install's
+        // media cache under the same name, and the restored rows are pointed at it.
+        const name = from.split('/').pop() ?? '';
+        if (from !== `${EXPORT_MEDIA_DIR}/${name}` || name !== `${artifact.sha256}.jpg`) {
+          throw new OperationError('invalid_params', `The backup names a picture that is not where a backup keeps one: ${from}.`);
+        }
+        plan.push({ from, to: join(mediaCacheDir(env), name), sourceId: artifact.sourceId, kind: 'media' });
         break;
       }
       case 'legacy_store':
@@ -266,7 +278,17 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
     const ledgers = plan
       .filter((entry) => entry.kind === 'judgments' && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX))
       .map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join(input, entry.from)) }));
+    // The pictures go into this install's media cache before the stores that
+    // point at them. The cache is content-addressed, so a picture this
+    // computer already holds under its digest is the same bytes and stays.
+    const pictures = new Map<string, string>();
     for (const entry of plan) {
+      if (entry.kind !== 'media') continue;
+      if (!existsSync(entry.to)) copyPrivate(join(input, entry.from), entry.to);
+      pictures.set(entry.to.split('/').pop()!.slice(0, -'.jpg'.length), entry.to);
+    }
+    for (const entry of plan) {
+      if (entry.kind === 'media') continue;
       if (entry.merge === 'mail_always_private') {
         const carried = JSON.parse(readFileSync(join(input, entry.from), 'utf8')) as { always_private_senders?: unknown };
         if (carryMailOwnerRules(entry.to, carried.always_private_senders) === 'kept_approval') {
@@ -275,10 +297,18 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         continue;
       }
       if (entry.keptAs) copyPrivate(entry.to, entry.keptAs);
+      let held: string[] = [];
       const prepare = entry.kind === 'store'
-        ? (staged: string) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to)
+        ? (staged: string) => {
+            repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to);
+            held = repointMediaPaths(staged, (sha256) => pictures.get(sha256));
+          }
         : undefined;
       copyPrivate(join(input, entry.from), entry.to, prepare);
+      // The restored store holds its pictures by its path until it is first
+      // opened, which holds them again under its own name: until then the
+      // cache's sweep sees a holder and keeps them.
+      for (const sha256 of held) retainMediaCacheFile(pictures.get(sha256)!, sha256, entry.to);
     }
     for (const sourceId of writeRestoredIdentities(identities, bindingsPath, env)) {
       notes.push(`${sourceId}'s history came to name another account while restoring, so its account is asked again at sign-in.`);
@@ -451,6 +481,40 @@ function storeIsTierBound(path: string): boolean {
     if (!table) return false;
     const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
     return Boolean(row?.cursor);
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Point a restored store's chunks at their pictures in this install's media
+ * cache. A chunk records the absolute path its picture had on the computer
+ * that made the backup; every reader trusts only a cache file that exists, so
+ * without this the pictures would be in the backup and never seen. A picture
+ * the backup does not hold keeps its old path and embeds as text, as it would
+ * have there. Returns the digests now pointed at this install's cache.
+ */
+function repointMediaPaths(storePath: string, pictureFor: (sha256: string) => string | undefined): string[] {
+  const db = new Database(storePath, { readwrite: true, create: false });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const columns = (db.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
+    if (!columns.includes('media_path') || !columns.includes('media_sha256')) return [];
+    const releases = Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunk_media_releases'").get());
+    const digests = (db.query('SELECT DISTINCT media_sha256 FROM chunks WHERE media_sha256 IS NOT NULL AND media_path IS NOT NULL').all() as Array<{ media_sha256: string }>)
+      .map((row) => row.media_sha256);
+    const moved: string[] = [];
+    db.transaction(() => {
+      for (const sha256 of digests) {
+        const path = pictureFor(sha256);
+        if (!path) continue;
+        db.query('UPDATE chunks SET media_path = ? WHERE media_sha256 = ? AND media_path IS NOT NULL').run(path, sha256);
+        // A release queued on the old computer names the picture where it was there.
+        if (releases) db.query('UPDATE chunk_media_releases SET media_path = ? WHERE media_sha256 = ?').run(path, sha256);
+        moved.push(sha256);
+      }
+    })();
+    return moved;
   } finally {
     closeSqliteStore(db);
   }
