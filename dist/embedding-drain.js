@@ -7667,7 +7667,7 @@ function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
     throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
   }
 }
-var BUILT_IN_EMBEDDING_MODEL_ID, SecureAnalystPoolE2EEGateError;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_PRESETS, SecureAnalystPoolE2EEGateError;
 var init_sovereignty = __esm(() => {
   init_owner_config_read();
   init_owner_config_read();
@@ -7683,6 +7683,7 @@ var init_sovereignty = __esm(() => {
   init_zkapi_consult_settings();
   init_source_model_policy();
   BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
+  SOVEREIGNTY_PRESETS = ["local-first", "local-only", "private-cloud-only", "no-sensitive"];
   SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
     profileId;
     modelId;
@@ -70769,6 +70770,41 @@ init_source_failure();
 init_google_own_app();
 init_sovereignty();
 init_first_run_privacy();
+
+// src/core/settings-proposal.ts
+init_sovereignty();
+var SETTINGS_PROPOSAL_MODEL_PROVIDERS = ["local", "venice", "zkapi"];
+var SETTINGS_PROPOSAL_SCHEMA = {
+  description: "Write a JSON object with any of these keys, then run olympus settings propose <file>. The owner applies it with one click on the dashboard Settings page. Run olympus settings show for the current values and the allowed model choices.",
+  keys: {
+    private_answer_mode: { type: "string", allowed: [...SOVEREIGNTY_PRESETS] },
+    computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only, while the choice is still open. Propose it on its own." },
+    privacy_judge: {
+      type: "object",
+      fields: {
+        choice: { type: "string", allowed: ["local", "venice"] },
+        spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
+        note: { type: "note", note: "Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately." }
+      }
+    },
+    models: {
+      type: "object",
+      fields: Object.fromEntries(SETTINGS_PROPOSAL_MODEL_PROVIDERS.map((provider) => [provider, {
+        type: "string",
+        note: `One of models.${provider}.options from olympus settings show.`
+      }]))
+    }
+  },
+  example: {
+    private_answer_mode: "local-first",
+    models: { venice: "strongest" }
+  }
+};
+
+// src/workers/settings-proposal-holder.ts
+init_privacy_language();
+
+// src/workers/email-source/index.ts
 init_privacy_language();
 
 // src/workers/email-source/dashboard-messaging-service.ts
@@ -71512,6 +71548,13 @@ var SETTINGS_SECTIONS = [
   { id: "help", label: "Help" }
 ];
 var SETTINGS_CSS = `
+.propcard { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 24px; }
+.propcard .sect { margin-top: 0; }
+.proptable { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.proptable th, .proptable td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+.proptable thead th { border-top: 0; color: var(--t2); font-weight: 500; }
+.propnote { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.propcard .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
