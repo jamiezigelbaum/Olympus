@@ -9,6 +9,7 @@ import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
+import type { BackupStatus } from '../src/workers/backup-service.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 // Local design-iteration harness for the dashboard (unified dashboard phase
 // 4, 2026-10-09: the ChatGPT panel is the only dashboard). Serves the
@@ -1803,6 +1804,23 @@ export function previewPrivacyScope(sourceId: unknown) {
   return { structuredContent: { kind: data.kind }, _meta: { [SCOPE_UI_META_KEY]: data } };
 }
 
+/** Settings › Back up and restore: &backup=new (nothing chosen yet), else the mockup's state. */
+function previewBackupStatus(kind: string | null): BackupStatus {
+  if (kind === 'new') return { schedule: 'manual', passphraseSet: false, running: false, backups: [], restoreAvailable: true };
+  const yesterday = new Date(NOW.getTime() - 24 * 60 * 60 * 1000);
+  yesterday.setHours(3, 10, 0, 0);
+  return {
+    folder: '/Volumes/T7/Backup/Olympus',
+    schedule: 'nightly',
+    passphraseSet: true,
+    last: { at: yesterday.toISOString(), file: '/Volumes/T7/Backup/Olympus/olympus-backup.olympusbackup', bytes: 2_100_000_000, encrypted: true },
+    running: false,
+    backups: [],
+    ...(kind === 'restored' ? { restore: { state: 'done' as const, at: NOW.toISOString(), sign_in_again: ['gmail.email', 'whatsapp.personal'] } } : {}),
+    restoreAvailable: true,
+  };
+}
+
 /** Invented settings only; the conflict simulates another editor changing them. */
 let previewPrivacySaved: PrivacySettings | undefined;
 let previewPrivacyConflicted = false;
@@ -2190,6 +2208,21 @@ if (import.meta.main) {
     const url = new URL(request.url);
     const state = previewState(request);
     const previewUnlocked = /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
+    // Settings › Back up and restore: an invented folder listing; nothing is read or written.
+    if (request.method === 'POST' && url.pathname.startsWith('/dashboard/backup/')) {
+      const body = await request.json().catch(() => ({})) as { parent_key?: string };
+      if (url.pathname.endsWith('/browse')) {
+        const inside = body.parent_key === '/@t7/Backup/Olympus';
+        return Response.json({
+          ok: true,
+          path: body.parent_key ? body.parent_key.replace('/@t7', '/Volumes/T7') : null,
+          folders: inside ? [] : body.parent_key ? [{ key: '/@t7/Backup/Olympus', name: 'Olympus', has_children: true, selectable: true }]
+            : [{ key: '/Documents', name: 'Documents', has_children: true, selectable: true }, { key: '/@t7/Backup', name: 'T7', has_children: true, selectable: true }],
+          files: inside ? [3, 2, 1].map((day) => ({ key: `/@t7/Backup/Olympus/olympus-backup-2026-07-0${day}-0310.olympusbackup`, name: `olympus-backup-2026-07-0${day}-0310.olympusbackup`, bytes: 2_100_000_000, created_at: '', encrypted: true })) : [],
+        });
+      }
+      return Response.json({ ok: false, error: { message: 'The preview does not back up or restore.' } }, { status: 409 });
+    }
     // The page's own unlock form posts here. There is no worker behind this
     // harness, so ANY non-empty paste mints a pretend control session (a
     // cookie). Nothing is verified and nothing is stored.
@@ -2364,6 +2397,7 @@ if (import.meta.main) {
           agents: previewAgentsView(url.searchParams.get('agents')),
           // The pretend session is a local one, so Private answers shows its list.
           outsideHelpLocalSession: unlocked,
+          ...(unlocked ? { backup: previewBackupStatus(url.searchParams.get('backup')) } : {}),
           appsReceivedAvailable: true,
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
           ...previewUpdateSettings(url),

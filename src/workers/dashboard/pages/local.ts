@@ -1,5 +1,7 @@
 import { dashboardPeopleRow } from './people.ts';
 import { judgeArchiveEstimate, judgeChoiceUsesVenice, judgeDefaultCapDollars, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeChoice, type JudgeObserved, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
+import { BACKUP_COPY, BACKUP_SECTION_CSS, DASHBOARD_SETTINGS_BACKUP_ID, renderBackupSection } from '../backup-section.ts';
+import type { BackupStatus } from '../../backup-service.ts';
 import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
  * The computer's own pages (unified dashboard phase 4, 2026-10-09): what
@@ -73,6 +75,8 @@ import {
 export interface DashboardJudgeSetup extends JudgeSpendingStatus { cloudModel: string | null; cloudAvailable: boolean; observed?: JudgeObserved }
 export interface DashboardPageOptions {
   judgeSetup?: DashboardJudgeSetup;
+  /** Settings › Back up and restore (backup-section.ts); only for the unlocked local session. */
+  backup?: BackupStatus;
   /** The model pickers on Privacy rules (model-choices-backend.ts). */
   modelChoices?: import('../../../core/model-choices.ts').DashboardModelChoices | undefined;
   now?: Date;
@@ -655,6 +659,7 @@ const SETTINGS_SECTIONS = [
   { id: 'agents', label: 'Agents and access' },
   { id: 'models', label: 'Models on this computer' },
   { id: DASHBOARD_SETTINGS_ZKAPI_ID, label: 'zkAPI' },
+  { id: DASHBOARD_SETTINGS_BACKUP_ID, label: BACKUP_COPY.title },
   { id: 'updates', label: 'Updates' },
   { id: 'help', label: 'Help' },
 ] as const;
@@ -683,6 +688,12 @@ export function renderDashboardSettingsPage(options?: DashboardPageOptions): str
       ? renderOutsideHelpCard(options.outsideHelp, { ...(csrfToken !== undefined ? { csrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true, part: 'account', otherPartHref: `${dashboardLocalPageHref('keys', token)}#zkapi-model` })
       : `<p class="pnote" data-outside-unavailable>${escapeHtml(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`)
     + '</section>';
+  const backup = renderBackupSection({
+    ...(options?.backup ? { status: options.backup } : {}),
+    local: options?.outsideHelpLocalSession === true,
+    now,
+    ...(csrfToken !== undefined ? { csrfToken } : {}),
+  });
   const update = settings?.update;
   const updater = settings?.updater;
   const notice = updater && (update || (updater.status && updater.status.state !== 'idle'))
@@ -704,8 +715,8 @@ export function renderDashboardSettingsPage(options?: DashboardPageOptions): str
   const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
     + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref('help', token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const proposal = renderSettingsProposal(options?.settingsProposal);
-  const body = lockedGate(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
-  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS, UPDATE_NOTICE_CSS], options });
+  const body = lockedGate(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${backup}${updates}${help}</div></div>`;
+  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS, BACKUP_SECTION_CSS, UPDATE_NOTICE_CSS], options });
 }
 
 /**
