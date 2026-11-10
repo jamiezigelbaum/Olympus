@@ -2792,6 +2792,7 @@ var init_olympus_layout = __esm(() => {
     "google-drive-request-budget": "google-drive-daily-request-budget.json",
     "credential-broker-state": "credential-broker-state.json",
     "waiting-private-questions": "waiting-private-questions.sqlite",
+    "app-release-log": "app-release-log.sqlite",
     "tier-migration": "tier-migration",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -6769,6 +6770,226 @@ var init_router = __esm(() => {
   NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
 });
 
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage4;
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
+// src/core/secret-patterns.ts
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+});
+
+// src/core/opsec.ts
+var init_opsec = __esm(() => {
+  init_secret_patterns();
+  init_types();
+});
+
+// src/core/parent-label.ts
+var init_parent_label = __esm(() => {
+  init_types();
+});
+
+// src/core/secret-location-note.ts
+var init_secret_location_note = () => {};
+
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
   if (trustTier === "S5") {
@@ -7755,6 +7976,7 @@ var init_engine_maintenance = __esm(() => {
     staleAfterMs: Number.MAX_SAFE_INTEGER
   };
 });
+
 // src/core/worker-service.ts
 import { basename as basename4, dirname as dirname21, isAbsolute as isAbsolute17, join as join28, relative as relative3, sep as sep3 } from "node:path";
 function workerServicePaths(platform2, homeDir, env = {}) {
@@ -17851,203 +18073,6 @@ var init_fts = __esm(() => {
   INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
 });
 
-// src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
-var init_secret_patterns = __esm(() => {
-  PROSE_WORDS = new Set([
-    "above",
-    "again",
-    "below",
-    "cannot",
-    "change",
-    "changed",
-    "characters",
-    "choose",
-    "click",
-    "contact",
-    "enter",
-    "expired",
-    "expires",
-    "forgot",
-    "forgotten",
-    "guideline",
-    "guidelines",
-    "hidden",
-    "incorrect",
-    "information",
-    "instruction",
-    "instructions",
-    "invalid",
-    "least",
-    "letters",
-    "link",
-    "manager",
-    "maximum",
-    "min",
-    "minimum",
-    "must",
-    "need",
-    "needed",
-    "needs",
-    "number",
-    "numbers",
-    "optional",
-    "please",
-    "policies",
-    "policy",
-    "protected",
-    "provide",
-    "provided",
-    "required",
-    "requirements",
-    "reset",
-    "retry",
-    "see",
-    "send",
-    "sent",
-    "setting",
-    "settings",
-    "shared",
-    "should",
-    "shown",
-    "sign",
-    "strength",
-    "symbols",
-    "unchanged",
-    "use",
-    "used",
-    "using",
-    "via"
-  ]);
-  CREDENTIAL_KEYS = [
-    { pattern: String.raw`api[_ -]?key`, legacy: true },
-    { pattern: String.raw`access[_ -]?token`, legacy: true },
-    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
-    { pattern: String.raw`client[_ -]?secret`, legacy: true },
-    { pattern: "password", legacy: true },
-    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
-    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
-    { pattern: String.raw`private[_ -]?key` },
-    { pattern: "secret" },
-    { pattern: String.raw`token(?!s)` },
-    { pattern: "sig", urlOnly: true }
-  ];
-  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
-  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
-  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-  PLACEHOLDER_WORDS = new RegExp([
-    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
-    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
-    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
-    "placeholder",
-    "redacted",
-    "changeme",
-    "change[_-]me",
-    "replace[_-]?me",
-    "insert[_-]?(?:your|here|key|token)",
-    "[_-]here$",
-    "^n/a$",
-    "not[_ -]?set",
-    "^unset$"
-  ].join("|"), "i");
-  BARE_LITERALS = new Set([
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "string",
-    "null",
-    "none",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "empty",
-    "hidden",
-    "masked",
-    "required",
-    "optional",
-    "changeme",
-    "enabled",
-    "disabled",
-    "encrypted",
-    "hashed",
-    "unknown",
-    "tbd",
-    "pending",
-    "missing"
-  ]);
-  COMMON_OBJECTS = new Set([
-    "user",
-    "users",
-    "body",
-    "data",
-    "form",
-    "state",
-    "props",
-    "creds",
-    "credentials",
-    "account",
-    "profile",
-    "session",
-    "auth",
-    "db",
-    "app",
-    "json",
-    "response",
-    "res",
-    "row",
-    "record",
-    "item",
-    "model"
-  ]);
-  STRONG_QUALIFIERS = new Set([
-    "client",
-    "app",
-    "api",
-    "access",
-    "refresh",
-    "auth",
-    "bearer",
-    "id",
-    "session",
-    "bot",
-    "oauth",
-    "webhook",
-    "signing",
-    "jwt",
-    "service",
-    "personal",
-    "consumer",
-    "shared",
-    "encryption",
-    "master",
-    "admin",
-    "root",
-    "user",
-    "db",
-    "database",
-    "wifi",
-    "email",
-    "login"
-  ]);
-  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
-  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
-  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
-  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
-  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
-  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
-  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
-  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
-});
-
 // src/workers/dropbox-files/content-policy.ts
 var init_content_policy = __esm(() => {
   init_secret_patterns();
@@ -18317,6 +18342,83 @@ var init_tier_placement = __esm(() => {
   init_tier_ledger();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
+  init_sqlite_migrations();
+  init_olympus_layout();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
+  });
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/core/app-release-log.ts
+var DAY_MS2, openLogPaths;
+var init_app_release_log = __esm(() => {
+  init_olympus_layout();
+  init_remote_connections();
+  init_sqlite_migrations();
+  DAY_MS2 = 24 * 60 * 60000;
+  openLogPaths = new Map;
+});
+
 // src/workers/source-index/built-in-reasoning/manifest.ts
 function unslothQwen(size, revision, bytes, sha256) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
@@ -18572,6 +18674,7 @@ var init_sniffer = __esm(() => {
 
 // src/workers/connector-store/secrets-disposition.ts
 var init_secrets_disposition = __esm(() => {
+  init_app_release_log();
   init_sniffer();
   init_sniffer_store();
   init_tier_ledger_path();
@@ -18711,7 +18814,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -18719,7 +18822,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage4;
+  priorityQueryEmbedding = new AsyncLocalStorage5;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -19667,12 +19770,6 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
-// src/core/opsec.ts
-var init_opsec = __esm(() => {
-  init_secret_patterns();
-  init_types();
-});
-
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES;
 var init_evidence_versions = __esm(() => {
@@ -19680,7 +19777,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -19689,7 +19786,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -19946,11 +20043,6 @@ var init_analyst_openclaw_infer = __esm(() => {
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
 
-// src/core/parent-label.ts
-var init_parent_label = __esm(() => {
-  init_types();
-});
-
 // src/core/evidence-pack.ts
 var utf8;
 var init_evidence_pack = __esm(() => {
@@ -19963,9 +20055,6 @@ var init_evidence_pack = __esm(() => {
   init_answer_latency_trace();
   utf8 = new TextEncoder;
 });
-
-// src/core/secret-location-note.ts
-var init_secret_location_note = () => {};
 
 // src/workers/source-index/analyst-pool.ts
 class SecureAnalystPoolState {
@@ -23695,72 +23784,6 @@ var init_source_delete_holds = __esm(() => {
   init_requests();
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS;
-var init_waiting_private_questions = __esm(() => {
-  init_sqlite_migrations();
-  init_olympus_layout();
-  WAITING_QUESTION_LIMITS = Object.freeze({
-    questionBytes: 2048,
-    localQuestionBytes: 8 * 1024,
-    selectorBytes: 4096,
-    answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000,
-    reanswerAfterMs: 10 * 60000
-  });
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-});
-
 // src/core/ingestion-health-state.ts
 import { existsSync as existsSync20, mkdirSync as mkdirSync16, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname33 } from "node:path";
@@ -23901,6 +23924,7 @@ var init_tier_migration_reports = __esm(() => {
 
 // src/core/source-forget-registry.ts
 var init_source_forget_registry = __esm(() => {
+  init_app_release_log();
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
@@ -23927,6 +23951,7 @@ var init_source_forget_registry = __esm(() => {
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_mac_engine_daemon();
+  init_app_release_log();
   init_tier_ledger_path();
   init_olympus_layout();
   init_source_placement();
@@ -27227,7 +27252,23 @@ class EmailClient {
       return result;
     if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
       sourceAnswerTickets.set(result, ticket);
-    return await this.revalidateSourceAnswer(result);
+    const released = await this.revalidateSourceAnswer(result);
+    if (released !== result && released && typeof released === "object" && typeof ticket === "string" && sourceAnswerTickets.has(result)) {
+      sourceAnswerTickets.set(released, ticket);
+    }
+    return released;
+  }
+  async noteSourceAnswerReceived(original, withheld) {
+    const ticket = original && typeof original === "object" ? sourceAnswerTickets.get(original) : undefined;
+    if (!ticket)
+      return;
+    try {
+      await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/received`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket, withheld })
+      });
+    } catch {}
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
@@ -30077,6 +30118,362 @@ function constantTimeStringEqual(actual, expected) {
 
 // src/core/operations.ts
 init_release_manifest();
+
+// src/core/app-release-agent.ts
+init_app_release_capture();
+init_release_manifest();
+
+// src/core/remote-result.ts
+init_app_release_capture();
+init_operation_error();
+init_opsec();
+init_parent_label();
+init_release_manifest();
+init_secret_location_note();
+var MAX_ANSWER = 64 * 1024;
+var MAX_SENT = 16 * 1024;
+var MAX_TITLE = 400;
+var MAX_ROUTE = 300;
+var MAX_MESSAGE = 2000;
+var MAX_CORPORA = 200;
+var JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+var PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+var MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+var REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+var REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.";
+var PROVIDER_LABELS = {
+  gmail: "Gmail",
+  google_drive: "Google Drive",
+  "google-drive": "Google Drive",
+  google_calendar: "Google Calendar",
+  dropbox: "Dropbox",
+  x: "X bookmarks",
+  readwise: "Readwise",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+  whatsapp_personal: "WhatsApp",
+  whatsapp_business: "WhatsApp",
+  apple_messages: "Apple Messages",
+  signal: "Signal",
+  reflect: "Reflect",
+  roam: "Roam",
+  evernote: "Evernote",
+  local_files: "Files on this computer"
+};
+var FAMILY_LABELS = {
+  email: "Mail",
+  file: "Files",
+  chat: "Messages",
+  note: "Notes",
+  x: "X bookmarks",
+  readwise: "Readwise"
+};
+var OTHER_SOURCE_LABEL = "Other source";
+var REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+  ...Object.values(PROVIDER_LABELS),
+  ...Object.values(FAMILY_LABELS),
+  OTHER_SOURCE_LABEL
+])].sort());
+var REMOTE_REFUSAL_CODES = Object.freeze([
+  "refused",
+  "anonymous_answers_off",
+  "cancelled",
+  "gate_refused",
+  "internal_error",
+  "invalid_params",
+  "model_same_provider",
+  "question_empty",
+  "question_too_long",
+  "route_not_configured",
+  "secret_detected",
+  "settings_invalid",
+  "settings_stale",
+  "writer_declined",
+  "writer_failed",
+  "invalid_question",
+  "busy",
+  "acknowledgements_incomplete",
+  "funding_date_missing",
+  "funding_date_invalid",
+  "note_expired",
+  "daemon_api_key_missing",
+  "daemon_not_found",
+  "tor_not_found",
+  "unresolved_session",
+  "unresolved_session_other_wallet",
+  "no_unresolved_session",
+  "stranded_processes",
+  "daemon_already_running",
+  "tor_port_busy",
+  "tor_bootstrap_failed",
+  "daemon_start_failed",
+  "daemon_version_unsupported",
+  "daemon_supervisor_unsupported",
+  "relay_mismatch",
+  "key_reuse_on",
+  "key_reuse_unverified",
+  "daemon_keyless",
+  "daemon_identity_failed",
+  "daemon_api_key_rejected",
+  "session_process_exited",
+  "confinement_self_test_failed",
+  "confinement_unavailable",
+  "policy_unavailable",
+  "model_unavailable",
+  "daily_cap_reached",
+  "spend_cap_reached",
+  "state_unavailable",
+  "timeout",
+  "aborted",
+  "redirect_refused",
+  "response_too_large",
+  "invalid_response",
+  "daemon_error",
+  "transport_failed",
+  "teardown_incomplete",
+  "authorization_refused",
+  "session_spent"
+].filter((code, index, all) => all.indexOf(code) === index));
+var REMOTE_DAEMON_CODES = Object.freeze([
+  "busy",
+  "request_cancelled",
+  "funding_required",
+  "model_budget_unavailable",
+  "model_policy_unavailable",
+  "invalid_model",
+  "anonymous_access_failed",
+  "upstream_error",
+  "invalid_upstream_response",
+  "withdrawal_pending",
+  "wallet_conflict",
+  "invalid_request_error",
+  "invalid_body",
+  "testnet_password_required",
+  "invalid_api_key",
+  "local_connection_required",
+  "browser_origin_denied",
+  "unrecognized"
+]);
+var REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+var TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+var RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+var RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+var REMOTE_DESCRIPTIONS = {
+  source_index_status: [
+    "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+    "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+    "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+  ].join(" ")
+};
+var REMOTE_ERROR_TEXT = {
+  invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  unsupported_filter: "That filter is not supported here.",
+  config_error: "Olympus on the computer needs setup before it can answer.",
+  argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+  argus_error: "Olympus's private analyst could not answer. Try again later.",
+  email_not_configured: "Olympus on the computer needs setup before it can answer.",
+  email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+  email_error: "Olympus could not complete this request.",
+  email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+  source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_error: "Olympus could not complete this request.",
+  source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+  source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+  source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+  source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+  internal_error: "Olympus could not complete this request.",
+  unknown_operation: "Olympus has no operation with that name here.",
+  operation_unavailable: "That operation is not enabled on this Olympus install.",
+  unauthorized: "A connection token is required.",
+  invalid_token: "The connection token is not valid or has been revoked.",
+  remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+  not_found: "There is nothing at this path.",
+  method_not_allowed: "That HTTP method is not allowed here.",
+  unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+  payload_too_large: "The request body is too large.",
+  olympus_offline: "Olympus is off; try again later."
+};
+var REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+var REFERENCED_ERROR_CODES = new Set([
+  "internal_error",
+  "email_error",
+  "source_index_error",
+  "argus_error",
+  "config_error"
+]);
+var PENDING_SCHEMA = {
+  type: "object",
+  description: "Still working: call source_answer_result with job_id, again while it says working.",
+  additionalProperties: false,
+  required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+  properties: {
+    status: { const: "working" },
+    job_id: { type: "string", pattern: JOB_ID.source },
+    elapsed_ms: { type: "integer", minimum: 0 },
+    next_tool: { const: "source_answer_result" },
+    message: { type: "string" }
+  }
+};
+var CITATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label"],
+  properties: {
+    label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+    title: { type: "string", maxLength: MAX_TITLE },
+    date: { type: "string", format: "date" }
+  }
+};
+var ANONYMOUS_ANSWERED_SCHEMA = {
+  type: "object",
+  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "answered" },
+    reply: { type: "string", maxLength: MAX_ANSWER },
+    level: { enum: ["strict", "standard"] },
+    rewritten: { type: "boolean" },
+    remembered: { type: "boolean" },
+    network_identity: { enum: [...NETWORK_IDENTITIES] },
+    cleanup: { enum: [...CLEANUPS] },
+    model: { type: "string", pattern: MODEL_ID.source },
+    route: { type: "string", maxLength: MAX_ROUTE },
+    sent: { type: "string", maxLength: MAX_SENT },
+    note: { type: "string", maxLength: MAX_MESSAGE },
+    provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+  }
+};
+var ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+  type: "object",
+  description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+  additionalProperties: false,
+  required: ["kind", "status", "message", "options"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "needs_choice" },
+    message: { type: "string" },
+    options: {
+      type: "object",
+      additionalProperties: false,
+      required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+      properties: {
+        suggested_level: { enum: ["strict", "standard"] },
+        suggested_cleanup: { enum: [...CLEANUPS] },
+        custom_instruction: { type: "boolean" }
+      }
+    }
+  }
+};
+var ANONYMOUS_REFUSED_SCHEMA = {
+  type: "object",
+  description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+  additionalProperties: false,
+  required: ["kind", "status", "code", "message"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "refused" },
+    code: { enum: [...REMOTE_REFUSAL_CODES] },
+    message: { type: "string", maxLength: MAX_MESSAGE },
+    outcome: { enum: [...OUTCOMES] },
+    daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+    sent: { type: "string", maxLength: MAX_SENT }
+  }
+};
+var SOURCE_INDEX_STATUS_SCHEMA = {
+  type: "object",
+  description: "Per-corpus status and counts.",
+  additionalProperties: false,
+  required: ["kind", "corpora"],
+  properties: {
+    kind: { const: "source_index_status" },
+    generated_at: { type: "string", format: "date-time" },
+    corpora: {
+      type: "array",
+      maxItems: MAX_CORPORA,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["corpus_id", "label", "configured"],
+        properties: {
+          corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+          label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+          trust_domain: { enum: [...TRUST_DOMAINS] },
+          configured: { type: "boolean" },
+          retrieval: {
+            type: "object",
+            additionalProperties: false,
+            required: ["mode", "state"],
+            properties: {
+              mode: { enum: [...RETRIEVAL_MODES] },
+              state: { enum: [...RETRIEVAL_STATES] }
+            }
+          },
+          last_refresh: {
+            type: "object",
+            additionalProperties: false,
+            required: ["status"],
+            properties: {
+              status: { enum: [...REFRESH_STATUSES] },
+              completed_at: { type: "string", format: "date-time" }
+            }
+          },
+          counts: {
+            type: "object",
+            additionalProperties: false,
+            required: ["indexed_items", "chunks", "embedded_chunks"],
+            properties: {
+              indexed_items: { type: "integer", minimum: 0 },
+              chunks: { type: "integer", minimum: 0 },
+              embedded_chunks: { type: "integer", minimum: 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+var REMOTE_ERROR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["error", "message"],
+  properties: {
+    error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+    message: { type: "string", description: "A fixed sentence for this code." },
+    ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+    param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+    retry_after_seconds: {
+      type: "integer",
+      minimum: 1,
+      maximum: 86400,
+      description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+    }
+  }
+};
+
+// src/core/app-release-agent.ts
+function isLocalAgent(surface) {
+  return surface === "mcp" || surface === "native";
+}
+async function noteLocalAgentAnswer(input) {
+  try {
+    if (!isLocalAgent(input.caller?.surface))
+      return;
+    const released = input.released;
+    if (!released || typeof released !== "object" || typeof released.answer !== "string")
+      return;
+    if (typeof input.email.noteSourceAnswerReceived !== "function")
+      return;
+    await input.email.noteSourceAnswerReceived(input.original, isWithheldSourceAnswer(released));
+  } catch {}
+}
 
 // src/core/first-run-privacy.ts
 init_atomic_file();
@@ -33557,7 +33954,7 @@ function tierMigrationStoppedGraceDays(env) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
 }
-var DAY_MS2 = 24 * 60 * 60 * 1000;
+var DAY_MS3 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord17(value);
   if (migration.in_progress !== true)
@@ -33577,8 +33974,8 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
     const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
-    if (ageMs > graceDays * DAY_MS2) {
-      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS2)} days ago` : "migration stopped at an unknown time";
+    if (ageMs > graceDays * DAY_MS3) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS3)} days ago` : "migration stopped at an unknown time";
       return {
         state,
         approvalEntryId,
@@ -34676,7 +35073,9 @@ var operations = [
       });
       const jobs = ctx.sourceAnswerJobs;
       const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
+      return released;
     }
   },
   {
@@ -34697,7 +35096,9 @@ var operations = [
       if (!jobs)
         throw sourceAnswerJobNotFound();
       const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
+      return released;
     }
   },
   {
