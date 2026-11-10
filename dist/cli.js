@@ -30559,21 +30559,21 @@ function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
   };
 }
 async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
-  const clock2 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
+  const clock3 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
   const text2 = query.trim();
   if (!text2 || !Number.isFinite(budgetMs) || budgetMs <= 0)
     return;
-  const deadline = clock2.now() + budgetMs;
+  const deadline = clock3.now() + budgetMs;
   const expiresIn = (ms) => {
     let timer;
     const done = new Promise((resolve12) => {
-      timer = clock2.setTimeout(() => resolve12("expired"), ms);
+      timer = clock3.setTimeout(() => resolve12("expired"), ms);
     });
-    return { done, cancel: () => clock2.clearTimeout(timer) };
+    return { done, cancel: () => clock3.clearTimeout(timer) };
   };
   let retryMs = STARTING_MODEL_FIRST_RETRY_MS;
   for (;; ) {
-    const remaining = deadline - clock2.now();
+    const remaining = deadline - clock3.now();
     if (remaining <= 0)
       return;
     const attempt = provider.embed([{ text: text2 }], { taskType: "RETRIEVAL_QUERY" }).then(() => "done", (error) => error instanceof TransientSourceEmbeddingError && error.modelStarting ? "starting" : "done");
@@ -30582,7 +30582,7 @@ async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
     expiry.cancel();
     if (outcome !== "starting")
       return;
-    const pause = Math.min(retryMs, deadline - clock2.now());
+    const pause = Math.min(retryMs, deadline - clock3.now());
     if (pause <= 0)
       return;
     const wait = expiresIn(pause);
