@@ -477,7 +477,8 @@ if (env.LAUNCH === '0') {
       expect(spawned).toHaveLength(2);
       expect(spawned[0]!.exitCode).toBe(75);
       expect(spawned[1]!.exitCode).toBeNull();
-      expect(lines).toContain('olympus-worker: Olympus worker exited unexpectedly.');
+      expect(lines).not.toContain('olympus-worker: Olympus worker exited unexpectedly.');
+      expect(lines).toContain('olympus-worker: Olympus worker is restarting, as it asked to.');
       expect(lines.filter((line) => line === 'olympus-worker: Olympus worker is ready.')).toHaveLength(2);
       expect(lines.filter((line) => line.includes('could not be stopped'))).toEqual([]);
       expect(handle!.status().services['olympus-worker']?.state).toBe('ok');

@@ -121,6 +121,14 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
     const card = await until(async () => { const now = await ctx.cardOf('local_files'); return now && !connected(now) ? now : undefined; }, 60_000);
     return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as disconnected: ${summary(await ctx.cardOf('local_files'))}` };
   };
+  /** A worker restart the route announced: see it go down (bounded: it may already be back), then wait until it answers again. */
+  const reachable = async (): Promise<boolean> => {
+    try { return (await ctx.call('GET', '/dashboard.json')).status === 200; } catch (error) { if (signal?.aborted) throw error; return false; }
+  };
+  const settleRestart = async (): Promise<void> => {
+    await until(async () => (await reachable()) ? undefined : true, 20_000, 500);
+    await until(async () => (await reachable()) ? true : undefined, 180_000, 2_000);
+  };
   const emptyState = async (): Promise<StateResult> => {
     let card = await ctx.cardOf('local_files');
     if (connected(card)) {
@@ -131,6 +139,8 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
     if (items(card) > 0) {
       const reply = await ask('/dashboard/delete-source-data', { source_id: 'local.files', acknowledge: true });
       if (reply.status !== 200) return { ok: false, detail: `delete-source-data answered ${reply.status}: ${flat(reply.text)}` };
+      // The worker answers first and restarts a moment later (#1034): a page read in that gap fails, so the next step waits for it.
+      if (reply.json?.worker_restarting === true) await settleRestart();
       card = await until(async () => { const now = await ctx.cardOf('local_files'); return items(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
     }
     return card && items(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
