@@ -912,6 +912,8 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  * instead of on every one. Only the snapshot passes it.
  */
 export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
+/** How long a search keeps a store's "has vectors" answer (vectorLaneServable). */
+export const SEARCH_VECTOR_LANE_MEMO_MS = 60_000;
 
 // Identities looked up per step when the hidden-copy set is rebuilt in turns.
 const IDENTITY_LOOKUP_SLICE = 5_000;
@@ -11383,8 +11385,8 @@ export class LocalConnectorStore {
   // True when the store has at least one current, visible embedding for the
   // model: stale or held vectors never activate the vector lane.
   // `countsMaxAgeMs` only for a status snapshot's display (see
-  // STATUS_COUNTS_MAX_AGE_MS); search and embedding pass none and see the
-  // current hidden-copy set.
+  // STATUS_COUNTS_MAX_AGE_MS); embedding passes none and sees the current
+  // hidden-copy set. Search asks through vectorLaneServable.
   hasEmbeddings(modelId: string, options: { countsMaxAgeMs?: number } = {}): boolean {
     // A rebind deletes this model's vectors across the WHOLE corpus while the
     // call that triggered it re-embeds only its own selection. Until a
@@ -11412,6 +11414,34 @@ export class LocalConnectorStore {
     `).get(modelId, ...exclusion.params) as { present: number } | null;
     return row !== null;
   }
+
+  /**
+   * Whether a search may switch the vector lane on: `hasEmbeddings` for the
+   * search path, which must not hold the worker's thread. Each query used to
+   * ask `hasEmbeddings` with no age three or four times (adapter, hybrid
+   * availability, neighbours, passage ranking), and each ask rebuilt the
+   * store's whole hidden-copy set on the main thread. On Sparta (2026-11-10,
+   * #1079) that was up to 45% of a 46 s freeze during a dashboard Ask, so
+   * every lane missed its deadline. This only decides whether the lane runs:
+   * what the lane returns is still filtered by the current tier ledger.
+   *
+   * A rebind is checked on every ask (one row). Otherwise a `true` is kept
+   * for SEARCH_VECTOR_LANE_MEMO_MS, and the answer is computed from the
+   * hidden set the status path keeps (rebuilt in turns, never on this ask
+   * after the first). A `false` is never kept, so a store's first vectors
+   * switch the lane on at the next search.
+   */
+  vectorLaneServable(modelId: string): boolean {
+    if (this.embeddingCurrencyRebuildPending(modelId)) return false;
+    const memo = this.vectorLaneMemo.get(modelId);
+    if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
+    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+    if (servable) this.vectorLaneMemo.set(modelId, Date.now());
+    else this.vectorLaneMemo.delete(modelId);
+    return servable;
+  }
+
+  private readonly vectorLaneMemo = new Map<string, number>();
 
   // Vector lane: embed the query via the provider, cosine over the stored
   // vectors (exact scan, like the Dropbox lane), best chunk score per item,
@@ -13287,7 +13317,7 @@ export function createConnectorStoreCorpusAdapter(
     if (embeddingProvider && useHybrid === 'hybrid') {
       if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
-      } else if (!store.hasEmbeddings(embeddingProvider.modelId)) {
+      } else if (!store.vectorLaneServable(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
       }
     }
@@ -13386,7 +13416,7 @@ export function createConnectorStoreCorpusAdapter(
         backend: embeddingProvider.backend,
       };
     }
-    const servable = store.hasEmbeddings(embeddingProvider.modelId);
+    const servable = store.vectorLaneServable(embeddingProvider.modelId);
     return {
       servable,
       ...(!servable ? { reason: 'no_current_embedding_artifacts' as const } : {}),
@@ -13410,7 +13440,7 @@ export function createConnectorStoreCorpusAdapter(
       !embeddingProvider
       || (options.retrievalMode ?? 'hybrid') !== 'hybrid'
       || (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
-      || !store.hasEmbeddings(embeddingProvider.modelId)
+      || !store.vectorLaneServable(embeddingProvider.modelId)
     ) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
@@ -13457,7 +13487,7 @@ export function createConnectorStoreCorpusAdapter(
     const hybrid = embeddingProvider !== undefined
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
-      && store.hasEmbeddings(embeddingProvider.modelId);
+      && store.vectorLaneServable(embeddingProvider.modelId);
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
@@ -14120,7 +14150,7 @@ export function createConnectorStoreContentProvider(
     const text = query?.trim();
     if (!embeddingProvider || !text) return undefined;
     try {
-      storeHasVectors ??= store.hasEmbeddings(embeddingProvider.modelId);
+      storeHasVectors ??= store.vectorLaneServable(embeddingProvider.modelId);
       if (!storeHasVectors) return undefined;
       const [vector] = await embeddingProvider.embed([{ text }], { taskType: 'RETRIEVAL_QUERY' });
       return vector && vector.length === embeddingProvider.dimension ? vector : undefined;

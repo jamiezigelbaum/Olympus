@@ -267,6 +267,60 @@ describe('source-index router per-lane retrieval deadline', () => {
     expect(result.rawExposed).toBe(false);
   });
 
+  // #1079: a lane that waits on I/O must not be dropped because another lane
+  // (or a judging pass) held the thread past its deadline. Sparta had every
+  // lane time out together this way while each had found candidates.
+  test('keeps a lane whose deadline passed only because another lane held the thread', async () => {
+    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora());
+    const calls: string[] = [];
+    const result = await routeSourceIndexSearch({
+      registry,
+      laneTimeoutMs: 200,
+      adapters: {
+        // Waits on I/O that completes just after its deadline (as a query
+        // embedding can), and is ready the moment the thread is free again.
+        'public_safe.fast': async (request) => {
+          await new Promise((resolve) => setTimeout(resolve, 210));
+          return adapterFor(calls, 'public_safe.fast', 'file', 'fast-1')(request);
+        },
+        // Holds the thread well past the other lane's deadline.
+        'public_safe.slow': (request) => {
+          const until = Date.now() + 800;
+          while (Date.now() < until) { /* synchronous keyword search */ }
+          return adapterFor(calls, 'public_safe.slow', 'file', 'slow-1')(request);
+        },
+      },
+      request: { query: 'q', maxResults: 5, context },
+    });
+
+    expect([...result.searchedCorpora].sort()).toEqual(['public_safe.fast', 'public_safe.slow']);
+    expect(result.skippedCorpora).toEqual([]);
+  });
+
+  test('a lane that stays unfinished while the thread is free is still dropped after a held thread', async () => {
+    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora());
+    const calls: string[] = [];
+    const startedAt = Date.now();
+    const result = await routeSourceIndexSearch({
+      registry,
+      laneTimeoutMs: 200,
+      adapters: {
+        'public_safe.fast': () => new Promise<SourceIndexCorpusSearchResponse>(() => {}),
+        'public_safe.slow': (request) => {
+          const until = Date.now() + 800;
+          while (Date.now() < until) { /* synchronous keyword search */ }
+          return adapterFor(calls, 'public_safe.slow', 'file', 'slow-1')(request);
+        },
+      },
+      request: { query: 'q', maxResults: 5, context },
+    });
+
+    expect(result.searchedCorpora).toEqual(['public_safe.slow']);
+    expect(result.skippedCorpora).toContainEqual({ corpusId: 'public_safe.fast', trustDomain: 'public_safe', reason: 'lane_timeout' });
+    // One grace after the held thread, then the free-thread deadline drops it.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+  });
+
   test('total fan-out time is bounded by the lane budget, not the slowest lane', async () => {
     const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora());
     const calls: string[] = [];

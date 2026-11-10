@@ -145,6 +145,12 @@ export interface AnalystAnswerLanes {
    * retrieval, and probePrivateMatch reads it as not checked.
    */
   excludedCorpusIds?: ReadonlySet<string>;
+  /**
+   * Registered corpora with no store mounted on this computer: nothing here
+   * could search them, and nothing here holds them (an answer on this
+   * computer does not name them as left out).
+   */
+  unmountedCorpusIds?: ReadonlySet<string>;
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {

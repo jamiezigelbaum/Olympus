@@ -308,6 +308,12 @@ export interface RouteSourceIndexSearchOptions {
 // monopolize the event loop and prevent the timer itself from firing.
 const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 10_000;
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
+// A deadline timer this late means the thread was held past it (see
+// runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
+// up to HELD_THREAD_MAX_DEADLINE_FACTOR times its deadline in all.
+const HELD_THREAD_LATE_TIMER_MS = 500;
+const HELD_THREAD_GRACE_MS = 1_000;
+const HELD_THREAD_MAX_DEADLINE_FACTOR = 6;
 
 const FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   'body',
@@ -753,8 +759,29 @@ async function runCorpusLaneWithDeadline(
     (response) => ({ kind: 'response' as const, response }),
     (error) => ({ kind: 'error' as const, error }),
   );
+  // A held thread is not a slow lane. When the deadline's timer fires late,
+  // something else held the worker's thread past it (a judging pass, another
+  // lane's synchronous keyword search), so this lane never had its budget of
+  // turns. It gets a short grace instead of being dropped, and is dropped
+  // only when a timer fires on time after the deadline, or at the hard stop.
+  // Sparta, 2026-11-10 (#1079): with the thread held 32-45 s during a
+  // dashboard Ask, every lane missed its 10 s deadline together and the Ask
+  // reported every source as unsearchable, although the lanes had found
+  // candidates.
+  const hardStopAtMs = startedAt + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise<{ kind: 'timeout' }>((resolve) => {
-    timer = setTimeout(() => resolve({ kind: 'timeout' as const }), timeoutMs);
+    const arm = (delayMs: number) => {
+      const dueAtMs = Date.now() + delayMs;
+      timer = setTimeout(() => {
+        const now = Date.now();
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
+          arm(HELD_THREAD_GRACE_MS);
+          return;
+        }
+        resolve({ kind: 'timeout' as const });
+      }, delayMs);
+    };
+    arm(timeoutMs);
   });
 
   try {
