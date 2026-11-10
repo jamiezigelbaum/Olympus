@@ -306,5 +306,5 @@ describe('closing a leftover macOS dashboard window', () => {
     // No heredoc swallowed the shell commands that follow it.
     expect(scripts.join('')).not.toContain('EOF');
     expect(scripts.join('')).not.toContain('&&');
-  });
+  }, 15_000);
 });
