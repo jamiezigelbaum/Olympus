@@ -423,7 +423,8 @@ for (const [passMs, fail] of [[18_000, false], [18_000, true], [300_000, false]]
     expect(options.passTimeMs).toBe(passMs);
     expect(imports).toBe(0);
     clock += passMs;
-    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0,
+      timing: { passMs, setupMs: passMs, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 } } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
     clock += 100;
