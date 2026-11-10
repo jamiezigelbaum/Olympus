@@ -42,6 +42,17 @@ describe('release check: approving an app connection on a Mac needs the owner (#
     expect((await checkMacConsentOwnerProof(fake('macos', new Error('driver gone')).machine, true)).status).toBe('fail');
   });
 
+  test('a stop names the step it stopped at, and the registration status when that was the step', () => {
+    const atRegister = evaluateMacConsentOwnerProof(1, 'step=account\nstep=pkce\nstep=register\nregister=403\n');
+    expect(atRegister.status).toBe('fail');
+    expect(atRegister.detail).toContain('at step register (registration answered 403)');
+    expect(evaluateMacConsentOwnerProof(1, 'step=account\n').detail).toContain('at step account:');
+    // The script names every setup step before running it, and reads the registration's status, not just its body.
+    const script = macConsentOwnerProofScript();
+    for (const step of ['account', 'pkce', 'register', 'approve', 'owner']) expect(script).toContain(`echo "step=${step}"`);
+    expect(script).toContain('echo "register=$(/usr/bin/curl -sS -o "$jar/client.json" -w \'%{http_code}\'');
+  });
+
   test('skips Linux, and a run with no relay, without running anything', async () => {
     const linux = fake('linux', { stdout: PASS });
     expect((await checkMacConsentOwnerProof(linux.machine, true)).status).toBe('skip');
@@ -63,7 +74,7 @@ describe('release check: approving an app connection on a Mac needs the owner (#
     expect(script).toContain('-b "olympus_consent_$rid=$csrf"');
     // Only status codes and yes/no flags are echoed.
     for (const line of script.split('\n').map((l) => l.trim()).filter((l) => /\becho\b/.test(l))) {
-      expect(line).toMatch(/echo "(page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=/);
+      expect(line).toMatch(/echo "(step|register|page|form|other_form|other_form_refused|other_page|other_page_refused|owner|owner_code)=/);
     }
     // It is valid bash.
     expect(spawnSync('bash', ['-n'], { input: script, encoding: 'utf8', timeout: 10_000 }).status).toBe(0);
