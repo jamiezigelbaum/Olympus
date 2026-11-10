@@ -1766,6 +1766,26 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   /**
+   * A dialog that an address can open (`dialog[data-open-hash]`): Sources'
+   * Build a connector, which the old `?connector` page redirects to as
+   * `?connect#build-connector` (#1087). The fragment is cleared at once, so a
+   * reload or a close does not open it again.
+   */
+  function applyOpenHash(): void {
+    const view = root.ownerDocument.defaultView;
+    const id = view ? view.location.hash.slice(1) : '';
+    if (!view || !/^[A-Za-z0-9_-]+$/.test(id)) return;
+    const dialog = root.querySelector<HTMLDialogElement>(`dialog[data-open-hash][id="${id}"]`);
+    if (!dialog || typeof dialog.showModal !== 'function') return;
+    try {
+      view.history.replaceState(null, '', view.location.pathname + view.location.search);
+    } catch {
+      // An unchangeable history keeps the fragment; the dialog still opens.
+    }
+    if (!dialog.open) dialog.showModal();
+  }
+
+  /**
    * Where an open link asked Keys to open (core/open-targets.ts, by way of
    * the panel's Connect or Change models, or an `olympus://` link):
    * `#olympus-open=connect.x` opens that source's Connect panel, and
@@ -1994,6 +2014,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.addEventListener(redrawEvent, onRedrawRequest);
   applyWriteCapability();
   applyOpenTarget();
+  applyOpenHash();
   restartPoll();
   resumeMessaging();
 

@@ -3,7 +3,7 @@
  * calls short (hosted agents: Claude documents about 240 s per tool call).
  *
  * The common case stays one call: `source_answer` waits for the answer up to a
- * per-surface hand-off threshold (200 s remote, 45 s local stdio MCP) and
+ * per-surface hand-off threshold (45 s on both surfaces by default) and
  * returns it exactly as before. Past
  * the threshold it returns a "still working" result carrying a job id, and the
  * answer keeps running in the background; `source_answer_result(job_id)`
@@ -56,7 +56,16 @@ import {
 } from './release-manifest.ts';
 import type { OperationCaller } from './operation-caller.ts';
 
-export const SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200_000;
+/**
+ * The remote default (worker `/mcp`, the ChatGPT relay, OpenAPI): under the
+ * shortest common client limit, so a slow answer always reaches the client as
+ * a job handle rather than a timeout. The MCP TypeScript SDK gives up on a
+ * request after 60 s by default (`DEFAULT_REQUEST_TIMEOUT_MSEC`), the release
+ * canary's client after 120 s, Claude after about 240 s. It was 200 s until
+ * #1033: a fresh-install answer on a CPU-only host ran past the canary's 120 s
+ * and the client never saw the job id.
+ */
+export const SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 45_000;
 /**
  * The local stdio MCP default (`olympus serve`, used by Codex and Claude
  * Code): under Codex's 60 s default MCP tool timeout.
@@ -840,9 +849,10 @@ export type SourceAnswerJobSurface = 'remote' | 'stdio';
 /**
  * Reads the operator knobs for one surface. The threshold is per surface,
  * because the clients differ: remote agents (worker `/mcp` and OpenAPI) read
- * `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS` (default 200 s, below Claude's ~240 s);
- * local stdio MCP reads `OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS` (default
- * 45 s, below Codex's 60 s). Both clamp to 1 s–230 s.
+ * `OLYMPUS_SOURCE_ANSWER_HANDOFF_MS` (default 45 s, below the MCP SDK's
+ * 60 s default request timeout); local stdio MCP reads
+ * `OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS` (default 45 s, below Codex's 60 s).
+ * Both clamp to 1 s–230 s.
  * `OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS` sets how long one result call waits
  * (0–120 s, default 60 s, and never past the surface's threshold).
  * `OLYMPUS_SOURCE_ANSWER_MAX_RUNNING` sets how many answers may run at once

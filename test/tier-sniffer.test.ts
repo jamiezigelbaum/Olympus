@@ -217,6 +217,34 @@ describe('batching, cache and threshold', () => {
     }
   });
 
+  test('a cloud judge may keep more calls in flight than a local model (#884)', async () => {
+    for (const [lane, peakWanted] of [[VENICE_LANE, 16], [LOCAL_LANE, 8]] as const) {
+      const ledger = new TierLedger({ dbPath: ':memory:' });
+      const store = new TierSnifferStore({ dbPath: ':memory:' });
+      try {
+        for (let n = 0; n < 40; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
+        let inFlight = 0;
+        let peak = 0;
+        const model: AnalystModel = {
+          async complete(request) {
+            inFlight += 1;
+            peak = Math.max(peak, inFlight);
+            await flushMicrotasks();
+            inFlight -= 1;
+            const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
+            return { text: verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }), modelId: lane.modelId };
+          },
+        };
+        const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane, model, maxCallsPerPass: 100, concurrentCalls: 16 });
+        expect(peak).toBe(peakWanted);
+        expect(report.calls).toBe(40);
+      } finally {
+        ledger.close();
+        store.close();
+      }
+    }
+  });
+
   test('every flagged name is asked on its own call, with localOnly set', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });

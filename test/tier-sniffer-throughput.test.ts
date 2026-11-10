@@ -7,7 +7,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
 import { appendClassificationLedgerEntry } from '../src/workers/classification-ledger.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
@@ -102,11 +102,9 @@ test('a completion through a shared slot says how long it waited there', async (
   expect(completion).toMatchObject({ text: 'answer', slotWaitMs: 45 });
 });
 
-/** A service over one store with `items` flagged items, on the test clock (performance.now too). */
+/** A service over one store with `items` flagged items, on the test clock. */
 async function serviceFixture(items: number, model: AnalystModel, extra: { answersInFlight?: () => boolean; concurrentCalls?: number } = {}) {
   const clock = createTestClock();
-  const now = spyOn(performance, 'now').mockImplementation(() => clock.now());
-  cleanup.push(() => now.mockRestore());
   const dir = mkdtempSync(join(tmpdir(), 'olympus-sniffer-throughput-'));
   const installed = new InstalledTierClassification({ env: {}, lane: LANE });
   const storePath = join(dir, 'items.sqlite');
@@ -127,7 +125,7 @@ async function serviceFixture(items: number, model: AnalystModel, extra: { answe
   const service = new TierSnifferService({ installed, lane: LANE, model, classificationLedgerPath,
     // Each read of the stores costs the tick time around its pass.
     stores: () => { clock.set(clock.now() + 3); return [store]; },
-    log: line => lines.push(line), rejudgePerPass: 0, ...extra,
+    log: line => lines.push(line), rejudgePerPass: 0, monotonicNow: () => clock.now(), ...extra,
   });
   cleanup.push(() => service.stop());
   return { clock, service, lines };
