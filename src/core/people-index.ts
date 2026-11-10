@@ -135,7 +135,7 @@ export type PeopleCorrection =
 /** At most this many senders in one conversation make it a group signal. */
 const MAX_GROUP_SIGNAL_MEMBERS = 50;
 const MAX_NAMES_PER_IDENTITY = 8;
-const PEOPLE_SCHEMA_VERSION = 1;
+const PEOPLE_SCHEMA_VERSION = 2;
 export const PEOPLE_INDEX_STORE_ID = 'people-index';
 
 function peopleIndexMigrations(): SqliteMigration[] {
@@ -182,6 +182,18 @@ function peopleIndexMigrations(): SqliteMigration[] {
           updated_at TEXT NOT NULL
         );
       `);
+    },
+  }, {
+    version: 2,
+    name: 'people_corrections_corpora',
+    up(db: Database) {
+      // The corpora a correction's identities were seen in, kept on the
+      // correction itself: a source's Delete finds it even after a rebuild
+      // has dropped those identities (every item of the sender tombstoned).
+      const columns = db.query(`PRAGMA table_info(people_corrections)`).all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'corpus_ids_json')) {
+        db.exec(`ALTER TABLE people_corrections ADD COLUMN corpus_ids_json TEXT NOT NULL DEFAULT '[]'`);
+      }
     },
   }];
 }
@@ -717,10 +729,33 @@ export class LocalPeopleIndex {
           );
         }
       }
+      this.tagCorrectionCorpora();
       this.db.query(`INSERT OR REPLACE INTO people_meta (key, value) VALUES ('rebuilt_at', ?)`).run(this.now().toISOString());
     })();
     this.setPeople(people);
     return people;
+  }
+
+  /**
+   * Add to each correction the corpora its identities are seen in now. Only
+   * adds: a corpus stays on the correction until that source's Delete.
+   */
+  private tagCorrectionCorpora(): void {
+    this.db.exec(`
+      UPDATE people_corrections SET corpus_ids_json = (
+        SELECT json_group_array(DISTINCT value) FROM (
+          SELECT value FROM json_each(people_corrections.corpus_ids_json)
+          UNION
+          SELECT c.value FROM people_identities i, json_each(i.corpus_ids_json) c
+          WHERE i.identity_key IN (people_corrections.identity_a, people_corrections.identity_b)
+        )
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM people_identities i, json_each(i.corpus_ids_json) c
+        WHERE i.identity_key IN (people_corrections.identity_a, people_corrections.identity_b)
+          AND c.value NOT IN (SELECT value FROM json_each(people_corrections.corpus_ids_json))
+      )
+    `);
   }
 
   list(): PeoplePerson[] {
@@ -839,6 +874,7 @@ export class LocalPeopleIndex {
         if (!name) throw new Error('A person needs a name.');
         insert.run('rename', correction.identity, null, name, at);
       }
+      this.tagCorrectionCorpora();
     })();
   }
 
@@ -1048,12 +1084,15 @@ export function forgetPeopleIndexRows(
       SELECT identity_key FROM people_identities
       WHERE EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?)))
     `).all(corpora) as Array<{ identity_key: string }>).map((row) => row.identity_key);
-    if (keys.length === 0) return 0;
     const keyList = JSON.stringify(keys);
-    const corrections = (db.query(`
-      SELECT COUNT(*) AS n FROM people_corrections
-      WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-    `).get(keyList) as { n: number }).n;
+    // A correction goes when it names a forgotten identity, or when its
+    // identities were ever seen in these corpora (kept on the correction, so
+    // it is found after a rebuild dropped a sender whose items are all gone).
+    const correctionMatch = `identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
+      OR EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?2)))`;
+    const corrections = (db.query(`SELECT COUNT(*) AS n FROM people_corrections WHERE ${correctionMatch}`)
+      .get(keyList, corpora) as { n: number }).n;
+    if (keys.length === 0 && corrections === 0) return 0;
     const cards = (db.query(`
       SELECT card_id FROM people_contact_cards
       WHERE EXISTS (SELECT 1 FROM json_each(keys_json) k WHERE k.value IN (SELECT value FROM json_each(?)))
@@ -1061,10 +1100,7 @@ export function forgetPeopleIndexRows(
     if (dryRun) return keys.length + corrections + cards;
     db.transaction(() => {
       db.query(`DELETE FROM people_identities WHERE identity_key IN (SELECT value FROM json_each(?))`).run(keyList);
-      db.query(`
-        DELETE FROM people_corrections
-        WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-      `).run(keyList);
+      db.query(`DELETE FROM people_corrections WHERE ${correctionMatch}`).run(keyList, corpora);
       // A card keeps its other entries; only the deleted source's are taken out.
       const rows = db.query(`SELECT card_id, keys_json FROM people_contact_cards`).all() as Array<{ card_id: string; keys_json: string }>;
       const gone = new Set(keys);

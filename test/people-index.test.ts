@@ -8,6 +8,7 @@ import {
   LocalPeopleIndex,
   OWNER_PERSON_ID,
   peopleIndexPath,
+  forgetPeopleIndexRows,
   linkPeople,
   displayNameFromLabel,
   normalizePhone,
@@ -397,6 +398,45 @@ describe('people index: owner corrections', () => {
       expect(index.citationName('messages', 'brianna@example.com')).toBeUndefined();
     } finally {
       index.close();
+    }
+  });
+});
+
+describe('people index: forgetting a source', () => {
+  test("a source's Delete takes the owner's corrections with it, even once its senders are gone", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-forget-'));
+    const dbPath = join(dir, 'people.sqlite');
+    try {
+      const index = new LocalPeopleIndex({ dbPath });
+      index.rebuild([obs('gmail', 'quinn@example.com', 'Quinn', { corpusId: 'internal.email' })]);
+      index.correct({ kind: 'rename', identity: 'sender:gmail:quinn@example.com', name: 'Quinn H.' });
+      // Every item of that sender was tombstoned: the identity drops out.
+      index.rebuild([]);
+      index.close();
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] }, { dryRun: true })).toBe(1);
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] })).toBe(1);
+      const reopened = new LocalPeopleIndex({ dbPath });
+      expect(reopened.corrections()).toEqual([]);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a correction is tied to every source its identities were seen in', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-forget-'));
+    const dbPath = join(dir, 'people.sqlite');
+    try {
+      const index = new LocalPeopleIndex({ dbPath });
+      index.correct({ kind: 'rename', identity: 'sender:gmail:quinn@example.com', name: 'Quinn H.' });
+      // Seen only after the rename, in another account's corpus.
+      index.rebuild([obs('gmail', 'quinn@example.com', 'Quinn', { corpusId: 'internal.email-2' })]);
+      index.rebuild([]);
+      index.close();
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] })).toBe(0);
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email-2'] })).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
