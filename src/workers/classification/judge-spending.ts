@@ -26,19 +26,43 @@ export const JUDGE_RECOMMENDATION_NIGHTS = 14;
 // Count alone cannot establish the length mix. Show the measured short/long range,
 // and recommend cloud only when even short items exceed two weeks of nights.
 export const VENICE_JUDGE_ESTIMATE = { date: '2026-11-06', itemsPerMinute: 190, inputTokensPerItem: 800, outputTokensPerItem: 80 } as const;
-export function judgeArchiveEstimate(count: number, model: string) {
+/** #891's simulation on the owner's labels: the cautious 4B held about 16% of items Private. */
+export const SECOND_ROUND_HELD_ASSUMPTION = 0.16;
+/** What this install measured itself (judge-second-round.ts); absent until there are enough samples. */
+export interface JudgeObserved { localItemsPerMinute?: number; heldFraction?: number }
+export function judgeArchiveEstimate(count: number, model: string, observed: JudgeObserved = {}) {
   const items = Math.max(0, Math.trunc(count));
   const shortHours = items / LOCAL_JUDGE_MEASUREMENT.shortPerMinute / 60;
   const longHours = items / LOCAL_JUDGE_MEASUREMENT.longPerMinute / 60;
+  const measuredHours = observed.localItemsPerMinute ? items / observed.localItemsPerMinute / 60 : undefined;
   const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(model)];
-  return { items, shortHours, longHours, localNights: shortHours / JUDGE_NIGHT_HOURS,
-    recommended: shortHours > JUDGE_RECOMMENDATION_NIGHTS * JUDGE_NIGHT_HOURS ? 'venice' as const : 'local' as const,
+  const cloudDollars = price ? items * (VENICE_JUDGE_ESTIMATE.inputTokensPerItem * price.input + VENICE_JUDGE_ESTIMATE.outputTokensPerItem * price.output) / 1_000_000 : null;
+  const heldFraction = observed.heldFraction ?? SECOND_ROUND_HELD_ASSUMPTION;
+  const secondRoundItems = Math.ceil(items * heldFraction);
+  return { items, shortHours, longHours, localNights: (measuredHours ?? shortHours) / JUDGE_NIGHT_HOURS,
+    ...(measuredHours !== undefined ? { measuredHours, measuredPerMinute: observed.localItemsPerMinute! } : {}),
+    recommended: (measuredHours ?? shortHours) > JUDGE_RECOMMENDATION_NIGHTS * JUDGE_NIGHT_HOURS ? 'venice' as const : 'local' as const,
     cloudHours: items / VENICE_JUDGE_ESTIMATE.itemsPerMinute / 60,
-    cloudDollars: price ? items * (VENICE_JUDGE_ESTIMATE.inputTokensPerItem * price.input + VENICE_JUDGE_ESTIMATE.outputTokensPerItem * price.output) / 1_000_000 : null };
+    cloudDollars,
+    secondRound: { items: secondRoundItems, heldFraction, observed: observed.heldFraction !== undefined,
+      hours: secondRoundItems / VENICE_JUDGE_ESTIMATE.itemsPerMinute / 60,
+      dollars: cloudDollars === null ? null : items === 0 ? 0 : cloudDollars * secondRoundItems / items } };
 }
+/** With no estimate to go on, the limit starts small; the owner can raise it. */
+export const JUDGE_DEFAULT_CAP_FLOOR_DOLLARS = 5;
+/** The limit a Venice choice starts with when the owner has not set one: the estimate plus 25%, rounded up to the dollar. */
+export function judgeDefaultCapDollars(estimateDollars: number | null): number {
+  return estimateDollars === null ? JUDGE_DEFAULT_CAP_FLOOR_DOLLARS : Math.max(1, Math.ceil(estimateDollars * 1.25));
+}
+/** Whether a choice sends anything to Venice. */
+export function judgeChoiceUsesVenice(choice: JudgeChoice): boolean { return choice !== 'local'; }
+/** local: the free judge on this computer. local-then-venice: it judges everything, and Venice
+ * double-checks only what it held Private (#891). venice: Venice judges everything. */
+export type JudgeChoice = 'local' | 'local-then-venice' | 'venice';
+export const JUDGE_CHOICES: readonly JudgeChoice[] = ['local', 'local-then-venice', 'venice'];
 
 export interface JudgeSpendingStatus {
-  choice: 'local' | 'venice'; capDollars: number; spentDollars: number; remainingDollars: number;
+  choice: JudgeChoice; capDollars: number; spentDollars: number; remainingDollars: number;
   stop: 'cap' | 'payment' | 'storage' | null;
   /** Approved before limits existed: keeps judging, no cap, until the owner sets one. */
   uncapped?: boolean;
@@ -58,9 +82,9 @@ function readBudgetRow(path: string): BudgetRow {
     throw new Error('The saved judge budget cannot be read. Restore the spending record or fix its file permissions; cloud judging is off.');
   }
 }
-interface BudgetRow { choice: 'local' | 'venice'; cap: number; spent: number; stop: 'cap' | 'payment' | null; uncapped?: true; noted?: true }
+interface BudgetRow { choice: JudgeChoice; cap: number; spent: number; stop: 'cap' | 'payment' | null; uncapped?: true; noted?: true }
 function statusFromRow(row: BudgetRow): JudgeSpendingStatus {
-  if (!row || !['local', 'venice'].includes(row.choice) || !Number.isSafeInteger(row.cap) || !Number.isSafeInteger(row.spent) || row.cap < 0 || row.spent < 0 || ![null, 'cap', 'payment'].includes(row.stop) || ![undefined, true].includes(row.uncapped)) throw new Error('The saved judge budget cannot be read. Cloud judging is stopped.');
+  if (!row || !JUDGE_CHOICES.includes(row.choice) || !Number.isSafeInteger(row.cap) || !Number.isSafeInteger(row.spent) || row.cap < 0 || row.spent < 0 || ![null, 'cap', 'payment'].includes(row.stop) || ![undefined, true].includes(row.uncapped)) throw new Error('The saved judge budget cannot be read. Cloud judging is stopped.');
   return { choice: row.choice, capDollars: row.cap / 1_000_000, spentDollars: row.spent / 1_000_000,
     remainingDollars: Math.max(0, row.cap - row.spent) / 1_000_000, stop: row.stop, ...(row.uncapped ? { uncapped: true } : {}) };
 }
@@ -79,7 +103,7 @@ export class JudgeSpending {
       return result;
     });
   }
-  choose(choice: 'local' | 'venice', capDollars: number): void {
+  choose(choice: JudgeChoice, capDollars: number): void {
     const cap = judgeCapMicros(capDollars);
     this.change(row => { row.choice = choice; row.cap = cap; row.stop = null; delete row.uncapped; delete row.noted; });
   }
@@ -103,7 +127,7 @@ export class JudgeSpending {
   }
   private reserve(cost: number): void {
     const stopped = this.change(row => {
-      if (row.choice !== 'venice') return 'opt_in' as const;
+      if (!judgeChoiceUsesVenice(row.choice)) return 'opt_in' as const;
       if (row.stop) return row.stop;
       if (row.spent + cost > row.cap) { row.stop = 'cap'; return row.stop; }
       row.spent += cost;
