@@ -373,15 +373,29 @@ export function linkPeople(input: {
     }
     return false;
   };
-  const link = (a: string, b: string, why: PeopleLinkReason): void => {
-    if (!identities.has(a) || !identities.has(b)) return;
+  /** Joins a and b unless a correction forbids it; true when they end up one person. */
+  const link = (a: string, b: string, why: PeopleLinkReason): boolean => {
+    if (!identities.has(a) || !identities.has(b)) return false;
     const ra = uf.find(a);
     const rb = uf.find(b);
-    if (ra === rb || blocked(ra, rb)) return;
+    if (ra === rb) return true;
+    if (blocked(ra, rb)) return false;
     uf.union(a, b);
     // Record the reason on the identity that joined, once.
     if (!reason.has(b)) reason.set(b, why);
     else if (!reason.has(a)) reason.set(a, why);
+    return true;
+  };
+  // Everyone who shares a key or a card links with each other: each member
+  // joins the first earlier member it may, so a split or rejected first
+  // member never keeps the rest apart.
+  const linkAll = (members: readonly string[], why: PeopleLinkReason): void => {
+    const sorted = [...members].sort();
+    for (let i = 1; i < sorted.length; i += 1) {
+      for (let j = 0; j < i; j += 1) {
+        if (link(sorted[j]!, sorted[i]!, why)) break;
+      }
+    }
   };
 
   // 0. The owner's merges come first: the owner decides.
@@ -402,9 +416,7 @@ export function linkPeople(input: {
     for (const key of identity.keys) byKey.set(key, [...(byKey.get(key) ?? []), identity.identityKey]);
   }
   for (const [key, members] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
-    const why: PeopleLinkReason = key.startsWith('phone:') ? 'phone' : 'email';
-    const sorted = [...members].sort();
-    for (const member of sorted.slice(1)) link(sorted[0]!, member, why);
+    linkAll(members, key.startsWith('phone:') ? 'phone' : 'email');
   }
   // 3. The owner's contacts.
   for (const card of [...(input.contacts ?? [])].sort((a, b) => a.cardId.localeCompare(b.cardId))) {
@@ -417,8 +429,7 @@ export function linkPeople(input: {
       }
       for (const member of byKey.get(normalizeCardKey(key) ?? '') ?? []) members.add(member);
     }
-    const sorted = [...members].sort();
-    for (const member of sorted.slice(1)) link(sorted[0]!, member, 'contacts');
+    linkAll([...members], 'contacts');
   }
   // 4. A name with one more independent signal.
   const byName = new Map<string, string[]>();

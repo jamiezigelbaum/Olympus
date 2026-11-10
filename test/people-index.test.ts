@@ -212,6 +212,34 @@ describe('people index: owner corrections', () => {
     }
   });
 
+  test('splitting or rejecting the first identity of a shared key keeps the others together', () => {
+    const shared = [
+      obs('a', 'sam@example.com', 'Sam'),
+      obs('b', 'sam@example.com', 'Sam'),
+      obs('c', 'sam@example.com', 'Sam'),
+    ];
+    const keysOf = (people: readonly PeoplePerson[], key: string) => personOf(people, key).identities.map((identity) => identity.identityKey).sort();
+    const split = linkPeople({ observations: shared, corrections: [{ kind: 'split', identity: 'sender:a:sam@example.com' }] });
+    expect(keysOf(split, 'sender:a:sam@example.com')).toEqual(['sender:a:sam@example.com']);
+    expect(keysOf(split, 'sender:b:sam@example.com')).toEqual(['sender:b:sam@example.com', 'sender:c:sam@example.com']);
+
+    const rejected = linkPeople({
+      observations: shared,
+      corrections: [{ kind: 'not_same', identityA: 'sender:a:sam@example.com', identityB: 'sender:b:sam@example.com' }],
+    });
+    // The rejected pair stays apart; the third identity still joins one of them.
+    expect(keysOf(rejected, 'sender:b:sam@example.com')).not.toContain('sender:a:sam@example.com');
+    expect(keysOf(rejected, 'sender:c:sam@example.com')).toHaveLength(2);
+
+    // The same through a contact card whose first entry is split off.
+    const card = linkPeople({
+      observations: [obs('a', '1', 'Sam'), obs('b', '2', 'Sam'), obs('c', '3', 'Sam')],
+      contacts: [{ cardId: 'sam', name: 'Sam', keys: ['sender:a:1', 'sender:b:2', 'sender:c:3'] }],
+      corrections: [{ kind: 'split', identity: 'sender:a:1' }],
+    });
+    expect(keysOf(card, 'sender:b:2')).toEqual(['sender:b:2', 'sender:c:3']);
+  });
+
   test('split keeps an identity on its own until the owner merges it', () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     try {
