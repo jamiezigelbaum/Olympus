@@ -73,6 +73,11 @@ import {
   BuiltInSourceEmbeddingProvider,
   loadedBuiltInEmbedding,
 } from '../src/workers/source-index/built-in-embedding/provider.ts';
+import {
+  builtInEmbeddingPaths,
+  installedBuiltInEmbedding,
+} from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
 import type { EvalGrade } from './grade.ts';
@@ -440,6 +445,8 @@ export async function prepareEvalEmbedding(input: {
   /** Thrown or unset configuration, said in the note. */
   configurationError?: string;
   warmTimeoutMs?: number;
+  /** Where the built-in model's files are looked for. Default: this process's environment. */
+  env?: Record<string, string | undefined>;
 }): Promise<{ retrieval: EvalRetrievalMode; embeddingFor: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined }> {
   const keyword = (reason: string) => ({
     retrieval: { mode: 'keyword' as const, note: `keyword search only (${reason})` },
@@ -455,6 +462,11 @@ export async function prepareEvalEmbedding(input: {
     if (status.state !== 'ready' && status.previouslyReady !== true) {
       return keyword(`built-in embedding model ${provider.modelId} is not installed (${status.state})`);
     }
+    // Loading runs the installer, which downloads whatever is missing: a
+    // status file that outlived its files must not start a download.
+    if (!builtInEmbeddingFilesPresent(provider.modelId, input.env ?? process.env)) {
+      return keyword(`built-in embedding model ${provider.modelId} files are missing`);
+    }
     try {
       await withTimeout(provider.warm(), input.warmTimeoutMs ?? DEFAULT_EMBEDDING_WARM_TIMEOUT_MS, 'model load');
     } catch (error) {
@@ -466,6 +478,20 @@ export async function prepareEvalEmbedding(input: {
     retrieval: { mode: 'hybrid', modelId: modelIds, note: `hybrid search with the built-in embedding model ${modelIds}` },
     embeddingFor: (trustDomain) => input.configured[trustDomain],
   };
+}
+
+/** Whether every file the built-in model loads from is on disk (never downloads). */
+export function builtInEmbeddingFilesPresent(modelId: string, env: Record<string, string | undefined>): boolean {
+  const model = builtInEmbeddingModel(modelId);
+  if (!model) return false;
+  try {
+    const paths = builtInEmbeddingPaths(env, model);
+    const installed = installedBuiltInEmbedding(paths, model);
+    return [installed.modelPath, installed.vocabularyPath, installed.libraryPath ?? installed.runtimeDir]
+      .every((path) => path === undefined || existsSync(path));
+  } catch {
+    return false;
+  }
 }
 
 /** Each tier's embedding model as this install configures it (the worker's own resolution). */

@@ -24,6 +24,8 @@ import { fixtureConnector, RecordingProvider, tempDir, type FixtureSpec } from '
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { join } from 'node:path';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
+import { reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -106,6 +108,23 @@ describe('the real eval runner searches the way Ask does', () => {
     });
     expect(remote.retrieval.mode).toBe('keyword');
     expect(remote.retrieval.note).toMatch(/not the built-in/i);
+  });
+
+  test('a status file that outlived the model files leaves the eval on keyword search, with no download', async () => {
+    const { dir, cleanup } = tempDir('olympus-eval-707-model-');
+    cleanups.push(cleanup);
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
+    reportBuiltInEmbeddingState({ env }, 'ready');
+    let installs = 0;
+    const provider = new BuiltInSourceEmbeddingProvider({
+      env,
+      install: async () => { installs += 1; throw new Error('the eval must not install a model'); },
+    });
+    expect(provider.status().state).toBe('ready');
+    const prepared = await prepareEvalEmbedding({ configured: { secure_local: provider }, env });
+    expect(prepared.retrieval.mode).toBe('keyword');
+    expect(prepared.retrieval.note).toMatch(/files are missing/);
+    expect(installs).toBe(0);
   });
 
   test('a loaded local model makes the vector lane run', async () => {
