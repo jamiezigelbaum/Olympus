@@ -20,18 +20,21 @@
 //
 // Either way, too, the side stores that hold the item's names or a short
 // excerpt outside its store copies keep none of it (`forgetSecretInSideStores`):
-// the sniffer's queued questions (beside the set ledger) are deleted, and the
+// the sniffer's queued questions (beside the set ledger) are deleted, the
 // extraction job ledger's captured names are cleared, for good (a later
-// enqueue cannot write them back). A Secret keeps its
+// enqueue cannot write them back), and the titles and locators the list of
+// what AI apps received recorded are cleared, for good too (a receipt written
+// later cannot write them back). A Secret keeps its
 // location only, wherever it was written down (docs/TRUST_MODEL.md).
 //
 // An item that leaves Secrets (the owner's "not a secret" or a lower tier,
 // then the item decided again) gets its job names back on its next enqueue:
 // the tier ledger records the change in the deciding write itself and
 // cancels any clearing still owed, and `retireSecretRedactions` removes the
-// item's redaction markers from every job ledger.
+// item's redaction markers from every job ledger and AI apps list.
 
 import { existsSync } from 'node:fs';
+import { appReleaseLogDbPaths, forgetSecretAppReleaseItem, retireSecretAppReleaseItem } from '../../core/app-release-log.ts';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import { snifferMaterialCarriesSecret, snifferOwnMaterial } from '../classification/sniffer.ts';
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
@@ -60,6 +63,8 @@ export interface ForgottenSecretSideStores {
   snifferQuestions: number;
   /** Extraction job rows whose captured name was cleared. */
   extractionJobNames: number;
+  /** Rows of the list of what AI apps received whose title and locator were cleared. */
+  appReleaseTitles: number;
   /** Side stores that could not be reached; left as a ledger debt, retried every tier tick. */
   failed: number;
   /** Job ledgers cleared but not yet able to keep the names out (an older schema); also owed. */
@@ -106,8 +111,9 @@ export function settleSecretsCopies(options: {
 
 /**
  * Forget a Secrets item in the side stores that hold its names or a short
- * excerpt: delete its queued sniffer questions (the file beside `ledger`) and
- * clear the names its extraction jobs captured, for good. Files that do not
+ * excerpt: delete its queued sniffer questions (the file beside `ledger`),
+ * clear the names its extraction jobs captured, and the titles and locators
+ * the list of what AI apps received recorded, for good. Files that do not
  * exist are not created. A side store that cannot be reached does not hold
  * up the copies' fate: it is logged and left as a debt in the ledger, which
  * `retrySecretSideStoreDebts` clears at the next tier tick. A Secrets item
@@ -133,7 +139,7 @@ export function forgetSecretInSideStores(options: {
    */
   onlyWhileOwed?: boolean;
 }): ForgottenSecretSideStores {
-  const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
+  const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers: string[] = [];
   const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
@@ -173,6 +179,19 @@ export function forgetSecretInSideStores(options: {
       } finally {
         sniffer.close();
       }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  // The list of what AI apps received: the default path and any this process
+  // holds open. A separate process (the tier set command) owes it to the worker.
+  for (const logPath of appReleaseLogDbPaths()) {
+    try {
+      result.appReleaseTitles += forgetSecretAppReleaseItem(logPath, {
+        provider: identity.provider,
+        providerItemId: identity.providerItemId,
+        ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+      }, options.onlyWhileOwed ? { proceed: stillOwed } : {});
     } catch {
       result.failed += 1;
     }
@@ -343,6 +362,13 @@ export function retireSecretRedactions(ledger: TierLedger, options: { identity?:
       for (const jobsPath of new Set([...extractionJobsDbPaths(), ...knownJobLedgers, ...retirement.jobLedgerPaths])) {
         try {
           if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret) secret = true;
+        } catch {
+          failed += 1;
+        }
+      }
+      for (const logPath of appReleaseLogDbPaths()) {
+        try {
+          retireSecretAppReleaseItem(logPath, { provider: item.provider, providerItemId: item.providerItemId }, { stillSecret });
         } catch {
           failed += 1;
         }
