@@ -23,8 +23,6 @@ import type { CalibrationSampleItem, ExtractionNote, WholeItemChild } from './fi
 import { storedJudgeInput, type Row } from './stored-input.ts';
 import type { PopulationUnit, WholeStratum } from './whole-item.ts';
 
-/** What the judge is given: production keeps at most this much of an item's text. */
-const JUDGE_TEXT_CHARS = 60_000;
 /** What the labeling page keeps of one item or attachment: long documents whole, within reason. */
 export const WHOLE_TEXT_CHARS = 400_000;
 const STORE_FILES = ['secure_local.sqlite', 'internal.sqlite'] as const;
@@ -339,7 +337,10 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
       const found = stores.find(unit.identity)!;
       const own = stores.textOf(found);
       const provider = String(found.row['provider']);
-      const input = storedJudgeInput(found.row, own.slice(0, JUDGE_TEXT_CHARS), provider);
+      // The judge input is rebuilt from the same retained text the built-in scorer reads (item.text),
+      // so both judges see the same excerpt of one frozen item.
+      const whole = cut(own);
+      const input = storedJudgeInput(found.row, whole.text, provider);
       const queued = stores.queuedInput(unit.identity);
       const judgeSees = queued ?? input.material;
       const injection = judgeSees !== undefined && snifferInjectionRule(snifferOwnMaterial(snifferMaterialForModel(judgeSees))) !== undefined;
@@ -353,7 +354,6 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
         };
       });
       const note = extraction.note(provider, String(found.row['local_item_id']));
-      const whole = cut(own);
       const locator = text(found.row['locator_uri']);
       return {
         id: ids[index]!,
