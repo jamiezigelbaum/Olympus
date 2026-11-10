@@ -343,20 +343,8 @@ export function linkPeople(input: {
     }
   }
 
-  const corrections = input.corrections ?? [];
-  const rejected = new Set<string>();
   const pairKey = (a: string, b: string) => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
-  const merges: Array<[string, string]> = [];
-  const renames = new Map<string, string>();
-  for (const correction of corrections) {
-    if (correction.kind === 'not_same') rejected.add(pairKey(correction.identityA, correction.identityB));
-    else if (correction.kind === 'merge') merges.push([correction.identityA, correction.identityB]);
-    else if (correction.kind === 'rename') renames.set(correction.identity, correction.name);
-  }
-  const splits = new Set(corrections.flatMap((c) => (c.kind === 'split' ? [c.identity] : [])));
-  // A merge after a rejection of the same pair wins, and the reverse: the
-  // later correction is the owner's current answer.
-  for (const [a, b] of merges) rejected.delete(pairKey(a, b));
+  const { merges, rejected, splits, renames } = replayCorrections(input.corrections ?? [], pairKey);
 
   const uf = new UnionFind();
   for (const key of identities.keys()) uf.add(key);
@@ -483,7 +471,9 @@ export function linkPeople(input: {
     const members = [...memberSet].sort().map((key) => identities.get(key)!);
     const isOwner = members.some((member) => member.isOwner);
     const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash('sha256').update(members[0]!.identityKey).digest('hex').slice(0, 16)}`;
-    const renamed = [...renames].filter(([identity]) => memberSet.has(identity)).map(([, name]) => name).at(-1);
+    // The owner's newest rename of any identity of this person wins.
+    const renamed = [...memberSet].map((identity) => renames.get(identity))
+      .reduce<{ name: string; at: number } | undefined>((best, next) => (next && (!best || next.at > best.at) ? next : best), undefined)?.name;
     const displayName = isOwner ? OWNER_DISPLAY_NAME : renamed ?? bestName(members);
     const nameShareable = isOwner || renamed !== undefined || members.some((member) => member.publicNames.size > 0);
     const linkedBy = new Set<string>();
@@ -515,6 +505,92 @@ export function linkPeople(input: {
     });
   }
   return people.sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || b.itemCount - a.itemCount || a.personId.localeCompare(b.personId));
+}
+
+interface ReplayedCorrections {
+  /** The owner's merges still in force, oldest first. */
+  merges: Array<[string, string]>;
+  /** Pairs the owner said are not the same, still in force. */
+  rejected: Set<string>;
+  /** Identities the owner split off and has not merged since. */
+  splits: Set<string>;
+  /** The newest rename of each identity, with its place in the replay. */
+  renames: Map<string, { name: string; at: number }>;
+}
+
+/**
+ * The owner's corrections, replayed strictly in the order they were made, as
+ * one model: the later answer always wins.
+ * - Merge joins a pair, and ends any earlier Not the same between identities
+ *   the merges now join, and any earlier split of either identity.
+ * - Not the same keeps a pair apart: while earlier merges still join the
+ *   pair, the newest merge on the path between them is undone.
+ * - Split keeps an identity alone: every earlier merge of it is undone.
+ * - Rename: the newest rename of any identity of a person names the person.
+ */
+function replayCorrections(corrections: readonly PeopleCorrection[], pairKey: (a: string, b: string) => string): ReplayedCorrections {
+  // Active merges keyed by pair, each with the step it was made at.
+  const merges = new Map<string, { a: string; b: string; at: number }>();
+  const rejected = new Set<string>();
+  const splits = new Set<string>();
+  const renames = new Map<string, { name: string; at: number }>();
+  /** The active merges joining a to b (a shortest path), or undefined when they do not. */
+  const mergePath = (from: string, to: string): Array<{ key: string; at: number }> | undefined => {
+    const edges = new Map<string, Array<{ next: string; key: string; at: number }>>();
+    for (const [key, merge] of merges) {
+      edges.set(merge.a, [...(edges.get(merge.a) ?? []), { next: merge.b, key, at: merge.at }]);
+      edges.set(merge.b, [...(edges.get(merge.b) ?? []), { next: merge.a, key, at: merge.at }]);
+    }
+    const via = new Map<string, { from: string; key: string; at: number } | null>([[from, null]]);
+    const queue = [from];
+    while (queue.length > 0) {
+      const node = queue.shift()!;
+      if (node === to) break;
+      for (const edge of edges.get(node) ?? []) {
+        if (via.has(edge.next)) continue;
+        via.set(edge.next, { from: node, key: edge.key, at: edge.at });
+        queue.push(edge.next);
+      }
+    }
+    if (!via.has(to)) return undefined;
+    const path: Array<{ key: string; at: number }> = [];
+    for (let step = via.get(to); step; step = via.get(step.from)) path.push({ key: step.key, at: step.at });
+    return path;
+  };
+  corrections.forEach((correction, at) => {
+    if (correction.kind === 'merge') {
+      const { identityA: a, identityB: b } = correction;
+      if (a === b) return;
+      merges.set(pairKey(a, b), { a, b, at });
+      splits.delete(a);
+      splits.delete(b);
+      for (const pair of [...rejected]) {
+        const [x, y] = pair.split('\u0000') as [string, string];
+        if (mergePath(x, y)) rejected.delete(pair);
+      }
+    } else if (correction.kind === 'not_same') {
+      const { identityA: a, identityB: b } = correction;
+      if (a === b) return;
+      rejected.add(pairKey(a, b));
+      for (let path = mergePath(a, b); path && path.length > 0; path = mergePath(a, b)) {
+        const newest = path.reduce((best, edge) => (edge.at > best.at ? edge : best));
+        merges.delete(newest.key);
+      }
+    } else if (correction.kind === 'split') {
+      for (const [key, merge] of [...merges]) {
+        if (merge.a === correction.identity || merge.b === correction.identity) merges.delete(key);
+      }
+      splits.add(correction.identity);
+    } else {
+      renames.set(correction.identity, { name: correction.name, at });
+    }
+  });
+  return {
+    merges: [...merges.values()].sort((x, y) => x.at - y.at).map((merge): [string, string] => [merge.a, merge.b]),
+    rejected,
+    splits,
+    renames,
+  };
 }
 
 function bestName(members: readonly WorkingIdentity[]): string {

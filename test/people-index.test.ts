@@ -11,6 +11,7 @@ import {
   linkPeople,
   normalizePhone,
   strongKeysFromText,
+  type PeopleCorrection,
   type PeoplePerson,
   type PeopleSenderObservation,
 } from '../src/core/people-index.ts';
@@ -241,6 +242,82 @@ describe('people index: owner corrections', () => {
       corrections: [{ kind: 'split', identity: 'sender:a:1' }],
     });
     expect(keysOf(card, 'sender:b:2')).toEqual(['sender:b:2', 'sender:c:3']);
+  });
+
+  describe('are replayed in the order the owner made them', () => {
+    const A = 'sender:a:1';
+    const B = 'sender:b:2';
+    const C = 'sender:c:3';
+    const three = [obs('a', '1', 'Ana'), obs('b', '2', 'Bea'), obs('c', '3', 'Cy')];
+    const replay = (corrections: PeopleCorrection[], observations = three): PeoplePerson[] => {
+      const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+      try {
+        for (const correction of corrections) index.correct(correction);
+        return index.rebuild(observations);
+      } finally {
+        index.close();
+      }
+    };
+    const keysOf = (people: readonly PeoplePerson[], key: string) => personOf(people, key).identities.map((identity) => identity.identityKey).sort();
+
+    test('the newest rename of any identity of a person wins', () => {
+      const people = replay([
+        { kind: 'merge', identityA: A, identityB: B },
+        { kind: 'rename', identity: A, name: 'First' },
+        { kind: 'rename', identity: B, name: 'Second' },
+        { kind: 'rename', identity: A, name: 'Latest' },
+      ]);
+      expect(personOf(people, A).displayName).toBe('Latest');
+    });
+
+    test('a later Not the same cuts an earlier chain of merges', () => {
+      const people = replay([
+        { kind: 'merge', identityA: A, identityB: B },
+        { kind: 'merge', identityA: B, identityB: C },
+        { kind: 'not_same', identityA: A, identityB: C },
+      ]);
+      expect(keysOf(people, A)).not.toContain(C);
+      // The newest merge on the path is the one undone: A and B stay together.
+      expect(keysOf(people, A)).toEqual([A, B]);
+      expect(keysOf(people, C)).toEqual([C]);
+    });
+
+    test('a later merge chain overrides an earlier Not the same', () => {
+      const people = replay([
+        { kind: 'not_same', identityA: A, identityB: C },
+        { kind: 'merge', identityA: A, identityB: B },
+        { kind: 'merge', identityA: B, identityB: C },
+      ]);
+      expect(keysOf(people, A)).toEqual([A, B, C]);
+    });
+
+    test('a later split undoes earlier merges, and a later merge undoes the split', () => {
+      expect(keysOf(replay([
+        { kind: 'merge', identityA: A, identityB: B },
+        { kind: 'split', identity: A },
+      ]), A)).toEqual([A]);
+      expect(keysOf(replay([
+        { kind: 'split', identity: A },
+        { kind: 'merge', identityA: A, identityB: B },
+      ]), A)).toEqual([A, B]);
+    });
+
+    test('a split first identity of a shared key leaves the rest together', () => {
+      const shared = [obs('a', 'sam@example.com', 'Sam'), obs('b', 'sam@example.com', 'Sam'), obs('c', 'sam@example.com', 'Sam')];
+      const people = replay([{ kind: 'split', identity: 'sender:a:sam@example.com' }], shared);
+      expect(keysOf(people, 'sender:b:sam@example.com')).toEqual(['sender:b:sam@example.com', 'sender:c:sam@example.com']);
+    });
+
+    test('the newer answer about the same pair wins, either way round', () => {
+      expect(keysOf(replay([
+        { kind: 'not_same', identityA: A, identityB: B },
+        { kind: 'merge', identityA: B, identityB: A },
+      ]), A)).toEqual([A, B]);
+      expect(keysOf(replay([
+        { kind: 'merge', identityA: A, identityB: B },
+        { kind: 'not_same', identityA: B, identityB: A },
+      ]), A)).toEqual([A]);
+    });
   });
 
   test('split keeps an identity on its own until the owner merges it', () => {
