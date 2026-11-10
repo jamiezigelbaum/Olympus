@@ -565,6 +565,11 @@ export class TierSnifferService {
     }
   }
 
+  /** A judge pass is running now: a restart on memory waits for it to end (engine-split/rss-restart.ts). */
+  get passRunning(): boolean {
+    return this.running;
+  }
+
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;

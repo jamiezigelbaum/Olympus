@@ -40,6 +40,8 @@ export interface EngineStatusSnapshot {
   archive?: { view: unknown; cards: unknown[]; source_imports: unknown[]; sources: unknown[] };
   /** Sync now runs the background started for the front, by scheduler source id: the latest per source. */
   manual_syncs?: Record<string, EngineManualSyncRun>;
+  /** How many times a background restarted itself on memory, carried from one to the next (rss-restart.ts). */
+  rss_restarts?: { count: number; last?: { at: string; rss_mb: number } };
 }
 
 export interface EngineManualSyncRun {

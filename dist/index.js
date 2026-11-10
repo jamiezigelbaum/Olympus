@@ -4440,6 +4440,9 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   if (worker && Object.prototype.hasOwnProperty.call(worker, "engineSplit")) {
     config.worker.engineSplit = worker.engineSplit;
   }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, "engineSplitRssRestartMb")) {
+    config.worker.engineSplitRssRestartMb = worker.engineSplitRssRestartMb;
+  }
   const service = asRecord5(worker?.service);
   if (service) {
     if (typeof service.enabled === "boolean")
@@ -4858,6 +4861,9 @@ function applyModelProfileEnv(config, profile, env, prefix) {
 }
 function validateConfig(config) {
   assertBoolean(config.worker.engineSplit, "worker.engineSplit");
+  if (!Number.isSafeInteger(config.worker.engineSplitRssRestartMb) || config.worker.engineSplitRssRestartMb < 0) {
+    throw new OperationError("config_error", "worker.engineSplitRssRestartMb must be a whole number of MB, 0 or more (0 turns the restart off).");
+  }
   if (config.sovereignty?.configPath !== undefined) {
     if (typeof config.sovereignty.configPath !== "string" || !config.sovereignty.configPath.trim()) {
       throw new OperationError("config_error", "sovereignty.configPath must be a non-empty string.");
@@ -5180,7 +5186,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord5(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, ENGINE_RSS_RESTART_DEFAULT_MB = 3072, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_openclaw_plugin_remote();
@@ -5211,6 +5217,7 @@ var init_config = __esm(() => {
   DEFAULT_CONFIG = {
     worker: {
       engineSplit: false,
+      engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
       service: {
         enabled: false,
         startupTimeoutSeconds: 180,
