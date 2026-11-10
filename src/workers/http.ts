@@ -58,6 +58,9 @@ export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-
  * which controls this session reaches. Stripped from every incoming request.
  */
 export const DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = 'X-Olympus-Control-Session-Grade';
+/** Update now (core/self-update.ts): a local-grade session only, never the bearer. */
+export const DASHBOARD_SELF_UPDATE_PATHS = { start: '/dashboard/engine/update', status: '/dashboard/engine/update/status' } as const;
+export const DASHBOARD_SELF_UPDATE_LOCAL_ONLY = 'Olympus updates itself only from the dashboard on this computer, in an unlocked browser.';
 /**
  * Internal context carried from the native Gateway bridge to the worker.
  *
@@ -117,12 +120,8 @@ export function withWorkerBearerAuth(
   // The signing key is the secret bound to the bearer: the bearer alone
   // cannot forge a cookie (it lacks the secret), and rotating the worker
   // token still revokes every session at once (the key changes with it).
-  const sessionSecret = createHmac('sha256', options.sessionSecret?.trim() || randomBytes(32).toString('base64url'))
-    .update('olympus-dashboard-control-key-v1')
-    .update('\0')
-    // No bearer configured: the wrapper refuses everything but health anyway.
-    .update(authToken ?? '')
-    .digest('base64url');
+  // No bearer configured: the wrapper refuses everything but health anyway.
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes(32).toString('base64url'), authToken ?? '');
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request: Request): Promise<Response> => {
@@ -645,6 +644,22 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
   '/dashboard/archive-import/stop',
 ];
 
+/**
+ * The owner's one-item privacy change on the Privacy tab
+ * (classification/tier-owner-items.ts): finding any item, with its names, and
+ * setting it Personal or Private or back to the judge. Lowering an item is
+ * the person's call at this computer, so these take the consult routes'
+ * grade too; an agent raises through its own route on the worker bearer.
+ */
+export const DASHBOARD_PRIVACY_ITEM_PATHS: readonly string[] = [
+  '/dashboard/privacy/items/find',
+  '/dashboard/privacy/items/set',
+];
+
+function isDashboardPrivacyItemRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_PRIVACY_ITEM_PATHS.includes(new URL(request.url).pathname);
+}
+
 export const DASHBOARD_MESSAGING_PATHS: readonly string[] = [
   '/dashboard/messaging/start', '/dashboard/messaging/status', '/dashboard/messaging/respond',
   '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
@@ -661,19 +676,35 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
+    || isDashboardSelfUpdateRoute(request)
+    || isDashboardPrivacyItemRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
+function isDashboardSelfUpdateRoute(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return request.method === 'POST' && (path === DASHBOARD_SELF_UPDATE_PATHS.start || path === DASHBOARD_SELF_UPDATE_PATHS.status);
+}
+
 function dashboardLocalGradeRefusal(request: Request): Response {
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (isDashboardSelfUpdateRoute(request)) {
+    return new Response(JSON.stringify({ ok: false, error: { code: 'mac_dashboard_only', message: DASHBOARD_SELF_UPDATE_LOCAL_ONLY } }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    });
+  }
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)
+    && !isDashboardPrivacyItemRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
         ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
-        : isDashboardAppsReceivedRoute(request)
-          ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
+        : isDashboardPrivacyItemRoute(request)
+          ? 'One item\'s privacy label is changed only in the dashboard on this computer, in an unlocked browser.'
+          : isDashboardAppsReceivedRoute(request)
+            ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
           : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {
@@ -837,6 +868,59 @@ function mintDashboardControlSession(
   };
 }
 
+function dashboardControlSigningKey(sessionSecret: string, authToken: string): string {
+  return createHmac('sha256', sessionSecret)
+    .update('olympus-dashboard-control-key-v1')
+    .update('\0')
+    .update(authToken)
+    .digest('base64url');
+}
+
+/**
+ * The owner proof for approving an app connection where there is no owner
+ * socket (#1186): this browser's live dashboard control session, signed by
+ * this worker, unexpired and bound to `origin`. Only the owner's launch
+ * ticket or the worker token (owner-only worker.env) opens one, and since
+ * #1153 the local mint needs one too, so another account on this computer
+ * that can reach the loopback port has none. Either grade counts: both come
+ * from the owner. The caller states the origin (the approval page's own,
+ * from its loopback Host), because that page sends `Origin: null` under its
+ * `no-referrer` policy; the cookie's origin tag still has to match it.
+ * Without a configured bearer or session secret no session can be checked,
+ * so the answer is always no.
+ */
+export function dashboardOwnerSessionCheck(options: {
+  authToken: string | undefined;
+  sessionSecret: string | undefined;
+  now?: () => number;
+}): (request: Request, origin: string) => boolean {
+  const authToken = normalizeWorkerAuthToken(options.authToken);
+  const configured = options.sessionSecret?.trim();
+  if (!authToken || !configured) return () => false;
+  const sessionSecret = dashboardControlSigningKey(configured, authToken);
+  const now = options.now ?? Date.now;
+  return (request, origin) => {
+    const parts = liveDashboardControlSessionParts(request, sessionSecret, now());
+    return !!parts && constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin));
+  };
+}
+
+/** The request's control cookie when this worker signed it and it is live; nothing about origin or CSRF. */
+function liveDashboardControlSessionParts(request: Request, sessionSecret: string, nowMs: number): DashboardControlSessionParts | undefined {
+  const cookie = cookieValue(request.headers.get('Cookie'), DASHBOARD_CONTROL_COOKIE);
+  if (!cookie) return undefined;
+  const parts = decodeDashboardControlSession(cookie);
+  if (!parts) return undefined;
+  // Signature first: a cookie this worker's token did not sign is no session
+  // at all, whatever else it claims. Then lifetime.
+  const expected = dashboardControlSignature(sessionSecret, parts);
+  if (!constantTimeStringEqual(parts.signature, expected)) return undefined;
+  const expiresAtMs = dashboardControlExpiresAtMs(parts);
+  // A cookie dated in the future was not issued by this worker's clock.
+  if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60_000) return undefined;
+  return parts;
+}
+
 function authorizeDashboardControlSession(
   request: Request,
   sessionSecret: string,
@@ -862,17 +946,10 @@ function authorizeDashboardControlSession(
    */
   allowOriginlessNavigation = false,
 ): AuthorizedDashboardControlSession | { status: 'missing' | 'origin_mismatch' | 'csrf_mismatch' } {
-  const cookie = cookieValue(request.headers.get('Cookie'), DASHBOARD_CONTROL_COOKIE);
-  if (!cookie) return { status: 'missing' };
-  const parts = decodeDashboardControlSession(cookie);
+  // Signature and lifetime first, then origin, then CSRF.
+  const parts = liveDashboardControlSessionParts(request, sessionSecret, nowMs);
   if (!parts) return { status: 'missing' };
-  // Signature first: a cookie this worker's token did not sign is no session
-  // at all, whatever else it claims. Then lifetime, then origin, then CSRF.
-  const expected = dashboardControlSignature(sessionSecret, parts);
-  if (!constantTimeStringEqual(parts.signature, expected)) return { status: 'missing' };
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
-  // A cookie dated in the future was not issued by this worker's clock.
-  if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60_000) return { status: 'missing' };
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined) return { status: 'origin_mismatch' };
   if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin))) {
