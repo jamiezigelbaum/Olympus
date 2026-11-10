@@ -265,3 +265,67 @@ describe('data restore keeps which account a source\'s items came from', () => {
     }
   });
 });
+
+// The mail picker's "always Private" senders are the owner's own rules (#1149
+// review on #1098's export): they travel without the approval, which is bound
+// to the grant on the computer that made the backup, and come back exactly as
+// the owner set them, for the picker to open with and the approval to hold.
+test('the mail picker\'s "always Private" senders travel without the approval, and come back as the owner set them', async () => {
+  const { lifecycleHandleRegistryPath } = await import('../src/data-lifecycle.ts');
+  const mail = await import('../src/core/mail-source-scope.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-mail-rules-'));
+  const homeA = join(dir, 'a');
+  const homeB = join(dir, 'b');
+  const backup = join(dir, 'backup');
+  const statePath = (home: string) => mail.defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath({ homeDir: home }));
+  const senders = ['@clinic.example', 'lawyer@example.com'];
+  const generation = 'a'.repeat(64);
+  try {
+    mkdirSync(dirname(statePath(homeA)), { recursive: true });
+    writeFileSync(statePath(homeA), JSON.stringify({
+      version: 1,
+      approvals: [{
+        source_id: 'gmail.email',
+        account_generation: generation,
+        revision: '0b0f8c6e-6c1f-4a43-9c3e-5d1f2a3b4c5d',
+        status: 'approved',
+        mail_scope: { window: 'all', skipped_categories: [], skipped_labels: [], always_private_senders: senders, skip_senders: ['news@example.com'] },
+        owner_tier_rules: [],
+        approved_at: '2026-11-01T00:00:00.000Z',
+      }],
+    }));
+    seed(storeOf(homeA), 'rows', 'a bookmark');
+    const exported = exportOlympusData({ destination: backup, homeDir: homeA });
+    const artifact = exported.artifacts.find((entry) => entry.ownerFile === 'mail_always_private')!;
+    expect(artifact.role).toBe('owner_rules');
+    const carried = readFileSync(join(backup, artifact.relativePath), 'utf8');
+    expect(JSON.parse(carried).always_private_senders).toEqual(senders);
+    // Only the owner's list: not the grant-bound approval, nor the other choices.
+    expect(carried).not.toContain(generation);
+    expect(carried).not.toContain('news@example.com');
+
+    restoreOlympusData({ input: backup, homeDir: homeB });
+    const registry = {
+      handles: [{ handle: 'gmail-new', provider: 'gmail', allowedCapabilities: ['gmail.email.sync'], connectedAt: '2026-11-10T00:00:00.000Z' }],
+    };
+    const pending = mail.readMailSourceScopeApproval({ registry, statePath: statePath(homeB) });
+    expect(pending.status).toBe('scope_pending');
+    expect(pending.carriedAlwaysPrivateSenders).toEqual(senders);
+    expect(mail.mailOwnerRulesForExport(statePath(homeB))?.always_private_senders).toEqual(senders);
+    // Deleting Gmail's data forgets a carried list, as it forgets an approval.
+    expect(mail.forgetMailSourceScopeApproval(statePath(homeB), ['gmail.email'], { dryRun: true })).toBe(1);
+
+    // Approving the scope the picker opens with makes them the owner's force-Private rules.
+    const approved = mail.approveMailSourceScope({
+      registry,
+      statePath: statePath(homeB),
+      accountGeneration: pending.accountGeneration!,
+      expectedRevision: pending.revision,
+      scope: { ...mail.defaultMailScopeSelection(), alwaysPrivateSenders: pending.carriedAlwaysPrivateSenders! },
+    });
+    expect(approved.ownerTierRules).toEqual(mail.mailScopeOwnerTierRules({ alwaysPrivateSenders: senders }));
+    expect(JSON.parse(readFileSync(statePath(homeB), 'utf8')).carried_owner_rules).toBeUndefined();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

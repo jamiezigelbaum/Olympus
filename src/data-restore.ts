@@ -50,6 +50,7 @@ import {
 import { compareProviderAccounts, mergeProviderAccountIds } from './core/provider-account-identity.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './core/source-registry.ts';
 import { placeOwnedAccount, recordProviderAccount } from './core/source-storage.ts';
+import { carryMailOwnerRules, defaultMailSourceScopeStatePath, normalizeSenders } from './core/mail-source-scope.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from './workers/connector-store/local-index.ts';
 import { TierLedger } from './workers/classification/tier-ledger.ts';
 import { TIER_LEDGER_FILE_SUFFIX } from './workers/classification/tier-ledger-path.ts';
@@ -63,6 +64,8 @@ export interface DataRestorePlanEntry {
   kind: 'store' | 'judgments' | 'owner_settings';
   /** An owner settings file this computer already has: kept beside the restored one. */
   keptAs?: string;
+  /** Merged into the file at `to` rather than copied over it (the mail picker's "always Private" senders). */
+  merge?: 'mail_always_private';
 }
 
 export interface DataRestoreResult {
@@ -161,6 +164,15 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         notes.push(`Left out ${from}: an index from before Olympus 1.0, which this install doesn't open.`);
         break;
       case 'owner_rules': {
+        if (artifact.ownerFile === 'mail_always_private') {
+          // Not a file of its own here: the senders go into the mail scope
+          // file, beside an approval this computer may already hold.
+          const to = defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath(context));
+          // Checked before anything is written: a list the picker would refuse is refused here.
+          normalizeSenders((JSON.parse(readFileSync(join(input, from), 'utf8')) as { always_private_senders?: unknown }).always_private_senders, 'always Private');
+          plan.push({ from, to, sourceId: 'olympus.config', kind: 'owner_settings', merge: 'mail_always_private' });
+          break;
+        }
         const to = artifact.ownerFile === 'tier_rules' ? resolveTierRulesPath({ env })
           : artifact.ownerFile === 'ingestion_exclusions' ? resolveSourceIngestionExclusionsPath(env)
             : undefined;
@@ -223,7 +235,7 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
     );
   }
   for (const entry of plan) {
-    if (entry.kind === 'owner_settings' && existsSync(entry.to)) entry.keptAs = `${entry.to}.before-restore`;
+    if (entry.kind === 'owner_settings' && !entry.merge && existsSync(entry.to)) entry.keptAs = `${entry.to}.before-restore`;
   }
 
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === 'store').map((entry) => entry.sourceId))];
@@ -255,6 +267,13 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
       .filter((entry) => entry.kind === 'judgments' && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX))
       .map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join(input, entry.from)) }));
     for (const entry of plan) {
+      if (entry.merge === 'mail_always_private') {
+        const carried = JSON.parse(readFileSync(join(input, entry.from), 'utf8')) as { always_private_senders?: unknown };
+        if (carryMailOwnerRules(entry.to, carried.always_private_senders) === 'kept_approval') {
+          notes.push('Kept the mail scope this computer already approved; the backup\'s "always Private" senders were not added to it.');
+        }
+        continue;
+      }
       if (entry.keptAs) copyPrivate(entry.to, entry.keptAs);
       const prepare = entry.kind === 'store'
         ? (staged: string) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to)

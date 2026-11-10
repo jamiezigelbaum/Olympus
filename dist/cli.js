@@ -53768,7 +53768,10 @@ function defaultMailSourceScopeStatePath(handleRegistryPath) {
 function forgetMailSourceScopeApproval(statePath, sourceIds, options = {}) {
   if (!existsSync42(statePath))
     return 0;
-  const dropped = (state) => state.approvals.filter((approval) => sourceIds.includes(approval.source_id));
+  const dropped = (state) => [
+    ...state.approvals.filter((approval) => sourceIds.includes(approval.source_id)),
+    ...state.carried_owner_rules && sourceIds.includes(state.carried_owner_rules.source_id) ? [state.carried_owner_rules] : []
+  ];
   const first = readState3(statePath);
   const found = first.kind === "valid" ? dropped(first.state).length : 0;
   if (found === 0 || options.dryRun === true)
@@ -53780,9 +53783,11 @@ function forgetMailSourceScopeApproval(statePath, sourceIds, options = {}) {
     const count = dropped(read.state).length;
     if (count === 0)
       return 0;
+    const carried = read.state.carried_owner_rules;
     const state = {
       version: 1,
-      approvals: read.state.approvals.filter((approval) => !sourceIds.includes(approval.source_id))
+      approvals: read.state.approvals.filter((approval) => !sourceIds.includes(approval.source_id)),
+      ...carried && !sourceIds.includes(carried.source_id) ? { carried_owner_rules: carried } : {}
     };
     lease.commit(() => writePrivateFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}
 `));
@@ -53803,18 +53808,23 @@ function connectedMailSourceAccountGeneration(registry, pinnedHandle) {
 }
 function readMailSourceScopeApproval(input) {
   const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
-  if (!account)
-    return pendingSnapshot2("not-connected", undefined, "not_connected");
   const read = readState3(input.statePath);
+  const carried = read.kind === "valid" ? read.state.carried_owner_rules?.always_private_senders : undefined;
+  const pending = (revision, reason) => ({
+    ...pendingSnapshot2(revision, account?.generation, reason),
+    ...carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}
+  });
+  if (!account)
+    return pending("not-connected", "not_connected");
   if (read.kind === "missing")
-    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
+    return pending(`missing:${account.generation}`, "missing");
   if (read.kind === "malformed")
-    return pendingSnapshot2(`malformed:${read.digest}`, account.generation, "malformed");
+    return pending(`malformed:${read.digest}`, "malformed");
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
   if (!approval)
-    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
+    return pending(`missing:${account.generation}`, "missing");
   if (approval.account_generation !== account.generation) {
-    return pendingSnapshot2(`stale:${approval.revision}:${account.generation}`, account.generation, "account_changed");
+    return pending(`stale:${approval.revision}:${account.generation}`, "account_changed");
   }
   return {
     sourceId: MAIL_SOURCE_SCOPE_ID,
@@ -53951,6 +53961,34 @@ function estimateMailScope(input) {
 }
 function nonNegativeInteger(value) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+function mailOwnerRulesForExport(statePath) {
+  const read = readState3(statePath);
+  if (read.kind !== "valid")
+    return;
+  const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
+  const senders = approval ? approval.mail_scope.always_private_senders : read.state.carried_owner_rules?.always_private_senders;
+  return senders && senders.length > 0 ? { schema_version: 1, source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: [...senders] } : undefined;
+}
+function carryMailOwnerRules(statePath, alwaysPrivateSenders) {
+  const senders = normalizeSenders(alwaysPrivateSenders, "always Private");
+  return withFileLeaseSync(statePath, (lease) => {
+    const read = readState3(statePath);
+    if (read.kind === "malformed") {
+      throw new OperationError("invalid_params", `The mail scope file at ${statePath} is unreadable, so the backup's mail privacy rules were not restored.`);
+    }
+    const approvals = read.kind === "valid" ? read.state.approvals : [];
+    if (approvals.some((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID))
+      return "kept_approval";
+    const state = {
+      version: 1,
+      approvals,
+      carried_owner_rules: { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: senders }
+    };
+    lease.commit(() => writePrivateFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}
+`));
+    return "carried";
+  });
 }
 function mailScopeDraftView(scope) {
   const source = scope ?? defaultMailScopeSelection();
@@ -54106,10 +54144,19 @@ function readState3(path) {
     const approvals = record.approvals.map(parseApproval2);
     if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length)
       throw new Error("duplicate");
-    return { kind: "valid", state: { version: 1, approvals } };
+    const carried = record.carried_owner_rules === undefined ? undefined : parseCarriedOwnerRules(record.carried_owner_rules);
+    return { kind: "valid", state: { version: 1, approvals, ...carried ? { carried_owner_rules: carried } : {} } };
   } catch {
     return { kind: "malformed", digest: digest3 };
   }
+}
+function parseCarriedOwnerRules(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("carried");
+  const record = value;
+  if (record.source_id !== MAIL_SOURCE_SCOPE_ID)
+    throw new Error("carried");
+  return { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: normalizeSenders(record.always_private_senders, "always Private") };
 }
 function parseApproval2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -101958,6 +102005,13 @@ function exportOlympusData(options) {
         artifacts.push({ ...fileArtifact(destination, destinationPath, "olympus.config", "owner_rules"), ownerFile });
       }
     }
+    const mailRules = mailOwnerRulesForExport(defaultMailSourceScopeStatePath(handleRegistryPathFor(options)));
+    if (mailRules) {
+      const destinationPath = join92(configRoot, "mail-always-private.json");
+      writePrivateFileAtomicSync(destinationPath, JSON.stringify(mailRules, null, 2));
+      files.push(destinationPath);
+      artifacts.push({ ...fileArtifact(destination, destinationPath, "olympus.config", "owner_rules"), ownerFile: "mail_always_private" });
+    }
   }
   const bindingsRead = readSourceAccountBindings(sourceAccountBindingsPath(handleRegistryPathFor(options)));
   const bindings = bindingsRead.kind === "ok" ? bindingsRead.bindings : undefined;
@@ -103253,6 +103307,7 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  init_mail_source_scope();
   init_source_account_binding();
   ACCOUNT_FOLDER_UNEXPORTED = ["raw", "session"];
   backgroundTrashRemovals = new Set;
@@ -222747,7 +222802,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...snapshot2.accountGeneration ? { account_generation: snapshot2.accountGeneration } : {},
       scope_revision: snapshot2.revision,
       ingestion_enabled: snapshot2.status === "approved",
-      mail_scope: mailScopeDraftView(snapshot2.mailScope),
+      mail_scope: mailScopeDraftView(snapshot2.mailScope ?? (snapshot2.carriedAlwaysPrivateSenders ? { ...defaultMailScopeSelection(), alwaysPrivateSenders: snapshot2.carriedAlwaysPrivateSenders } : undefined)),
       ...snapshot2.mailScope?.contentAfter ? { content_after: snapshot2.mailScope.contentAfter } : {},
       ...snapshot2.reason === "malformed" ? { error: "Saved mail scope is unreadable. Review and save the scope again." } : {}
     };
@@ -227048,6 +227103,7 @@ init_source_account_binding();
 init_provider_account_identity();
 init_source_registry();
 init_source_storage();
+init_mail_source_scope();
 init_local_index();
 init_tier_ledger();
 init_tier_ledger_path();
@@ -227112,6 +227168,12 @@ function restoreOlympusData(options) {
         notes.push(`Left out ${from}: an index from before Olympus 1.0, which this install doesn't open.`);
         break;
       case "owner_rules": {
+        if (artifact.ownerFile === "mail_always_private") {
+          const to2 = defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath(context2));
+          normalizeSenders(JSON.parse(readFileSync70(join113(input, from), "utf8")).always_private_senders, "always Private");
+          plan.push({ from, to: to2, sourceId: "olympus.config", kind: "owner_settings", merge: "mail_always_private" });
+          break;
+        }
         const to = artifact.ownerFile === "tier_rules" ? resolveTierRulesPath({ env }) : artifact.ownerFile === "ingestion_exclusions" ? resolveSourceIngestionExclusionsPath(env) : undefined;
         if (!to)
           throw new OperationError("invalid_params", `The backup names an unknown settings file: ${from}.`);
@@ -227152,7 +227214,7 @@ function restoreOlympusData(options) {
     throw new OperationError("invalid_params", `This computer already holds Olympus data for ${sources.join(", ")}, so nothing was restored.`, "Restore onto a fresh install, or delete that data first with olympus data delete --source <id>.");
   }
   for (const entry of plan) {
-    if (entry.kind === "owner_settings" && existsSync84(entry.to))
+    if (entry.kind === "owner_settings" && !entry.merge && existsSync84(entry.to))
       entry.keptAs = `${entry.to}.before-restore`;
   }
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === "store").map((entry) => entry.sourceId))];
@@ -227173,6 +227235,13 @@ function restoreOlympusData(options) {
     }
     const ledgers = plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join113(input, entry.from)) }));
     for (const entry of plan) {
+      if (entry.merge === "mail_always_private") {
+        const carried = JSON.parse(readFileSync70(join113(input, entry.from), "utf8"));
+        if (carryMailOwnerRules(entry.to, carried.always_private_senders) === "kept_approval") {
+          notes.push(`Kept the mail scope this computer already approved; the backup's "always Private" senders were not added to it.`);
+        }
+        continue;
+      }
       if (entry.keptAs)
         copyPrivate(entry.to, entry.keptAs);
       const prepare = entry.kind === "store" ? (staged) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to) : undefined;

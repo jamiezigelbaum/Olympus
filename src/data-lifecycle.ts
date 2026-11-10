@@ -99,6 +99,7 @@ import { closeSqliteStore } from './core/sqlite-store.ts';
 import { isMediaCachePath, mediaCacheDir, mediaHolderName, releaseMediaCacheFile } from './core/media-cache.ts';
 import { storeHolderAtPath, type StoreHolder } from './core/store-identity.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
+import { defaultMailSourceScopeStatePath, mailOwnerRulesForExport } from './core/mail-source-scope.ts';
 import {
   ACCOUNT_BOUND_SOURCE_IDS,
   readSourceAccountBindings,
@@ -166,8 +167,12 @@ export interface DataExportArtifact {
    */
   storeIndex?: number;
   sidecar?: 'tier_ledger' | 'tier_sniffer' | 'secret_locations';
-  /** `owner_rules`: which owner file this is. */
-  ownerFile?: 'tier_rules' | 'ingestion_exclusions';
+  /**
+   * `owner_rules`: which owner file this is. `mail_always_private` is the mail
+   * picker's "always Private" senders on their own, without the approval
+   * (bound to this computer's grant) that holds them.
+   */
+  ownerFile?: 'tier_rules' | 'ingestion_exclusions' | 'mail_always_private';
   bytes: number;
   sha256: string;
   sqlite?: {
@@ -480,6 +485,17 @@ export function exportOlympusData(options: {
       if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
         artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile });
       }
+    }
+    // The mail picker's "always Private" senders are owner rules too (they feed
+    // the classifier as the owner's force-Private rules), kept in the mail
+    // scope approval. The approval is bound to this computer's Gmail grant, so
+    // only the owner's list travels, exactly as they set it.
+    const mailRules = mailOwnerRulesForExport(defaultMailSourceScopeStatePath(handleRegistryPathFor(options)));
+    if (mailRules) {
+      const destinationPath = join(configRoot, 'mail-always-private.json');
+      writePrivateFileAtomicSync(destinationPath, JSON.stringify(mailRules, null, 2));
+      files.push(destinationPath);
+      artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile: 'mail_always_private' });
     }
   }
   // Which account each source's items came from, read once. A bindings file
