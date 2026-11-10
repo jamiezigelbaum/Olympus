@@ -716,7 +716,8 @@ describe('LocalConnectorStore sync', () => {
       title: 'Dor',
       sourceLabel: 'whatsapp',
       conversationLabel: 'Dor',
-      authorLabel: 'Sam',
+      // The owner wrote it: the citation says so, whatever name was stored (#1073).
+      authorLabel: 'You',
       authoredAt: '2026-07-09T09:00:00.000Z',
     });
 
