@@ -69525,8 +69525,10 @@ class JudgeRateLimitPacer {
     const now = this.clock.now();
     if (remaining === undefined || resetAt === undefined || resetAt <= now)
       return;
-    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now)
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) {
+      this.remaining = Math.min(this.remaining, remaining - (this.reportSeq - seq));
       return;
+    }
     this.remaining = remaining;
     this.resetAt = resetAt;
     this.reportSeq = seq;

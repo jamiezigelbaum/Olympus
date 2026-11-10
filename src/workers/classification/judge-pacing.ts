@@ -87,10 +87,14 @@ export class JudgeRateLimitPacer {
     const resetAt = header(response, 'x-ratelimit-reset-requests');
     const now = this.clock.now();
     if (remaining === undefined || resetAt === undefined || resetAt <= now) return;
-    // Replies race. A reply to an older call than the current report's is
-    // stale and would forget calls sent since, unless that report has expired
-    // (then any report beats none, and an older number only counts more calls).
-    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) return;
+    // Replies race, and dispatch order is not the provider's admission order.
+    // While the current report is live, a reply to an older call may only
+    // lower the allowance (calls sent after it still count), never raise it
+    // or clear newer reservations. An expired report yields to any report.
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) {
+      this.remaining = Math.min(this.remaining, remaining - (this.reportSeq - seq));
+      return;
+    }
     this.remaining = remaining;
     this.resetAt = resetAt;
     this.reportSeq = seq;

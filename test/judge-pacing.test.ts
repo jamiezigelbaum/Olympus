@@ -79,6 +79,32 @@ test('a stale reply arriving late does not forget calls sent after a newer repor
   await d;
 });
 
+test('a late reply from an earlier call can still lower the allowance', async () => {
+  const clock = createTestClock();
+  const pacer = new JudgeRateLimitPacer(clock);
+  const reset = String(clock.now() + 60_000);
+  const replies: Array<(remaining: number) => void> = [];
+  const model = judge(pacer, () => new Promise<Response>(resolve => {
+    replies.push(remaining => resolve(ok({ 'x-ratelimit-remaining-requests': String(remaining), 'x-ratelimit-reset-requests': reset })));
+  }));
+  const a = model.complete(request);
+  const b = model.complete(request);
+  await flushMicrotasks();
+  // B was admitted first and saw 1 left; A was admitted last and saw none.
+  replies[1]!(1);
+  await b;
+  replies[0]!(0);
+  await a;
+  const c = model.complete(request);
+  await flushMicrotasks();
+  expect(replies.length).toBe(2);
+  await clock.advance(60_000);
+  await flushMicrotasks();
+  expect(replies.length).toBe(3);
+  replies[2]!(10);
+  await c;
+});
+
 test('a 429 waits for the reset and retries the same item instead of failing it', async () => {
   const clock = createTestClock();
   const pacer = new JudgeRateLimitPacer(clock);
