@@ -282,14 +282,26 @@ async function waitForEngine(timeoutMs: number): Promise<number> {
   throw new Error(`the engine was not ready (models included) within ${Math.round(timeoutMs / 1000)} s`);
 }
 
-/** Fresh-install setup uses exactly the unlocked local dashboard request. */
+/**
+ * Fresh-install setup uses exactly the unlocked local dashboard request: the
+ * page the owner's launch opened (a control session the bearer minted), then
+ * its local unlock, which on a Mac needs that session (#1153).
+ */
 export async function saveFreshInstallPrivacyChoice(input: {
   workerFetch: Platform['workerFetch'];
   readPolicy: () => unknown;
   computerChoicePending?: boolean;
+  /** The worker bearer, read the owner's way (`olympus dashboard token`). */
+  bearer: () => string;
 }): Promise<void> {
+  const opened = await input.workerFetch('/dashboard/control/session', {
+    method: 'POST', headers: { authorization: `Bearer ${input.bearer()}`, origin: WORKER_ORIGIN },
+  });
+  if (opened.status !== 200) throw new Error(`dashboard control session answered ${opened.status}`);
+  await opened.body?.cancel();
+  const ownerCookie = opened.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
   const mint = await input.workerFetch('/dashboard/control/session/local', {
-    method: 'POST', headers: { origin: WORKER_ORIGIN },
+    method: 'POST', headers: { origin: WORKER_ORIGIN, cookie: ownerCookie },
   });
   if (mint.status !== 200) throw new Error(`local dashboard control session answered ${mint.status}`);
   const cookie = mint.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
@@ -347,6 +359,7 @@ async function prepareSource(): Promise<never> {
       workerFetch: p.workerFetch,
       readPolicy: () => readPolicy()?.json,
       computerChoicePending: readComputerUseState(p.sovereigntyPath)?.choice === null,
+      bearer: workerBearer,
     });
     say('first-run privacy choice saved: no-sensitive');
   }

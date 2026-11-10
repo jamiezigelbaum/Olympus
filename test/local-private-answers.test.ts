@@ -15,7 +15,8 @@
 // - The Needs you count reaches only the computer's control session, never
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
-import { searchPrivateEvidence, probePrivateMatch } from '../src/workers/source-index/analyst-answer.ts';
+import { searchPrivateEvidence, probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import http from 'node:http';
@@ -34,7 +35,6 @@ import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSou
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
@@ -58,7 +58,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
-import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { installBuiltInEmbedding, reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
 import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
@@ -679,8 +679,8 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(embedded.some((text) => PRIVATE_SENTINEL.test(text))).toBe(true);
     // The store whose vectors came from another (cloud) model was searched by keyword: its model saw nothing.
     expect(local.fixture.cloud.inputs.slice(cloudBefore)).toEqual([]);
-    // What could not be searched here is named.
-    expect(outcome.body.left_out).toEqual(['Cloud mail', 'Other files']);
+    // What could not be searched here is named; a source with no store here is not (#1079).
+    expect(outcome.body.left_out).toEqual(['Cloud mail']);
     // A citation names its source and never carries a path.
     expect(JSON.stringify(outcome.body.citations)).not.toContain('/Files/');
   });
@@ -762,8 +762,76 @@ describe('answers on this computer, with every outbound request denied', () => {
     const local = await localFixture();
     // Keyword only: the stand-in embedding finds everything "similar".
     const result = await local.answer({ question: 'zebra quartz xylophone', selectors: { retrieval_mode: 'keyword' } });
-    expect(result).toEqual({ status: 'not_found', leftOut: ['Cloud mail', 'Other files'] });
+    expect(result).toEqual({ status: 'not_found', leftOut: ['Cloud mail'] });
     expect(local.stub.requests).toEqual([]);
+  });
+});
+
+// #1079: on Sparta every lane timed out while the worker was busy, and the Ask
+// said "Nothing on this computer answers this" and "Olympus cannot search
+// them on this computer" for all eight sources.
+describe('an Ask whose searches ran out of time', () => {
+  const CHATS = 'secure_local.fixture.chats';
+  const MAIL = 'internal.fixture.mail';
+  const NAMES: Record<string, string> = { [CHATS]: 'WhatsApp', [MAIL]: 'Gmail', [NO_ADAPTER_CORPUS]: 'Other files' };
+  const model: PrivateAnswerModel = {
+    status: () => ({ state: 'ready' }),
+    answerPrivately: async () => { throw new Error('no model call expected'); },
+  };
+  const ask = (adapters: AnalystAnswerLanes['adapters'], logged: unknown[] = []) => answerOnThisComputer({ question: 'who said the line?' }, {
+    lanes: () => ({
+      registry: buildSourceIndexCorpusRegistry([
+        defineConnectorCorpus({ corpusId: CHATS, family: 'chat', trustDomain: 'secure_local' }),
+        defineConnectorCorpus({ corpusId: MAIL, family: 'email', trustDomain: 'internal' }),
+        defineConnectorCorpus({ corpusId: NO_ADAPTER_CORPUS, family: 'file', trustDomain: 'secure_local' }),
+      ]),
+      adapters,
+      contentProviders: {},
+      excludedCorpusIds: new Set(),
+      unmountedCorpusIds: new Set([NO_ADAPTER_CORPUS]),
+    }),
+    model,
+    eligible: async (items) => items.map(() => true),
+    sourceName: (corpusId) => NAMES[corpusId],
+    laneTimeoutMs: 20,
+    logRetrieval: (line) => logged.push(line),
+  });
+  const never = () => new Promise<never>(() => {});
+  const empty = () => ({ hits: [], latencyMs: 1, rawExposed: false as const });
+
+  test('nothing searched is its own outcome, naming the busy sources, never "not found"', async () => {
+    const logged: unknown[] = [];
+    const result = await ask({ [CHATS]: never, [MAIL]: never }, logged);
+    expect(result).toEqual({ status: 'not_searched', leftOut: [], busy: ['Gmail', 'WhatsApp'] });
+    // The Ask leaves a content-free line: which corpora were searched or skipped, and why.
+    expect(logged).toEqual([expect.objectContaining({
+      searchedCorpora: [],
+      skippedCorpora: expect.arrayContaining([
+        { corpusId: CHATS, reason: 'lane_timeout' },
+        { corpusId: MAIL, reason: 'lane_timeout' },
+        { corpusId: NO_ADAPTER_CORPUS, reason: 'no_adapter' },
+      ]),
+      candidates: 0,
+    })]);
+  });
+
+  test('a source searched by keyword only, its search by meaning cut short, is named as busy', async () => {
+    const cutShort = () => ({
+      hits: [],
+      latencyMs: 1,
+      rawExposed: false as const,
+      laneAudits: [
+        { laneName: `${CHATS}:connector_store_fts`, laneType: 'keyword' as const, candidateCount: 0, returnedCount: 0, localOnly: true, rawExposed: false as const },
+        { laneName: `${CHATS}:connector_store_vector`, laneType: 'semantic' as const, candidateCount: 0, returnedCount: 0, skippedReason: 'vector_scan_deadline_exceeded', localOnly: true, rawExposed: false as const },
+      ],
+    });
+    const result = await ask({ [CHATS]: cutShort, [MAIL]: empty });
+    expect(result).toEqual({ status: 'not_found', leftOut: [], busy: ['WhatsApp'] });
+  });
+
+  test('a source that timed out is named as busy beside a real not found', async () => {
+    const result = await ask({ [CHATS]: never, [MAIL]: empty });
+    expect(result).toEqual({ status: 'not_found', leftOut: [], busy: ['WhatsApp'] });
   });
 });
 
@@ -1098,9 +1166,7 @@ function worker(privateAnswers: LocalPrivateAnswers | undefined, panelTools?: Da
 type Fetcher = (request: Request) => Promise<Response>;
 
 async function localSession(fetcher: Fetcher): Promise<{ cookie: string; csrf: string }> {
-  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-  recordRequestPeer(request, '127.0.0.1');
-  const mint = await fetcher(request);
+  const mint = await ownerLocalMint(fetcher, ORIGIN, TOKEN);
   expect(mint.status).toBe(200);
   return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
 }

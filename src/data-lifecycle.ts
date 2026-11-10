@@ -1,4 +1,6 @@
+import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
+import { APP_RELEASE_LOG_STORE_ID, appReleaseLogDbPath } from './core/app-release-log.ts';
 import { spawnSync } from 'node:child_process';
 import {
   embeddingPrefilterDirectory,
@@ -399,9 +401,10 @@ export function exportOlympusData(options: {
   // leaves behind like every other secret. Named, so the manifest says so.
   // Waiting private questions are Private-derived questions kept only until
   // answered on this computer: never exported, named like the connections.
+  // So is the list of what each AI app received (core/app-release-log.ts).
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath)]) {
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath), appReleaseLogDbPath(connectionsPath)]) {
       if (existsSync(path)) skipped.push(path);
     }
   }
@@ -1198,6 +1201,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // connection token at once. Named on its own because XDG_DATA_HOME can put
     // it outside the known roots below.
     ...remoteConnectionsDeleteTargets(context),
+    // The people index (#1076): who is who across sources, and the owner's
+    // corrections. Named on its own because XDG_DATA_HOME can put it outside
+    // the known roots below.
+    ...sqliteDeleteTargets(peopleIndexPath(envForContext(context)), PEOPLE_INDEX_STORE_ID, context),
     // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
     // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
     // the known roots; it is always a directory Olympus created for itself.
@@ -1483,7 +1490,8 @@ function accountFolderTarget(path: string, context: LifecyclePathContext | undef
 /**
  * The connection database, its sidecars, and its pre-migration backup; and
  * the waiting private questions beside it (core/waiting-private-questions.ts),
- * which name those connections.
+ * which name those connections, and the list of what each AI app received
+ * (core/app-release-log.ts).
  */
 function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
   const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
@@ -1492,6 +1500,8 @@ function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTa
     ...targets,
     { ...targets[1]!, path: remoteConnectionsPreV2BackupPath(dbPath) },
     ...sqliteDeleteTargets(waitingPrivateQuestionsDbPath(dbPath), WAITING_PRIVATE_QUESTIONS_STORE_ID, context),
+    // What each AI app received (core/app-release-log.ts): questions and titles, kept like Private data.
+    ...sqliteDeleteTargets(appReleaseLogDbPath(dbPath), APP_RELEASE_LOG_STORE_ID, context),
   ];
 }
 

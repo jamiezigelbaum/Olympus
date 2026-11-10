@@ -267,11 +267,11 @@ describe('the page shows the route to details, calmly', () => {
     // The page-wide line shows while two or more sources are moving.
     const moving = [drive, { ...drive, id: 'readwise.library', label: 'Readwise' }];
     host.push({ structuredContent: model({ progress, sources: [STALLED, ...moving] }) });
-    expect(host.doc.querySelector('.progress-line')!.textContent).toBe('First index: 42% done, 1,204 files left, Dropbox paused');
+    expect(host.doc.querySelector('.progress-line')!.textContent).toBe('First index: 42% done, 1,204 files left, Dropbox retrying');
     host.push({ structuredContent: model({ progress, sources: [STALLED, gmail, ...moving] }) });
-    expect(host.doc.querySelector('.progress-line')!.textContent).toContain('Dropbox and Gmail paused');
+    expect(host.doc.querySelector('.progress-line')!.textContent).toContain('Dropbox and Gmail retrying');
     host.push({ structuredContent: model({ progress, sources: [STALLED, gmail, notes, ...moving] }) });
-    expect(host.doc.querySelector('.progress-line')!.textContent).toContain('Dropbox, Gmail and 1 more paused');
+    expect(host.doc.querySelector('.progress-line')!.textContent).toContain('Dropbox, Gmail and 1 more retrying');
   });
 
   test('a model that would not start or download says why', () => {

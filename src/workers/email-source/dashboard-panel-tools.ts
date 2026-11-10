@@ -74,6 +74,7 @@ import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-to
 import type { OperationContext } from '../../core/operations.ts';
 import { FILES_AND_FOLDERS_URL } from '../local-files/mac-permissions.ts';
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
+import type { SetupChecklist } from '../../core/setup-checklist.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../http.ts';
 
 /** Where the call came from: the origin the browser reached Olympus at. */
@@ -135,6 +136,11 @@ export interface DashboardPanelToolsOptions {
    * only ever in the computer meta.
    */
   sourceImports?: () => ComputerSourceImportsMeta[] | undefined;
+  /**
+   * The setup checklist for Home (#1077), built from the same view the
+   * dashboard result came from. Absent: no checklist in the meta.
+   */
+  setupChecklist?: (view: SourceDashboardViewModel | undefined) => SetupChecklist;
   /** The cards that import their own exports (archive-import/dashboard.ts archiveSources). */
   archiveSources?: () => ComputerArchiveSourceMeta[] | undefined;
   /** Each import-only source's card and its imports (archive-import/dashboard.ts cardViews). */
@@ -544,6 +550,15 @@ export function computerUnpairEntries(view: SourceDashboardViewModel | undefined
   });
 }
 
+/** The checklist, or nothing when it cannot be built: Home then shows no setup card. */
+function setupMeta(options: DashboardPanelToolsOptions, view: SourceDashboardViewModel | undefined): SetupChecklist | undefined {
+  try {
+    return options.setupChecklist?.(view);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The waiting count, or 0 when it cannot be read: the line is a nudge, never a failure. */
 function waitingCount(options: DashboardPanelToolsOptions): number {
   try {
@@ -598,7 +613,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
+      const setup = setupMeta(options, view);
+      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -607,6 +623,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(unreadable.length > 0 ? { unreadable } : {}),
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
         ...(indexedItems > 0 ? { indexedItems } : {}),
+        ...(setup ? { setup } : {}),
         ...(archives ? { archives } : {}),
         ...(sourceImports ? { sourceImports } : {}),
         ...(archiveSources ? { archiveSources } : {}),

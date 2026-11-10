@@ -133,19 +133,21 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
   });
 }
 
-/** The tab bar the Privacy page's two halves share: Private questions first, then Privacy settings (?keys). */
-export function dashboardPrivacyTabs(active: 'questions' | 'settings', token?: string): string {
-  const tab = (id: 'questions' | 'settings', href: string, label: string) => id === active
+/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), What AI apps received (?apps-received). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'apps', token?: string): string {
+  const tab = (id: 'questions' | 'settings' | 'apps', href: string, label: string) => id === active
     ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
     : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
     + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
     + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
+    + tab('apps', dashboardLocalPageHref('appsReceived', token), W.tabApps)
     + '</nav>';
 }
 
 export const PRIVACY_TABS_CSS = `
-.ptabs { display: flex; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs { display: flex; flex-wrap: wrap; gap: 0 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs .ptab { white-space: nowrap; }
 .ptabs .ptab { padding: 8px 14px; color: var(--t2); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .ptabs .ptab.on { color: var(--t1); border-bottom-color: var(--link); font-weight: 600; }
 .ptabs .ptab:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -168,6 +170,7 @@ export const PRIVACY_TABS_CSS = `
 .judgecap { display: block; margin: 8px 0 4px; }
 .judgehow { margin: 10px 0 0; color: var(--t2); }
 @media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .ptabs .ptab { padding: 8px 10px; } }
 `;
 
 /** The read-only token a dash_ reader's basePath carries, for the link to the gate. */
@@ -329,6 +332,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       anonymousPath: W.anonymousPath,
       open: W.open,
       leftOut: W.leftOut,
+      busy: W.busy,
+      notSearched: W.notSearched,
       unanswered: W.unanswered,
       notFound: W.notFound,
       noModel: W.noModel,
@@ -451,6 +456,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
+    var busy = Array.isArray(result.busy) ? result.busy : [];
     if (status === 'withdrawn') { renderSent(card, result); card.appendChild(el('p', 'pamsg', result.reason)); return; }
     if (status === 'answered') {
       var box = el('div', 'paanswer answer');
@@ -491,6 +497,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         meta.appendChild(el('p', 'pamsg', config.copy.unanswered.replace('{parts}', result.unanswered.join('; '))));
       }
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+      if (busy.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.busy.replace('{sources}', busy.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
     } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
@@ -499,6 +506,10 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       card.appendChild(failureNotice(result.failureReason));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
+    } else if (status === 'not_searched') {
+      var unsearched = el('p', 'pamsg', config.copy.notSearched);
+      unsearched.setAttribute('data-state', 'error');
+      card.appendChild(unsearched);
     } else {
       var words = status === 'no_model' ? config.copy.noModel
         : status === 'model_downloading' ? config.copy.downloading
@@ -508,6 +519,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       card = out.firstChild;
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+    if (busy.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.busy.replace('{sources}', busy.join(', '))));
   }
   // The picked model card sets where the one Ask button sends; a card that
   // stops being ready gives up the pick to the next ready one.

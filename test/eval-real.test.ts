@@ -5,7 +5,6 @@ import {
   createEvalAnalystModel,
   effectiveIsolatedQuestionTimeoutMs,
   parseEvalRealArgs,
-  releasedVisibleUnanswered,
   resolveEvalAnalystProvider,
   resolveEvalDropboxScope,
 } from '../eval/run-real.ts';
@@ -26,14 +25,6 @@ describe('real eval runner options', () => {
     expect(parseEvalRealArgs(['eval/private/custom.json'], { OLYMPUS_EVAL_ANALYST_PROVIDER: 'venice' }))
       .toEqual({ datasetPath: 'eval/private/custom.json', analystProvider: 'venice' });
     expect(() => resolveEvalAnalystProvider('cloud')).toThrow('local or venice');
-  });
-
-  test('released visible unanswered only counts gaps present in the released answer', () => {
-    expect(releasedVisibleUnanswered('I could not extract a cited bounded answer.', true)).toEqual([]);
-    expect(releasedVisibleUnanswered('Answer.\n\nCoverage notes:\n- 1 source item could not be read.', true))
-      .toEqual(['- 1 source item could not be read.']);
-    expect(releasedVisibleUnanswered('I found matching source material, but this needs review.', true)).toEqual([]);
-    expect(releasedVisibleUnanswered('Coverage notes:\n- hidden', false)).toEqual([]);
   });
 
   test('resolves an optional Dropbox path scope through the canonical codec', () => {

@@ -67,6 +67,10 @@ const ALLOWED: Record<string, string> = {
   'scripts/connector-store-locator-index.ts':
     'an operator tool on the --db its command line names (its schema-version read); holds the owner lock for its run',
   'scripts/vector-scan-bench.ts': 'an operator tool on the --db its command line names; holds the owner lock for its run',
+  // A synthetic benchmark: builds its own store set in a temp directory
+  // and opens nothing else.
+  'scripts/engine-split-bench.ts':
+    'a disposable benchmark on a store set it builds itself in a temp directory (seed, then a copy per run); never opens a live store',
   'scripts/whatsapp-identity-backfill.ts':
     'an operator tool on the --db and --session-db its command line names; holds the owner lock for its run',
 };
@@ -79,7 +83,9 @@ const ALLOWED: Record<string, string> = {
 const SHARED_FILES: Record<string, string> = {
   'src/core/source-watch.ts': 'the shared source-watches database',
   'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
+  'src/core/app-release-log.ts': 'the shared list of what each AI app received',
   'src/core/remote-connections.ts': 'the shared remote-connections database',
+  'src/core/people-index.ts': 'the shared people index (#1076): who is who across sources, and the owner\'s corrections',
   'src/workers/source-dashboard.ts': 'the shared dashboard history database',
   'src/workers/source-ingestion-ledger.ts': 'the shared dashboard database the ingestion ledger reads and writes',
   'src/workers/source-scheduler-state.ts': 'the shared scheduler database',

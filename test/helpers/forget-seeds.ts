@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { writeIngestionHealthState, readIngestionHealthState, defaultIngestionHealthStatePath } from '../../src/core/ingestion-health-state.ts';
 import { resolveRemoteConnectionsDbPath } from '../../src/core/remote-connections.ts';
+import { appReleaseLogDbPath, openAppReleaseLog } from '../../src/core/app-release-log.ts';
 import {
   openWaitingPrivateQuestionStore,
   waitingPrivateQuestionsDbPath,
@@ -32,6 +33,7 @@ import { TierLedger, tierLedgerPathForStore } from '../../src/workers/classifica
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../../src/workers/source-scheduler-state.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../../src/workers/file-extraction/job-store.ts';
 import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
+import { LocalPeopleIndex, peopleIndexPath } from '../../src/core/people-index.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
 import { xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
 import { LocalXBookmarksApiUsageStore } from '../../src/workers/x-bookmarks/live-control.ts';
@@ -142,6 +144,9 @@ export const storedAnswer = (corpusId: string): StoredPrivateAnswer => ({
 export const waitingPath = (layout: ForgetLayout): string =>
   waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(layout.env));
 
+export const appReleasePath = (layout: ForgetLayout): string =>
+  appReleaseLogDbPath(resolveRemoteConnectionsDbPath(layout.env));
+
 /** The dashboard database's rows for a source, however keyed. */
 const dashboardRows = (path: string, source: SeededSource): number =>
   count(path, 'source_dashboard_samples', 'source_id = ? OR source_id = ? OR corpus_id = ?', source.source_id, source.ledger_id, source.corpus_id)
@@ -224,6 +229,40 @@ export const SEEDED_FILES: readonly SeededFile[] = [
           question.result?.read.some((item) => item.corpusId === source.corpus_id)).length;
       } finally {
         store.close();
+      }
+    },
+  },
+  {
+    stepId: 'app-release-log',
+    mine: MINE,
+    other: OTHER,
+    path: appReleasePath,
+    seed(layout) {
+      mkdirSync(dirname(appReleasePath(layout)), { recursive: true });
+      const store = openAppReleaseLog(appReleasePath(layout));
+      try {
+        for (const source of [MINE, OTHER]) {
+          store.record({
+            at: Date.now(),
+            connection: { name: 'ChatGPT', kind: 'app' },
+            question: `What do my ${source.source_id} files say?`,
+            items: [{ source: 'Files', title: `${source.source_id} notes`, tier: 'personal', corpusId: source.corpus_id, provider: 'synthetic', providerItemId: `item-${source.source_id}` }],
+            heldBack: 0,
+            answeredPrivately: false,
+            withheld: false,
+          });
+        }
+      } finally {
+        store.close();
+      }
+    },
+    left(layout, source) {
+      if (!existsSync(appReleasePath(layout))) return 0;
+      const db = new Database(appReleasePath(layout), { readonly: true });
+      try {
+        return (db.query('SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id = ?').get(source.corpus_id) as { n: number }).n;
+      } finally {
+        db.close();
       }
     },
   },
@@ -367,6 +406,35 @@ export const SEEDED_FILES: readonly SeededFile[] = [
         + count(path, 'secret_restored_rereads', 'job_id IN (SELECT job_id FROM extraction_jobs WHERE corpus_id = ?)', source.corpus_id)
         + count(path, 'secret_item_redaction_claims', 'claimant = ?', tierLedgerIdOf(source))
         + count(path, 'secret_item_redactions', 'account_scope = ?', `${source.ledger_id}@example.com`);
+    },
+  },
+  {
+    stepId: 'people-index',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => peopleIndexPath(layout.env),
+    seed(layout) {
+      const index = new LocalPeopleIndex({ dbPath: peopleIndexPath(layout.env) });
+      try {
+        index.rebuild([MINE, OTHER].map((source) => ({
+          provider: source.ledger_id,
+          senderId: `ada@${source.ledger_id}.example`,
+          senderLabel: 'Ada Example',
+          isOwner: false,
+          itemCount: 2,
+          corpusId: source.corpus_id,
+        })));
+        index.correct({ kind: 'rename', identity: `sender:${MINE.ledger_id}:ada@${MINE.ledger_id}.example`, name: 'Ada' });
+        index.correct({ kind: 'rename', identity: `sender:${OTHER.ledger_id}:ada@${OTHER.ledger_id}.example`, name: 'Ada' });
+      } finally {
+        index.close();
+      }
+    },
+    left(layout, source) {
+      const path = peopleIndexPath(layout.env);
+      const key = `sender:${source.ledger_id}:ada@${source.ledger_id}.example`;
+      return count(path, 'people_identities', 'identity_key = ?', key)
+        + count(path, 'people_corrections', 'identity_a = ?', key);
     },
   },
   {

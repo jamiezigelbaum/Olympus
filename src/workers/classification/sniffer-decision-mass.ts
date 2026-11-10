@@ -1,6 +1,12 @@
 // Shared one-token decision maths. No item text.
 
-/** Bump SNIFFER_DECISION_VERSION whenever the bar, floor or decoder changes. */
+/**
+ * The P(Private) bar of a decision judge with no measured bar of its own
+ * (snifferDecisionBar in sniffer.ts picks each lane's). Every judge leans
+ * Private (owner, 2026-11-10, #1184): a bar is never above this even chance.
+ * A bar change re-tiers stored verdicts on read; bump SNIFFER_DECISION_VERSION
+ * only when the floor or decoder changes.
+ */
 export const SNIFFER_DECISION_PRIVATE_BAR = 0.5;
 export const SNIFFER_DECISION_MIN_COVERAGE = 0.9;
 

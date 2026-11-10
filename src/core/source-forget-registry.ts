@@ -14,6 +14,7 @@
  * `test/store-open-guard.test.ts` ties the two lists to the code: a module that
  * opens a shared SQLite file must own a step or a kept entry.
  */
+import { appReleaseLogDbPath, forgetAppReleaseItems } from './app-release-log.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 import { resolveRemoteConnectionsDbPath } from './remote-connections.ts';
@@ -21,6 +22,7 @@ import {
   forgetWaitingPrivateQuestions,
   waitingPrivateQuestionsDbPath,
 } from './waiting-private-questions.ts';
+import { forgetPeopleIndexRows, peopleIndexPath } from './people-index.ts';
 import { forgetSourceWatches, defaultSourceWatchDbPath } from './source-watch.ts';
 import { defaultIngestionHealthStatePath, forgetIngestionHealthState } from './ingestion-health-state.ts';
 import { defaultFileSourceScopeStatePath, forgetFileSourceScopeApproval } from './source-scope-approval.ts';
@@ -219,6 +221,23 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     },
   },
   {
+    // What each AI app received: the titles a deleted source released go with it.
+    id: 'app-release-log',
+    file: 'app-release-log',
+    modules: ['src/core/app-release-log.ts'],
+    // An answer written from the deleted stores' open handles can still be recorded before the restart.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
+      return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
+    },
+    // One imported archive removed: only its items' rows, the family's other archives' stay.
+    forgetAccountScopes(account, accountScopes, context, { dryRun }) {
+      const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
+      return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids, accountScopes }, { dryRun }));
+    },
+  },
+  {
     id: 'source-dashboard',
     file: 'source-dashboard',
     // The ingestion ledger shares the file; forgetSourceDashboardRows covers both writers' tables.
@@ -280,6 +299,21 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
       return unreadable > 0 && paths[0] !== undefined
         ? [...withSpool, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
         : withSpool;
+    },
+  },
+  {
+    // People (#1076): the deleted source's identities, the owner's corrections
+    // and contact-card entries that name them, and the derived people, which
+    // the next refresh rebuilds from the stores that remain.
+    id: 'people-index',
+    file: 'people-index',
+    modules: ['src/core/people-index.ts'],
+    // The worker's refresh can link the deleting source's senders again
+    // from stores still open while it winds down.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = peopleIndexPath(context.env);
+      return line(path, 'people', forgetPeopleIndexRows(path, { corpusIds: account.corpus_ids }, { dryRun }));
     },
   },
   {

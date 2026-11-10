@@ -8,18 +8,21 @@
 //     "rules": [
 //       { "kind": "folder", "source_id": "dropbox.files", "key": "/health" },
 //       { "kind": "label",  "source_id": "gmail.email",   "key": "Label_12", "value": "Therapy" },
-//       { "kind": "sender", "source_id": "gmail.email",   "value": "@clinic.example" }
+//       { "kind": "sender", "source_id": "gmail.email",   "value": "@clinic.example" },
+//       { "kind": "chat",   "source_id": "telegram.messages", "key": "<chat id>", "display": "Dr. Lee" }
 //     ],
 //     "updatedAt": "<ISO time>"
 //   }
 //
 // - The description is free text in the owner's words. It feeds the privacy
 //   sniffer's prompt as quoted data (sniffer.ts), never a rule by itself.
-// - Each rule names a folder, a label or a sender that is ALWAYS Private. The
+// - Each rule names a folder, a label, a sender or a chat that is ALWAYS
+//   Private (a chat rule is the owner's own whole-chat decision, the same rule
+//   `olympus tier rules add --match chat=<id>` writes). The
 //   profile owns the matching owner tier rules (tier-rules.ts): every save
 //   rewrites the rules whose id starts with `privacy-` and leaves every other
 //   rule exactly as it was.
-// - Display names (folder and label names) live only here and in the privacy
+// - Display names (folder, label and chat names) live only here and in the privacy
 //   tools' widget data; nothing else reads them.
 //
 // Nothing here names a source in a branch: a rule's source id maps to the
@@ -44,7 +47,7 @@ export const PRIVACY_KEY_MAX_CHARS = 1_024;
 /** Owner tier rules this profile owns carry this id prefix. */
 export const PRIVACY_RULE_ID_PREFIX = 'privacy-';
 
-export const PRIVACY_RULE_KINDS = ['folder', 'label', 'sender'] as const;
+export const PRIVACY_RULE_KINDS = ['folder', 'label', 'sender', 'chat'] as const;
 export type PrivacyRuleKind = (typeof PRIVACY_RULE_KINDS)[number];
 
 /**
@@ -64,16 +67,30 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
   sender: {
     'gmail.email': { provider: 'gmail', match: 'sender' },
   },
+  // A chat's key is its conversation id, which every chat connector publishes
+  // among an item's folder keys (and every store keeps, so the rules sweep
+  // raises messages already stored).
+  chat: {
+    'telegram.messages': { provider: 'telegram', match: 'chat' },
+    'whatsapp.personal.messages': { provider: 'whatsapp', match: 'chat' },
+  },
 };
 
-export type PrivacyRuleSourceId = 'dropbox.files' | 'google_drive.docs' | 'evernote.notes' | 'gmail.email';
+export type PrivacyRuleSourceId =
+  | 'dropbox.files'
+  | 'google_drive.docs'
+  | 'evernote.notes'
+  | 'gmail.email'
+  | 'telegram.messages'
+  | 'whatsapp.personal.messages';
 
 /**
  * One always-Private rule, in the dashboard contract's shape
  * (chatgpt/dashboard-contract.ts PrivacyRuleView):
  * - folder: `key` (the picker's opaque key), optional `display` (its name);
  * - label: `key` (the label id) and `value` (the label name);
- * - sender: `value` (an address or a whole `@domain`).
+ * - sender: `value` (an address or a whole `@domain`);
+ * - chat: `key` (the conversation id), optional `display` (the chat's name).
  */
 export interface PrivacyRule {
   kind: PrivacyRuleKind;
@@ -190,7 +207,7 @@ function parsePrivacyRule(raw: unknown): PrivacyRule {
   if (unknownKeys.length > 0) throw invalid('A rule has unknown fields.');
   const kind = record.kind;
   if (typeof kind !== 'string' || !(PRIVACY_RULE_KINDS as readonly string[]).includes(kind)) {
-    throw invalid('A rule kind must be folder, label or sender.');
+    throw invalid('A rule kind must be folder, label, sender or chat.');
   }
   const sources = RULE_SOURCES[kind as PrivacyRuleKind];
   const sourceId = record.source_id;
@@ -208,7 +225,7 @@ function parsePrivacyRule(raw: unknown): PrivacyRule {
   }
   const key = typeof record.key === 'string' ? record.key.trim() : '';
   if (!key || key.length > PRIVACY_KEY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(key)) {
-    throw invalid(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
+    throw invalid(`A folder, label or chat rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
   }
   if (sources[sourceId]!.match === 'pathPrefix' && !key.startsWith('/')) throw invalid('A folder key for this source is a path.');
   if (kind === 'label') {
@@ -216,7 +233,7 @@ function parsePrivacyRule(raw: unknown): PrivacyRule {
     const value = boundedName(record.value, 'value');
     return { kind, source_id: sourceId as PrivacyRuleSourceId, key, value };
   }
-  if (record.value !== undefined) throw invalid('A folder rule takes key, not value.');
+  if (record.value !== undefined) throw invalid(`A ${kind} rule takes key, not value.`);
   return { kind: kind as PrivacyRuleKind, source_id: sourceId as PrivacyRuleSourceId, key, ...(display ? { display } : {}) };
 }
 

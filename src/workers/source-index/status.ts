@@ -39,6 +39,7 @@ import {
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { PEOPLE_AUTHORED_FAMILIES } from '../../core/people-index.ts';
 import { existsSync } from 'node:fs';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
@@ -188,6 +189,13 @@ export interface SourceIndexCorpusStatusBase {
   };
   content_extraction_throughput?: ContentExtractionThroughputSignal;
   /**
+   * Chat and email stores only (#1076): how many active items carry no
+   * author (no sender id and no sender label), in all and per provider.
+   * Counts only. A release check reads it to catch a connector that stops
+   * publishing who sent each message.
+   */
+  author_coverage?: SourceIndexAuthorCoverage;
+  /**
    * PDFs catalogued with no extracted text yet, and an ESTIMATE of what
    * embedding them would cost once extracted: their count times the average
    * text of this store's already-extracted PDFs (characters / 4 tokens).
@@ -203,6 +211,25 @@ export interface SourceIndexCorpusStatusBase {
       price_source: 'config' | 'default_unverified';
     };
   };
+}
+
+export interface SourceIndexAuthorCoverage {
+  items: number;
+  items_without_author: number;
+  by_provider: Array<{ provider: string; items: number; items_without_author: number }>;
+}
+
+function authorCoverageStatus(store: LocalConnectorStore): SourceIndexAuthorCoverage | undefined {
+  try {
+    const rows = store.authorCoverage();
+    return {
+      items: rows.reduce((total, row) => total + row.items, 0),
+      items_without_author: rows.reduce((total, row) => total + row.itemsWithoutAuthor, 0),
+      by_provider: rows.map((row) => ({ provider: row.provider, items: row.items, items_without_author: row.itemsWithoutAuthor })),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export interface SourceIndexConnectorStoreStatus extends SourceIndexCorpusStatusBase {
@@ -478,6 +505,10 @@ export function createSourceIndexStatusHandler(
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           const unreadable = options.unreadableCount(corpus.corpusId);
           if (unreadable !== undefined) status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
+        }
+        if (status.configured && store && PEOPLE_AUTHORED_FAMILIES.has(corpus.family)) {
+          const coverage = authorCoverageStatus(store);
+          if (coverage) status.author_coverage = coverage;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId

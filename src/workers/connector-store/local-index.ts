@@ -1,4 +1,5 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
@@ -6,7 +7,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { offThreadReadsAvailable, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -151,12 +152,14 @@ import {
 } from '../../core/source-index/corpus.ts';
 import { FileLeaseBusyError, withFileLease } from '../../core/file-lease.ts';
 import {
+  awaitStartingQueryEmbedding,
   cosineSimilarity,
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  type QueryEmbeddingWaitTimers,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -201,6 +204,10 @@ import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 export const DEFAULT_MAX_CHUNK_CHARS = 4_000;
 const MAX_MAX_CHUNK_CHARS = 32_000;
 const MAX_SEARCH_RESULTS = 50;
+// The most raw keyword matches one query reads while looking for rows the tier
+// filter serves (#1174). Bounds the work in a store that is mostly superseded
+// copies: at most a handful of page queries per search.
+const KEYWORD_CANDIDATE_SCAN_CAP = 1_000;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
 // text also matches, without changing the query or candidate budget.
@@ -472,6 +479,94 @@ export function connectorStoreMigrations() {
     },
   ];
 }
+
+/**
+ * Entries the item change feed keeps. Larger than the ledger's 8,192 because
+ * an import writes items much faster than verdicts arrive, and a reader that
+ * finds its cursor past the oldest kept entry cannot use the saved set.
+ */
+const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
+
+/**
+ * Item visibility kept in the store file itself (#858 option 1), so every
+ * connection, not just the writer's, can bring its hidden-copy set up to date
+ * without a full rebuild:
+ *
+ * - `item_visibility_feed`: a bounded feed of item identities whose rows
+ *   were inserted, deleted or changed in what decides visibility, written by
+ *   real triggers in the item write's own transaction (like the ledger's
+ *   `tier_visibility_changes`).
+ * - `tier_visibility_members`: the set a writer last saved, one row per item
+ *   identity with a copy here the ledger does not simply serve (its flags and
+ *   the item pks it maps to), by generation: a whole new set is written as a
+ *   new generation a chunk at a time and switched to in one small step.
+ * - `tier_visibility_state`: which ledger, corpus, generation and feed
+ *   cursors that set covers. A reader applies only the feed entries past
+ *   them; when either feed no longer holds them it never serves the saved set
+ *   and rebuilds from the ledger instead.
+ * - `tier_visibility_lease`: which writable connection may publish now, so
+ *   two writers on one store never interleave their writes.
+ *
+ * Created idempotently on every writable open, without a schema version: the
+ * tables and triggers are additive, so the previous build (which checks
+ * version 15) still opens the store after a binary rollback, and its item
+ * writes still land in the feed through these real triggers. The feed is not
+ * named `item_visibility_changes`, the TEMP journal that build creates on its
+ * own connection.
+ */
+function createConnectorStoreVisibilityTables(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_visibility_feed (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tier_visibility_members (
+      generation INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL,
+      flags INTEGER NOT NULL,
+      item_pks_json TEXT NOT NULL,
+      PRIMARY KEY (generation, provider, account_scope, conversation_key, provider_item_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS tier_visibility_lease (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      owner TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS tier_visibility_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      corpus_id TEXT NOT NULL,
+      ledger_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      ledger_cursor INTEGER NOT NULL,
+      store_cursor INTEGER NOT NULL
+    );
+  `);
+  const note = (row: 'NEW' | 'OLD') => `
+    INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id)
+      VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
+    DELETE FROM item_visibility_feed
+      WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed);`;
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_insert AFTER INSERT ON items BEGIN ${note('NEW')} END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_delete AFTER DELETE ON items BEGIN ${note('OLD')} END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_visibility_update
+      AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned,
+        trust_tier, parent_local_item_id ON items
+      BEGIN ${note('OLD')} ${note('NEW')} END;
+  `);
+}
+
+const CONNECTOR_STORE_VISIBILITY_TRIGGERS = [
+  'connector_store_item_visibility_insert',
+  'connector_store_item_visibility_delete',
+  'connector_store_item_visibility_update',
+] as const;
 
 /**
  * The child-item columns (docs/design/child-items.md, "Storage"). A child is
@@ -917,6 +1012,8 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  * instead of on every one. Only the snapshot passes it.
  */
 export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
+/** How long a search keeps a store's "has vectors" answer (vectorLaneServable). */
+export const SEARCH_VECTOR_LANE_MEMO_MS = 60_000;
 
 // Identities looked up per step when the hidden-copy set is rebuilt in turns.
 const IDENTITY_LOOKUP_SLICE = 5_000;
@@ -984,6 +1081,8 @@ const VISIBILITY_PK_FLAGS = ['hidden', 'held', 'heldForJudgment', 'metadataLayer
 
 interface TierVisibilityMemo {
   ledger: TierLedger;
+  /** The ledger's identity, for the saved set's stamp; undefined when it has none. */
+  ledgerId: string | undefined;
   ledgerCursor: number;
   storeCursor: number;
   dataVersion: number;
@@ -1001,6 +1100,81 @@ export class TierLedgerUnavailableError extends Error {
     );
     this.name = 'TierLedgerUnavailableError';
   }
+}
+
+/** Bits of `tier_visibility_members.flags`. */
+const VISIBILITY_MEMBER_BITS = {
+  hidden: 1, held: 2, heldForJudgment: 4, metadataLayer: 8, metadataLayerContentUnread: 16, moving: 32,
+} as const;
+
+interface SavedVisibilityState {
+  corpus_id: string;
+  ledger_id: string;
+  generation: number;
+  ledger_cursor: number;
+  store_cursor: number;
+}
+
+interface VisibilityTimers {
+  setTimeout(callback: () => void, ms?: number): unknown;
+  clearTimeout(timer: unknown): void;
+  setInterval(callback: () => void, ms?: number): unknown;
+  clearInterval(timer: unknown): void;
+}
+
+/**
+ * Members one publish step writes or one saved-set page reads. On Sparta's
+ * largest store a whole publish in one transaction took 2.05 s for 645k
+ * members (#1167 review), about 3 us a member, so a chunk is ~13 ms.
+ */
+const VISIBILITY_PUBLISH_CHUNK = 4_096;
+/** How often a writer checks, with no import running, that its saved set is within both feeds. */
+const VISIBILITY_BACKSTOP_MS = 5_000;
+/** How long a publisher's lease lasts without a step renewing it. */
+const VISIBILITY_LEASE_MS = 30_000;
+
+/** Another connection is publishing this store's visibility set: this one retries later. */
+function visibilityPublishLeaseError(): Error {
+  const error = new Error('Another connection is saving this store\'s visibility set.');
+  error.name = 'VisibilityPublishLeaseError';
+  return error;
+}
+/** A failed save is retried after 1 s, doubling to at most a minute. */
+const VISIBILITY_RETRY_MIN_MS = 1_000;
+const VISIBILITY_RETRY_MAX_MS = 60_000;
+/** Entries the ledger's tier_visibility_changes feed keeps (its trigger in tier-ledger.ts). */
+const LEDGER_VISIBILITY_FEED_RETENTION = 8_192;
+/** Items an import writes between checks that the writers on its ledger are within both feeds. */
+const VISIBILITY_TICK_ITEMS = 256;
+/** The writable stores in this process that save a visibility set, by the ledger they judge with. */
+// Made on first use: a module-level `new Map()` is a side effect at load,
+// which keeps this module (and bun:sqlite) in the Node plugin bundle.
+let visibilityWritersByLedger: Map<TierLedger, Set<LocalConnectorStore>> | undefined;
+function visibilityWriters(): Map<TierLedger, Set<LocalConnectorStore>> {
+  return visibilityWritersByLedger ??= new Map();
+}
+
+function emptyTierVisibilityMemo(
+  ledger: TierLedger,
+  ledgerId: string | undefined,
+  ledgerCursor: number,
+  storeCursor: number,
+  dataVersion: number,
+): TierVisibilityMemo {
+  return {
+    ledger, ledgerId, ledgerCursor, storeCursor, dataVersion,
+    lists: { hidden: new MutablePkList(), held: new MutablePkList(), heldForJudgment: new MutablePkList(), metadataLayer: new MutablePkList(),
+      metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
+    value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
+  };
+}
+
+function visibilityMemberBits(flags: TierCorpusVisibility): number {
+  let value = 0;
+  for (const [flag, bit] of Object.entries(VISIBILITY_MEMBER_BITS)) {
+    if (flags[flag as keyof typeof VISIBILITY_MEMBER_BITS]) value |= bit;
+  }
+  return value;
 }
 
 export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
@@ -1905,6 +2079,22 @@ export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
  * concepts (a term with its synonyms is one concept) and, per row (by local
  * item id), how many of them the item's name or text contains.
  */
+/** Keyword-search options (searchItemsDetailed). */
+export interface ConnectorStoreKeywordFtsOptions {
+  prefix?: boolean;
+  contentOnly?: boolean;
+  locate?: boolean;
+  relaxed?: boolean;
+  privatePrecision?: boolean;
+}
+
+/** A keyword search's rows, whether more may match, and each row's concept coverage. */
+export interface ConnectorStoreKeywordSearch {
+  rows: ConnectorStoreSearchRow[];
+  saturated: boolean;
+  concepts: ConnectorStoreConceptCoverage;
+}
+
 export interface ConnectorStoreConceptCoverage {
   total: number;
   matched: ReadonlyMap<string, number>;
@@ -2534,6 +2724,12 @@ export interface ConnectorStoreSearchFilters {
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
+  /**
+   * The senders of the people a person filter names (#1076), from the shared
+   * people index. With `senderLabel`, an item matches either; alone, an item
+   * must come from one of them.
+   */
+  senderIdentities?: readonly PeopleSenderIdentity[];
   authoredAfter?: string;
   authoredBefore?: string;
   /**
@@ -2557,6 +2753,13 @@ export interface ConnectorStoreSearchFilters {
   /** These approved folder identities are searchable by metadata rows only. */
   metadataOnlySourceScopeFolderKeys?: readonly string[];
 }
+
+/** The people index's answer for one sender (see LocalConnectorStore.setPeopleNames). */
+export type ConnectorStorePeopleNames = (
+  provider: string,
+  senderId: string | undefined,
+  senderLabel: string | undefined,
+) => PeopleCitationName | undefined;
 
 export interface ConnectorStoreSenderAggregationOptions {
   accountScope: string;
@@ -2790,6 +2993,15 @@ export class LocalConnectorStore {
   private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
+    this.visibilityOwner = randomUUID();
+    this.visibilityNow = () => Date.now();
+    this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
+    this.visibilityTimers = {
+      setTimeout: (callback, ms) => setTimeout(callback, ms),
+      clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+    };
     this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
@@ -2849,9 +3061,17 @@ export class LocalConnectorStore {
         createConnectorStoreChunkMediaReleases(this.db);
         createConnectorStoreMediaJudgments(this.db);
         createConnectorStoreItemTextVersions(this.db);
+        createConnectorStoreVisibilityTables(this.db);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
+      // A read-only open of a store no writer of this build has opened has no
+      // feed: it keeps the older rule (any external commit rebuilds the set).
+      this.visibilityFeedPresent = (this.db.query(`SELECT COUNT(*) AS present FROM sqlite_master
+        WHERE (type = 'table' AND name IN ('item_visibility_feed', 'tier_visibility_members', 'tier_visibility_state'))
+          OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`)
+        .get(JSON.stringify(CONNECTOR_STORE_VISIBILITY_TRIGGERS)) as { present: number }).present
+        === 3 + CONNECTOR_STORE_VISIBILITY_TRIGGERS.length;
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
       this.childItemColumnsPresent = tableColumns(this.db, 'items', false).includes('parent_local_item_id');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
@@ -2874,6 +3094,7 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    this.stopVisibilityPublisher();
     try {
       if (!this.readOnly) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
@@ -2881,6 +3102,10 @@ export class LocalConnectorStore {
       this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
+      // The read pool's connections to this file go with the store, and so
+      // do its waiting queries.
+      this.closedForPoolReads = true;
+      if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     }
   }
@@ -3052,7 +3277,14 @@ export class LocalConnectorStore {
     // by the handle that is kept: check its id, and refuse a different one. A
     // replacement has had its schema migrated by this open before it is
     // checked; that is accepted, since it is closed unused.
-    const opened = new TierLedger({ dbPath: found, now: this.now });
+    // A read-only store reads its ledger read-only too, so a read does not
+    // repair or lock the ledger another process is writing. A ledger from an
+    // older build is opened writable to migrate it, as it always was.
+    let opened = new TierLedger({ dbPath: found, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
+    if (this.readOnly && !opened.hasCurrentSchema()) {
+      opened.close();
+      opened = new TierLedger({ dbPath: found, now: this.now });
+    }
     if (!holdsBoundId(opened)) {
       opened.close();
       throw new TierLedgerUnavailableError(this.corpusId);
@@ -3260,74 +3492,129 @@ export class LocalConnectorStore {
     return runSteps(this.tierLedgerHiddenSteps());
   }
 
+  /**
+   * Brings this writer's visibility set up to date and saves it in the store,
+   * with a turn between steps, for read-only connections to start from. The
+   * writer also does this on its own (refreshVisibilityIfBehind); this is for
+   * a caller that wants the saved set current now. Does nothing on a
+   * read-only store.
+   */
+  async saveVisibilityInTurns(): Promise<void> {
+    if (this.readOnly) return;
+    await runStepsInTurns(this.tierLedgerHiddenSteps());
+    await this.publishVisibility();
+  }
+
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
   private visibilityJournal = false;
+  private visibilityFeedPresent = false;
   private visibilitySqlMemo: TierVisibilityMemo | undefined;
+  /** What the next publish writes: the whole set, or the identities changed since `from`. */
+  private visibilityPending: {
+    memo: TierVisibilityMemo;
+    full: boolean;
+    from?: { ledger: number; store: number };
+    ids: Map<string, TierLedgerIdentity>;
+  } | undefined;
+  private visibilityPublishing: Promise<void> | undefined;
+  private visibilityPublishTimer: unknown;
+  private visibilityRetryDelay = 0;
+  private visibilityBackstop: unknown;
+  private visibilityRefreshing: Promise<void> | undefined;
+  private visibilityRegisteredLedger: TierLedger | undefined;
+  private visibilityClosed = false;
+  // Set in the constructor, not as field initializers: an initializer that
+  // calls or builds something keeps this module (and bun:sqlite) in the Node
+  // plugin bundle (test/plugin-bundle-no-bun-sqlite.test.ts).
+  /** This connection's name on the publish lease. */
+  private readonly visibilityOwner: string;
+  /** The publish lease's clock (tests pass a test clock). */
+  private visibilityNow: () => number;
+  /** Members written per publish step (tests make it small). */
+  private visibilityPublishChunk: number;
+  /** The timers the publisher uses (tests pass a test clock). */
+  private visibilityTimers: VisibilityTimers;
 
-  /** Item writes on this connection only; embedding, sync status and other bookkeeping do not invalidate pks. */
+  /** The writer's indexed copy of its own set, for the SQL filters below (temp: this connection only). */
   private createVisibilityJournal(): void {
-    this.db.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
-      CREATE TEMP TABLE item_visibility_changes (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
-      conversation_key TEXT, provider_item_id TEXT
-    );`);
-    const note = (row: 'NEW' | 'OLD') => `
-      INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
-        VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
-      DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);`;
-    this.db.exec(`
-      CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN ${note('NEW')} END;
-      CREATE TEMP TRIGGER item_visibility_delete AFTER DELETE ON main.items BEGIN ${note('OLD')} END;
-      CREATE TEMP TRIGGER item_visibility_update
-        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned ON main.items
-        BEGIN ${note('OLD')} ${note('NEW')} END;
-    `);
+    this.db.exec('CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));');
     this.visibilityJournal = true;
   }
 
+  /**
+   * Item identities written since `after`, from the store's persistent feed,
+   * which every connection's item writes fill in their own transaction.
+   * `identities` is undefined when the feed no longer holds every entry past
+   * `after` (or `after` is unknown or ahead of it): the caller must not treat
+   * an older set as current.
+   */
   private itemVisibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
-    if (!this.visibilityJournal) return { cursor: 0, identities: [] }; // read-only: external writes use data_version
-    const bounds = this.db.query('SELECT (SELECT MIN(seq) FROM item_visibility_changes) AS first, (SELECT MAX(seq) FROM item_visibility_changes) AS last')
-      .get() as { first: number | null; last: number | null };
-    const cursor = bounds.last ?? 0;
-    if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
-    const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-      FROM item_visibility_changes WHERE seq > ?`).all(after) as Array<{
-        provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
-      }>;
-    return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
-      providerItemId: row.provider_item_id, providerConversationId: row.conversation_key })) };
+    if (!this.visibilityFeedPresent) return { cursor: 0, identities: [] }; // older read-only schema: external writes use data_version
+    return this.db.transaction(() => {
+      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_feed) AS first,
+        (SELECT MAX(seq) FROM main.item_visibility_feed) AS last,
+        (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued`)
+        .get() as { first: number | null; last: number | null; issued: number | null };
+      // AUTOINCREMENT never reuses a number, so an emptied feed still knows its last one.
+      const cursor = bounds.last ?? bounds.issued ?? 0;
+      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+        FROM main.item_visibility_feed WHERE seq > ?`).all(after) as Array<{
+          provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+        }>;
+      return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
+        providerItemId: row.provider_item_id, providerConversationId: row.conversation_key })) };
+    })();
   }
 
   /**
    * Bootstrap once, then refresh only identities touched by copy/item writes.
-   * The bounded feeds include other ledger connections. A retention gap or an
-   * external store commit forces a complete rebuild before a current read.
-   * No partial rebuild is published. Changes during a yielded build remain
-   * after its saved cursors and are picked up by the next current read.
+   * Both feeds are persistent and fed by every connection's writes, so a
+   * commit on another connection is only more feed entries, never a reason
+   * to start again. A connection with no current set of its own starts from
+   * the set the writer saved in the store and applies the feed entries past
+   * its stamp. When neither its own set nor the saved one is within both
+   * feeds (a retention gap), or nothing is saved for this ledger and corpus,
+   * the connection rebuilds from the ledger, as every connection did before
+   * the saved set: a stale set is never served. No partial rebuild is
+   * published. Changes during a yielded build remain after its saved cursors
+   * and are picked up by the next current read.
+   *
+   * The set is what it always was: what counts, aggregates, the vector-lane
+   * check and the embedding work lists leave out. It is never the authority
+   * for a returned row; every row a read returns is still checked against the
+   * current ledger (tierVisibleRows, embeddingBatchRecheck).
    */
   private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
     const ledger = this.visibilityLedger(); // binding verification must precede every cache use
+    this.registerVisibilityWriter(ledger);
     if (!ledger) {
       if (this.visibilitySqlMemo) this.db.exec('DELETE FROM temp.tier_visibility_pks');
       this.visibilitySqlMemo = undefined;
       this.tierLedgerHiddenMemo = undefined;
       return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
-    const version = (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
+    // Without the persistent feed (an older read-only schema) another
+    // connection's commit shows only as a changed data_version, which forces
+    // the full rebuild it always did.
+    const version = this.visibilityFeedPresent ? 0
+      : (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
     const prior = this.tierLedgerHiddenMemo;
-    const priorLedgerCursor = prior?.ledgerCursor;
-    const priorStoreCursor = prior?.storeCursor;
     const same = prior?.ledger === ledger && prior.dataVersion === version;
-    const ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-    const storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
-    const incremental = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined;
-    const memo: TierVisibilityMemo = incremental ? prior : {
-      ledger, ledgerCursor: ledgerChanges.cursor, storeCursor: storeChanges.cursor, dataVersion: version,
-      lists: { hidden: new MutablePkList(), held: new MutablePkList(), heldForJudgment: new MutablePkList(), metadataLayer: new MutablePkList(),
-        metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
-      value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
-    };
+    let ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+    let storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    let base: TierVisibilityMemo | undefined = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined
+      ? prior : undefined;
+    if (!base && this.visibilityFeedPresent) {
+      const saved = yield* this.savedVisibilitySteps(ledger);
+      if (saved) ({ memo: base, ledgerChanges, storeChanges } = saved);
+      if (this.tierLedgerHiddenMemo !== prior) return yield* this.tierLedgerHiddenSteps();
+    }
+    const incremental = base !== undefined;
+    const memo: TierVisibilityMemo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor,
+      storeChanges.cursor, version);
+    const startLedgerCursor = memo.ledgerCursor;
+    const startStoreCursor = memo.storeCursor;
     for (const flag of VISIBILITY_PK_FLAGS) memo.value[flag] = memo.lists[flag].values;
     const changed = incremental ? [...new Map([...ledgerChanges.identities!, ...storeChanges.identities!]
       .map(identity => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
@@ -3361,9 +3648,13 @@ export class LocalConnectorStore {
     // Never overwrite its newer state with this older delta: rebuild against
     // that state on the next step instead.
     if (this.tierLedgerHiddenMemo !== prior
-      || (incremental && (memo.ledgerCursor !== priorLedgerCursor || memo.storeCursor !== priorStoreCursor))) {
+      || (incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor))) {
       return yield* this.tierLedgerHiddenSteps();
     }
+    // What a publish must rewrite: identities this store holds or held, not
+    // every other corpus's ledger entries.
+    const touched = updates.filter(({ identity, pks, flags }) => flags !== undefined || pks.length > 0
+      || memo.members.has(tierLedgerIdentityKey(identity))).map(({ identity }) => identity);
     try { this.applyVisibilityUpdates(memo, updates); }
     catch (error) { this.tierLedgerHiddenMemo = undefined; this.visibilitySqlMemo = undefined; throw error; }
     if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
@@ -3377,7 +3668,407 @@ export class LocalConnectorStore {
     memo.ledgerCursor = ledgerChanges.cursor;
     memo.storeCursor = storeChanges.cursor;
     this.tierLedgerHiddenMemo = memo;
+    const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
+    if (!this.readOnly && this.visibilityFeedPresent && moved) {
+      this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
+    }
     return memo.value;
+  }
+
+  private ledgerIdOf(ledger: TierLedger): string | undefined {
+    try { return ledger.ledgerId(); } catch { return undefined; }
+  }
+
+  private readVisibilityState(): SavedVisibilityState | null {
+    return this.db.query(`SELECT corpus_id, ledger_id, generation, ledger_cursor, store_cursor
+      FROM main.tier_visibility_state WHERE id = 1`).get() as SavedVisibilityState | null;
+  }
+
+  /**
+   * The set the writer saved, as a memo at the saved cursors, with the feed
+   * entries past them. Undefined when none is saved for this ledger and
+   * corpus, or when either feed no longer holds every entry past its cursors
+   * (a retention gap).
+   *
+   * Read a page at a time, with a step between pages. The writer only ever
+   * moves a saved row to a state at or after the stamp read first, and moves
+   * the stamp after the rows, so the rows plus the feed past that first stamp
+   * give the current set. A new generation switched in during the read means
+   * the rows read may have been cleared, and the read starts again.
+   */
+  private *savedVisibilitySteps(ledger: TierLedger): Generator<void, {
+    memo: TierVisibilityMemo;
+    ledgerChanges: { cursor: number; identities?: TierLedgerIdentity[] };
+    storeChanges: { cursor: number; identities?: TierLedgerIdentity[] };
+  } | undefined> {
+    const ledgerId = this.ledgerIdOf(ledger);
+    if (ledgerId === undefined) return undefined;
+    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+      FROM main.tier_visibility_members
+      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const state = this.readVisibilityState();
+      if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
+      let after: [string, string, string, string] = ['', '', '', ''];
+      for (;;) {
+        const rows = page.all(state.generation, ...after, VISIBILITY_PUBLISH_CHUNK) as Array<{
+          provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+          flags: number; item_pks_json: string;
+        }>;
+        for (const row of rows) {
+          const identity: TierLedgerIdentity = {
+            provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+            ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+          };
+          const pks = JSON.parse(row.item_pks_json) as number[];
+          const flags: TierCorpusVisibility = { ...identity,
+            hidden: (row.flags & VISIBILITY_MEMBER_BITS.hidden) !== 0,
+            held: (row.flags & VISIBILITY_MEMBER_BITS.held) !== 0,
+            heldForJudgment: (row.flags & VISIBILITY_MEMBER_BITS.heldForJudgment) !== 0,
+            metadataLayer: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayer) !== 0,
+            metadataLayerContentUnread: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayerContentUnread) !== 0,
+            moving: (row.flags & VISIBILITY_MEMBER_BITS.moving) !== 0 };
+          for (const flag of VISIBILITY_PK_FLAGS) if (flags[flag]) for (const pk of pks) memo.lists[flag].add(pk);
+          if (flags.moving) memo.value.moving += 1;
+          memo.members.set(tierLedgerIdentityKey(identity), { pks, flags });
+        }
+        if (rows.length < VISIBILITY_PUBLISH_CHUNK) break;
+        const last = rows[rows.length - 1]!;
+        after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+        yield;
+      }
+      if (this.readVisibilityState()?.generation !== state.generation) continue;
+      // Read after the rows, so every entry past the stamp is included.
+      const ledgerChanges = ledger.visibilityChangesSince(state.ledger_cursor);
+      const storeChanges = this.itemVisibilityChangesSince(state.store_cursor);
+      if (ledgerChanges.identities === undefined || storeChanges.identities === undefined) return undefined;
+      return { memo, ledgerChanges, storeChanges };
+    }
+    return undefined;
+  }
+
+  /** Queues this build's result for the publisher. */
+  private notePublish(
+    memo: TierVisibilityMemo,
+    from: { ledger: number; store: number } | undefined,
+    touched: readonly TierLedgerIdentity[],
+  ): void {
+    const pending = this.visibilityPending;
+    if (pending?.memo === memo) {
+      if (!pending.full) for (const identity of touched) pending.ids.set(tierLedgerIdentityKey(identity), identity);
+    } else {
+      this.visibilityPending = from
+        ? { memo, full: false, from, ids: new Map(touched.map(identity => [tierLedgerIdentityKey(identity), identity])) }
+        : { memo, full: true, ids: new Map() };
+    }
+    this.scheduleVisibilityPublish(0);
+  }
+
+  private scheduleVisibilityPublish(delayMs: number): void {
+    if (this.visibilityClosed || this.visibilityPublishTimer !== undefined) return;
+    const timer = this.visibilityTimers.setTimeout(() => {
+      this.visibilityPublishTimer = undefined;
+      void this.publishVisibility();
+    }, delayMs);
+    (timer as { unref?: () => void } | undefined)?.unref?.();
+    this.visibilityPublishTimer = timer;
+    if (this.visibilityBackstop === undefined) {
+      // For ledger writes no import here announces (another process, a tier
+      // move, a judgment): keep the saved set within both feeds.
+      const backstop = this.visibilityTimers.setInterval(() => this.refreshVisibilityIfBehind(), VISIBILITY_BACKSTOP_MS);
+      (backstop as { unref?: () => void } | undefined)?.unref?.();
+      this.visibilityBackstop = backstop;
+    }
+  }
+
+  /**
+   * Saves what the builds queued, with a turn between steps. A failure
+   * (most often a busy store) keeps the older saved set, which is still exact
+   * at its own stamp, and is retried with backoff.
+   */
+  private publishVisibility(): Promise<void> {
+    if (this.visibilityPublishTimer !== undefined) {
+      this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
+      this.visibilityPublishTimer = undefined;
+    }
+    if (this.visibilityPublishing) return this.visibilityPublishing;
+    if (!this.visibilityPending || this.visibilityClosed) return Promise.resolve();
+    let publishing: Promise<void> | undefined;
+    publishing = (async () => {
+      try {
+        while (this.visibilityPending && !this.visibilityClosed) await runStepsInTurns(this.visibilityPublishSteps());
+        this.visibilityRetryDelay = 0;
+      } catch {
+        if (!this.visibilityClosed) {
+          this.visibilityRetryDelay = Math.min(Math.max(this.visibilityRetryDelay * 2, VISIBILITY_RETRY_MIN_MS), VISIBILITY_RETRY_MAX_MS);
+          this.scheduleVisibilityPublish(this.visibilityRetryDelay);
+        }
+      } finally {
+        // Only this run's own promise: one that settled before it was stored
+        // must not be kept, or every later call would return it and do nothing.
+        if (this.visibilityPublishing === publishing) this.visibilityPublishing = undefined;
+      }
+    })();
+    this.visibilityPublishing = publishing;
+    return publishing;
+  }
+
+  /**
+   * One small write transaction under this connection's publish lease
+   * (`tier_visibility_lease`), never waiting on another writer's lock. It
+   * takes the write lock first (BEGIN IMMEDIATE), then checks the lease in
+   * the same transaction, so nothing another connection commits can land
+   * between the check and the write. `take` acquires a free or expired lease
+   * (the start of a publish); every later step needs the lease still to be
+   * this connection's, so a publisher whose lease another connection took,
+   * or took and released, can never write again.
+   */
+  private visibilityWrite<T>(write: () => T, options: { take?: boolean } = {}): T {
+    if (this.db.inTransaction) throw new Error('The store is in another transaction; the visibility save waits.');
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try {
+      return this.db.transaction(() => {
+        const now = this.visibilityNow();
+        const lease = this.db.query('SELECT owner, expires_at FROM main.tier_visibility_lease WHERE id = 1')
+          .get() as { owner: string; expires_at: number } | null;
+        const mine = lease?.owner === this.visibilityOwner;
+        if (options.take === true ? (lease !== null && !mine && lease.expires_at > now) : !mine) {
+          throw visibilityPublishLeaseError();
+        }
+        this.db.query('INSERT OR REPLACE INTO main.tier_visibility_lease (id, owner, expires_at) VALUES (1, ?, ?)')
+          .run(this.visibilityOwner, now + VISIBILITY_LEASE_MS);
+        return write();
+      }).immediate();
+    } finally { this.db.exec('PRAGMA busy_timeout = 10000'); }
+  }
+
+  /** Lets the next publisher (here or on another connection) start at once. */
+  private releaseVisibilityLease(): void {
+    try {
+      this.db.exec('PRAGMA busy_timeout = 0');
+      this.db.query('DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?').run(this.visibilityOwner);
+    } catch {
+      // Busy or closed: the lease runs out on its own.
+    } finally {
+      try { this.db.exec('PRAGMA busy_timeout = 10000'); } catch { /* closed */ }
+    }
+  }
+
+  /**
+   * One publish, in steps that each write at most one chunk of members. The
+   * identities changed since the saved stamp are rewritten in place when the
+   * saved stamp lies between this build's start and its cursors (every
+   * identity changed in between is among them); otherwise the whole set is
+   * written as a new generation. Either way the stamp moves last, in one
+   * small transaction that first checks nobody else moved it, and only to
+   * the cursors the set had when this publish started: rows written later
+   * reflect later states, which the feed past the stamp covers.
+   *
+   * One publisher at a time per store: every step is a lease-checked write
+   * (visibilityWrite), and an in-place step also checks the saved state is
+   * still the one this publish started from, so an older publisher that
+   * resumes after a newer one can write nothing. Cleanup deletes only
+   * generations older than the one the state points at, read in the same
+   * transaction.
+   */
+  private *visibilityPublishSteps(): Generator<void, void> {
+    const pending = this.visibilityPending;
+    if (!pending) return;
+    this.visibilityPending = undefined;
+    const { memo } = pending;
+    const ledgerId = memo.ledgerId;
+    const current = () => !this.visibilityClosed && this.tierLedgerHiddenMemo === memo;
+    if (ledgerId === undefined || !current()) return; // replaced: its successor is queued
+    const stamp = { ledger: memo.ledgerCursor, store: memo.storeCursor };
+    const chunk = Math.max(1, this.visibilityPublishChunk);
+    const put = (generation: number, flags: TierLedgerIdentity) => {
+      const key = [generation, flags.provider, flags.accountScope, flags.providerConversationId ?? '', flags.providerItemId] as const;
+      const member = memo.members.get(tierLedgerIdentityKey(flags));
+      if (member) {
+        this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_members
+          (generation, provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(...key, visibilityMemberBits(member.flags), JSON.stringify(member.pks));
+      } else {
+        this.db.query(`DELETE FROM main.tier_visibility_members
+          WHERE generation = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...key);
+      }
+    };
+    let leased = false;
+    try {
+      // Take the lease and read where the saved set stands in one transaction.
+      const { state, top } = this.visibilityWrite(() => ({
+        state: this.readVisibilityState(),
+        top: (this.db.query('SELECT MAX(generation) AS generation FROM main.tier_visibility_members').get() as { generation: number | null }).generation ?? 0,
+      }), { take: true });
+      leased = true;
+      const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
+      if (sameAuthority && state.ledger_cursor >= stamp.ledger && state.store_cursor >= stamp.store) return;
+      const unchanged = () => {
+        const now = this.readVisibilityState();
+        if (now?.generation !== state?.generation || now?.ledger_cursor !== state?.ledger_cursor
+          || now?.store_cursor !== state?.store_cursor || now?.corpus_id !== state?.corpus_id || now?.ledger_id !== state?.ledger_id) {
+          throw new Error('Another connection saved this store\'s visibility set first.');
+        }
+      };
+      const moveStamp = (generation: number) => this.visibilityWrite(() => {
+        unchanged();
+        this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_state (id, corpus_id, ledger_id, generation, ledger_cursor, store_cursor)
+          VALUES (1, ?, ?, ?, ?, ?)`).run(this.corpusId, ledgerId, generation, stamp.ledger, stamp.store);
+      });
+      const from = pending.from;
+      if (!pending.full && from && sameAuthority
+        && state.ledger_cursor >= from.ledger && state.ledger_cursor <= stamp.ledger
+        && state.store_cursor >= from.store && state.store_cursor <= stamp.store) {
+        const ids = [...pending.ids.values()];
+        for (let start = 0; start < ids.length; start += chunk) {
+          yield;
+          if (!current()) return;
+          this.visibilityWrite(() => {
+            unchanged();
+            for (const identity of ids.slice(start, start + chunk)) put(state.generation, identity);
+          });
+        }
+        yield;
+        if (!current()) return;
+        moveStamp(state.generation);
+        return;
+      }
+      // Unique while the lease is held: above every generation any earlier
+      // publisher wrote, live or left behind.
+      const generation = Math.max(state?.generation ?? 0, top) + 1;
+      // The live members: one changed after this publish started is written
+      // as it is now (a later state the feed covers), or not at all when it
+      // left the set (also in the feed).
+      let batch: TierLedgerIdentity[] = [];
+      const flush = () => {
+        const rows = batch;
+        batch = [];
+        this.visibilityWrite(() => { for (const identity of rows) put(generation, identity); });
+      };
+      for (const { flags } of memo.members.values()) {
+        batch.push(flags);
+        if (batch.length < chunk) continue;
+        yield;
+        if (!current()) return;
+        flush();
+      }
+      if (batch.length > 0) {
+        yield;
+        if (!current()) return;
+        flush();
+      }
+      yield;
+      if (!current()) return;
+      moveStamp(generation);
+      // Generations older than the live one (and any a failed publish left
+      // below it) go a chunk at a time; a newer one is never touched.
+      for (;;) {
+        yield;
+        if (this.visibilityClosed) return;
+        const removed = this.visibilityWrite(() => this.db.query(`DELETE FROM main.tier_visibility_members
+          WHERE (generation, provider, account_scope, conversation_key, provider_item_id) IN (
+            SELECT generation, provider, account_scope, conversation_key, provider_item_id
+            FROM main.tier_visibility_members
+            WHERE generation < (SELECT generation FROM main.tier_visibility_state WHERE id = 1) LIMIT ?)`).run(chunk).changes);
+        if (removed < chunk) return;
+      }
+    } catch (error) {
+      // Put back what this publish was to save, with anything queued since.
+      if (current()) {
+        const queued = this.visibilityPending as typeof pending | undefined; // queued again while this publish yielded
+        if (!queued) this.visibilityPending = pending;
+        else if (queued.memo === memo) {
+          queued.full ||= pending.full;
+          if (!queued.full) {
+            for (const [key, identity] of pending.ids) if (!queued.ids.has(key)) queued.ids.set(key, identity);
+            if (pending.from) queued.from = pending.from;
+          }
+        }
+      }
+      throw error;
+    } finally {
+      if (leased) this.releaseVisibilityLease();
+    }
+  }
+
+  /** Called as feeds move: refreshes and saves this writer's set before a feed drops what the saved stamp needs. */
+  private refreshVisibilityIfBehind(options: { anyMovement?: boolean; ledgerCursor?: number } = {}): void {
+    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing) return;
+    try {
+      const ledger = this.visibilityRegisteredLedger;
+      const state = this.readVisibilityState();
+      if (!ledger || !state || state.corpus_id !== this.corpusId) return; // nothing saved for readers to fall behind on
+      const ledgerCursor = options.ledgerCursor ?? ledger.visibilityChangesSince().cursor;
+      const storeCursor = (this.db.query("SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed'")
+        .get() as { seq: number } | null)?.seq ?? 0;
+      const ledgerLag = ledgerCursor - state.ledger_cursor;
+      const storeLag = storeCursor - state.store_cursor;
+      const behind = options.anyMovement === true
+        ? ledgerLag > 0 || storeLag > 0
+        : ledgerLag > LEDGER_VISIBILITY_FEED_RETENTION / 2 || storeLag > ITEM_VISIBILITY_FEED_RETENTION / 2;
+      if (!behind) return;
+    } catch {
+      return; // a closed or busy store: the backstop asks again
+    }
+    let refreshing: Promise<void> | undefined;
+    refreshing = (async () => {
+      try {
+        await runStepsInTurns(this.tierLedgerHiddenSteps());
+        await this.publishVisibility();
+      } catch {
+        // The next movement or the backstop asks again.
+      } finally {
+        if (this.visibilityRefreshing === refreshing) this.visibilityRefreshing = undefined;
+      }
+    })();
+    this.visibilityRefreshing = refreshing;
+  }
+
+  /**
+   * Every writer sharing this store's ledger checks whether the feeds moved
+   * more than half their retention past its saved stamp, and refreshes if
+   * so. The ledger feed is shared, so another store's import moves it too.
+   */
+  private tickVisibilityWriters(options: { completed?: boolean } = {}): void {
+    const ledger = this.visibilityRegisteredLedger;
+    if (!ledger) return;
+    let ledgerCursor: number;
+    try { ledgerCursor = ledger.visibilityChangesSince().cursor; } catch { return; }
+    for (const store of visibilityWriters().get(ledger) ?? []) {
+      store.refreshVisibilityIfBehind({ ledgerCursor, anyMovement: options.completed === true && store === this });
+    }
+  }
+
+  private registerVisibilityWriter(ledger: TierLedger | undefined): void {
+    if (this.readOnly || !this.visibilityFeedPresent || this.visibilityClosed || ledger === this.visibilityRegisteredLedger) return;
+    this.unregisterVisibilityWriter();
+    if (!ledger) return;
+    let writers = visibilityWriters().get(ledger);
+    if (!writers) visibilityWriters().set(ledger, writers = new Set());
+    writers.add(this);
+    this.visibilityRegisteredLedger = ledger;
+  }
+
+  private unregisterVisibilityWriter(): void {
+    const ledger = this.visibilityRegisteredLedger;
+    if (!ledger) return;
+    const writers = visibilityWriters().get(ledger);
+    writers?.delete(this);
+    if (writers?.size === 0) visibilityWriters().delete(ledger);
+    this.visibilityRegisteredLedger = undefined;
+  }
+
+  private stopVisibilityPublisher(): void {
+    this.visibilityClosed = true;
+    this.unregisterVisibilityWriter();
+    if (!this.readOnly && this.visibilityFeedPresent) this.releaseVisibilityLease();
+    if (this.visibilityPublishTimer !== undefined) this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
+    if (this.visibilityBackstop !== undefined) this.visibilityTimers.clearInterval(this.visibilityBackstop);
+    this.visibilityPublishTimer = undefined;
+    this.visibilityBackstop = undefined;
+    this.visibilityPending = undefined;
   }
 
   private applyVisibilityUpdates(memo: TierVisibilityMemo, updates: ReadonlyArray<{
@@ -5310,6 +6001,109 @@ export class LocalConnectorStore {
       candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
       truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8,
     };
+  }
+
+  /**
+   * Who sent what in this store, for the shared people index (#1076): one
+   * row per sender and label, with the conversations it spoke in. Names and
+   * ids only, never text. A label seen only on rows Private by their own tier
+   * is marked `privateOnly`, so the index never shows it as a citation name.
+   */
+  /**
+   * Where a citation finds the person behind a sender (#1076): the shared
+   * people index, set once by the worker that owns it. Unset, citations keep
+   * each item's own label.
+   */
+  setPeopleNames(resolver: ConnectorStorePeopleNames | undefined): void {
+    this.peopleNames = resolver;
+  }
+
+  /** The person's display name for a non-owner sender linked to one, when it may be shown. */
+  personCitationName(row: Pick<ConnectorStoreSearchRow, 'sourceItem' | 'senderId' | 'authorLabel' | 'senderIsOwner'>): string | undefined {
+    if (!this.peopleNames || row.senderIsOwner === true) return undefined;
+    if (!row.senderId && !row.authorLabel) return undefined;
+    try {
+      return this.peopleNames(row.sourceItem.provider, row.senderId, row.authorLabel)?.displayName;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private peopleNames: ConnectorStorePeopleNames | undefined;
+
+  peopleObservations(): PeopleSenderObservation[] {
+    // A copy the tier ledger keeps out of view (superseded, staged, or held
+    // for classification) never names anyone: an old Personal copy of an item
+    // now judged Private must not make its sender's name shareable.
+    const tierHidden = this.tierHiddenItemPks();
+    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
+    const rows = this.db.query(`
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
+      provider: string;
+      sender_id: string | null;
+      sender_label: string | null;
+      conversation_id: string | null;
+      trust_tier: string;
+      is_owner: number;
+      item_count: number;
+    }>;
+    const bySender = new Map<string, PeopleSenderObservation & { conversations: Set<string>; anyPublic: boolean }>();
+    for (const row of rows) {
+      const key = `${row.provider}\u0000${row.sender_id ?? ''}\u0000${row.sender_label ?? ''}`;
+      let entry = bySender.get(key);
+      if (!entry) {
+        entry = {
+          provider: row.provider,
+          ...(row.sender_id?.trim() ? { senderId: row.sender_id.trim() } : {}),
+          ...(row.sender_label?.trim() ? { senderLabel: row.sender_label.trim() } : {}),
+          isOwner: false,
+          itemCount: 0,
+          corpusId: this.corpusId,
+          conversations: new Set(),
+          anyPublic: false,
+        };
+        bySender.set(key, entry);
+      }
+      entry.isOwner ||= row.is_owner === 1;
+      entry.itemCount += row.item_count;
+      if (row.conversation_id) entry.conversations.add(row.conversation_id);
+      const tier = SOURCE_TRUST_TIERS.find((candidate) => candidate === row.trust_tier);
+      if (tier && !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: tier })) entry.anyPublic = true;
+    }
+    return [...bySender.values()].map(({ conversations, anyPublic, ...observation }) => ({
+      ...observation,
+      ...(anyPublic ? {} : { privateOnly: true }),
+      ...(conversations.size > 0 ? { conversationIds: [...conversations].sort() } : {}),
+    }));
+  }
+
+  /**
+   * Author coverage (#1076): per provider, how many active items carry no
+   * author (no sender id and no sender label). Counts only.
+   */
+  authorCoverage(): Array<{ provider: string; items: number; itemsWithoutAuthor: number }> {
+    return (this.db.query(`
+      SELECT provider, COUNT(*) AS items,
+        SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
+          THEN 1 ELSE 0 END) AS without_author
+      FROM items
+      WHERE tombstoned = 0 AND parent_local_item_id IS NULL
+      GROUP BY provider
+      ORDER BY provider
+    `).all() as Array<{ provider: string; items: number; without_author: number | null }>).map((row) => ({
+      provider: row.provider,
+      items: row.items,
+      itemsWithoutAuthor: row.without_author ?? 0,
+    }));
   }
 
   /**
@@ -8395,9 +9189,14 @@ export class LocalConnectorStore {
     connector: SourceConnector,
     options?: ConnectorStoreSyncOptions,
   ): Promise<ConnectorStoreSyncSummary> {
+    try { this.registerVisibilityWriter(this.visibilityLedger()); } catch { /* the sync itself reports a missing ledger */ }
     // A sync can tombstone or replace items; their pictures are released here.
     try {
-      return await this.syncFromConnectorHeld(connector, options);
+      const summary = await this.syncFromConnectorHeld(connector, options);
+      // Import completion: this writer's saved set catches up with what it
+      // wrote, and every writer on the ledger checks its distance.
+      this.tickVisibilityWriters({ completed: true });
+      return summary;
     } finally {
       this.releaseUnreferencedChunkMedia();
     }
@@ -8529,6 +9328,7 @@ export class LocalConnectorStore {
             break;
           }
           itemsSeen += 1;
+          if (itemsSeen % VISIBILITY_TICK_ITEMS === 0) this.tickVisibilityWriters();
           // SQLite's item work is synchronous. Return to the event loop once
           // the thread has run a time slice, so a large page cannot starve the
           // Bun HTTP server that owns this same loop (control-path-headroom.ts;
@@ -11390,8 +12190,8 @@ export class LocalConnectorStore {
   // True when the store has at least one current, visible embedding for the
   // model: stale or held vectors never activate the vector lane.
   // `countsMaxAgeMs` only for a status snapshot's display (see
-  // STATUS_COUNTS_MAX_AGE_MS); search and embedding pass none and see the
-  // current hidden-copy set.
+  // STATUS_COUNTS_MAX_AGE_MS); embedding passes none and sees the current
+  // hidden-copy set. Search asks through vectorLaneServable.
   hasEmbeddings(modelId: string, options: { countsMaxAgeMs?: number } = {}): boolean {
     // A rebind deletes this model's vectors across the WHOLE corpus while the
     // call that triggered it re-embeds only its own selection. Until a
@@ -11419,6 +12219,60 @@ export class LocalConnectorStore {
     `).get(modelId, ...exclusion.params) as { present: number } | null;
     return row !== null;
   }
+
+  /**
+   * Whether a search may switch the vector lane on: `hasEmbeddings` for the
+   * search path, which must not hold the worker's thread. Each query used to
+   * ask `hasEmbeddings` with no age three or four times (adapter, hybrid
+   * availability, neighbours, passage ranking), and each ask rebuilt the
+   * store's whole hidden-copy set on the main thread. On Sparta (2026-11-10,
+   * #1079) that was up to 45% of a 46 s freeze during a dashboard Ask, so
+   * every lane missed its deadline. This only decides whether the lane runs:
+   * what the lane returns is still filtered by the current tier ledger.
+   *
+   * A rebind is checked on every ask (one row). Otherwise a `true` is kept
+   * for SEARCH_VECTOR_LANE_MEMO_MS, and the answer is computed from the
+   * hidden set the status path keeps (rebuilt in turns, never on this ask
+   * after the first). A `false` is never kept, so a store's first vectors
+   * switch the lane on at the next search.
+   */
+  vectorLaneServable(modelId: string): boolean {
+    if (this.embeddingCurrencyRebuildPending(modelId)) return false;
+    const memo = this.vectorLaneMemo?.get(modelId);
+    if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
+    // No hidden set built yet (the first search after a start): building it
+    // here held Sparta's thread for most of a 75-86 s freeze (2026-11-10).
+    // Build it in turns for the next search, and answer this one from the
+    // vectors alone, hidden or not: the lane's rows are still filtered by the
+    // current tier ledger, so a hidden vector can switch the lane on but
+    // never be returned.
+    if (!this.tierHiddenCountsMemo) {
+      void this.refreshTierHiddenCountsInTurns();
+      return this.anyCurrentEmbedding(modelId);
+    }
+    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+    if (servable) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
+    else this.vectorLaneMemo?.delete(modelId);
+    return servable;
+  }
+
+  /** Whether any live chunk has a current vector for the model, before visibility. */
+  private anyCurrentEmbedding(modelId: string): boolean {
+    return this.db.query(`
+      SELECT 1 AS present
+      FROM chunk_embeddings emb
+      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+      JOIN items i ON i.item_pk = emb.item_pk
+      WHERE emb.model_id = ?
+        AND i.tombstoned = 0
+        AND emb.content_hash = c.embedding_input_hash
+      LIMIT 1
+    `).get(modelId) !== null;
+  }
+
+  // No initializer: a class-field initializer is a load-time side effect that
+  // pulls this store, and bun:sqlite, into the Node plugin bundle.
+  private vectorLaneMemo: Map<string, number> | undefined;
 
   // Vector lane: embed the query via the provider, cosine over the stored
   // vectors (exact scan, like the Dropbox lane), best chunk score per item,
@@ -11885,11 +12739,97 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     // locate: false is the metadata-only mode: a text match is reported as
     // such, and no chunk text is read to place it.
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
-  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
+    ftsOptions: ConnectorStoreKeywordFtsOptions = {},
+  ): ConnectorStoreKeywordSearch {
+    return this.readHere(this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions));
+  }
+
+  /**
+   * searchItemsDetailed with its queries read on the read pool
+   * (off-thread-reads.ts), for the Ask and answer lanes (#1079): the same
+   * queries and the same tier filter, so the same rows, without holding this
+   * thread for the seconds a keyword search takes on a large store. This
+   * thread still builds every query and filters what comes back by the
+   * current tier ledger and the child-visibility rule. Each query is its own
+   * pool job, so stores take turns on the pool between queries.
+   *
+   * At `deadlineAtMs` a query still waiting or running on the pool is given
+   * up and this rejects with OffThreadReadBusyError, which the router reports
+   * as a lane timeout. It never falls back to reading on this thread: that
+   * fallback is the freeze this exists to end. A thread that cannot start
+   * right now makes the lane busy too. Only a store the pool never reads (an
+   * in-memory store, a runtime without Bun's Worker) is searched here.
+   */
+  async searchItemsDetailedOffThread(
+    query: string,
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+    ftsOptions: ConnectorStoreKeywordFtsOptions = {},
+    pool: { deadlineAtMs?: number } = {},
+  ): Promise<ConnectorStoreKeywordSearch> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
+    const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
+    let step = steps.next();
+    while (!step.done) {
+      // A store closed while its search was reading: the pool's connections
+      // to it are released, and no later read may open one again.
+      if (this.closedForPoolReads) throw new OffThreadReadBusyError();
+      step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
+    }
+    return step.value;
+  }
+
+  /**
+   * Search rows that this store still serves, by the current tier ledger and
+   * child visibility: the same filter the search applied, applied again.
+   * A keyword lane's reads yield to the event loop (they run on the read
+   * pool), and a tier move or a parent being hidden can land between the
+   * search's own filter and the moment the lane emits its hits. The adapter
+   * calls this after its last read, so the filter at emit time decides
+   * (#1079). A row with a chunk or a content match is checked at the content
+   * layer, as the search did.
+   */
+  stillVisibleSearchRows<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): T[] {
+    return this.tierVisibleRows(
+      rows,
+      (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...(row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}),
+      }),
+      (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
+    );
+  }
+
+  private closedForPoolReads = false;
+
+  /** Drives a read generator on this store's own connection. */
+  private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
+    let step = steps.next();
+    while (!step.done) {
+      const read = step.value;
+      const statement = this.db.query(read.sql);
+      step = steps.next(read.mode === 'all' ? statement.all(...(read.params as SQLQueryBindings[])) : statement.get(...(read.params as SQLQueryBindings[])));
+    }
+    return step.value;
+  }
+
+  // The keyword search as the reads it needs: each query is yielded and its
+  // rows come back, so one body serves this thread and the read pool. The
+  // tier filter is not a read: it runs here, on this thread, against the
+  // current ledger, whichever connection returned the rows.
+  private *searchItemsSteps(
+    query: string,
+    maxResults: number,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+    ftsOptions: ConnectorStoreKeywordFtsOptions,
+  ): Generator<StoreRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? this.privateRelaxedFtsQuery(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
+    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
@@ -11897,39 +12837,6 @@ export class LocalConnectorStore {
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const rows = this.db.query(`
-      SELECT
-        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
-        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
-        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
-        i.trust_tier, i.sync_run_id,
-        -- Bare column beside a single MIN(): SQLite takes it from the very row
-        -- that produced the minimum, so this is the BEST-RANKING chunk for the
-        -- item rather than an arbitrary one. That is exactly the chunk the
-        -- citation should point at.
-        connector_store_fts.chunk_pk AS chunk_pk,
-        MIN(connector_store_fts.rank) AS rank
-      FROM connector_store_fts
-      JOIN items i ON i.item_pk = connector_store_fts.item_pk
-      WHERE connector_store_fts MATCH ?
-        AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-        AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
-        ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
-        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
-        ${selectedFilters.sql}
-        ${selectedFtsScope.sql}
-      GROUP BY i.item_pk
-      ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
-      LIMIT ?
-    `).all(
-      terms,
-      ...(selectedAccount ? [selectedAccount] : []),
-      ...selectedFilters.params,
-      ...selectedFtsScope.params,
-      fetchLimit,
-    ) as ItemRow[];
     // Minimum signal: for a multi-concept query, a candidate matching a
     // single common concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
@@ -11944,90 +12851,177 @@ export class LocalConnectorStore {
     // "June 2026 blood work" matched a diet guide on "blood" and "work", and
     // "omega-3 level" matched every guide that says "3" and "level".
     const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
-    let selected = rows;
     const matchedGroups = new Map<number, number>();
     const matchedGroupIndexes = new Map<number, number[]>();
-    if (minimumSignal && rows.length > 0) {
-      const pks = rows.map((row) => row.item_pk);
-      const placeholders = pks.map(() => '?').join(', ');
-      for (const [groupIndex, group] of groups.entries()) {
-        const hits = this.db.query(`
-          SELECT DISTINCT connector_store_fts.item_pk
-          FROM connector_store_fts
-          JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ?
-            AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
-        for (const hit of hits) {
-          matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-          matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
-        }
-      }
-      const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
-      // One unique literal topic word can identify a record when a question
-      // combines neighbouring records (#710). The shared stopwords exclude
-      // scaffolding such as "my"; synonyms alone cannot earn this exception.
-      // Keep the population floor and all SQL scope/tier checks. A common
-      // term or a word shared by several items still needs the ordinary floor.
-      const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
-      const uniqueTerms = weights && weights.population >= 10
-        ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
-        : [];
-      const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (this.db.query(`
-        SELECT DISTINCT connector_store_fts.item_pk
-        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+    // Store-wide concept rarity, counted at most once per query.
+    let conceptWeights: { of: number[]; total: number; counts: number[]; population: number } | undefined;
+    // Candidates are read in pages until `limit` visible rows survive (#1174).
+    // In a store where most matches are superseded or staged copies, one
+    // page of the best-ranked matches can hold almost none the tier filter
+    // serves, and a visible match ranked below them was never considered.
+    // The first page is the same single fetch as before, so a store whose
+    // top matches are visible pays nothing extra. Later pages grow fourfold,
+    // and the whole scan stops at KEYWORD_CANDIDATE_SCAN_CAP raw rows, so the
+    // work per query stays bounded however much of the store is hidden. The
+    // filters themselves are unchanged: this decides how many candidates are
+    // looked at, never which of them may be served.
+    const selected: ItemRow[] = [];
+    const seen = new Set<number>();
+    let scanned = 0;
+    let pageSize = fetchLimit;
+    let exhausted = false;
+    while (true) {
+      const page = (yield { mode: 'all', sql: `
+        SELECT
+          i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+          i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+          i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+          i.mime_type, i.authored_at, i.updated_at,
+          i.trust_tier, i.sync_run_id,
+          -- Bare column beside a single MIN(): SQLite takes it from the very row
+          -- that produced the minimum, so this is the BEST-RANKING chunk for the
+          -- item rather than an arbitrary one. That is exactly the chunk the
+          -- citation should point at.
+          connector_store_fts.chunk_pk AS chunk_pk,
+          MIN(connector_store_fts.rank) AS rank
+        FROM connector_store_fts
+        JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          AND i.tombstoned = 0
+          AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
+          ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
+          ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+          ${selectedFilters.sql}
           ${selectedFtsScope.sql}
-      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>)
-        .map(row => row.item_pk));
-      selected = rows.filter((row) => {
-        if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
-        if (!weights) return false;
-        const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-        // Two rare topic concepts can identify an item even when the question
-        // adds words it never used. Rarity is evidence in every source family.
-        // Keep the strict floor for common words and small corpora. This uses
-        // the same scoped FTS candidates and tier filter.
-        if (groups.length >= 3 && weights.population >= 10
-          && indexes.length >= 2 && indexes.length * 2 >= groups.length
-          && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
-        const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
-        return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
-      });
+        GROUP BY i.item_pk
+        ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
+        LIMIT ? OFFSET ?
+      `, params: [
+        terms,
+        ...(selectedAccount ? [selectedAccount] : []),
+        ...selectedFilters.params,
+        ...selectedFtsScope.params,
+        pageSize,
+        scanned,
+      ] }) as ItemRow[];
+      scanned += page.length;
+      exhausted = page.length < pageSize;
+      // OFFSET pages over one ordering. On the read pool each page is its own
+      // read, so a row an earlier page already returned is not counted twice.
+      const rows = page.filter((row) => !seen.has(row.item_pk));
+      for (const row of rows) seen.add(row.item_pk);
+      let signalled = rows;
+      if (minimumSignal && rows.length > 0) {
+        const pks = rows.map((row) => row.item_pk);
+        const placeholders = pks.map(() => '?').join(', ');
+        // On the read pool each read is its own transaction, so a pk the FTS
+        // read returned may name another item by the time a follow-up read
+        // runs (ingestion writes in between), or the same item at a newer
+        // version. A hit counts only for the item and version the row was read
+        // as; on one connection they always agree.
+        const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
+        const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
+          const row = itemAt.get(hit.item_pk);
+          return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
+        };
+        for (const [groupIndex, group] of groups.entries()) {
+          const hits = ((yield { mode: 'all', sql: `
+            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+            .filter(sameItem);
+          for (const hit of hits) {
+            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+            matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+          }
+        }
+        const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+        const weights = rows.every(enough) ? undefined : (conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact));
+        // One unique literal topic word can identify a record when a question
+        // combines neighbouring records (#710). The shared stopwords exclude
+        // scaffolding such as "my"; synonyms alone cannot earn this exception.
+        // Keep the population floor and all SQL scope/tier checks. A common
+        // term or a word shared by several items still needs the ordinary floor.
+        const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
+        const uniqueTerms = weights && weights.population >= 10
+          ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
+          : [];
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+          .filter(sameItem)
+          .map(row => row.item_pk));
+        signalled = rows.filter((row) => {
+          if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
+          if (!weights) return false;
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          // Two rare topic concepts can identify an item even when the question
+          // adds words it never used. Rarity is evidence in every source family.
+          // Keep the strict floor for common words and small corpora. This uses
+          // the same scoped FTS candidates and tier filter.
+          if (groups.length >= 3 && weights.population >= 10
+            && indexes.length >= 2 && indexes.length * 2 >= groups.length
+            && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
+          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+        });
+      }
+      const visible = this.tierVisibleRows(
+        signalled,
+        (row) => ({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        }),
+        // A metadata-only FTS row carries no chunk. Chunk rows are the content
+        // layer (they are seasoned with the names, as they always were).
+        (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
+      );
+      selected.push(...visible);
+      // Only rows the tier filter hid earn another page. A page it hid nothing
+      // from was cut by the minimum-signal filter alone, which has always
+      // stopped at one page, and the cost of that common case stays as it was.
+      if (exhausted || selected.length >= limit || visible.length === signalled.length
+        || scanned >= KEYWORD_CANDIDATE_SCAN_CAP) break;
+      pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
     }
-    selected = this.tierVisibleRows(
-      selected,
-      (row) => ({
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-      }),
-      // A metadata-only FTS row carries no chunk. Chunk rows are the content
-      // layer (they are seasoned with the names, as they always were).
-      (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
-    );
     const spanTerms = queryTermsForSpan(query);
     const kept = selected.slice(0, limit);
+    const located: ConnectorStoreSearchRow[] = [];
+    const locatedRows: ItemRow[] = [];
+    for (const row of kept) {
+      const base = searchRowFromItemRow(row);
+      if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
+        located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true as const });
+        locatedRows.push(row);
+        continue;
+      }
+      const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+      // The chunk no longer belongs to this item as it was read (on the read
+      // pool, ingestion can replace an item's chunks between reads, and a
+      // chunk pk can be reused by another item): the row is dropped, as if
+      // it had not matched. Another item's chunk is never attached to it.
+      if (!chunk) continue;
+      located.push({ ...base, chunk });
+      locatedRows.push(row);
+    }
     return {
-      rows: kept.map((row) => {
-        const base = searchRowFromItemRow(row);
-        if (ftsOptions.locate === false) {
-          return row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true as const };
-        }
-        const chunk = row.chunk_pk === null || row.chunk_pk === undefined
-          ? undefined
-          : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
-        return chunk ? { ...base, chunk } : base;
-      }),
-      saturated: rows.length >= fetchLimit || selected.length > limit,
+      rows: located,
+      saturated: !exhausted || selected.length > limit,
       // How many of the query's concepts each row matched (in its name or its
       // text). A single-concept query has nothing to count: every row matched it.
       concepts: {
         total: groups.length,
-        matched: new Map(kept.map((row) => [
+        matched: new Map(locatedRows.map((row) => [
           row.local_item_id,
           minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
         ])),
@@ -12035,7 +13029,7 @@ export class LocalConnectorStore {
     };
   }
 
-  private privateRelaxedFtsQuery(query: string): string {
+  private *privateRelaxedFtsQuerySteps(query: string): Generator<StoreRead, string, unknown> {
     const terms = relaxedLocalFtsTerms(query);
     if (terms.length <= 2) return terms.join(' OR ');
     // A relaxed match can create a waiting question and a panel job. Require
@@ -12051,14 +13045,14 @@ export class LocalConnectorStore {
         alternatives.push(`(${terms[i]} AND ${terms[j]})`);
       }
     }
-    const population = this.db.query(
-      'SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20',
-    ).all();
+    const population = (yield {
+      mode: 'all', sql: 'SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20', params: [],
+    }) as unknown[];
     if (population.length === 20) {
       for (const term of terms) {
-        const rows = this.db.query(
-          'SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21',
-        ).all(term) as Array<{ item_pk: number }>;
+        const rows = (yield {
+          mode: 'all', sql: 'SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21', params: [term],
+        }) as Array<{ item_pk: number }>;
         if (rows.length > 0 && rows.length <= 20 && new Set(rows.map(row => row.item_pk)).size === 1) {
           alternatives.push(term);
         }
@@ -12073,14 +13067,20 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
-  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number; counts: number[]; population: number } {
-    const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
-    const counts = groups.map((group) => {
-      const { count } = this.db.query(
-        'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
-      ).get(sourceIndexFtsGroupQuery(group, exact)) as { count: number };
-      return count;
-    });
+  private *conceptWeightsSteps(
+    groups: ReadonlyArray<readonly string[]>,
+    exact: ReadonlyMap<string, unknown>,
+  ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
+    const items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
+    const counts: number[] = [];
+    for (const group of groups) {
+      const { count } = (yield {
+        mode: 'get',
+        sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+        params: [sourceIndexFtsGroupQuery(group, exact)],
+      }) as { count: number };
+      counts.push(count);
+    }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
   }
@@ -12122,22 +13122,36 @@ export class LocalConnectorStore {
       'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
     ).all(row.item_pk, row.chunk_index) as Array<{ bounded_text: string }>;
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+  }
 
-    const chunkChars = row.bounded_text.length;
-    const { charStart, charEnd } = queryTerms?.length
-      ? firstTermSpan(row.bounded_text, queryTerms)
-      : { charStart: 0, charEnd: chunkChars };
-    return {
-      chunkId: String(chunkPk),
-      chunkIndex: row.chunk_index,
-      contentHash: row.content_hash,
-      charStart,
-      charEnd,
-      itemCharStart: itemOffset + charStart,
-      itemCharEnd: itemOffset + charEnd,
-      chunkChars,
-      lane,
-    };
+  /**
+   * The keyword lane's chunk locate, checked against the item the FTS read
+   * returned: one statement reads the chunk and the chunks before it, and
+   * only while the chunk still belongs to that item at that version. On the
+   * read pool the FTS read and this one are separate transactions, so the
+   * chunk may by then be gone or reused by another item; then this returns
+   * undefined and the caller drops the row. On one connection it is the
+   * same locate as chunkMatchForChunkPk.
+   */
+  private *keywordChunkMatchSteps(
+    item: Pick<ItemRow, 'item_pk' | 'local_item_id' | 'source_version'>,
+    chunkPk: number,
+    queryTerms: readonly string[],
+  ): Generator<StoreRead, ConnectorStoreChunkMatch | undefined, unknown> {
+    const rows = (yield {
+      mode: 'all',
+      sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
+        ORDER BY c.chunk_index`,
+      params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk],
+    }) as Array<{ chunk_pk: number; chunk_index: number; content_hash: string; bounded_text: string }>;
+    const row = rows.at(-1);
+    if (!row || row.chunk_pk !== chunkPk) return undefined;
+    const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, 'keyword', queryTerms);
   }
 
   // Recency lane: newest live items regardless of query match, same
@@ -12682,13 +13696,17 @@ export class LocalConnectorStore {
    * status() with its whole-store counts read on the second thread
    * (off-thread-reads.ts): the same queries, so the same counts, without
    * holding this thread for the seconds they take on a large store (#870).
-   * Where that thread cannot read this store, it is status() itself.
+   * Where the pool never reads this store (in memory, no Bun Worker), it is
+   * status() itself; a pool that is full for now is waited for.
    */
   async statusOffThread(
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<ConnectorStoreStatus> {
-    if (!offThreadReadsAvailable(this.dbPath)) return this.status(scope, options);
+    // A pool that is full for now (threads still stopping after a missed
+    // deadline) is waited for: only a store the pool never reads is counted
+    // on this thread.
+    if (!offThreadReadsSupported(this.dbPath)) return this.status(scope, options);
     return withOffThreadSnapshot(this.dbPath, async (read) => {
       const steps = this.statusSteps(scope, options);
       let step = steps.next();
@@ -13264,6 +14282,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   filters?: ConnectorStoreSearchFilters;
   /** Optional declared projection applied only to final eligible hits. */
   resultProjector?: ConnectorStoreResultProjector;
+  /** Time seams for waiting on a starting embedding model; tests pass a test clock. */
+  timers?: QueryEmbeddingWaitTimers;
 }
 
 // Membrane-safe routed search: hits carry identity + provenance with a
@@ -13294,14 +14314,15 @@ export function createConnectorStoreCorpusAdapter(
     if (embeddingProvider && useHybrid === 'hybrid') {
       if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
-      } else if (!store.hasEmbeddings(embeddingProvider.modelId)) {
+      } else if (!store.vectorLaneServable(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
       }
     }
 
-    if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) {
-      const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
-        connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters), options.localKeywordFallback);
+    if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
+      const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+        await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
+        options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
       const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
@@ -13366,7 +14387,7 @@ export function createConnectorStoreCorpusAdapter(
         matchCount: keywordLane.matchCount,
         rawExposed: false,
       };
-    }
+    })();
 
     return hybridConnectorStoreSearch(
       store,
@@ -13393,7 +14414,7 @@ export function createConnectorStoreCorpusAdapter(
         backend: embeddingProvider.backend,
       };
     }
-    const servable = store.hasEmbeddings(embeddingProvider.modelId);
+    const servable = store.vectorLaneServable(embeddingProvider.modelId);
     return {
       servable,
       ...(!servable ? { reason: 'no_current_embedding_artifacts' as const } : {}),
@@ -13417,7 +14438,7 @@ export function createConnectorStoreCorpusAdapter(
       !embeddingProvider
       || (options.retrievalMode ?? 'hybrid') !== 'hybrid'
       || (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
-      || !store.hasEmbeddings(embeddingProvider.modelId)
+      || !store.vectorLaneServable(embeddingProvider.modelId)
     ) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
@@ -13464,17 +14485,16 @@ export function createConnectorStoreCorpusAdapter(
     const hybrid = embeddingProvider !== undefined
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
-      && store.hasEmbeddings(embeddingProvider.modelId);
+      && store.vectorLaneServable(embeddingProvider.modelId);
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
-    const keywordLane = relaxEmptyLocalKeywordLane(
+    const readKeywordLane = await relaxEmptyLocalKeywordLane(
       store, request.query, maxResults, options.accountScope, filters,
-      connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions),
-      options.localKeywordFallback, ftsOptions,
+      await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs),
+      options.localKeywordFallback, ftsOptions, request.deadlineAtMs,
     );
-    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
-    let semanticOnly = 0;
+    const semanticRows: ConnectorStoreSearchRow[] = [];
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
     // it would have matched is unknown, and the response says so.
@@ -13493,12 +14513,16 @@ export function createConnectorStoreCorpusAdapter(
         );
         if (lane.skippedReason !== undefined) incomplete = true;
         for (const row of lane.rows) {
-          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
-          rows.push(row);
-          semanticOnly += 1;
+          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
+          semanticRows.push(row);
         }
       }
     }
+    // Checked again after the last read, right before the hits and counts go out.
+    const keywordLane = revalidateKeywordLane(store, readKeywordLane);
+    const visibleSemanticRows = store.stillVisibleSearchRows(semanticRows);
+    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
+    const semanticOnly = visibleSemanticRows.length;
     return {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
@@ -13523,6 +14547,19 @@ export function createConnectorStoreCorpusAdapter(
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
+  // A local model that is still starting gets the router's preparation budget
+  // to finish before the vector lane runs (#1172). Only when this adapter will
+  // run the vector lane for the request, and without reading the store: the
+  // router asks only after hybridAvailability said the lane is servable. Only
+  // a local provider can report a starting model; a cloud one is never waited
+  // for, so a stalled remote call cannot hold every lane for the budget.
+  if (
+    embeddingProvider
+    && embeddingProvider.backend === 'local'
+    && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+  ) {
+    expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
+  }
   return expanded;
 }
 
@@ -13574,7 +14611,7 @@ function connectorStoreHitFromRow(
   return {
     ...(projection ?? {}),
     sourceItem: row.sourceItem,
-    provenance: provenanceFromSearchRow(store.corpusId, row),
+    provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
     // Every lane's hit (keyword, semantic, recency, pinned) is built here.
@@ -13643,9 +14680,9 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
-  let keywordLane = connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false });
+  let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size
-    ? withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}))
+    ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
     : undefined;
   const vectorLane = await store.vectorSearchLane(
     request.query,
@@ -13655,7 +14692,7 @@ async function hybridConnectorStoreSearch(
     filters,
     request.deadlineAtMs,
   );
-  const scoredVectorRows = vectorLane.rows;
+  let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
   // hits stand on their own lexical merit (live calibration 2026-07-25:
@@ -13664,7 +14701,7 @@ async function hybridConnectorStoreSearch(
   // questions the bar exists for).
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  const vectorRows = gateArmed
+  let vectorRows = gateArmed
     ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
@@ -13679,7 +14716,11 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
-  keywordLane = relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback);
+  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
+  keywordLane = revalidateKeywordLane(store, keywordLane);
+  scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
+  vectorRows = store.stillVisibleSearchRows(vectorRows);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
@@ -13829,25 +14870,32 @@ function normalizeSemanticRelevanceBar(value: number | undefined): number | unde
 // Both queries probe to MAX_SEARCH_RESULTS whatever the lane limit, so the
 // same rows also count the corpus's lexical match set for coverage breadth
 // ("6 files match"). A probe that fills its ceiling reports a lower bound.
-function connectorStoreKeywordLaneRows(
+//
+// The FTS queries run on the read pool (searchItemsDetailedOffThread, #1079),
+// so an Ask's keyword lanes do not hold the worker's thread.
+type ConnectorStoreKeywordLane = {
+  rows: ConnectorStoreSearchRow[];
+  matchCount: SourceIndexCorpusMatchCount;
+  matchedItemIds: ReadonlySet<string>;
+  completeItemIds: ReadonlySet<string>;
+  allRows: ConnectorStoreSearchRow[];
+};
+
+async function connectorStoreKeywordLaneRows(
   store: LocalConnectorStore,
   query: string,
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
-): {
-  rows: ConnectorStoreSearchRow[];
-  matchCount: SourceIndexCorpusMatchCount;
-  matchedItemIds: ReadonlySet<string>;
-  completeItemIds: ReadonlySet<string>;
-  allRows: ConnectorStoreSearchRow[];
-} {
-  const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
+  deadlineAtMs?: number,
+): Promise<ConnectorStoreKeywordLane> {
+  const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
+  const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
   const content = rows.every(connectorStoreRowHasContent)
     ? { rows: [], saturated: false, concepts: plain.concepts }
-    : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+    : await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true }, pool);
   const contentRows = content.rows;
   // Rows that match every concept of the question, in their name or text.
   const complete = new Set<string>();
@@ -13871,8 +14919,8 @@ function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : withKeywordExpansionDisabled(
-    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions),
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : await withKeywordExpansionDisabled(
+    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
   );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
   const allRows = baseline
@@ -13894,19 +14942,43 @@ function connectorStoreKeywordLaneRows(
   };
 }
 
+/**
+ * A keyword lane with every row this store no longer serves taken out, and
+ * its counts recounted (stillVisibleSearchRows). Unchanged when every row is
+ * still served.
+ */
+function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreKeywordLane): ConnectorStoreKeywordLane {
+  const allRows = store.stillVisibleSearchRows(lane.allRows);
+  if (allRows.length === lane.allRows.length) return lane;
+  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+  return {
+    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
+    allRows,
+    matchedItemIds: served,
+    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    matchCount: {
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      saturated: lane.matchCount.saturated,
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+    },
+  };
+}
+
 /** One bounded OR retry after the strict lane is empty, with identical SQL/tier scope. */
-function relaxEmptyLocalKeywordLane(
+async function relaxEmptyLocalKeywordLane(
   store: LocalConnectorStore,
   query: string,
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  strict: ReturnType<typeof connectorStoreKeywordLaneRows>,
+  strict: ConnectorStoreKeywordLane,
   enabled: boolean | 'private_search' | undefined,
   ftsOptions: { prefix?: boolean; locate?: boolean } = {},
-): ReturnType<typeof connectorStoreKeywordLaneRows> {
+  deadlineAtMs?: number,
+): Promise<ConnectorStoreKeywordLane> {
   if (!enabled || strict.rows.length > 0) return strict;
-  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' });
+  const relaxed = await connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' }, deadlineAtMs);
   // OR matches are ranked, but never claim every concept of the question matched.
   return { ...relaxed, completeItemIds: new Set() };
 }
@@ -14008,7 +15080,10 @@ function assertConnectorStoreCorpusRequest(store: LocalConnectorStore, request: 
   }
 }
 
-function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow): SourceIndexProvenance {
+function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow, personName?: string): SourceIndexProvenance {
+  // The owner reads as "You" (#1073); anyone else as their one linked name
+  // across sources when there is one (#1076), else the item's own label.
+  const authorLabel = row.senderIsOwner === true ? citationAuthorLabel(row) : (personName ?? row.authorLabel);
   return {
     sourceItem: row.sourceItem,
     // The frozen provenance shape has carried an optional `chunk` since the
@@ -14042,11 +15117,25 @@ function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow)
       ...(row.title ? { title: row.title } : {}),
       sourceLabel: row.sourceItem.provider,
       ...(row.conversationLabel ? { conversationLabel: row.conversationLabel } : {}),
-      ...(row.authorLabel ? { authorLabel: row.authorLabel } : {}),
+      ...(authorLabel ? { authorLabel } : {}),
       ...(row.authoredAt ? { authoredAt: row.authoredAt } : {}),
       ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
     },
   };
+}
+
+/**
+ * Who a citation says wrote the item. The owner's own messages read "You"
+ * whatever name or id the source recorded for the owner's account (#1073):
+ * the answer is written to the owner, and a stored label (a profile name, a
+ * phone id) next to a chat titled with the other person's name let the owner's
+ * words be attributed to someone else.
+ */
+export const OWNER_AUTHOR_LABEL = 'You';
+
+function citationAuthorLabel(row: ConnectorStoreSearchRow): string | undefined {
+  if (row.senderIsOwner === true) return OWNER_AUTHOR_LABEL;
+  return row.authorLabel;
 }
 
 function connectorStoreKeywordLaneAudit(
@@ -14127,7 +15216,7 @@ export function createConnectorStoreContentProvider(
     const text = query?.trim();
     if (!embeddingProvider || !text) return undefined;
     try {
-      storeHasVectors ??= store.hasEmbeddings(embeddingProvider.modelId);
+      storeHasVectors ??= store.vectorLaneServable(embeddingProvider.modelId);
       if (!storeHasVectors) return undefined;
       const [vector] = await embeddingProvider.embed([{ text }], { taskType: 'RETRIEVAL_QUERY' });
       return vector && vector.length === embeddingProvider.dimension ? vector : undefined;
@@ -15082,6 +16171,31 @@ export function chunkText(text: string, maxChunkChars: number): string[] {
   return chunks;
 }
 
+/** A chunk locator from its row and the UTF-16 length of the item's chunks before it (chunkMatchForChunkPk). */
+function chunkMatchFromRows(
+  chunkPk: number,
+  row: { chunk_index: number; content_hash: string; bounded_text: string },
+  itemOffset: number,
+  lane: 'keyword' | 'semantic',
+  queryTerms?: readonly string[],
+): ConnectorStoreChunkMatch {
+  const chunkChars = row.bounded_text.length;
+  const { charStart, charEnd } = queryTerms?.length
+    ? firstTermSpan(row.bounded_text, queryTerms)
+    : { charStart: 0, charEnd: chunkChars };
+  return {
+    chunkId: String(chunkPk),
+    chunkIndex: row.chunk_index,
+    contentHash: row.content_hash,
+    charStart,
+    charEnd,
+    itemCharStart: itemOffset + charStart,
+    itemCharEnd: itemOffset + charEnd,
+    chunkChars,
+    lane,
+  };
+}
+
 /**
  * The tightest honest span a keyword match can claim inside one chunk: the
  * first place a query term literally occurs.
@@ -15556,6 +16670,7 @@ interface NormalizedConnectorStoreSearchFilters {
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
+  senderIdentities?: readonly PeopleSenderIdentity[];
   authoredAfter?: string;
   authoredBefore?: string;
   searchTextExactLines?: readonly string[];
@@ -15581,6 +16696,7 @@ export function normalizeConnectorStoreSearchFilters(
   if (senderId && senderLabel) {
     throw new Error('Connector store search accepts senderId or senderLabel, not both.');
   }
+  const senderIdentities = normalizeSenderIdentities(value.senderIdentities);
   const authoredAfter = normalizeFilterTimestamp(value.authoredAfter, 'authoredAfter');
   const authoredBefore = normalizeFilterTimestamp(value.authoredBefore, 'authoredBefore');
   if (authoredAfter && authoredBefore && Date.parse(authoredAfter) > Date.parse(authoredBefore)) {
@@ -15608,6 +16724,7 @@ export function normalizeConnectorStoreSearchFilters(
     ...(conversationId ? { conversationId } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderLabel ? { senderLabel } : {}),
+    ...(senderIdentities.length > 0 ? { senderIdentities } : {}),
     ...(authoredAfter ? { authoredAfter } : {}),
     ...(authoredBefore ? { authoredBefore } : {}),
     ...(searchTextExactLines.length > 0 ? { searchTextExactLines } : {}),
@@ -15742,9 +16859,30 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.sender_id = ?');
     params.push(normalized.senderId);
   }
+  const senderIdentityMatch = normalized.senderIdentities?.length
+    ? `EXISTS (
+      SELECT 1 FROM json_each(?) person_sender
+      WHERE json_extract(person_sender.value, '$.p') = i.provider
+        AND (json_extract(person_sender.value, '$.s') = i.sender_id
+          OR (i.sender_id IS NULL AND json_extract(person_sender.value, '$.l') = i.sender_label))
+    )`
+    : undefined;
+  const senderIdentityParam = normalized.senderIdentities?.length
+    ? JSON.stringify(normalized.senderIdentities.map((identity) => ({
+      p: identity.provider,
+      ...(identity.senderId ? { s: identity.senderId } : {}),
+      ...(identity.senderLabel ? { l: identity.senderLabel } : {}),
+    })))
+    : undefined;
   if (normalized.senderLabel) {
-    clauses.push("AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
+    clauses.push(senderIdentityMatch
+      ? `AND (LOWER(i.sender_label) LIKE ? ESCAPE '\\' OR ${senderIdentityMatch})`
+      : "AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
     params.push(`%${escapeSqlLike(normalized.senderLabel.toLowerCase())}%`);
+    if (senderIdentityParam) params.push(senderIdentityParam);
+  } else if (senderIdentityMatch && senderIdentityParam) {
+    clauses.push(`AND ${senderIdentityMatch}`);
+    params.push(senderIdentityParam);
   }
   if (normalized.authoredAfter) {
     clauses.push('AND julianday(i.authored_at) >= julianday(?)');
@@ -15941,6 +17079,28 @@ function normalizeFilterTimestamp(value: string | undefined, label: string): str
     throw new Error(`Connector store ${label} filter must be an ISO timestamp with a timezone.`);
   }
   return new Date(normalized).toISOString();
+}
+
+const MAX_PERSON_SENDER_IDENTITIES = 500;
+
+function normalizeSenderIdentities(value: readonly PeopleSenderIdentity[] | undefined): PeopleSenderIdentity[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_PERSON_SENDER_IDENTITIES) {
+    throw new Error(`Connector store sender identities must be an array of at most ${MAX_PERSON_SENDER_IDENTITIES}.`);
+  }
+  // A stored label can carry characters a typed filter may not; such a
+  // sender is left out of the expansion rather than failing the search.
+  const safe = (text: string | undefined): string | undefined => {
+    const trimmed = typeof text === 'string' ? text.trim() : undefined;
+    return trimmed && trimmed.length <= 1_000 && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : undefined;
+  };
+  return value.flatMap((identity) => {
+    const provider = safe(identity?.provider);
+    const senderId = safe(identity?.senderId);
+    const senderLabel = safe(identity?.senderLabel);
+    if (!provider || (!senderId && !senderLabel)) return [];
+    return [{ provider, ...(senderId ? { senderId } : { senderLabel: senderLabel! }) }];
+  });
 }
 
 function escapeSqlLike(value: string): string {
@@ -16457,6 +17617,17 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   }
 }
 
+function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: string): void {
+  assertExactTableColumns(db, 'item_visibility_feed',
+    ['seq', 'provider', 'account_scope', 'conversation_key', 'provider_item_id'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_members',
+    ['generation', 'provider', 'account_scope', 'conversation_key', 'provider_item_id', 'flags', 'item_pks_json'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_state',
+    ['id', 'corpus_id', 'ledger_id', 'generation', 'ledger_cursor', 'store_cursor'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_lease', ['id', 'owner', 'expires_at'], false, versionLabel);
+  for (const trigger of CONNECTOR_STORE_VISIBILITY_TRIGGERS) assertTriggerExists(db, trigger, versionLabel);
+}
+
 function validateConnectorStoreV6Schema(db: Database): void {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, 'v6');
   validateConnectorStoreFtsOwnership(db, 'v6');
@@ -16474,6 +17645,7 @@ function validateConnectorStoreSchema(db: Database): void {
   assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
   assertExactTableColumns(db, 'item_text_versions', ['item_pk', 'source_version', 'recorded_at'], false, 'v14');
   assertTriggerExists(db, 'connector_store_item_text_version_capture', 'v14');
+  validateConnectorStoreVisibilitySchema(db, 'v15');
 }
 
 const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [

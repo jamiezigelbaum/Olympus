@@ -17,6 +17,27 @@ describe('layout rules', () => {
     expect(Array.isArray(found)).toBe(true);
   });
 
+  test('under an open modal dialog only the dialog is looked at: the page behind its backdrop is not "overlapping" it', () => {
+    // happy-dom has no layout: every line of text is drawn in the same box, and the browser's :modal is answered for it.
+    const run = (modal: boolean) => {
+      const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?connect' });
+      const document = window.document;
+      document.body.innerHTML = '<main><b>Readwise</b></main><dialog open><h3>Build a connector with your agent</h3></dialog>';
+      const box = { left: 20, right: 300, top: 240, bottom: 264, width: 280, height: 24 };
+      (window.Element.prototype as unknown as { getBoundingClientRect: () => typeof box }).getBoundingClientRect = () => box;
+      const dialog = document.querySelector('dialog')!;
+      const matches = dialog.matches.bind(dialog);
+      dialog.matches = (selector: string) => selector === ':modal' ? modal : matches(selector);
+      const createRange = () => ({ selectNodeContents() {}, getClientRects: () => [box] });
+      const doc = new Proxy(document, { get: (target, key) => key === 'createRange' ? createRange : Reflect.get(target, key, target) });
+      return (new Function('window', 'document', 'getComputedStyle', 'scrollX', 'scrollY', `return ${layoutRulesScript()};`)(window, doc, window.getComputedStyle.bind(window), 0, 0) as LayoutFinding[])
+        .filter((item) => item.rule === 'overlapping-text');
+    };
+    // An open dialog that is not modal sits in the page: its text over the page's text is a real overlap.
+    expect(run(false).map((item) => item.where)).toEqual(['b "Readwise" at 20,240 / h3 "Build a connector with your agent" at 20,240']);
+    expect(run(true)).toEqual([]);
+  });
+
   test('findings from every frame are kept, anything malformed is dropped', () => {
     const long = 'x'.repeat(400);
     const frames = [
