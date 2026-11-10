@@ -146235,6 +146235,7 @@ function view3(row, state) {
     ...record4?.state === "moving" && record4.targetContentTier ? { moving_to: tierDisplayName(record4.targetContentTier) } : {},
     decided_by: record4?.decidedBy ?? null,
     owner_set: state.ownerSet,
+    ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier && record4.targetContentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
     judge_reason: judgeReason(record4),
     decided_at: record4?.decidedAt ?? null
   };

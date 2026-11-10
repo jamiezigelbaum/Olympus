@@ -262,10 +262,13 @@ describe('one item, Private -> Personal -> Private', () => {
 
     // The owner, on the dashboard: Personal. It applies at the next pass and then serves.
     expect(ownerItems().set({ itemId, choice: 'personal', allowLower: true })).toMatchObject({ ok: true, changed: 'set', applies: 'next_pass' });
+    // Until that pass, a reload still shows what the owner chose.
+    expect(bankItem()).toMatchObject({ tier: 'Private', owner_choice: 'Personal', owner_set: true });
     await install.service.runOnce();
     expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private', decidedBy: 'override' });
     expect(await search(install, 'loan terms')).toContain(LOAN_TEXT);
     expect(bankItem()).toMatchObject({ tier: 'Personal', decided_by: 'override', owner_set: true });
+    expect(bankItem().owner_choice).toBeUndefined();
 
     // A re-judge leaves the owner's word alone, whatever the judge would say now.
     ownerWords = 'Anything about money is private.';
