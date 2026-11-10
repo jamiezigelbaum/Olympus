@@ -327,6 +327,39 @@ export interface TierSnifferWaiting {
   since: string;
 }
 
+/**
+ * Where the sniffer's time went between verdicts (#893), in monotonic
+ * milliseconds. A cycle runs from the end of one tick to the end of the next,
+ * and its parts add up to it:
+ * - idleMs: waiting for the next tick to start (the timer or a wake);
+ * - yieldedMs: that wait, when the tick before stopped to give the model to
+ *   other work, plus slotWaitMs, the calls' own wait for the model slot;
+ * - stepsMs: the tick's work around the pass (settling, recovery, approval,
+ *   re-judge, moves, training validation);
+ * - setupMs and dispatchMs: the pass's own work outside its model calls;
+ * - modelMs: the model calls themselves.
+ * Content-free numbers, a fixed set of them.
+ */
+export interface TierSnifferThroughput {
+  cycles: number;
+  verdicts: number;
+  calls: number;
+  wallMs: number;
+  idleMs: number;
+  yieldedMs: number;
+  slotWaitMs: number;
+  stepsMs: number;
+  setupMs: number;
+  dispatchMs: number;
+  modelMs: number;
+  passSwitches: number;
+  verdictsPerMinute: number;
+}
+
+function emptyThroughput(): TierSnifferThroughput {
+  return { cycles: 0, verdicts: 0, calls: 0, wallMs: 0, idleMs: 0, yieldedMs: 0, slotWaitMs: 0, stepsMs: 0, setupMs: 0, dispatchMs: 0, modelMs: 0, passSwitches: 0, verdictsPerMinute: 0 };
+}
+
 export type TierSnifferTick =
   | { state: 'skipped_running' }
   | { state: 'awaiting_owner_approval'; modelId: string; promptVersion: string }
@@ -345,6 +378,14 @@ export class TierSnifferService {
   private finalizingTraining = false;
   /** When the last tick ended (performance.now()), for the idle time before the next one. */
   private lastTickEndedAt: number | undefined;
+  /** The last tick's pass stopped to give the model to other work: the wait after it is yielding (#893). */
+  private lastTickYielded = false;
+  /** When the last recorded tick's bookkeeping ended: the wait for the next one starts here. */
+  private cycleEndedAt: number | undefined;
+  /** The last tick's work after its pass: lowerings, training validation and bookkeeping. */
+  private lastAfterPassMs = 0;
+  private lastCycle: TierSnifferThroughput | undefined;
+  private readonly cycleTotals = emptyThroughput();
   private readonly moveAbort = new AbortController();
   private moving: Promise<TierAutoMoveReport> | undefined;
   private readonly moveLedgerOffsets = { raise: 0, lower: 0 };
@@ -709,7 +750,7 @@ export class TierSnifferService {
   private embeddingState: TierLedger | undefined;
   private readonly embeddingPrefilters = new Map<string, EmbeddingPrefilter>();
 
-  status(): { lane: string; modelId: string; callsToday: number; embeddingPrefilter: string[]; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
+  status(): { lane: string; modelId: string; callsToday: number; embeddingPrefilter: string[]; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting; throughput?: { last: TierSnifferThroughput; total: TierSnifferThroughput } } {
     return {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
@@ -717,7 +758,39 @@ export class TierSnifferService {
       embeddingPrefilter: [...this.embeddingPrefilters.values()].map(filter => filter.status()),
       ...(this.lastTick ? { lastTick: this.lastTick } : {}),
       ...(this.waiting ? { waiting: { ...this.waiting } } : {}),
+      ...(this.lastCycle ? { throughput: { last: { ...this.lastCycle }, total: { ...this.cycleTotals } } } : {}),
     };
+  }
+
+  /** Adds one finished tick to the breakdown of time between verdicts (#893). */
+  private recordCycle(tick: TierSnifferTick, waitBeforeMs: number, tickMs: number, afterPassMs: number): void {
+    const timing = tick.state === 'ran' ? tick.report.timing : undefined;
+    const cycle = emptyThroughput();
+    cycle.cycles = 1;
+    cycle.verdicts = tick.state === 'ran' ? tick.report.verdictsApplied : 0;
+    cycle.calls = tick.state === 'ran' ? tick.report.calls : 0;
+    if (this.lastTickYielded) cycle.yieldedMs = waitBeforeMs;
+    else cycle.idleMs = waitBeforeMs;
+    cycle.setupMs = timing?.setupMs ?? 0;
+    cycle.dispatchMs = timing?.dispatchMs ?? 0;
+    cycle.slotWaitMs = timing?.slotWaitMs ?? 0;
+    cycle.yieldedMs += cycle.slotWaitMs;
+    cycle.modelMs = timing?.modelMs ?? 0;
+    cycle.passSwitches = timing?.passSwitches ?? 0;
+    // The pass's own parts are counted above; the rest of the tick is its steps.
+    const passParts = cycle.setupMs + cycle.dispatchMs + cycle.slotWaitMs + cycle.modelMs;
+    cycle.stepsMs = Math.max(0, tickMs - passParts);
+    cycle.wallMs = waitBeforeMs + Math.max(tickMs, passParts);
+    cycle.verdictsPerMinute = cycle.wallMs > 0 ? cycle.verdicts * 60_000 / cycle.wallMs : 0;
+    const totals = this.cycleTotals;
+    for (const key of Object.keys(cycle) as (keyof TierSnifferThroughput)[]) {
+      if (key !== 'verdictsPerMinute') totals[key] += cycle[key];
+    }
+    totals.verdictsPerMinute = totals.wallMs > 0 ? totals.verdicts * 60_000 / totals.wallMs : 0;
+    this.lastCycle = cycle;
+    this.lastAfterPassMs = afterPassMs;
+    const stop = tick.state === 'ran' ? tick.report.stoppedBy : undefined;
+    this.lastTickYielded = stop === 'yield' || stop === 'preempted';
   }
 
   async runOnce(): Promise<TierSnifferTick> {
@@ -755,8 +828,12 @@ export class TierSnifferService {
     this.abort = abort;
     let tick: TierSnifferTick;
     const leave = controlPathHeadroom.enter('tier-sniffer');
+    const tickStarted = performance.now();
+    const waitBeforeMs = this.cycleEndedAt === undefined ? 0 : Math.max(0, tickStarted - this.cycleEndedAt);
+    let tickReturnedAt: number | undefined;
     try {
       tick = await this.tick(abort.signal);
+      tickReturnedAt = performance.now();
       // The judge's deadline and tick timing have ended. Lowerings get their
       // own bounded slice before another pass starts, never its call budget.
       const lowerMoves = await this.drainMoves('lower');
@@ -813,6 +890,11 @@ export class TierSnifferService {
       && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls
         || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0
         || tick.report.stoppedBy === 'preempted')) this.wake();
+    // The bookkeeping above (the backlog count) is the tick's too, not the wait after it.
+    const cycleEndedAt = performance.now();
+    this.recordCycle(tick, waitBeforeMs, cycleEndedAt - tickStarted,
+      tickReturnedAt === undefined ? 0 : Math.max(0, cycleEndedAt - tickReturnedAt));
+    this.cycleEndedAt = cycleEndedAt;
     return tick;
   }
 
@@ -1261,7 +1343,9 @@ export class TierSnifferService {
         + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(',')}}; `
         + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; `
         + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; `
-        + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)}`}.`,
+        + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? 'yield' : 'idle'} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; `
+        + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} `
+        + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}.`,
       );
     }
     // A move that just landed may have carried an item whose owner override
