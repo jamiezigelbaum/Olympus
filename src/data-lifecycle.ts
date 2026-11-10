@@ -84,6 +84,8 @@ import {
   type SourceRegistryAccount,
 } from './core/source-registry.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
+import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import {
   olympusDataRoots,
   pairingOwnedRoots,
@@ -97,6 +99,14 @@ import { closeSqliteStore } from './core/sqlite-store.ts';
 import { isMediaCachePath, mediaCacheDir, mediaHolderName, releaseMediaCacheFile } from './core/media-cache.ts';
 import { storeHolderAtPath, type StoreHolder } from './core/store-identity.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
+import { defaultMailSourceScopeStatePath, mailOwnerRulesForExport } from './core/mail-source-scope.ts';
+import {
+  ACCOUNT_BOUND_SOURCE_IDS,
+  readSourceAccountBindings,
+  sourceAccountBindingsPath,
+  type AccountBoundSourceId,
+  type SourceAccountBindings,
+} from './core/source-account-binding.ts';
 
 export interface LifecyclePathContext {
   homeDir?: string;
@@ -148,8 +158,21 @@ export interface DataExportResult {
 
 export interface DataExportArtifact {
   sourceId: string;
-  role: 'legacy_store' | 'connector_store' | 'sanitized_config';
+  role: 'legacy_store' | 'connector_store' | 'tier_sidecar' | 'sanitized_config' | 'owner_rules';
   relativePath: string;
+  /**
+   * Version 3: a connector store's place in its account's store list, and
+   * for a tier sidecar, which one it is. A restore puts each file back where
+   * this install keeps that store, so privacy judgments come back with it (#1065).
+   */
+  storeIndex?: number;
+  sidecar?: 'tier_ledger' | 'tier_sniffer' | 'secret_locations';
+  /**
+   * `owner_rules`: which owner file this is. `mail_always_private` is the mail
+   * picker's "always Private" senders on their own, without the approval
+   * (bound to this computer's grant) that holds them.
+   */
+  ownerFile?: 'tier_rules' | 'ingestion_exclusions' | 'mail_always_private';
   bytes: number;
   sha256: string;
   sqlite?: {
@@ -158,6 +181,23 @@ export interface DataExportArtifact {
     expectedStoreId: string;
     schemaVersion: number;
   };
+}
+
+/**
+ * One account in an export's manifest (version 3, additive): where its files
+ * were, and which provider account its items came from. The provider account
+ * is the opaque id the account guard compares (core/provider-account-identity.ts),
+ * never a credential: a restore writes it back so the owner signing in again
+ * to the same account is recognized, and another account is still caught.
+ */
+export interface DataExportAccountRecord {
+  source_id: string;
+  slot: string;
+  layout: string;
+  /** The source registry's record of the account the history belongs to. */
+  provider_account_hash?: string;
+  /** The account binding (core/source-account-binding.ts): the account the stores were filled from. */
+  account_binding?: { provider_account_id?: string; previous_account_folders?: string[] };
 }
 
 export interface DataExportVerificationResult {
@@ -340,7 +380,8 @@ export function exportOlympusData(options: {
         artifacts,
       });
     }
-    for (const storePath of source.files.stores) {
+    source.files.stores.forEach((storePath, storeIndex) => {
+      const before = artifacts.length;
       exportSqliteStore({
         sqlitePath: storePath,
         destinationRoot: sourceRoot,
@@ -352,7 +393,23 @@ export function exportOlympusData(options: {
         skipped,
         artifacts,
       });
-    }
+      if (artifacts.length > before) artifacts[before]!.storeIndex = storeIndex;
+      // The store's privacy judgments, its sniffer queue and its secret
+      // locations sit beside it. Without them a restore judges every item
+      // again, which on a laptop takes nights (#1065). A ledger can exist
+      // beside a store that was never created (a tier lane shares the secure
+      // store's ledger), so each one is taken whether or not its store is.
+      for (const [sidecar, path, storeId] of [
+        ['tier_ledger', tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
+        ['tier_sniffer', tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
+        ['secret_locations', secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID],
+      ] as const) {
+        if (!existsSync(path)) continue;
+        const at = artifacts.length;
+        exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: 'tier_sidecar', expectedStoreId: storeId, files, skipped, artifacts });
+        if (artifacts.length > at) Object.assign(artifacts[at]!, { storeIndex, sidecar });
+      }
+    });
     for (const policyPath of source.files.settings) {
       const destinationPath = join(sourceRoot, basename(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
@@ -416,17 +473,47 @@ export function exportOlympusData(options: {
       artifacts.push(fileArtifact(destination, destinationPath, 'olympus.config', 'sanitized_config'));
     }
   }
+  // The owner's own privacy rules and exclusions: what a restore must bring
+  // back for the new install to keep the owner's decisions (#1065).
+  if (options.sourceId === undefined) {
+    const env = envForContext(options);
+    for (const [ownerFile, sourcePath, name] of [
+      ['tier_rules', resolveTierRulesPath({ env }), 'tier-rules.json'],
+      ['ingestion_exclusions', resolveSourceIngestionExclusionsPath(env), 'ingestion-exclusions.json'],
+    ] as const) {
+      const destinationPath = join(configRoot, name);
+      if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
+        artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile });
+      }
+    }
+    // The mail picker's "always Private" senders are owner rules too (they feed
+    // the classifier as the owner's force-Private rules), kept in the mail
+    // scope approval. The approval is bound to this computer's Gmail grant, so
+    // only the owner's list travels, exactly as they set it.
+    const mailRules = mailOwnerRulesForExport(defaultMailSourceScopeStatePath(handleRegistryPathFor(options)));
+    if (mailRules) {
+      const destinationPath = join(configRoot, 'mail-always-private.json');
+      writePrivateFileAtomicSync(destinationPath, JSON.stringify(mailRules, null, 2));
+      files.push(destinationPath);
+      artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile: 'mail_always_private' });
+    }
+  }
+  // Which account each source's items came from, read once. A bindings file
+  // that cannot be read names none: the restore then asks again at sign-in,
+  // as an install without bindings always has.
+  const bindingsRead = readSourceAccountBindings(sourceAccountBindingsPath(handleRegistryPathFor(options)));
+  const bindings = bindingsRead.kind === 'ok' ? bindingsRead.bindings : undefined;
   // The manifest is the export's commit record, so it is published LAST and
   // atomically. A manifest that reaches the disk before the data it describes
   // is what turns "export, then delete" into silent loss: the owner reads a
   // success they do not have.
   writePrivateFileAtomicSync(join(destination, 'manifest.json'), JSON.stringify({
     kind: 'olympus_data_export',
-    version: 2,
+    version: 3,
     exported_at: new Date().toISOString(),
     source_ids: selected.map((source) => source.sourceId),
     // Where each account's files were (additive: a verifier of this version ignores it).
-    accounts: selected.map((source) => ({ source_id: source.sourceId, slot: source.slot, layout: source.files.account.layout })),
+    accounts: selected.map((source) => exportAccountRecord(source, bindings)),
     secrets_excluded: true,
     files,
     skipped,
@@ -445,7 +532,7 @@ export function verifyOlympusDataExport(options: { destination: string }): DataE
     version?: unknown;
     artifacts?: unknown;
   };
-  if (parsed.kind !== 'olympus_data_export' || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
+  if (parsed.kind !== 'olympus_data_export' || (parsed.version !== 2 && parsed.version !== 3) || !Array.isArray(parsed.artifacts)) {
     throw new OperationError('source_index_error', 'Olympus data export manifest is unsupported or incomplete.');
   }
   const verified: Array<{ relativePath: string; bytes: number; sha256: string }> = [];
@@ -896,6 +983,32 @@ function forgetSharedRows(
     tierLedgerIds: ledgers.ids,
     unreadableTierLedgers: ledgers.unreadable,
   }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
+}
+
+/** The account's manifest record: where its files were and which provider account they came from. Never a credential. */
+function exportAccountRecord(source: LifecycleAccount, bindings: SourceAccountBindings | undefined): DataExportAccountRecord {
+  const hash = source.entry?.state === 'active' ? source.entry.provider_account_hash : undefined;
+  const bound = (ACCOUNT_BOUND_SOURCE_IDS as readonly string[]).includes(source.sourceId)
+    ? bindings?.sources[source.sourceId as AccountBoundSourceId]
+    : undefined;
+  const binding = bound
+    ? {
+        ...(bound.provider_account_id ? { provider_account_id: bound.provider_account_id } : {}),
+        ...(bound.previous_account_folders?.length ? { previous_account_folders: [...bound.previous_account_folders] } : {}),
+      }
+    : undefined;
+  return {
+    source_id: source.sourceId,
+    slot: source.slot,
+    layout: source.files.account.layout,
+    ...(hash ? { provider_account_hash: hash } : {}),
+    ...(binding && Object.keys(binding).length > 0 ? { account_binding: binding } : {}),
+  };
+}
+
+/** The connected-handle registry this context works from; the account bindings sit beside it. */
+export function lifecycleHandleRegistryPath(context: LifecyclePathContext = {}): string {
+  return handleRegistryPathFor(context);
 }
 
 function handleRegistryPathFor(context: LifecyclePathContext): string {
@@ -1618,7 +1731,7 @@ function exportSqliteStore(options: {
   destinationRoot: string;
   exportRoot: string;
   sourceId: string;
-  role: 'legacy_store' | 'connector_store';
+  role: 'legacy_store' | 'connector_store' | 'tier_sidecar';
   expectedStoreId: string;
   files: string[];
   skipped: string[];
@@ -1839,7 +1952,7 @@ export function exportDurabilityBoundary(destination: string): string {
  * reached the disk is still gone after a power loss, so the export's
  * directories are made durable before anything is written into them.
  */
-function makeDurableDirectory(path: string, boundary: string): void {
+export function makeDurableDirectory(path: string, boundary: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   let current = resolve(path);
   for (;;) {
@@ -2276,6 +2389,27 @@ function envForHome(homeDir: string | undefined): Record<string, string | undefi
     XDG_DATA_HOME: join(homeDir, '.local', 'share'),
     XDG_STATE_HOME: join(homeDir, '.local', 'state'),
   };
+}
+
+/** The environment the lifecycle resolves paths in for this context. */
+/**
+ * A source's store paths in each layout an install can keep them in (legacy
+ * and folder), index-aligned with `lifecycleAccountFiles(...).stores`: a
+ * version 2 backup names stores only by file name, from either layout.
+ */
+export function lifecycleStoreLayouts(sourceId: string, context: LifecyclePathContext = {}): string[][] {
+  const env = envForContext(context);
+  return (['legacy', 'folder'] as const).map((layout) => {
+    try {
+      return accountFiles({ source_id: sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout }, { env, ...(context.homeDir ? { homeDir: context.homeDir } : {}) }).stores;
+    } catch {
+      return [];
+    }
+  });
+}
+
+export function lifecycleEnv(context: LifecyclePathContext | undefined): Record<string, string | undefined> {
+  return envForContext(context);
 }
 
 function envForContext(context: LifecyclePathContext | undefined): Record<string, string | undefined> {
