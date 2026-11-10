@@ -44,14 +44,45 @@ func TestHistorySyncSpoolsOnlyAllowedChats(t *testing.T) {
 	record := func(evt *events.Message) (spoolRecord, bool) {
 		return spoolRecord{ID: string(evt.Info.ID), ChatJID: evt.Info.Chat.String(), Text: evt.Message.GetConversation()}, true
 	}
-	n := captureHistorySync(data, map[string]struct{}{allowedChat: {}}, parse, record, func(rec spoolRecord) { spooled = append(spooled, rec) })
+	n := captureHistorySync(data, map[string]struct{}{allowedChat: {}}, nil, parse, record, func(rec spoolRecord) { spooled = append(spooled, rec) })
 	if n != 2 || len(spooled) != 2 || spooled[0].ID != "a1" || spooled[1].ChatJID != allowedChat {
 		t.Fatalf("history spooled %d: %+v", n, spooled)
 	}
 	// All chats allowed: the group comes in too; a conversation with no id never does.
 	spooled = nil
-	if n := captureHistorySync(data, map[string]struct{}{"*": {}}, parse, record, func(rec spoolRecord) { spooled = append(spooled, rec) }); n != 3 {
+	if n := captureHistorySync(data, map[string]struct{}{"*": {}}, nil, parse, record, func(rec spoolRecord) { spooled = append(spooled, rec) }); n != 3 {
 		t.Fatalf("all-chats history spooled %d, want 3", n)
+	}
+}
+
+// A kind grant that covers groups but not communities (or the other way
+// round) needs the community lookup to decide a group; history must use it
+// just as live capture does, or approved group history is dropped.
+func TestHistorySyncDecidesGroupsByKindWithTheCommunityLookup(t *testing.T) {
+	plainGroup := "120363000000000009@g.us"
+	communityGroup := "120363000000000010@g.us"
+	data := &waHistorySync.HistorySync{Conversations: []*waHistorySync.Conversation{
+		historyConversation(plainGroup, "g1", "g2"),
+		historyConversation(communityGroup, "c1"),
+	}}
+	parse := func(chat types.JID, msg *waHistorySync.HistorySyncMsg) (*events.Message, bool) {
+		evt := &events.Message{Message: msg.GetMessage().GetMessage()}
+		evt.Info.Chat = chat
+		evt.Info.ID = types.MessageID(msg.GetMessage().GetKey().GetID())
+		return evt, true
+	}
+	record := func(evt *events.Message) (spoolRecord, bool) {
+		return spoolRecord{ID: string(evt.Info.ID), ChatJID: evt.Info.Chat.String()}, true
+	}
+	isCommunity := func(chat types.JID) (bool, error) { return chat.String() == communityGroup, nil }
+	var spooled []spoolRecord
+	spool := func(rec spoolRecord) { spooled = append(spooled, rec) }
+	if n := captureHistorySync(data, map[string]struct{}{"kind:dm": {}, "kind:group": {}}, isCommunity, parse, record, spool); n != 2 || spooled[0].ChatJID != plainGroup {
+		t.Fatalf("groups-only history spooled %d: %+v", n, spooled)
+	}
+	spooled = nil
+	if n := captureHistorySync(data, map[string]struct{}{"kind:community": {}}, isCommunity, parse, record, spool); n != 1 || spooled[0].ChatJID != communityGroup {
+		t.Fatalf("communities-only history spooled %d: %+v", n, spooled)
 	}
 }
 

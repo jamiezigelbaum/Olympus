@@ -51,12 +51,12 @@ func clientHistoryParser(client *whatsmeow.Client) historyMessageParser {
 
 // captureHistorySync spools every message of an allowed chat in one history
 // blob and returns how many were spooled. Out-of-scope chats are skipped
-// before any parsing, the same rule live messages follow.
-func captureHistorySync(data *waHistorySync.HistorySync, allowed map[string]struct{}, parse historyMessageParser, record func(*events.Message) (spoolRecord, bool), spool func(spoolRecord)) int {
+// before any parsing, by the same rule and community lookup live messages use.
+func captureHistorySync(data *waHistorySync.HistorySync, allowed map[string]struct{}, isCommunity communityLookup, parse historyMessageParser, record func(*events.Message) (spoolRecord, bool), spool func(spoolRecord)) int {
 	spooled := 0
 	for _, conversation := range data.GetConversations() {
 		chat, err := types.ParseJID(conversation.GetID())
-		if err != nil || chat.IsEmpty() || !chatCaptureAllowed(chat.String(), allowed) {
+		if err != nil || chat.IsEmpty() || !captureAllowed(chat, allowed, isCommunity) {
 			continue
 		}
 		for _, msg := range conversation.GetMessages() {
@@ -74,7 +74,7 @@ func captureHistorySync(data *waHistorySync.HistorySync, allowed map[string]stru
 }
 
 func spoolHistorySync(ctx context.Context, client *whatsmeow.Client, audioStore *audioMediaStore, writer *spoolWriter, allowed map[string]struct{}, data *waHistorySync.HistorySync) {
-	n := captureHistorySync(data, allowed, clientHistoryParser(client),
+	n := captureHistorySync(data, allowed, communityLookupFor(ctx, client), clientHistoryParser(client),
 		func(evt *events.Message) (spoolRecord, bool) { return recordFromMessage(ctx, client, audioStore, evt) },
 		writer.enqueueWait)
 	log.Printf("olympus-whatsapp-bridge: history sync (%s, chunk %d): %d messages from allowed chats", data.GetSyncType(), data.GetChunkOrder(), n)
