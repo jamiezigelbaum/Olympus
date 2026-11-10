@@ -2723,6 +2723,8 @@ export function chatgptDashboardClient(
   function transcriptionNeedsHand(models: DashboardModels): boolean {
     const entry = models.transcription;
     if (!entry || typeof entry !== 'object') return false;
+    // Not needed yet: it downloads when audio arrives, so its Download now is optional (Settings), not a Needs you line.
+    if (entry.state === 'not_needed') return false;
     return !!entry.download || entry.state === 'failed' || entry.state === 'load_failed' || entry.state === 'interrupted';
   }
 

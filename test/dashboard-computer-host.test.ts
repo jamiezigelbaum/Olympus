@@ -609,6 +609,19 @@ describe('the panel on the computer', () => {
     expect(doc.querySelector('[data-home-status]')!.textContent).toContain('2 things need you');
   });
 
+  test('a transcription model not needed yet is not Needs you: its optional Download now stays in Settings, and Home stays up to date (#1163 review)', async () => {
+    const calm = model({
+      sources: [TELEGRAM],
+      models: { embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'not_needed', download: { label: 'Download now', tool: 'olympus_model_download', args: { model: 'transcription' } } } },
+    } as unknown as Partial<DashboardViewModelV1>);
+    delete calm.progress;
+    const page = await onHost(COMPUTER, calm);
+    const doc = page.win.document;
+    expect(Array.from(doc.querySelectorAll('.row.need')).map((node) => node.textContent).filter((line) => line!.startsWith('Transcription'))).toEqual([]);
+    expect(page.buttons().some((node) => node.textContent === 'Download now')).toBe(false);
+    expect(doc.querySelector('[data-home-status]')!.getAttribute('data-home-status')).toBe('ok');
+  });
+
   test('a cost-guard wait is In progress with its reason and resume time in local time and UTC, and no Sync now (#1044)', async () => {
     const X = { id: 'x.bookmarks', label: 'X bookmarks', group: 'cloud', status: 'Working', lastSyncAt: ago(12 * 60 * MIN),
       primary: { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'x.bookmarks' } } } as DashboardViewModelV1['sources'][number];
