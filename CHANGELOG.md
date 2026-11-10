@@ -3,6 +3,7 @@
 ## 1.4.4 - 2026-11-10
 
 - **On a Mac, only the account that runs Olympus gets the owner controls.** Another standard account on the same Mac could open the dashboard as the owner. Olympus now checks that a local dashboard session comes from the account that runs it, and refuses any other (#1153, #1179).
+- **A forwarded owner socket no longer unlocks the dashboard on its own.** On Linux, `olympus remote open` forwards the owner socket to another computer; unlocking the local owner controls now also needs the owner's signed dashboard session, as on the Mac. Each normal way of opening the dashboard already carries one (#1188, #1196).
 
 ## 1.4.3 - 2026-11-10
 
