@@ -26,6 +26,7 @@ import { createArchivePathResolver } from '../src/workers/local-files/scope-brow
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { SourceScheduler, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -154,14 +155,6 @@ function engine(f: Fixture, clock: Clock) {
 
 type Engine = ReturnType<typeof engine>;
 
-async function until(done: () => boolean): Promise<void> {
-  for (let tries = 0; tries < 500; tries += 1) {
-    if (done()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('timed out');
-}
-
 /** Runs the scheduler's due tasks until the archive's import is over, one tick apart. */
 async function importThrough(e: Engine, f: Fixture, archiveId: string, clock: Clock): Promise<void> {
   for (let pass = 0; pass < 20; pass += 1) {
@@ -184,7 +177,7 @@ async function removedWithinOneTick(f: Fixture, archiveId: string, e: Engine, cl
   const askedAt = clock.now;
   clock.now += 1_000;
   e.fireTimers();
-  await until(() => f.runtime.state.get(archiveId) === undefined);
+  await waitFor(() => f.runtime.state.get(archiveId) === undefined, { description: 'the removal pass deleted the archive record' });
   expect(clock.now - askedAt).toBeLessThanOrEqual(TICK_MS);
 }
 
@@ -295,7 +288,7 @@ describe('removing an archive starts within one scheduler tick', () => {
     expect(e.dashboard.remove(done)).toEqual({ ok: true });
     await removedWithinOneTick(f, done, e, clock);
     // The two share one concurrency key, so they ran one after the other.
-    await until(() => f.runtime.state.get(importing)?.status === 'imported');
+    await waitFor(() => f.runtime.state.get(importing)?.status === 'imported', { description: 'the other archive finished importing' });
   });
 });
 

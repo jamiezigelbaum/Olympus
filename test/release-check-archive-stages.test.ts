@@ -19,7 +19,7 @@ import {
 import { archivesOpenTarget, createArchiveImportAgent } from '../src/workers/archive-import/agent.ts';
 import { FIXTURE_FOLDER, legFixture, writeFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
+  ARCHIVE_BOUNDS, changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
   type StoreView,
 } from '../scripts/release-check/archive-leg.ts';
 import {
@@ -31,6 +31,12 @@ import { PanelDriver, closeWindows, dashboardAnswer, entryFor, mountPanel, settl
 
 // Each stage walks several journeys in real time (the runner looks again every 0.4 s), so a test takes seconds on a loaded runner.
 setDefaultTimeout(60_000);
+/**
+ * The bound for a step this test expects to pass. A journey step polls until its outcome holds, so a passing step ends as soon as the
+ * panel shows it and this is only a ceiling for a hang. The panel redraws on real timers, so a tight bound here was a budget that a
+ * loaded runner overran: a Remove the page did finish in time failed at 5 s (#1053). Steps a test expects to fail keep short bounds.
+ */
+const PASS_S = 30;
 
 const cleanups: Array<() => void> = [];
 afterEach(async () => {
@@ -56,6 +62,8 @@ interface World {
   panelUnreadable: boolean;
   /** The page shows the archive gone but the engine still lists it. */
   engineKeepsRemoved: boolean;
+  /** This many of the next navigations throw, as a page that times out loading does. */
+  goFails?: number;
 }
 
 /** A stand-in machine: the product's state, the agent's CLI over it, the stores, the engine restart, the private model. */
@@ -150,6 +158,10 @@ class FakeMachine implements ArchiveHost {
       override async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
         if (world.panelUnreadable) throw new Error('the page is not there');
         return super.probe(frame, call);
+      }
+      override async go(path?: string): Promise<void> {
+        if (world.goFails && path === '/dashboard') { world.goFails -= 1; throw new Error('navigation timed out'); }
+        return super.go(path);
       }
     }
     const driver = new Driver(async (path) => (await mountPanel(this.serve(), path)).win);
@@ -314,7 +326,7 @@ describe('importing an archive', () => {
   test('the agent path: a request, the owner\'s press, the row settles, the held messages drain, a search is cited', async () => {
     const { machine: fake, fx } = machine('agent');
     const agent = fx.agent!;
-    const observation = await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: 5, startS: 5 });
+    const observation = await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: PASS_S, startS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(observation.start).toMatchObject({ code: 'needs_approval', hasOpenTarget: true, carriesContent: false });
     expect(observation.waiting!.requestStates).toEqual(['waiting_for_approval']);
@@ -332,7 +344,7 @@ describe('importing an archive', () => {
   test('the Telegram archive by the agent path: the same request, press, settle and drain, and the search is cited "Telegram"', async () => {
     const { machine: fake, fx } = machine('agent:telegram_json');
     const chat = fx['agent-telegram_json']!;
-    const observation = await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: 5, startS: 5 });
+    const observation = await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: PASS_S, startS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(observation.start).toMatchObject({ code: 'needs_approval', hasOpenTarget: true, carriesContent: false });
     expect(observation.settled).toBe(true);
@@ -354,7 +366,7 @@ describe('importing an archive', () => {
     ] as const) {
       const { machine: fake, fx } = machine(`agent:${format}`);
       const notes = fx[`agent-${format}`]!;
-      const observation = await importStage(fake, { role: 'agent', format, via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: 5, startS: 5 });
+      const observation = await importStage(fake, { role: 'agent', format, via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: PASS_S, startS: PASS_S });
       expect(observation.ok).toBe(true);
       expect(observation.start).toMatchObject({ code: 'needs_approval', hasOpenTarget: true, carriesContent: false });
       expect(observation.settled).toBe(true);
@@ -375,7 +387,7 @@ describe('importing an archive', () => {
     const leftover = legFixture('agent', 'an-earlier-seed');
     fake.know(leftover);
     fake.archives = [entryFor(leftover)];
-    const observation = await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: 5, startS: 5 });
+    const observation = await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: PASS_S, startS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(fake.archives.map((entry) => entry.name)).toEqual([fx.picker!.fileName]);
     expect(fake.lines.some((line) => line.includes('removing leftover archive'))).toBe(true);
@@ -420,7 +432,7 @@ describe('importing with the private model off', () => {
     const { machine: fake, fx } = machine('held');
     const held = fx.held!;
     expect((await modelStage(fake, 'off')).ok).toBe(true);
-    const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: 5, startS: 5 });
+    const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: PASS_S, startS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(observation.egress).toMatchObject({ samples: 40, fresh: [], pageRequests: 0, pageOutside: [] });
     expect(observation.stores.find((store) => store.tier === 'private')!.tokenRows).toBeGreaterThan(0);
@@ -438,7 +450,7 @@ describe('importing with the private model off', () => {
     const { machine: fake, fx } = machine('held');
     await modelStage(fake, 'off');
     fake.world.egressFresh = ['203.0.113.7:443'];
-    const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: 5, startS: 5 });
+    const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: PASS_S, startS: PASS_S });
     expect(failing(heldOffChecks(observation, fx.held!))).toEqual(['archive.held.mbox.stays-here']);
   });
 
@@ -447,14 +459,64 @@ describe('importing with the private model off', () => {
     await modelStage(fake, 'off');
     const stores = fake.readStores.bind(fake);
     fake.readStores = (spec, archiveId, token) => stores(spec, archiveId, token).map((store) => (store.tier === 'personal' ? { ...store, tokenRows: 1 } : store));
-    const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: 5, startS: 5 });
+    const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: PASS_S, startS: PASS_S });
     expect(failing(heldOffChecks(observation, fx.held!))).toEqual(['archive.held.mbox.stores']);
+  });
+
+  /** An archive held while the model was off, with the model back on: what a drain stage then reads. */
+  async function heldThenOn() {
+    const { machine: fake, fx } = machine('held');
+    await modelStage(fake, 'off');
+    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: 5, startS: 5 });
+    await modelStage(fake, 'on');
+    return { fake, held: fx.held! };
+  }
+
+  test('a navigation that throws after the drain is tried once more, and the row read then passes the check', async () => {
+    const { fake, held } = await heldThenOn();
+    fake.world.goFails = 1;
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux', rowS: 60 });
+    expect(drained.drain?.row).toBeDefined();
+    expect(drained.drain?.rowProblem).toContain('navigation 1 to the dashboard threw: navigation timed out');
+    expect(failing(drainChecks('d', drained.drain, held, 'linux', 'restored'))).toEqual([]);
+  });
+
+  test('a navigation that throws both times fails the check and says the navigation failed', async () => {
+    const { fake, held } = await heldThenOn();
+    fake.world.goFails = 2;
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux', rowS: 60 });
+    expect(drained.drain).toMatchObject({ drained: true });
+    const checks = drainChecks('d', drained.drain, held, 'linux', 'restored');
+    expect(failing(checks)).toEqual(['d']);
+    expect(checks[0]!.detail).toContain('navigation 1 to the dashboard threw');
+    expect(checks[0]!.detail).toContain('navigation 2 to the dashboard threw');
+  });
+
+  test('a row still missing at the settle bound is read again after a second navigation before the check fails, and says the row was missing', async () => {
+    const { fake, held } = await heldThenOn();
+    fake.world.panelUnreadable = true;
+    const before = fake.now();
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux', rowS: 60 });
+    const checks = drainChecks('d', drained.drain, held, 'linux', 'restored');
+    expect(failing(checks)).toEqual(['d']);
+    expect(checks[0]!.detail).toContain('after navigation 1 the row was still missing at 60 s');
+    expect(checks[0]!.detail).toContain('after navigation 2 the row was still missing at 30 s');
+    expect(checks[0]!.detail).not.toContain('threw');
+    // The read waited the settle bound and the retry's floor, not the old 30 s alone.
+    expect(fake.now() - before).toBeGreaterThanOrEqual(90_000);
+  });
+
+  test('the post-drain row read defaults to the import\'s own settle bound', async () => {
+    const { fake } = await heldThenOn();
+    fake.world.panelUnreadable = true;
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux' });
+    expect(drained.drain?.rowProblem).toContain(`after navigation 1 the row was still missing at ${ARCHIVE_BOUNDS.settleS} s`);
   });
 
   test('a drain that never finishes within its bound fails with the count still waiting', async () => {
     const { machine: fake, fx } = machine('held');
     await modelStage(fake, 'off');
-    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: PASS_S, startS: PASS_S });
     // The model comes back on, but the engine never judges anything.
     fake.privateModel = 'off';
     const stuck = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'macos', boundS: 60 });
@@ -468,9 +530,9 @@ describe('importing with the private model off', () => {
 describe('Remove', () => {
   async function importedThree() {
     const { machine: fake, fx } = machine('agent', 'picker', 'held');
-    await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: 5, startS: 5 });
-    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, settleS: 5, startS: 5 });
-    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: PASS_S, startS: PASS_S });
+    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, settleS: PASS_S, startS: PASS_S });
+    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, settleS: PASS_S, startS: PASS_S });
     return { fake, fx };
   }
   const targets = (fx: Record<string, LegFixture>) => ['agent', 'picker', 'held'].map((role) => ({ role: fx[role]!.role, format: 'mbox', fileName: fx[role]!.fileName, token: fx[role]!.token }));
@@ -478,7 +540,7 @@ describe('Remove', () => {
   test('each archive is removed from its row and only that one: counts reach zero, the others keep their content', async () => {
     const { fake, fx } = await importedThree();
     expect(fake.archives).toHaveLength(3);
-    const observation = await removeStage(fake, { targets: targets(fx), removeS: 5 });
+    const observation = await removeStage(fake, { targets: targets(fx), removeS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(fake.archives).toEqual([]);
     expect(observation.removals.map((removal) => removal.role)).toEqual(['agent', 'picker', 'held']);
@@ -491,16 +553,16 @@ describe('Remove', () => {
 
   test('with a Telegram archive among the mail ones, each is removed alone, the others are read in their own format\'s stores, and the checks pass for all', async () => {
     const { machine: fake, fx } = machine('agent', 'agent:telegram_json', 'picker', 'held');
-    await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: 5, startS: 5 });
-    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, settleS: 5, startS: 5 });
-    await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, settleS: 5, startS: 5 });
-    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: PASS_S, startS: PASS_S });
+    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, settleS: PASS_S, startS: PASS_S });
+    await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, settleS: PASS_S, startS: PASS_S });
+    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, settleS: PASS_S, startS: PASS_S });
     expect(fake.archives).toHaveLength(4);
     const chat = fx['agent-telegram_json']!;
     const all = [fx.agent!, chat, fx.picker!, fx.held!];
     const targets = all.map((one) => ({ role: one.role, format: one.format, fileName: one.fileName, token: one.token }));
     fake.storeReads.length = 0;
-    const observation = await removeStage(fake, { targets, removeS: 5 });
+    const observation = await removeStage(fake, { targets, removeS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(fake.archives).toEqual([]);
     expect(observation.removals.map((removal) => `${removal.role}:${removal.format}`)).toEqual(['agent:mbox', 'agent:telegram_json', 'picker:mbox', 'held:mbox']);
@@ -520,19 +582,19 @@ describe('Remove', () => {
 
   test('a Telegram removal that leaves its content behind fails that archive\'s removed check and none of the mail ones', async () => {
     const { machine: fake, fx } = machine('agent', 'agent:telegram_json');
-    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: 5, startS: 5 });
-    await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: PASS_S, startS: PASS_S });
+    await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, settleS: PASS_S, startS: PASS_S });
     const chat = fx['agent-telegram_json']!;
     const targets = [fx.agent!, chat].map((one) => ({ role: one.role, format: one.format, fileName: one.fileName, token: one.token }));
     fake.world.removalLeavesContent = true;
-    const observation = await removeStage(fake, { targets: targets.slice(1), removeS: 5 });
+    const observation = await removeStage(fake, { targets: targets.slice(1), removeS: PASS_S });
     expect(failing(removeChecks(observation, [chat]))).toEqual(['archive.agent.telegram_json.removed']);
   });
 
   test('a removal that leaves content behind fails the removed check for that archive', async () => {
     const { fake, fx } = await importedThree();
     fake.world.removalLeavesContent = true;
-    const observation = await removeStage(fake, { targets: targets(fx).slice(0, 1), removeS: 5 });
+    const observation = await removeStage(fake, { targets: targets(fx).slice(0, 1), removeS: PASS_S });
     expect(failing(removeChecks(observation, [fx.agent!]))).toEqual(['archive.agent.mbox.removed']);
   });
 
@@ -563,7 +625,7 @@ describe('Remove', () => {
   test('cleaning up when the engine still lists an archive the page lost is not ok, though every Remove journey passed', async () => {
     const { fake, fx } = await importedThree();
     fake.world.engineKeepsRemoved = true;
-    const cleaned = await removeAllStage(fake, { removeS: 5, verifyS: 6 });
+    const cleaned = await removeAllStage(fake, { removeS: PASS_S, verifyS: 6 });
     expect(cleaned.ok).toBe(false);
     expect(cleaned.failed).toEqual([]);
     expect(cleaned.removed).toHaveLength(3);
@@ -601,7 +663,7 @@ describe('a file changed while it is imported', () => {
     const { machine: fake } = machine();
     fake.know(legFixture('bulk', SEED, 'mbox', 8_000), legFixture('bulk', SEED, 'mbox', 40_000));
     fake.world.finishesFirstUpTo = 8_000;
-    const observation = await changedStage(fake, { seed: SEED, sizes: [8_000, 40_000], startS: 5, stopS: 5, removeS: 5 });
+    const observation = await changedStage(fake, { seed: SEED, sizes: [8_000, 40_000], startS: PASS_S, stopS: PASS_S, removeS: PASS_S });
     expect(observation.ok).toBe(true);
     expect(observation.attempts.map((attempt) => `${attempt.messages} ${attempt.outcome}`)).toEqual(['8000 finished-first', '40000 changed']);
     expect(observation.row).toMatchObject({ status: 'stopped' });
@@ -617,7 +679,7 @@ describe('a file changed while it is imported', () => {
     const { machine: fake } = machine();
     fake.know(legFixture('bulk', SEED, 'mbox', 8_000), legFixture('bulk', SEED, 'mbox', 40_000));
     fake.world.finishesFirstUpTo = 1_000_000;
-    const observation = await changedStage(fake, { seed: SEED, sizes: [8_000, 40_000], startS: 5, stopS: 5, removeS: 5 });
+    const observation = await changedStage(fake, { seed: SEED, sizes: [8_000, 40_000], startS: PASS_S, stopS: PASS_S, removeS: PASS_S });
     expect(observation.attempts.map((attempt) => attempt.outcome)).toEqual(['finished-first', 'finished-first']);
     const checks = changedChecks(observation);
     expect(failing(checks)).toContain('archive.changed.stops');
