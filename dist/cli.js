@@ -43415,7 +43415,11 @@ function loadNative() {
         const out = [];
         for (;; ) {
           clearErrno();
-          const entry = s[`readdir${suffix}`](dir);
+          let entry = s[`readdir${suffix}`](dir);
+          if (!entry && errno() !== 0) {
+            clearErrno();
+            entry = s[`readdir${suffix}`](dir);
+          }
           if (!entry) {
             const failure = errno();
             if (failure !== 0)
