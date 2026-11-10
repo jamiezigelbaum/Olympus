@@ -39,6 +39,11 @@ export function parseInstallerVersion(script: string): string | undefined {
   return version && semver(version) ? version : undefined;
 }
 
+/** True for a release version newerVersion can compare. */
+export function isReleaseVersion(version: string): boolean {
+  return semver(version) !== undefined;
+}
+
 export function newerVersion(remote: string, running: string): boolean {
   const next = semver(remote);
   const current = semver(running);
