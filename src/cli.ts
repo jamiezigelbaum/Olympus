@@ -393,6 +393,29 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'setup' && args[1] === 'status') {
+    // The setup checklist (#1077): JSON for an agent, --text for a person.
+    try {
+      const { parseSetupStatusArgs, readSetupStatus } = await import('./core/setup-status.ts');
+      const { text } = parseSetupStatusArgs(args.slice(2));
+      const checklist = await readSetupStatus();
+      if (text) {
+        const { renderSetupChecklistText } = await import('./core/setup-checklist.ts');
+        console.log(renderSetupChecklistText(checklist));
+      } else {
+        console.log(JSON.stringify(checklist, null, 2));
+      }
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
   if (args[0] === 'setup') {
     if (args.length === 2 && args[1] === '--privacy-options') {
       const { state } = resolveInstallationPrivacyState();
@@ -1493,6 +1516,7 @@ function printHelp(): void {
   console.log('  olympus source index search <query> --corpus-id <corpus>');
   console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join('|')} --yes [--cloud-lane subscription|api-key]`);
+  console.log('  olympus setup status [--text]');
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path ~/.olympus/sovereignty.json]`);
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
