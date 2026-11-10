@@ -13265,7 +13265,7 @@ function isTerminalServiceAccountAssertionError(error) {
   return isPermanentOAuthClientError(error.providerError);
 }
 function isPermanentOAuthClientError(providerError) {
-  return providerError === "invalid_client" || providerError === "unauthorized_client" || providerError === "access_denied";
+  return providerError === "invalid_client" || providerError === "deleted_client" || providerError === "unauthorized_client" || providerError === "access_denied";
 }
 function serviceAccountDelegationError(handle, capability) {
   return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
@@ -17852,7 +17852,7 @@ var init_fts = __esm(() => {
 });
 
 // src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
   PROSE_WORDS = new Set([
     "above",
@@ -18044,6 +18044,7 @@ var init_secret_patterns = __esm(() => {
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
   LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
   LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
 });
 
@@ -18134,10 +18135,13 @@ var init_sniffer_store = __esm(() => {
 });
 
 // src/workers/classification/tier-ledger.ts
+var REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
   init_tier_ledger_path();
+  REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
+  REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
 });
 
 // src/workers/file-extraction/job-names.ts
@@ -18462,7 +18466,7 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, INSTRUCTION_VERBS, OBJECT_GLUE, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -18484,8 +18488,19 @@ var init_sniffer = __esm(() => {
     "other"
   ];
   SNIFFER_PRIVATE_KINDS = ["none", "health", "therapy", "financial", "legal", "identity", "intimate", "family", "other"];
+  ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+  TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+  TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
+  INJECTION_RULES = [
+    ["role_boundary", ROLE_TAG],
+    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+    ["forged_verdict", new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+    ["cross_item_steering", new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)]
+  ];
   INSTRUCTION_VERBS = new Set(["reply", "answer", "respond", "output", "return", "mark", "set", "label", "classify", "treat", "tag", "rate", "assign", "choose", "use", "emit", "produce", "make"]);
   OBJECT_GLUE = new Set(["only", "with", "as", "to", "be", "is", "the", "a", "an", "this", "that", "it", "these", "them", "every", "each", "all", "item", "items", "file", "files", "document", "documents", "message", "messages", "entry", "entries", "list", "batch", "not"]);
+  ASSIGN_VERBS = new Set(["set", "assign"]);
+  SETTING_VERBS = new Set(["set", "make", "use", "choose"]);
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy classifier. Judge the ONE item independently.",
     "PERSONAL means the owner permits their trusted cloud assistant to read it.",
@@ -19136,7 +19151,7 @@ import { closeSync as closeSync8, constants as constants7, existsSync as existsS
 import { homedir as homedir16 } from "node:os";
 import { delimiter as delimiter6, dirname as dirname30, isAbsolute as isAbsolute21, join as join37 } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath as fileURLToPath6 } from "node:url";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
 function helperEnvironment() {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -19308,7 +19323,7 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname30(fileURLToPath6(import.meta.url));
+  const here = dirname30(fileURLToPath7(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join37(here, name);
     if (existsSync17(candidate))
@@ -19548,6 +19563,17 @@ var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-secrets-floor-sweep.ts
+var init_tier_secrets_floor_sweep = __esm(() => {
+  init_secret_patterns();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_stored_names();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
@@ -19569,6 +19595,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  init_tier_secrets_floor_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
@@ -22430,9 +22457,9 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync18 } from "node:fs";
 import { dirname as dirname31, join as join40 } from "node:path";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
-  let directory = dirname31(fileURLToPath7(moduleUrl));
+  let directory = dirname31(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
@@ -22768,7 +22795,7 @@ var init_remote_vlm = __esm(() => {
 import { Worker as Worker2 } from "node:worker_threads";
 import { existsSync as existsSync19 } from "node:fs";
 import { dirname as dirname32, join as join42 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
+import { fileURLToPath as fileURLToPath9 } from "node:url";
 
 class ModelThread {
   worker;
@@ -22865,7 +22892,7 @@ function cancelled() {
   return Object.assign(new Error("The request was cancelled."), { name: "AbortError" });
 }
 function modelWorkerPath() {
-  const here = dirname32(fileURLToPath8(import.meta.url));
+  const here = dirname32(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join42(here, name);
     if (existsSync19(path))
@@ -25768,7 +25795,7 @@ function createNativeProcessService(options) {
         return;
       }
       const cleanup = stopChild(lifetime, child);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null ? `Olympus ${options.label} is restarting, as it asked to.` : signal === "SIGTERM" || signal === null && code === 0 ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ""}; starting it again.` : `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then((result) => {
         if (result === "unconfirmed") {
           reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
@@ -30080,6 +30107,7 @@ import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync9, rmSync as rmSync4 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname19, join as join26 } from "node:path";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir10();
@@ -30102,8 +30130,37 @@ function defaultTelegramPython(platform2) {
     return;
   return python;
 }
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
-var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+var TELEGRAM_TELETHON_VERSION = "1.45.0";
+var TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
+var TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt";
+var TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt";
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync9) {
+  let directory = dirname19(fileURLToPath6(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    if (exists(join26(directory, TELEGRAM_REQUIREMENTS_FILE)))
+      return directory;
+    const parent = dirname19(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function telegramInstallCommands(input) {
+  const python = join26(input.venvDir, "bin", "python");
+  const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
+  return [
+    [...pip, "-r", join26(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join26(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+  ];
+}
+function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
+  const venv = "~/.cache/olympus/telegram-python";
+  const root = packageRoot ?? "<Olympus package>";
+  const [build, telethon] = telegramInstallCommands({ venvDir: venv, packageRoot: root }).map((argv) => argv.filter((arg) => arg !== "--quiet").map((arg) => arg.includes(" ") ? `"${arg}"` : arg).join(" "));
+  return `Use a private virtual environment: python3 -m venv ${venv}, then ${build}, then ${telethon}. Re-run olympus connect telegram --pair.`;
+}
+var TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
 var installing = new Map;
 
 // src/core/linux-engine-service.ts
@@ -30131,6 +30188,11 @@ init_linux_desktop_entry();
 init_engine_maintenance();
 init_file_lease();
 init_linux_engine_layout();
+
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES = 512 * 1024;
+
+// src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
 import { existsSync as existsSync12, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync27, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
@@ -31076,7 +31138,7 @@ import { createHash as createHash14 } from "node:crypto";
 import { existsSync as existsSync21, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { basename as basename7, dirname as dirname34, join as join43 } from "node:path";
-import { fileURLToPath as fileURLToPath9 } from "node:url";
+import { fileURLToPath as fileURLToPath10 } from "node:url";
 init_opsec();
 init_types();
 var CONSULT_GATE_MAX_QUESTION_BYTES = 600;
@@ -31329,7 +31391,7 @@ function verifiedPackFile(path, sha256) {
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname34(fileURLToPath9(moduleUrl));
+  const here = dirname34(fileURLToPath10(moduleUrl));
   const root = basename7(here) === "core" && basename7(dirname34(here)) === "src" ? dirname34(dirname34(here)) : basename7(here) === "dist" ? dirname34(here) : undefined;
   return root !== undefined && existsSync21(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
 }

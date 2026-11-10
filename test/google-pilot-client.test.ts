@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
   DEFAULT_GOOGLE_PILOT_CLIENT_ID,
+  isRetiredGooglePilotClientId,
   PACKAGED_GOOGLE_PILOT_CLIENT_ID,
   packagedGooglePilotClientId,
   resolveGooglePilotClientId,
@@ -19,6 +20,8 @@ const ROOT = join(import.meta.dir, '..');
 const SENTINEL = '__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__';
 const RELEASE_ID = '12-release.apps.googleusercontent.com';
 const SHIPPED_ID = '34-shipped.apps.googleusercontent.com';
+/** The 0.4.0-beta.11 Desktop client, whose Google project is deleted. */
+const RETIRED_ID = '604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com';
 
 /**
  * A repository install never runs the release substitution, so the shipped
@@ -44,15 +47,22 @@ describe('Google pilot client resolution order', () => {
     expect(PACKAGED_GOOGLE_PILOT_CLIENT_ID).toBe(SENTINEL);
   });
 
-  test('the shipped default is empty or a real Google Desktop client id', () => {
-    expect(
-      DEFAULT_GOOGLE_PILOT_CLIENT_ID === ''
-      || /^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(DEFAULT_GOOGLE_PILOT_CLIENT_ID),
-    ).toBe(true);
-    expect(packagedGooglePilotClientId()).toBe(
-      DEFAULT_GOOGLE_PILOT_CLIENT_ID === '' ? undefined : DEFAULT_GOOGLE_PILOT_CLIENT_ID,
-    );
+  test('source ships no Desktop client: the beta.11 one is deleted (#765)', () => {
+    expect(DEFAULT_GOOGLE_PILOT_CLIENT_ID).toBe('');
+    expect(packagedGooglePilotClientId()).toBeUndefined();
   });
+
+  test('the retired beta.11 client is recognised by hash, and nothing else is', () => {
+    expect(isRetiredGooglePilotClientId(` ${RETIRED_ID} `)).toBe(true);
+    for (const value of [undefined, '', RELEASE_ID, SHIPPED_ID, RETIRED_ID.slice(1)]) {
+      expect(isRetiredGooglePilotClientId(value)).toBe(false);
+    }
+  });
+
+  test('no source or script carries the retired client id', () => {
+    const grep = Bun.spawnSync(['git', 'grep', '-l', RETIRED_ID, '--', 'src', 'scripts', 'site', 'skills', 'docs', 'chatgpt-plugin'], { cwd: ROOT });
+    expect(grep.stdout.toString().trim()).toBe('');
+  }, 30_000);
 
   test('the release builder resolves its Desktop client through the shared choice module', () => {
     const builder = readFileSync(join(ROOT, 'scripts/release-artifact.ts'), 'utf8');
@@ -66,17 +76,21 @@ describe('Google pilot client resolution order', () => {
 });
 
 /**
- * Olympus 1.0 release builds ship with no Desktop client (owner, 2026-10-03),
- * but only by an explicit choice: OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none.
+ * Release builds ship no Desktop client unless one is named (#765): unset and
+ * `none` both mean none; the retired beta.11 client is refused.
  */
 describe('release Google Desktop client choice', () => {
   test('a Desktop client id is packaged; none is an explicit choice; anything else refuses', () => {
     expect(releaseGooglePilotChoice(RELEASE_ID, '')).toEqual({ kind: 'client', clientId: RELEASE_ID });
     expect(releaseGooglePilotChoice(undefined, SHIPPED_ID)).toEqual({ kind: 'client', clientId: SHIPPED_ID });
     expect(releaseGooglePilotChoice(' none ', SHIPPED_ID)).toEqual({ kind: 'none' });
-    for (const value of [undefined, '', '   ', 'None', 'NONE', 'off', 'false', SENTINEL, 'not-a-client-id']) {
+    for (const value of [undefined, '', '   ']) {
+      expect(releaseGooglePilotChoice(value, '')).toEqual({ kind: 'none' });
+    }
+    for (const value of ['None', 'NONE', 'off', 'false', SENTINEL, 'not-a-client-id', RETIRED_ID]) {
       expect(releaseGooglePilotChoice(value, '')).toBeUndefined();
     }
+    expect(releaseGooglePilotChoice(undefined, RETIRED_ID)).toBeUndefined();
     expect(GOOGLE_PILOT_CLIENT_MISSING_MESSAGE).toContain('or be "none"');
   });
 
@@ -87,6 +101,9 @@ describe('release Google Desktop client choice', () => {
     expect(packaged.packagedGooglePilotClientId()).toBeUndefined();
     expect(packaged.DEFAULT_GOOGLE_PILOT_CLIENT_ID).toBe('');
     expect(packaged.PACKAGED_GOOGLE_PILOT_CLIENT_ID).toBe('');
+    expect(packaged.isRetiredGooglePilotClientId(RETIRED_ID)).toBe(true);
+    expect(packaged.isRetiredGooglePilotClientId(RELEASE_ID)).toBe(false);
+    expect(source).not.toContain(RETIRED_ID);
     expect(describeReleaseGooglePilotChoice({ kind: 'none' })).toContain('none');
   });
 

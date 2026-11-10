@@ -185,12 +185,13 @@ out=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    --proto|--retry) shift 2 ;;
+    --proto|--retry|--retry-delay|-w) shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 echo "$url" >> "${curlLog}"
+if [ -n "$FAKE_HTTP_STATUS" ]; then printf '%s' "$FAKE_HTTP_STATUS"; exit 22; fi
 case "$url" in
   https://releases.test/*)
     case "$url" in *olympus-engine-helper-*) [ -z "$FAKE_HELPER_DOWNLOAD_FAIL" ] || exit 22 ;; esac
@@ -716,6 +717,16 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(result.status).not.toBe(0);
     expect(appVersion(h.app)).toBe(V1);
     expect(h.logLines()).toHaveLength(1);
+  });
+
+  shellTest('a download server error says to try again later, not to check the connection (#1038)', () => {
+    const h = harness(shell);
+    const result = h.run(V1, { FAKE_HTTP_STATUS: '504' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Bun could not be downloaded.');
+    expect(result.stderr).toContain('The download server returned an error (HTTP 504). Try again in a few minutes. Nothing was changed on this Mac.');
+    expect(existsSync(join(h.home, 'Library'))).toBe(false);
+    expect(readFileSync(join(REPO, 'scripts/install-macos.sh'), 'utf8')).toContain('--retry 6 --retry-delay 5');
   });
 
   shellTest('a Bun download that does not match its pinned SHA-256, or whose program does not, is never run', () => {
@@ -1257,5 +1268,19 @@ describe('macOS helper installer', () => {
     expectSucceeded(result);
     expect(result.stdout).toContain('Desktop, Documents, Downloads and iCloud are not available in this release');
     expect(h.logLines().join('\n')).not.toContain('engine install-helper');
+  }, 30_000);
+  shellTest('a release without a helper says an installed helper still in use keeps working (#694)', () => {
+    const h = harness();
+    expectSucceeded(h.run('1.0.0', {}, { helper: {} }));
+    const upgrade = h.run('1.1.0');
+    expectSucceeded(upgrade);
+    expect(upgrade.stdout).toContain('the one already installed stays in use for Desktop, Documents, Downloads and iCloud');
+    expect(upgrade.stdout).not.toContain('not available in this release');
+    expect(h.logLines().filter((line) => line.includes('engine install-helper'))).toHaveLength(1);
+    // A helper that is gone or not runnable is not claimed.
+    chmodSync(join(h.support, 'Olympus Engine.app/Contents/MacOS/OlympusEngineHost'), 0o644);
+    const broken = h.run('1.2.0');
+    expectSucceeded(broken);
+    expect(broken.stdout).toContain('not available in this release');
   }, 30_000);
 });
