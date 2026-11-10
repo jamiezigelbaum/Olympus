@@ -53,7 +53,7 @@ test('times the keyword search step by step, restores the store, and prints no i
   expect(runs.map((run) => run.query)).toEqual(['plain', 'content']);
   for (const run of runs) {
     expect(run.rows).toBeGreaterThan(0);
-    expect(run.statements.ranked_match_page?.calls).toBeGreaterThan(0);
+    expect((run.statements.ranked_match_page?.calls ?? 0) + (run.statements.ranked_match_page_bounded?.calls ?? 0)).toBeGreaterThan(0);
     expect(run.visibilityFilter.calls).toBeGreaterThan(0);
   }
   // The store reads as before once the trace is done.
@@ -65,6 +65,7 @@ test('times the keyword search step by step, restores the store, and prints no i
 
 test('names keyword statements by shape', () => {
   expect(keywordStatementKind('SELECT x, MIN(connector_store_fts.rank) AS rank FROM connector_store_fts')).toBe('ranked_match_page');
+  expect(keywordStatementKind('WITH top AS MATERIALIZED (SELECT rowid, rank FROM connector_store_fts) SELECT x, MIN(top.rank) AS rank FROM top')).toBe('ranked_match_page_bounded');
   expect(keywordStatementKind('SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?')).toBe('concept_weight_count');
   expect(keywordStatementKind('SELECT DISTINCT a FROM connector_store_fts WHERE connector_store_fts.item_pk IN (?, ?)')).toBe('concept_hits_for_candidates');
 });

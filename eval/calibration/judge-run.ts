@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import {
   buildSnifferBatchPrompt,
   parseSnifferBatchResponse,
+  SNIFFER_PERSONAL_MIN_CONFIDENCE,
   SNIFFER_RESPONSE_SCHEMA,
   SNIFFER_SYSTEM_PROMPT,
   snifferInjectionRule,
@@ -193,7 +194,7 @@ async function askVenice(model: AnalystModel, material: string, ownerContext: st
   }
   const verdict = parseSnifferBatchResponse(text, new Set([1])).get(1);
   if (!verdict) return { judge: 'private', via: 'no_answer' };
-  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind };
+  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind, modelTier: verdict.tier, confidence: verdict.confidence, ownRecord: verdict.ownRecord, heldBy: heldBy(verdict) };
 }
 
 async function runVenicePass(asked: readonly Asked[], model: AnalystModel, ownerContext: string | undefined) {
@@ -312,6 +313,20 @@ interface Answer {
   coverage?: number;
   /** full mode: the kind of private information the model named. */
   privateKind?: string;
+  /** full mode: the model's own tier and confidence, before the 0.9 Personal floor (snifferTierKey). */
+  modelTier?: string;
+  confidence?: number;
+  ownRecord?: boolean;
+  /** Why the item was held Private, or 'personal' when it was not. */
+  heldBy?: 'fail_safe' | 'own_record' | 'private_verdict' | 'personal_under_floor' | 'personal';
+}
+
+/** Mirrors snifferTierKey's order for a full-mode verdict, so a sweep can tell the reasons apart. */
+function heldBy(verdict: { tier: string; confidence: number; failSafe?: boolean; ownRecord?: boolean; privateKind?: string }): NonNullable<Answer['heldBy']> {
+  if (verdict.failSafe) return 'fail_safe';
+  if (verdict.ownRecord === true && verdict.privateKind !== undefined && verdict.privateKind !== 'none') return 'own_record';
+  if (verdict.tier === 'private') return 'private_verdict';
+  return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? 'personal' : 'personal_under_floor';
 }
 
 interface CompletionReply {
@@ -341,7 +356,7 @@ async function askModel(prompt: string, written: string, primed: boolean): Promi
   });
   const verdict = parseSnifferBatchResponse(reply.content ?? '', new Set([1])).get(1);
   if (!verdict) return { judge: 'private', via: 'no_answer' };
-  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind };
+  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind, modelTier: verdict.tier, confidence: verdict.confidence, ownRecord: verdict.ownRecord, heldBy: heldBy(verdict) };
 }
 
 async function prime(shared: string): Promise<void> {

@@ -210,6 +210,17 @@ const MAX_SEARCH_RESULTS = 50;
 // filter serves (#1174). Bounds the work in a store that is mostly superseded
 // copies: at most a handful of page queries per search.
 const KEYWORD_CANDIDATE_SCAN_CAP = 1_000;
+// How many FTS rows the bounded ranked page ranks first (#1242): enough for
+// several matching chunks per item on the page, and never so many that the
+// bound costs what ranking every match does.
+const KEYWORD_RANKED_BOUND_MIN = 256;
+const KEYWORD_RANKED_BOUND_MAX = 8_192;
+const KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8;
+// Store-wide concept counts feed only the rarity weights of the
+// minimum-signal filter, so a recent count serves: every search of a
+// question (plain, content, relaxed) and the next question reuse it.
+const CONCEPT_COUNT_MAX_AGE_MS = 5 * 60_000;
+const CONCEPT_COUNT_MEMO_LIMIT = 512;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
 // text also matches, without changing the query or candidate budget.
@@ -4672,36 +4683,52 @@ export class LocalConnectorStore {
   /** `hiddenChildItemPks` with a step between bounded slices of parents, for the builds that run in turns. */
   private *hiddenChildSteps(): Generator<void, number[]> {
     if (!this.hasChildItems()) return [];
-    const groups = this.db.query(`
-      SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
-      GROUP BY provider, account_scope, parent_local_item_id
-    `).all() as Array<{
-      provider: string;
-      account_scope: string;
-      parent_local_item_id: string;
-      child_item_id: string;
-      provider_conversation_id: string | null;
-    }>;
-    const parents: ParentRef[] = groups.map((group) => ({
-      provider: group.provider,
-      accountScope: group.account_scope,
-      parentLocalItemId: group.parent_local_item_id,
-      ...parentIdentityField({
-        provider: group.provider,
-        accountScope: group.account_scope,
-        providerItemId: group.child_item_id,
-        ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
-      }),
-    }));
-    // Parents are judged independently, so a slice at a time gives the same set.
+    // Parents are judged independently, so a window at a time gives the same
+    // set. The parent ids come off the parent index HIDDEN_CHILD_PARENT_SLICE
+    // at a time and only the children under them are grouped, one window per
+    // step. Grouping every child in one query scanned and sorted the whole
+    // items table before the first turn: 0.8 s on a 500,000-item store with
+    // 100,000 children, the longest freeze the request thread had left with
+    // the keyword search on the read pool (#1250).
     const lane = this.childVisibilityLane();
     const hiddenParents: ParentRef[] = [];
-    for (let offset = 0; offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+    let from = '';
+    let inclusive = true;
+    while (true) {
       yield;
-      const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+      const window = (this.db.query(`
+        SELECT parent_local_item_id AS parent FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? '>=' : '>'} ?
+        GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
+      `).all(from, HIDDEN_CHILD_PARENT_SLICE) as Array<{ parent: string }>).map((row) => row.parent);
+      if (window.length === 0) break;
+      const groups = this.db.query(`
+        SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+        WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND tombstoned = 0
+        GROUP BY provider, account_scope, parent_local_item_id
+      `).all(JSON.stringify(window)) as Array<{
+        provider: string;
+        account_scope: string;
+        parent_local_item_id: string;
+        child_item_id: string;
+        provider_conversation_id: string | null;
+      }>;
+      const slice: ParentRef[] = groups.map((group) => ({
+        provider: group.provider,
+        accountScope: group.account_scope,
+        parentLocalItemId: group.parent_local_item_id,
+        ...parentIdentityField({
+          provider: group.provider,
+          accountScope: group.account_scope,
+          providerItemId: group.child_item_id,
+          ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
+        }),
+      }));
       const verdicts = parentVerdicts(lane, slice);
       for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
+      if (window.length < HIDDEN_CHILD_PARENT_SLICE) break;
+      from = window[window.length - 1]!;
+      inclusive = false;
     }
     const pks: number[] = [];
     for (let offset = 0; offset < hiddenParents.length; offset += 20_000) {
@@ -12542,6 +12569,7 @@ export class LocalConnectorStore {
     const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
     let dimensionMismatches = 0;
     let afterChunkPk = 0;
+    let pagesScanned = 0;
 
     try {
       if (ownsScanDb) {
@@ -12593,7 +12621,7 @@ export class LocalConnectorStore {
         }
         afterChunkPk = page.at(-1)!.chunkPk;
         if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
-        await yieldConnectorStoreVectorScan();
+        if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
       }
     } finally {
       try {
@@ -12932,6 +12960,9 @@ export class LocalConnectorStore {
   }
 
   private closedForPoolReads = false;
+  // Created on first use: a field initializer that constructs an object
+  // keeps this class in bundles that never use it (dist/index.js).
+  private conceptCountMemo?: Map<string, { count: number; at: number }>;
 
   /** Drives a read generator on this store's own connection. */
   private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
@@ -12998,8 +13029,16 @@ export class LocalConnectorStore {
     let scanned = 0;
     let pageSize = fetchLimit;
     let exhausted = false;
+    // A bound that could not prove one page will not prove a later, deeper one.
+    let tryBound = true;
     while (true) {
-      const page = (yield { mode: 'all', sql: `
+      const rankedPage = (bound: number | undefined): StoreRead => ({ mode: 'all', sql: `
+        ${bound === undefined ? '' : `WITH top AS MATERIALIZED (
+          SELECT rowid AS fts_rowid, rank FROM connector_store_fts
+          WHERE connector_store_fts MATCH ?
+            AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          ORDER BY rank LIMIT ?
+        )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
           i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -13011,11 +13050,13 @@ export class LocalConnectorStore {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          MIN(connector_store_fts.rank) AS rank
-        FROM connector_store_fts
+          ${bound === undefined ? 'MIN(connector_store_fts.rank) AS rank' : `MIN(top.rank) AS rank,
+          (SELECT COUNT(*) FROM top) AS bound_rows,
+          (SELECT MAX(rank) FROM top) AS bound_rank`}
+        FROM ${bound === undefined ? 'connector_store_fts' : 'top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid'}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ?
-          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+        WHERE ${bound === undefined ? `connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : '1'}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
           ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
@@ -13027,12 +13068,29 @@ export class LocalConnectorStore {
         LIMIT ? OFFSET ?
       `, params: [
         terms,
+        ...(bound === undefined ? [] : [bound]),
         ...(selectedAccount ? [selectedAccount] : []),
         ...selectedFilters.params,
         ...selectedFtsScope.params,
         pageSize,
         scanned,
-      ] }) as ItemRow[];
+      ] });
+      // Rank the best FTS rows first, then read only their items (#1242).
+      // Every match outside those rows ranks at or below the last of them,
+      // so the page is the full ranking's page when the bound held every
+      // match, or when the page filled and its last item ranks strictly
+      // above the bound. Otherwise (ties at the bound, or filters hid too
+      // many of the best rows) the full ranking runs, as it always did.
+      const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
+      const boundedPage = tryBound ? (yield rankedPage(bound)) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
+      const head = boundedPage[0];
+      const last = boundedPage.at(-1);
+      const proved = head !== undefined && last !== undefined && (head.bound_rows! < bound
+        || (boundedPage.length === pageSize && last.rank < head.bound_rank!));
+      if (!proved) tryBound = false;
+      const page = proved
+        ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row as ItemRow)
+        : (yield rankedPage(undefined)) as ItemRow[];
       scanned += page.length;
       exhausted = page.length < pageSize;
       // OFFSET pages over one ordering. On the read pool each page is its own
@@ -13199,14 +13257,33 @@ export class LocalConnectorStore {
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
   ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
-    const items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
+    const memo = this.conceptCountMemo ??= new Map();
+    const remembered = (key: string): number | undefined => {
+      const entry = memo.get(key);
+      return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+    };
+    const remember = (key: string, count: number) => {
+      if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT) memo.clear();
+      memo.set(key, { count, at: Date.now() });
+    };
+    const POPULATION = '\u0000items';
+    let items = remembered(POPULATION);
+    if (items === undefined) {
+      items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
+      remember(POPULATION, items);
+    }
     const counts: number[] = [];
     for (const group of groups) {
-      const { count } = (yield {
-        mode: 'get',
-        sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
-        params: [sourceIndexFtsGroupQuery(group, exact)],
-      }) as { count: number };
+      const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+      let count = remembered(groupQuery);
+      if (count === undefined) {
+        count = ((yield {
+          mode: 'get',
+          sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+          params: [groupQuery],
+        }) as { count: number }).count;
+        remember(groupQuery, count);
+      }
       counts.push(count);
     }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
@@ -14808,22 +14885,37 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
-  const keywordStartedAt = Date.now();
-  let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
-  const baselineKeywordLane = keywordAlternatives(request.query)?.size
-    ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
-    : undefined;
-  let keywordElapsedMs = Date.now() - keywordStartedAt;
-  const vectorStartedAt = Date.now();
-  const vectorLane = await store.vectorSearchLane(
-    request.query,
-    provider,
-    laneLimit,
-    accountScope,
-    filters,
-    request.deadlineAtMs,
-  );
-  const vectorElapsedMs = Date.now() - vectorStartedAt;
+  // The two lanes run side by side, each against the whole deadline: the
+  // keyword lane reads the FTS index on the read pool, the vector lane the
+  // embeddings. Run one after the other, a slow keyword lane left the vector
+  // lane the remainder of the budget, and it missed the deadline on every
+  // question (Sparta 2026-11-10, #1242).
+  const keywordWork = (async () => {
+    const keywordStartedAt = Date.now();
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
+    const baseline = keywordAlternatives(request.query)?.size
+      ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
+      : undefined;
+    return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
+  })();
+  const vectorWork = (async () => {
+    const vectorStartedAt = Date.now();
+    const lane = await store.vectorSearchLane(
+      request.query,
+      provider,
+      laneLimit,
+      accountScope,
+      filters,
+      request.deadlineAtMs,
+    );
+    return { lane, elapsedMs: Date.now() - vectorStartedAt };
+  })();
+  const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
+  let keywordLane = keywordResult.lane;
+  const baselineKeywordLane = keywordResult.baseline;
+  let keywordElapsedMs = keywordResult.elapsedMs;
+  const vectorLane = vectorResult.lane;
+  const vectorElapsedMs = vectorResult.elapsedMs;
   let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
@@ -14985,6 +15077,13 @@ function yieldConnectorStoreVectorScan(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+// The scan yields after its first page and then every eighth page (2,048
+// rows), not after every page: a 153k-row store scans 599 pages, and a timer
+// tick after each cost about 0.7 s idle and more under load before the lane
+// could score (Sparta 2026-11-10, #1242). Timers and I/O still run between
+// pages at that spacing.
+const CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8;
+
 function normalizeSemanticRelevanceBar(value: number | undefined): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isFinite(value) || value <= 0 || value >= 1) {
@@ -15016,6 +15115,8 @@ type ConnectorStoreKeywordLane = {
   matchedItemIds: ReadonlySet<string>;
   completeItemIds: ReadonlySet<string>;
   allRows: ConnectorStoreSearchRow[];
+  /** The expansion-free search, when expansion changed this one. */
+  baseline?: ConnectorStoreKeywordLane;
 };
 
 async function connectorStoreKeywordLaneRows(
@@ -15056,9 +15157,14 @@ async function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : await withKeywordExpansionDisabled(
-    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
-  );
+  // The expansion-free baseline is the same search when expansion changes
+  // nothing about it (no alternatives, no foreign stopwords): running it
+  // again only doubled the lane's cost (Sparta 2026-11-10, #1242).
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions)
+    ? undefined
+    : await withKeywordExpansionDisabled(
+      () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
+    );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
   const allRows = baseline
     ? [...baseline.allRows.map(row=>complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
@@ -15076,7 +15182,14 @@ async function connectorStoreKeywordLaneRows(
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
+    ...(baseline ? { baseline } : {}),
   };
+}
+
+/** Whether keyword expansion changes the SQL a keyword search would run for this question. */
+function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStoreKeywordFtsOptions): boolean {
+  const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
+  return shape() !== withKeywordExpansionDisabled(shape);
 }
 
 /**
@@ -17801,6 +17914,7 @@ function validateConnectorStoreV6Schema(db: Database): void {
 
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -17948,6 +18062,12 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
   if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error('Connector store schema FTS row ownership map is incomplete.');
   }
+}
+
+// Walks every foreign key in the file: most of a large store's open time
+// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only the writer's open runs
+// it, after its migrations; a read-only open migrates nothing.
+function validateConnectorStoreForeignKeys(db: Database): void {
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();
   if (foreignKeyErrors.length > 0) {
     throw new Error('Connector store schema has broken foreign-key references after migration.');
