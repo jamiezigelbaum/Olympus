@@ -4,12 +4,13 @@ import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/
 import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
-import { snifferPromptVersions } from '../classification/sniffer.ts';
+import { snifferDecisionBar, snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
@@ -553,6 +554,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -2582,6 +2584,8 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  // The local judge's own speed and held share on this install, for the setup estimates (#891).
+  const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
@@ -6286,6 +6290,8 @@ export async function main(): Promise<void> {
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
               credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
               requestReload: () => requestModelReload(),
+              observed: () => judgeObservations.observed(),
+              secondRoundStatePath: judgeSecondRoundStatePath(process.env),
             }),
             modelSetup: getModelSetup,
             setupStatus: async () => {
@@ -7481,25 +7487,59 @@ export async function main(): Promise<void> {
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const snifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
+  const rawSnifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+  // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
+  const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
+  const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
+  // This computer, then Venice double-checks (#891): the local judge sorts everything, and
+  // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
+  const judgeChoice = judgeSpending.status();
+  const secondRoundVenice = snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
+    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
+      lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
+      promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
+    })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    : undefined;
+  if (judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
+    console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
+  }
+  const secondRoundSweep = secondRoundVenice ? new SecondRoundSweep({
+    statePath: judgeSecondRoundStatePath(process.env),
+    setFor: tierSetForLedger,
+    unanswered: (ledgerPath, id) => installedTierClassification.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered,
+  }) : undefined;
+  const secondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
+  let lastSecondRoundLog = '';
+  const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
+  const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
-        model: snifferResource ? {
+        model: withSecondRound(snifferResource ? {
           ...snifferModel,
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
           // The completion says how long it waited for the model slot (#893).
           complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
-        } : snifferModel,
+        } : snifferModel),
+        ...(secondRoundSweep ? { secondRound: async (ledgerPaths, autoMovesFor) => {
+          const reopened = await secondRoundSweep.run(ledgerPaths, autoMovesFor, ingestionTurn);
+          const counts = JSON.stringify(secondRoundCounts);
+          if (reopened > 0 || counts !== lastSecondRoundLog) {
+            lastSecondRoundLog = counts;
+            console.log(`Olympus privacy judge: Venice double-check: ${reopened} held item(s) re-opened this tick; ${secondRoundCounts.asked} asked, ${secondRoundCounts.released} released to Personal, ${secondRoundCounts.kept} kept Private, ${secondRoundCounts.failed} failed and ${secondRoundCounts.stopped} stopped (kept Private).`);
+          }
+        } } : {}),
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         ...(snifferRuntime.source === 'built_in'

@@ -100,7 +100,8 @@ export function resolveTierSnifferRuntime(input: {
  * A recommendation alone never selects cloud. A terminal cloud stop uses local. */
 export function resolveJudgeChoiceRuntime(
   input: Parameters<typeof resolveTierSnifferRuntime>[0],
-  choice: { choice: 'local' | 'venice'; stop: string | null; remainingDollars: number; uncapped?: boolean },
+  // 'local-then-venice' judges on this computer first; Venice is only its second round (judge-second-round.ts).
+  choice: { choice: 'local' | 'local-then-venice' | 'venice'; stop: string | null; remainingDollars: number; uncapped?: boolean },
 ): TierSnifferRuntime {
   const original = resolveTierSnifferRuntime(input);
   if (original.source === 'off' && original.reason !== 'no_private_lane') return original;

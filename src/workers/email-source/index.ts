@@ -1,3 +1,4 @@
+import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
 import type { DashboardPeopleBackend } from './dashboard-people.ts';
 import { DASHBOARD_PEOPLE_PATH, type DashboardPeopleView } from '../dashboard/pages/people.ts';
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
@@ -612,7 +613,7 @@ export interface EmailSourceWorkerOptions {
     judgeSetup?: {
       status: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
-      save: (choice: 'local' | 'venice', capDollars: number) => Promise<{ ok: true; status_message: string }>;
+      save: (choice: JudgeChoice, capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
     /** The model pickers on Privacy rules (model-choices-backend.ts). */
     modelChoices?: import('./model-choices-backend.ts').ModelChoicesBackend;
@@ -2447,11 +2448,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
           }
           const input = await parseObjectBody(request);
-          if ((input.choice !== 'local' && input.choice !== 'venice') || typeof input.cap_dollars !== 'number' || !Number.isFinite(input.cap_dollars) || input.cap_dollars < 0) {
+          if (!JUDGE_CHOICES.includes(input.choice as JudgeChoice) || typeof input.cap_dollars !== 'number' || !Number.isFinite(input.cap_dollars) || input.cap_dollars < 0) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a judge and enter a spending limit in dollars.');
           }
           if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
-          try { return json(await sourceDashboard.judgeSetup.save(input.choice, input.cap_dollars)); }
+          try { return json(await sourceDashboard.judgeSetup.save(input.choice as JudgeChoice, input.cap_dollars)); }
           catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
         }
 

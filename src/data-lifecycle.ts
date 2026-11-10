@@ -897,6 +897,7 @@ function forgetSharedRows(
     sourceAliases: source.aliases,
     knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
     tierLedgerIds: ledgers.ids,
+    tierLedgerPaths: source.files.stores.filter((store) => store !== ':memory:').map(tierLedgerPathForStore),
     unreadableTierLedgers: ledgers.unreadable,
   }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
 }
