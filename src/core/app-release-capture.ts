@@ -46,6 +46,12 @@ export interface ReleaseCapture {
   heldBack: number;
   /** The result was withheld whole under the owner's privacy rules. */
   withheld?: boolean;
+  /**
+   * The waiting private question this request left on the computer
+   * (core/waiting-private-questions.ts), when Private items matched. Only its
+   * completion (notePrivateAnswerCompleted) says the question was answered privately.
+   */
+  privateQuestionId?: string;
 }
 
 export interface AppConnection {
@@ -61,9 +67,14 @@ export interface AppRequestRecord {
   question: string;
   items: readonly ReleasedItem[];
   heldBack: number;
-  /** The question was answered on this computer from Private items; the app got only a note. */
+  /**
+   * The question was answered on this computer from Private items; the app got
+   * only a note. True only once that answer completed, never from a match alone.
+   */
   answeredPrivately: boolean;
   withheld: boolean;
+  /** The waiting private question whose completion marks the request answered privately. */
+  privateQuestionId?: string;
 }
 
 const storage = new AsyncLocalStorage<ReleaseCapture>();
@@ -147,6 +158,38 @@ export function appConnectionOf(caller: OperationCaller | undefined): AppConnect
 
 type Recorder = (record: AppRequestRecord) => void;
 let recorder: Recorder | undefined;
+let completionHook: ((privateQuestionId: string) => void) | undefined;
+
+// Private answers completed recently, in memory only: a fast answer can finish
+// before its request's result leaves, so the record reads it here.
+const COMPLETED_MAX = 512;
+const completedPrivateAnswers = new Set<string>();
+
+/** The worker installs the store's hook that marks a recorded request answered privately. */
+export function setPrivateAnswerCompletionHook(next: ((privateQuestionId: string) => void) | undefined): void {
+  completionHook = next;
+}
+
+/**
+ * A waiting private question was answered on this computer (the panel's
+ * analysis finished, or the local inbox saved an answer). Never throws.
+ */
+export function notePrivateAnswerCompleted(privateQuestionId: unknown): void {
+  try {
+    if (typeof privateQuestionId !== 'string' || !privateQuestionId) return;
+    completedPrivateAnswers.add(privateQuestionId);
+    while (completedPrivateAnswers.size > COMPLETED_MAX) completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value!);
+    completionHook?.(privateQuestionId);
+  } catch {
+    // Never changes an answer.
+  }
+}
+
+/** Notes, in the current capture, the waiting private question a request left on the computer. */
+export function notePrivateQuestion(privateQuestionId: unknown): void {
+  const capture = storage.getStore();
+  if (capture && typeof privateQuestionId === 'string' && privateQuestionId) capture.privateQuestionId = privateQuestionId;
+}
 
 /** The worker installs the store's recorder; undefined removes it (tests, shutdown). */
 export function setAppReleaseRecorder(next: Recorder | undefined): void {
@@ -161,25 +204,32 @@ export function recordAppRequest(input: {
   caller: OperationCaller | undefined;
   question: string | undefined;
   capture: ReleaseCapture;
-  answeredPrivately?: boolean;
+  /** The waiting private question the request left on the computer, if any (else the capture's). */
+  privateQuestionId?: string | undefined;
   /** The exit replaced the noted result with a withheld one after the builders ran. */
   withheldAfter?: boolean;
   now?: () => number;
+  /** Where the record goes when this process has no recorder installed (an agent's own process). */
+  fallback?: Recorder;
 }): void {
   try {
-    if (!recorder) return;
+    const write = recorder ?? input.fallback;
+    if (!write) return;
     const connection = appConnectionOf(input.caller);
     const question = boundedString(input.question, 2_000);
     if (!connection || !question || input.capture.items === undefined) return;
     const withheld = input.withheldAfter === true || input.capture.withheld === true;
-    recorder({
+    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
+    write({
       at: (input.now ?? Date.now)(),
       connection,
       question,
       items: withheld ? [] : input.capture.items,
       heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
-      answeredPrivately: input.answeredPrivately === true,
+      // A Private answer that finished before the result left is already known; a later one marks the row.
+      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
       withheld,
+      ...(privateQuestionId ? { privateQuestionId } : {}),
     });
   } catch {
     // A log that cannot be written never changes what an app gets.
@@ -210,6 +260,7 @@ export function jobQuestion(jobId: unknown, now = Date.now()): string | undefine
 /** Clear and Delete all forget the in-memory questions too. */
 export function forgetJobQuestions(): void {
   jobQuestions.clear();
+  completedPrivateAnswers.clear();
 }
 
 /**
@@ -238,7 +289,8 @@ export function recordRemoteOperation(input: {
   caller: OperationCaller | undefined;
   output: Record<string, unknown>;
   capture: ReleaseCapture;
-  answeredPrivately: boolean;
+  /** The waiting private question the call left on the computer (core/remote-private-part.ts answerId), if any. */
+  privateQuestionId: string | undefined;
 }): void {
   const { operation, args, output } = input;
   if (operation !== 'source_answer' && operation !== 'source_answer_result') return;
@@ -247,7 +299,7 @@ export function recordRemoteOperation(input: {
   recordAppRequest({
     caller: input.caller,
     question,
-    capture: input.answeredPrivately ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
-    answeredPrivately: input.answeredPrivately,
+    capture: input.privateQuestionId ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
+    privateQuestionId: input.privateQuestionId,
   });
 }

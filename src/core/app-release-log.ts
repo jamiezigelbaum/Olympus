@@ -69,6 +69,8 @@ export interface AppReleaseLogStore {
   /** The identifiers of one released item, for the per-item correction. */
   item(requestId: string, position: number): (ReleasedItem & { madePrivate: boolean }) | undefined;
   markMadePrivate(requestId: string, position: number): void;
+  /** The waiting private question a request left was answered on this computer; how many rows it marked. */
+  markAnsweredPrivately(privateQuestionId: string): number;
   /** Removes (or, dry, counts) the items of these corpora. */
   forgetCorpora(corpusIds: readonly string[], dryRun: boolean): number;
   close(): void;
@@ -121,10 +123,11 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
       if (retentionDays() === 0) return undefined;
       const id = `apr_${randomBytes(12).toString('base64url')}`;
       db.transaction(() => {
-        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind,
           record.question.slice(0, 2_000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0,
+          record.privateQuestionId ?? null,
         );
         const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -190,6 +193,9 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
     markMadePrivate(requestId, position) {
       db.query('UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?').run(requestId, position);
     },
+    markAnsweredPrivately(privateQuestionId) {
+      return db.query('UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0').run(privateQuestionId).changes;
+    },
     forgetCorpora(corpusIds, dryRun) {
       if (corpusIds.length === 0) return 0;
       const marks = corpusIds.map(() => '?').join(', ');
@@ -231,8 +237,10 @@ function migrations(): SqliteMigration[] {
           question TEXT NOT NULL,
           held_back INTEGER NOT NULL DEFAULT 0,
           answered_privately INTEGER NOT NULL DEFAULT 0,
-          withheld INTEGER NOT NULL DEFAULT 0
+          withheld INTEGER NOT NULL DEFAULT 0,
+          private_question_id TEXT
         );
+        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
         CREATE INDEX app_release_requests_at ON app_release_requests (at);
         CREATE TABLE app_release_items (
           request_id TEXT NOT NULL,

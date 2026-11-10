@@ -1,4 +1,4 @@
-import { createReleaseCapture, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
+import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
  * The MCP surface ChatGPT reaches through the relay: Olympus's search and
@@ -491,7 +491,8 @@ function recordChatGptRequest(
     question,
     // The panel's count and the search's own count of Private matches can name the same items: the larger stands.
     capture: { ...capture, heldBack: Math.max(capture.heldBack, privateCount) },
-    answeredPrivately: privateCount > 0,
+    // A match is not an answer: the row says the question was answered privately only once the
+    // waiting question's answer completes (notePrivateAnswerCompleted), whatever the panel's state.
     withheldAfter,
   });
 }
@@ -735,7 +736,10 @@ function recordWaiting(
 ): PrivateAnswerWaitingRef | undefined {
   if (!ticket) return undefined;
   try {
-    return options.waitingQuestions?.()?.record(ticket, { question, surface: 'chatgpt', state: 'waiting', detail });
+    const ref = options.waitingQuestions?.()?.record(ticket, { question, surface: 'chatgpt', state: 'waiting', detail });
+    // The request's row (what each AI app received) follows this question to its answer.
+    notePrivateQuestion(ref?.id);
+    return ref;
   } catch {
     console.warn('[chatgpt] waiting private question not recorded reason=store_unavailable');
     return undefined;

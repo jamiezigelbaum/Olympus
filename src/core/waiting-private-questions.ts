@@ -21,6 +21,7 @@
  * control route. delete --all removes the database and sidecars.
  * Plain factory closures: class-field initializers inflate native dist.
  */
+import { notePrivateAnswerCompleted } from './app-release-capture.ts';
 import { Database } from 'bun:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
@@ -545,11 +546,14 @@ export function openWaitingPrivateQuestionStore(
       if (sent !== undefined && options.isActive) {
         try { if (!options.isActive(ref.connectionId)) return false; } catch { return false; }
       }
-      return db.transaction(() => {
+      const saved = db.transaction(() => {
         const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
           .run(serialized, now(), sent ?? null, result.status === 'failed' ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
         return changed;
       }).immediate();
+      // What each AI app received: the request that left this question is now answered privately.
+      if (saved && result.status === 'answered') notePrivateAnswerCompleted(ref.id);
+      return saved;
     },
 
     retry(ref, reason = 'answer_failed') {

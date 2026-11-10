@@ -15,20 +15,14 @@
  */
 import {
   forgetJobQuestions,
-  recordAppRequest,
-  releasedItemFromEvidence,
   setAppReleaseRecorder,
-  type ReleaseCapture,
-  type ReleasedItem,
+  setPrivateAnswerCompletionHook,
 } from '../core/app-release-capture.ts';
 import {
   isAppReleaseRetentionDays,
   openAppReleaseLog,
   type AppReleaseLogStore,
 } from '../core/app-release-log.ts';
-import { OperationError } from '../core/operation-error.ts';
-import type { OperationCaller, OperationCallerWire } from '../core/operation-caller.ts';
-import { providerSourceLabel } from '../core/remote-result.ts';
 
 export interface AppsReceivedOutcome {
   status: number;
@@ -40,44 +34,15 @@ export interface AppsReceived {
   close(): void;
 }
 
-/** Raises one item to Private through the per-item override; throws when it cannot. */
-export type SetItemPrivate = (locator: string) => Promise<unknown>;
-
-const FAMILY_SOURCE: Readonly<Record<string, string>> = { email: 'Mail', file: 'Files', chat: 'Messages', note: 'Notes' };
-
 /**
- * A source answer an agent on this computer received from the worker's answer
- * route. Every evidence item in it left the worker, at its tier.
+ * Raises exactly the recorded item to Private through the per-item override.
+ * It must refuse (throw) when the locator no longer resolves to that same
+ * item, and write nothing then.
  */
-export function recordAgentAnswer(question: string, callerWire: OperationCallerWire, result: unknown): void {
-  try {
-    const caller = toCaller(callerWire);
-    const record = result && typeof result === 'object' ? result as Record<string, unknown> : {};
-    const items: ReleasedItem[] = (Array.isArray(record.evidence) ? record.evidence : [])
-      .filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
-      .slice(0, 48)
-      .map((entry) => releasedItemFromEvidence(
-        entry,
-        (typeof entry.provider === 'string' ? providerSourceLabel(entry.provider) : undefined)
-          ?? (typeof entry.family === 'string' ? FAMILY_SOURCE[entry.family] : undefined)
-          ?? 'Other source',
-        typeof entry.title === 'string' ? entry.title : undefined,
-      ));
-    const capture: ReleaseCapture = { items, heldBack: 0 };
-    recordAppRequest({ caller, question, capture });
-  } catch {
-    // Never changes the answer.
-  }
-}
+export type SetItemPrivate = (item: { locator: string; provider: string; providerItemId: string; providerConversationId?: string }) => Promise<unknown>;
 
-function toCaller(wire: OperationCallerWire): OperationCaller {
-  return {
-    surface: wire.surface,
-    ...(wire.connection_id ? { connectionId: wire.connection_id } : {}),
-    ...(wire.display_name ? { displayName: wire.display_name } : {}),
-    ...(wire.provider ? { provider: wire.provider } : {}),
-  };
-}
+/** The plain refusal when the recorded item cannot be found as it was recorded. */
+export const APPS_RECEIVED_ITEM_GONE = 'Olympus can\'t find this item on this computer any more, so nothing was changed.';
 
 export function createAppsReceived(options: {
   dbPath: string;
@@ -94,6 +59,13 @@ export function createAppsReceived(options: {
       open().record(record);
     } catch (error) {
       console.error(`[olympus:apps-received] record_failed ${error instanceof Error ? error.name : 'error'}`);
+    }
+  });
+  setPrivateAnswerCompletionHook((privateQuestionId) => {
+    try {
+      open().markAnsweredPrivately(privateQuestionId);
+    } catch (error) {
+      console.error(`[olympus:apps-received] mark_failed ${error instanceof Error ? error.name : 'error'}`);
     }
   });
 
@@ -125,20 +97,21 @@ export function createAppsReceived(options: {
             const item = id && position >= 0 ? open().item(id, position) : undefined;
             if (!item) return refuse(404, 'not_found', 'That item is no longer in the list.');
             if (item.madePrivate) return ok({ madePrivate: true });
-            const locators = [item.locator, item.providerItemId].filter((value): value is string => typeof value === 'string' && value !== '');
-            if (locators.length === 0) return refuse(409, 'item_unknown', 'Olympus cannot find this item on this computer any more.');
-            let lastError: unknown;
-            for (const locator of locators) {
-              try {
-                await options.setItemPrivate(locator);
-                open().markMadePrivate(id, position);
-                return ok({ madePrivate: true });
-              } catch (error) {
-                lastError = error;
-              }
+            // Bound to the recorded item: its full locator, checked against its provider, item and
+            // conversation. A bare item id could name another chat's message, so there is no fallback.
+            if (!item.locator || !item.provider || !item.providerItemId) return refuse(409, 'item_gone', APPS_RECEIVED_ITEM_GONE);
+            try {
+              await options.setItemPrivate({
+                locator: item.locator,
+                provider: item.provider,
+                providerItemId: item.providerItemId,
+                ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
+              });
+            } catch {
+              return refuse(409, 'item_gone', APPS_RECEIVED_ITEM_GONE);
             }
-            const message = lastError instanceof OperationError ? lastError.message : 'Olympus could not change this item.';
-            return refuse(409, 'item_unchanged', message);
+            open().markMadePrivate(id, position);
+            return ok({ madePrivate: true });
           }
           default:
             return refuse(400, 'invalid_params', 'Unknown action.');
@@ -149,6 +122,7 @@ export function createAppsReceived(options: {
     },
     close() {
       setAppReleaseRecorder(undefined);
+      setPrivateAnswerCompletionHook(undefined);
       store?.close();
       store = undefined;
     },

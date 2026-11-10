@@ -12,20 +12,30 @@ import {
   appConnectionOf,
   createReleaseCapture,
   forgetJobQuestions,
+  notePrivateAnswerCompleted,
   recordAppRequest,
   runWithReleaseCapture,
   setAppReleaseRecorder,
   type AppRequestRecord,
 } from '../src/core/app-release-capture.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems, openAppReleaseLog } from '../src/core/app-release-log.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { defaultConfig } from '../src/core/config.ts';
+import { findOperationByName } from '../src/core/operations.ts';
+import { withheldSourceAnswer } from '../src/core/release-manifest.ts';
+import { SourceAnswerJobRegistry, type SourceAnswerPending } from '../src/core/source-answer-jobs.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { remoteOperationOutput } from '../src/core/remote-result.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
-import { createAppsReceived, recordAgentAnswer } from '../src/workers/apps-received.ts';
+import { APPS_RECEIVED_ITEM_GONE, createAppsReceived } from '../src/workers/apps-received.ts';
+import { recordLocalAgentAnswer } from '../src/core/app-release-agent.ts';
+import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { clearInstalledTierClassification, configureInstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { runTierSetOnRecordedItem } from '../src/workers/classification/tier-cli.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { SEARCH_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { answerToolResult, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { renderDashboardAppsReceivedPage } from '../src/workers/dashboard/pages/apps-received.ts';
@@ -136,9 +146,9 @@ describe('the release exits record each request', () => {
     expect(records[0]!.withheld).toBe(true);
   });
 
-  test('an agent on this computer is recorded from the worker\'s answer route', () => {
+  test('an agent on this computer is recorded at its tool result', async () => {
     const records = capture();
-    recordAgentAnswer('Which invoices are unpaid?', { surface: 'native', display_name: 'Muse' }, { answer: 'Two.', evidence: [PERSONAL, PRIVATE] });
+    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Which invoices are unpaid?' }, result: { answer: 'Two.', evidence: [PERSONAL, PRIVATE] } });
     expect(records[0]).toMatchObject({ connection: { name: 'Muse', kind: 'agent' }, question: 'Which invoices are unpaid?' });
     expect(records[0]!.items.map((item) => [item.title, item.tier])).toEqual([['Appointment confirmed: Leo', 'personal'], ['SENTINEL_PRIVATE_TITLE', 'private']]);
   });
@@ -166,7 +176,7 @@ function sample(at: number, question = 'When is Leo\'s dentist appointment?'): A
       { source: 'Dropbox', title: 'calendar.pdf', tier: 'personal', corpusId: 'internal.dropbox.files', provider: 'dropbox', providerItemId: 'id:2' },
     ],
     heldBack: 1,
-    answeredPrivately: true,
+    answeredPrivately: false,
     withheld: false,
   };
 }
@@ -183,7 +193,7 @@ describe('the log', () => {
     store.record(sample(clock.now()));
     expect(store.list().map((entry) => entry.question)).toEqual(['When is Leo\'s dentist appointment?']);
     const [entry] = store.list();
-    expect(entry).toMatchObject({ connection: { name: 'ChatGPT', kind: 'app' }, heldBack: 1, answeredPrivately: true });
+    expect(entry).toMatchObject({ connection: { name: 'ChatGPT', kind: 'app' }, heldBack: 1, answeredPrivately: false });
     expect(entry!.items.map((item) => [item.source, item.title])).toEqual([['Gmail', 'Appointment confirmed: Leo'], ['Dropbox', 'calendar.pdf']]);
     // The list served to the page carries names only, never identifiers.
     expect(JSON.stringify(store.list())).not.toContain('msg-1');
@@ -235,31 +245,30 @@ describe('the log', () => {
 });
 
 describe('the dashboard route', () => {
-  function setup() {
+  function setup(refuse = false) {
     const dir = tempDir();
-    const changed: string[] = [];
+    const changed: Array<Record<string, unknown>> = [];
     const apps = createAppsReceived({
       dbPath: join(dir, 'data', 'app-release-log.sqlite'),
-      setItemPrivate: async (locator) => {
-        if (locator === 'gmail://msg-1') throw new Error('not a stored locator');
-        changed.push(locator);
+      setItemPrivate: async (item) => {
+        changed.push(item);
+        if (refuse) throw new Error('No stored item matches that locator.');
       },
     });
     cleanups.push(() => apps.close());
     return { apps, changed };
   }
 
-  test('lists, sets retention, clears, and marks an item Private through the per-item override', async () => {
+  test('lists, sets retention, clears, and marks the recorded item Private by its full identity', async () => {
     const { apps, changed } = setup();
-    recordAgentAnswer('Which invoices are unpaid?', { surface: 'native', display_name: 'Muse' }, { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1' }] });
+    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Which invoices are unpaid?' }, result: { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1', provider_conversation_id: 'thread-9' }] } });
     const listed = await apps.handle({ action: 'list' });
     const requests = listed.body.requests as Array<{ id: string; items: Array<{ position: number; madePrivate: boolean }> }>;
     expect(requests).toHaveLength(1);
     expect(listed.body.retentionDays).toBe(30);
-    // The locator is tried first; the provider item id when the locator finds nothing.
     const made = await apps.handle({ action: 'make_private', request: requests[0]!.id, item: 0 });
     expect(made).toEqual({ status: 200, body: { ok: true, madePrivate: true } });
-    expect(changed).toEqual(['msg-1']);
+    expect(changed).toEqual([{ locator: 'gmail://msg-1', provider: 'gmail', providerItemId: 'msg-1', providerConversationId: 'thread-9' }]);
     const after = (await apps.handle({ action: 'list' })).body.requests as typeof requests;
     expect(after[0]!.items[0]!.madePrivate).toBe(true);
     expect((await apps.handle({ action: 'make_private', request: 'apr_missing', item: 0 })).status).toBe(404);
@@ -267,6 +276,129 @@ describe('the dashboard route', () => {
     expect((await apps.handle({ action: 'retention', days: 90 })).body.retentionDays).toBe(90);
     expect((await apps.handle({ action: 'clear' })).body.removed).toBe(1);
     expect((await apps.handle({ action: 'list' })).body.requests).toEqual([]);
+  });
+
+  test('when the full locator no longer resolves, the correction is refused plainly with no bare-id retry', async () => {
+    const { apps, changed } = setup(true);
+    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Which invoices are unpaid?' }, result: { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1' }] } });
+    const [request] = (await apps.handle({ action: 'list' })).body.requests as Array<{ id: string }>;
+    const refused = await apps.handle({ action: 'make_private', request: request!.id, item: 0 });
+    expect(refused).toEqual({ status: 409, body: { ok: false, error: { code: 'item_gone', message: APPS_RECEIVED_ITEM_GONE } } });
+    // One attempt, by the recorded locator and identity: never the provider item id alone.
+    expect(changed).toEqual([{ locator: 'gmail://msg-1', provider: 'gmail', providerItemId: 'msg-1' }]);
+    const after = (await apps.handle({ action: 'list' })).body.requests as Array<{ items: Array<{ madePrivate: boolean }> }>;
+    expect(after[0]!.items[0]!.madePrivate).toBe(false);
+    // An item recorded without a locator is refused without any attempt.
+    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Anything else?' }, result: { answer: 'No.', evidence: [PERSONAL] } });
+    const [latest] = (await apps.handle({ action: 'list' })).body.requests as Array<{ id: string }>;
+    expect((await apps.handle({ action: 'make_private', request: latest!.id, item: 0 })).status).toBe(409);
+    expect(changed).toHaveLength(1);
+  });
+});
+
+describe('the per-item override, bound to the recorded item', () => {
+  function item(n: number, path: string, providerItemId: string): RawItem {
+    return {
+      identity: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId, localItemId: `personal:${providerItemId}`, sourceVersion: 'v1' },
+      mimeType: 'text/plain',
+      content: { kind: 'text', text: `note ${n}` },
+      metadata: { name: path.split('/').pop()!, pathDisplay: path, locatorUri: `fixture://files${path}` },
+      fetchedAt: '2026-09-23T00:00:00.000Z',
+    };
+  }
+  function connectorFor(items: readonly RawItem[]): SourceConnector {
+    return {
+      id: 'fixture',
+      family: 'file',
+      async authenticate() {},
+      listItems(): AsyncIterable<SourceConnectorListPage> {
+        return (async function* () { yield { items, done: true }; })();
+      },
+      async fetchItem(localItemId) {
+        const found = items.find((entry) => entry.identity.localItemId === localItemId);
+        if (!found) throw new Error('missing');
+        return found;
+      },
+      classificationSignals(raw) {
+        return { title: String(raw.metadata['name'] ?? ''), path: String(raw.metadata['pathDisplay'] ?? '') };
+      },
+    };
+  }
+
+  test('a locator that now names another item, or nothing, changes nothing; the recorded item is raised', async () => {
+    const dir = tempDir();
+    const env = {
+      OLYMPUS_TIER_RULES_PATH: join(dir, 'tier-rules.json'),
+      OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'classification-ledger.jsonl'),
+    };
+    const dbPath = join(dir, 'store.sqlite');
+    const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
+    cleanups.push(() => { store.close(); clearInstalledTierClassification(); });
+    configureInstalledTierClassification({ env });
+    await store.syncFromConnector(connectorFor([item(1, '/notes/a.txt', 'file-1'), item(2, '/notes/b.txt', 'file-2')]), { fetchContent: true });
+    const ledger = store.tierLedger()!;
+    const context = { storePaths: [dbPath], env };
+
+    // The recorded item was file-1, but its locator now resolves to file-2: refused, nothing written.
+    expect(() => runTierSetOnRecordedItem('fixture://files/notes/b.txt', 'private', { provider: 'fixture', providerItemId: 'file-1' }, context))
+      .toThrow('no longer names the item');
+    expect(ledger.getOverride({ provider: 'fixture', accountScope: 'personal', providerItemId: 'file-2' })).toBeUndefined();
+    // A locator that resolves to nothing is refused too.
+    expect(() => runTierSetOnRecordedItem('fixture://files/notes/gone.txt', 'private', { provider: 'fixture', providerItemId: 'file-9' }, context))
+      .toThrow('No stored item');
+    // The recorded item itself is raised.
+    runTierSetOnRecordedItem('fixture://files/notes/a.txt', 'private', { provider: 'fixture', providerItemId: 'file-1' }, context);
+    expect(ledger.getOverride({ provider: 'fixture', accountScope: 'personal', providerItemId: 'file-1' })).toEqual({ kind: 'tier', tier: 'secure' });
+  });
+});
+
+describe('a Private match is not a Private answer', () => {
+  test('a ChatGPT search with Private matches but no model ready records the items held back, not answered', async () => {
+    const records = capture();
+    const options = {
+      dashboardView: async () => ({ sources: [] }) as never,
+      evidenceSearch: async () => recordScriptedSearch({ evidence: [PERSONAL], coverage: {} }),
+      privateMatchProbe: async () => ({ count: 2, evidence: [] }),
+    } as unknown as ChatGptSurfaceOptions;
+    const ctx = { releaseCheck: scriptedSearchReleaseCheck, caller: { surface: 'remote', connectionId: 'conn-gpt', provider: 'openai' } } as OperationContext;
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: 'When is Leo\'s dentist appointment?' }, ctx, options);
+    expect((result._meta as Record<string, { count: number; state: string }>)['olympus/privateAnswer']).toMatchObject({ count: 2, state: 'no_model' });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ heldBack: 2, answeredPrivately: false });
+  });
+
+  test('the row says answered privately only once its waiting question\'s answer completes', async () => {
+    const clock = createTestClock(Date.parse('2026-11-10T10:00:00Z'));
+    const apps = createAppsReceived({ dbPath: join(tempDir(), 'data', 'app-release-log.sqlite'), setItemPrivate: async () => undefined, now: () => clock.now() });
+    cleanups.push(() => apps.close());
+    const caller = { surface: 'remote' as const, provider: 'openai' as const };
+    const noted = { items: [], heldBack: 1, privateQuestionId: 'wq_leo' };
+    recordAppRequest({ caller, question: 'When is Leo\'s dentist appointment?', capture: noted, now: () => clock.now() });
+    const read = async () => ((await apps.handle({ action: 'list' })).body.requests as Array<{ question: string; answeredPrivately: boolean }>);
+    expect((await read())[0]).toMatchObject({ answeredPrivately: false });
+    notePrivateAnswerCompleted('wq_other');
+    expect((await read())[0]).toMatchObject({ answeredPrivately: false });
+    notePrivateAnswerCompleted('wq_leo');
+    expect((await read())[0]).toMatchObject({ answeredPrivately: true });
+    // An answer that completed before its request's result left is known when the row is written.
+    recordAppRequest({ caller, question: 'Again?', capture: { items: [], heldBack: 1, privateQuestionId: 'wq_leo' }, now: () => clock.now() });
+    expect((await read()).find((row) => row.question === 'Again?')).toMatchObject({ answeredPrivately: true });
+  });
+
+  test('a saved local answer completes its waiting question', async () => {
+    const completed: string[] = [];
+    const { setPrivateAnswerCompletionHook } = await import('../src/core/app-release-capture.ts');
+    setPrivateAnswerCompletionHook((id) => completed.push(id));
+    cleanups.push(() => setPrivateAnswerCompletionHook(undefined));
+    const { openWaitingPrivateQuestionStore } = await import('../src/core/waiting-private-questions.ts');
+    const store = openWaitingPrivateQuestionStore(join(tempDir(), 'data', 'waiting.sqlite'));
+    cleanups.push(() => store.close());
+    const ref = store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'waiting' })!;
+    store.saveAnswer(ref, { status: 'failed', citations: [], unanswered: [], leftOut: [], read: [] });
+    expect(completed).toEqual([]);
+    const second = store.record(store.ticket('conn-a'), { question: 'Who signed it?', surface: 'remote', state: 'waiting' })!;
+    store.saveAnswer(second, { status: 'answered', answer: 'Alice.', citations: [], unanswered: [], leftOut: [], read: [] });
+    expect(completed).toEqual([second.id]);
   });
 });
 
@@ -352,10 +484,78 @@ describe('the worker serves the list only inside a local control session', () =>
       if (/openAppReleaseLog\(|createAppsReceived\(|sourceDashboard\??\.appsReceived\b/.test(text)) readers.push(file);
     }
     expect(readers.sort()).toEqual([
+      'src/core/app-release-agent.ts',
       'src/core/app-release-log.ts',
       'src/workers/apps-received.ts',
       'src/workers/email-source/index.ts',
       'src/workers/email-source/server.ts',
     ]);
+    // A local agent's tool result only appends its own record to the log; it never reads it.
+    const agent = readFileSync(join(import.meta.dir, '..', 'src/core/app-release-agent.ts'), 'utf8');
+    expect(agent).not.toMatch(/\.(list|item|retentionDays)\(/);
+  });
+});
+
+describe('a local agent\'s answer is recorded only at its tool result', () => {
+  function context(surface: 'mcp' | 'native' | 'cli', email: Record<string, unknown>, jobs?: SourceAnswerJobRegistry): OperationContext {
+    return {
+      config: defaultConfig(),
+      caller: { surface, displayName: 'Muse' },
+      email,
+      ...(jobs ? { sourceAnswerJobs: { registry: jobs, owner: `${surface}:test` } } : {}),
+    } as unknown as OperationContext;
+  }
+
+  test('a handed-off job is recorded when collected, not when the worker finishes, and with its question', async () => {
+    const records = capture();
+    let finish!: (value: unknown) => void;
+    const finished = new Promise((resolve) => { finish = resolve; });
+    const jobs = new SourceAnswerJobRegistry({ limits: { handoffMs: 1, resultWaitMs: 30 } });
+    const ctx = context('mcp', { sourceAnswer: () => finished, revalidateSourceAnswer: async (result: unknown) => result }, jobs);
+    const pending = await findOperationByName('source_answer')!.handler(ctx, { question: 'Which invoices are unpaid?' }) as SourceAnswerPending;
+    expect(pending.status).toBe('working');
+    finish({ answer: 'Two.', evidence: [PERSONAL] });
+    await finished;
+    await flushMicrotasks();
+    // The job finished in the background: nothing left for the agent yet.
+    expect(records).toEqual([]);
+    const collected = await findOperationByName('source_answer_result')!.handler(ctx, { job_id: pending.job_id }) as { answer: string };
+    expect(collected.answer).toBe('Two.');
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ connection: { name: 'Muse', kind: 'agent' }, question: 'Which invoices are unpaid?', withheld: false });
+    expect(records[0]!.items.map((item) => item.title)).toEqual(['Appointment confirmed: Leo']);
+  });
+
+  test('an answer the last release check withholds is recorded as withheld, with no items', async () => {
+    const records = capture();
+    const ctx = context('mcp', {
+      sourceAnswer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }),
+      revalidateSourceAnswer: async () => withheldSourceAnswer('Olympus withheld this answer because an item became Private.'),
+    });
+    const released = await findOperationByName('source_answer')!.handler(ctx, { question: 'Which invoices are unpaid?' });
+    expect(JSON.stringify(released)).not.toContain('Appointment confirmed');
+    expect(records).toHaveLength(1);
+    expect(records[0]!.withheld).toBe(true);
+    expect(records[0]!.items).toEqual([]);
+  });
+
+  test('an OpenClaw tool is recorded at its result; the owner\'s command line is not', async () => {
+    const records = capture();
+    await findOperationByName('source_answer')!.handler(context('native', { sourceAnswer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }) }), { question: 'Which invoices are unpaid?' });
+    expect(records).toHaveLength(1);
+    await findOperationByName('source_answer')!.handler(context('cli', { sourceAnswer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }) }), { question: 'Which invoices are unpaid?' });
+    expect(records).toHaveLength(1);
+  });
+
+  test('the worker\'s answer route records nothing itself', async () => {
+    const records = capture();
+    const worker = createEmailSourceWorker({ sourceAnswer: { answer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }) } as never });
+    const response = await worker.fetch(new Request('http://worker.test/v1/source/answer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ question: 'Which invoices are unpaid?', caller: { surface: 'mcp', display_name: 'Muse' } }),
+    }));
+    expect(response.status).toBe(200);
+    expect(records).toEqual([]);
   });
 });

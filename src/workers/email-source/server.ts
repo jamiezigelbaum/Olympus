@@ -6354,11 +6354,12 @@ export async function main(): Promise<void> {
     // Every request an AI app or agent makes, recorded where its result leaves (core/app-release-capture.ts).
     const { createAppsReceived } = await import('../apps-received.ts');
     const { appReleaseLogDbPath } = await import('../../core/app-release-log.ts');
-    const { tierForCli } = await import('../cli-operations.ts');
+    const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
     appsReceived = createAppsReceived({
       dbPath: appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env)),
-      // The per-item override (`olympus tier set <item> private`): the owner's decision on this one item.
-      setItemPrivate: (locator) => tierForCli({ args: ['set', locator, 'private'] }),
+      // The per-item override (`olympus tier set <item> private`) on exactly the recorded item:
+      // its locator must still name the same provider, item and conversation, or nothing is written.
+      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem(locator, 'private', expected),
     });
   }
   const connectionActive = (connectionId: string): boolean => {

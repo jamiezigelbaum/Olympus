@@ -1,5 +1,4 @@
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
-import { recordAgentAnswer } from '../apps-received.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
@@ -1147,10 +1146,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // Forward the manifest to an in-process remote call's sink too.
               for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
-              // An agent on this computer (an OpenClaw tool, a local MCP client) gets this result as it is:
-              // it goes on the owner's list of what each AI app received. A remote call is listed where
-              // its own output leaves (core/app-release-capture.ts); the owner's command line is not listed.
-              if (caller && caller.surface !== 'remote') recordAgentAnswer(sourceAnswerRequest.question, caller, result);
+              // Not recorded on the owner's list of what each AI app received here: a local agent's
+              // answer is recorded at its tool result (core/app-release-agent.ts), after collection
+              // and the release-ticket check, and a remote call where its own output leaves.
               let releaseTicket: string | undefined;
               if (caller?.surface !== 'remote') {
                 pruneReleaseTickets();

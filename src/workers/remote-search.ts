@@ -201,7 +201,7 @@ async function runSearch(
       caller: context.caller,
       question,
       capture: note === undefined ? capture : { ...capture, heldBack: Math.max(1, capture.heldBack) },
-      answeredPrivately: note !== undefined,
+      privateQuestionId: note !== undefined ? privateCall?.answerId : undefined,
       withheldAfter,
     });
   }
