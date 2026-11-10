@@ -34,6 +34,15 @@
 .film__frame:hover .film__play { transform: scale(1.06); }
 .film__caption { text-align: center; margin: 14px 0 0; }
 
+/* Common questions: plain links to the guides, under the reel. */
+.questions { width: 100%; max-width: 44rem; margin: 0 auto; padding: 8px var(--gutter) 0; }
+.questions h2 { font-size: clamp(24px, 2.4vw, 30px); margin: 0 0 12px; text-align: center; }
+.questions ul { list-style: none; margin: 0; padding: 0; }
+.questions li { border-top: 1px solid rgba(51, 37, 29, 0.15); }
+.questions li:last-child { border-bottom: 1px solid rgba(51, 37, 29, 0.15); }
+.questions a { display: block; padding: 12px 2px; color: inherit; text-decoration: none; font-size: clamp(16px, 1.5vw, 18px); }
+.questions a:hover, .questions a:focus-visible { text-decoration: underline; }
+
 /* The film player. */
 .player { width: min(1100px, 94vw); padding: 0; border: 0; border-radius: var(--radius-paper); background: #1a1314; box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.6); }
 .player::backdrop { background: rgba(26, 19, 20, 0.82); }
