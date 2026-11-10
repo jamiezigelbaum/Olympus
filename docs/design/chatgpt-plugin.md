@@ -1024,9 +1024,9 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
   or through a launch ticket a bearer minted (the Gateway bridge holds that
   bearer for the agents it serves), `local` for a session minted by
   `POST /dashboard/control/session/local`, which refuses any
-  `Authorization` header and any non-loopback or proxied origin, and, where
-  there is no owner socket (macOS), any browser without a live control
-  session of its own (#1153). The card
+  `Authorization` header, any non-loopback or proxied origin, and any
+  browser without a live control session of its own, owner socket or not
+  (#1153, #1188: the remote tunnel forwards the socket). The card
   shows a one-click "Unlock outside help on this Mac" to a bearer-grade
   session; a loopback browser presenting no bearer gets a local-grade
   cookie. The boundary (`DASHBOARD_CONSULT_CONTROL_PATHS` in

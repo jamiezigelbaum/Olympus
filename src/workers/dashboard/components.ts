@@ -8,6 +8,7 @@ import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
  * rather than stubbed so the three pages cannot each grow their own copy.
  */
 import { createHash } from 'node:crypto';
+import { dashboardSessionMarker } from './session-marker.ts';
 import { olympusOpenUrl } from '../../core/open-targets.ts';
 import { mountDashboardController } from '../../control-ui/browser-controller.ts';
 import { DASHBOARD_SAVED_SECRET_FIELD_VALUE, isGoogleOAuthSource } from '../source-dashboard.ts';
@@ -179,7 +180,7 @@ export function pageShell(input: DashboardPageShellInput): string {
   // page and its signature can never disagree about the clock or the facts.
   const sessionMarker = input.poll?.controlSessionCsrfToken === undefined
     ? ''
-    : createHash('sha256').update('olympus-dashboard-session-marker\0').update(input.poll.controlSessionCsrfToken).digest('hex').slice(0, 24);
+    : dashboardSessionMarker(input.poll.controlSessionCsrfToken);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController
     ? []
@@ -983,14 +984,11 @@ export function standaloneDashboardControllerScript(
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
             });
             // The local session is a new one: later requests carry its CSRF token, not the launch session's,
-            // and the poll expects its marker (the server's hash of that token), so it does not reload the page.
+            // and the poll expects the server's marker for it, so it does not reload the page.
             var body = await json(response);
             if (response.ok && typeof body.csrf_token === 'string') {
               csrfToken = body.csrf_token;
-              try {
-                var digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('olympus-dashboard-session-marker\\u0000' + csrfToken));
-                sessionMarker = Array.from(new Uint8Array(digest)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').slice(0, 24);
-              } catch (error) {}
+              if (typeof body.session_marker === 'string') sessionMarker = body.session_marker;
             }
             return response.ok;
           },
