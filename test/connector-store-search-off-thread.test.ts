@@ -152,4 +152,69 @@ describe('connector store keyword search on the read pool', () => {
       expect(result.skippedCorpora).toEqual([{ corpusId: 'public_safe.busy', trustDomain: 'public_safe', reason: 'lane_timeout' }]);
     }
   });
+
+  // Each pool read is its own transaction, so ingestion can write between
+  // the FTS read and the reads that depend on its rows. A chunk_pk or
+  // item_pk the FTS read returned may by then belong to another item. A
+  // dependent read that no longer matches the row's item drops the row, as
+  // if it had not matched: another item's chunk, hash or offsets must never
+  // be attached to it.
+  test('a chunk reused by another item between the FTS read and the locate drops the row', async () => {
+    const internal = (await seeded()).stores.internal!;
+    const db = (internal as unknown as { db: Database }).db;
+    const before = internal.searchItemsDetailed('zebra', 20);
+    expect(before.rows.map((row) => row.sourceItem.localItemId)).toEqual([localId('zebra')]);
+    const other = db.query('SELECT item_pk FROM items WHERE local_item_id = ?').get(localId('note-0')) as { item_pk: number };
+    const otherHashes = (db.query('SELECT content_hash FROM chunks WHERE item_pk = ?').all(other.item_pk) as Array<{ content_hash: string }>).map((row) => row.content_hash);
+    let reused = false;
+    const result = driveByHand(internal, 'zebra', {}, (read) => {
+      if (reused || !/FROM chunks/.test(read.sql) || /connector_store_fts/.test(read.sql)) return;
+      reused = true;
+      // The zebra chunk's pk now holds a chunk of another item (a delete and a reinsert that reused the pk).
+      const chunkPk = (db.query('SELECT c.chunk_pk FROM chunks c JOIN items i ON i.item_pk = c.item_pk WHERE i.local_item_id = ?').get(localId('zebra')) as { chunk_pk: number }).chunk_pk;
+      db.query('DELETE FROM chunks WHERE item_pk = ?').run(other.item_pk);
+      db.query('UPDATE chunks SET item_pk = ?, content_hash = ? WHERE chunk_pk = ?').run(other.item_pk, otherHashes[0]!, chunkPk);
+    });
+    expect(reused).toBe(true);
+    expect(result.rows).toEqual([]);
+    expect(result.rows.flatMap((row) => (row.chunk ? [row.chunk.contentHash] : []))).not.toContain(otherHashes[0]);
+  });
+
+  test('an item pk that names another item by the follow-up concept reads drops the row', async () => {
+    const internal = (await seeded()).stores.internal!;
+    const db = (internal as unknown as { db: Database }).db;
+    const query = 'zebra crossing museum';
+    const options = { locate: false } as const;
+    expect(internal.searchItemsDetailed(query, 20, undefined, undefined, options).rows.map((row) => row.sourceItem.localItemId)).toContain(localId('zebra'));
+    let moved = false;
+    const result = driveByHand(internal, query, options, (read) => {
+      if (moved || !/item_pk IN/.test(read.sql)) return;
+      moved = true;
+      // The pk the FTS read returned for zebra is now another item's.
+      db.query("UPDATE items SET local_item_id = 'personal:someone-else', provider_item_id = 'someone-else' WHERE local_item_id = ?").run(localId('zebra'));
+    });
+    expect(moved).toBe(true);
+    expect(result.rows.map((row) => row.sourceItem.localItemId)).not.toContain(localId('zebra'));
+  });
 });
+
+/** Runs the search's reads on the store's own connection, calling `between` before each one. */
+function driveByHand(
+  store: object,
+  query: string,
+  options: ConnectorStoreKeywordFtsOptions,
+  between: (read: { sql: string }) => void,
+): ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']> {
+  const inner = store as unknown as {
+    db: Database;
+    searchItemsSteps(...args: unknown[]): Generator<{ sql: string; params: unknown[]; mode: 'get' | 'all' }, ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']>, unknown>;
+  };
+  const steps = inner.searchItemsSteps(query, 20, undefined, undefined, options);
+  let step = steps.next();
+  while (!step.done) {
+    between(step.value);
+    const statement = inner.db.query(step.value.sql);
+    step = steps.next(step.value.mode === 'all' ? statement.all(...(step.value.params as never[])) : statement.get(...(step.value.params as never[])));
+  }
+  return step.value;
+}

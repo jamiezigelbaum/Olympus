@@ -12016,15 +12016,22 @@ export class LocalConnectorStore {
     if (minimumSignal && rows.length > 0) {
       const pks = rows.map((row) => row.item_pk);
       const placeholders = pks.map(() => '?').join(', ');
+      // On the read pool each read is its own transaction, so a pk the FTS
+      // read returned may name another item by the time a follow-up read
+      // runs (ingestion writes in between). A hit counts only for the item
+      // the row was read as; on one connection they always agree.
+      const itemAt = new Map(rows.map((row) => [row.item_pk, row.local_item_id]));
+      const sameItem = (hit: { item_pk: number; local_item_id: string }) => itemAt.get(hit.item_pk) === hit.local_item_id;
       for (const [groupIndex, group] of groups.entries()) {
-        const hits = (yield { mode: 'all', sql: `
-          SELECT DISTINCT connector_store_fts.item_pk
+        const hits = ((yield { mode: 'all', sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
           FROM connector_store_fts
           JOIN items i ON i.item_pk = connector_store_fts.item_pk
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number }>;
+        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string }>)
+          .filter(sameItem);
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
           matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
@@ -12042,11 +12049,12 @@ export class LocalConnectorStore {
         ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
         : [];
       const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
-        SELECT DISTINCT connector_store_fts.item_pk
+        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
         FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
         WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
           ${selectedFtsScope.sql}
-      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number }>)
+      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string }>)
+        .filter(sameItem)
         .map(row => row.item_pk));
       selected = rows.filter((row) => {
         if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
@@ -12078,16 +12086,22 @@ export class LocalConnectorStore {
     const spanTerms = queryTermsForSpan(query);
     const kept = selected.slice(0, limit);
     const located: ConnectorStoreSearchRow[] = [];
+    const locatedRows: ItemRow[] = [];
     for (const row of kept) {
       const base = searchRowFromItemRow(row);
-      if (ftsOptions.locate === false) {
-        located.push(row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true as const });
+      if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
+        located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true as const });
+        locatedRows.push(row);
         continue;
       }
-      const chunk = row.chunk_pk === null || row.chunk_pk === undefined
-        ? undefined
-        : yield* this.chunkMatchSteps(row.chunk_pk, 'keyword', spanTerms);
-      located.push(chunk ? { ...base, chunk } : base);
+      const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+      // The chunk no longer belongs to this item as it was read (on the read
+      // pool, ingestion can replace an item's chunks between reads, and a
+      // chunk pk can be reused by another item): the row is dropped, as if
+      // it had not matched. Another item's chunk is never attached to it.
+      if (!chunk) continue;
+      located.push({ ...base, chunk });
+      locatedRows.push(row);
     }
     return {
       rows: located,
@@ -12096,7 +12110,7 @@ export class LocalConnectorStore {
       // text). A single-concept query has nothing to count: every row matched it.
       concepts: {
         total: groups.length,
-        matched: new Map(kept.map((row) => [
+        matched: new Map(locatedRows.map((row) => [
           row.local_item_id,
           minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
         ])),
@@ -12186,43 +12200,47 @@ export class LocalConnectorStore {
     lane: 'keyword' | 'semantic',
     queryTerms?: readonly string[],
   ): ConnectorStoreChunkMatch | undefined {
-    return this.readHere(this.chunkMatchSteps(chunkPk, lane, queryTerms));
-  }
-
-  private *chunkMatchSteps(
-    chunkPk: number,
-    lane: 'keyword' | 'semantic',
-    queryTerms?: readonly string[],
-  ): Generator<StoreRead, ConnectorStoreChunkMatch | undefined, unknown> {
-    const row = (yield {
-      mode: 'get', sql: 'SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?', params: [chunkPk],
-    }) as
+    const row = this.db.query(
+      'SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?',
+    ).get(chunkPk) as
       | { item_pk: number; chunk_index: number; content_hash: string; bounded_text: string }
       | null;
     if (!row) return undefined;
 
-    const priorRows = (yield {
-      mode: 'all',
-      sql: 'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
-      params: [row.item_pk, row.chunk_index],
-    }) as Array<{ bounded_text: string }>;
+    const priorRows = this.db.query(
+      'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
+    ).all(row.item_pk, row.chunk_index) as Array<{ bounded_text: string }>;
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+  }
 
-    const chunkChars = row.bounded_text.length;
-    const { charStart, charEnd } = queryTerms?.length
-      ? firstTermSpan(row.bounded_text, queryTerms)
-      : { charStart: 0, charEnd: chunkChars };
-    return {
-      chunkId: String(chunkPk),
-      chunkIndex: row.chunk_index,
-      contentHash: row.content_hash,
-      charStart,
-      charEnd,
-      itemCharStart: itemOffset + charStart,
-      itemCharEnd: itemOffset + charEnd,
-      chunkChars,
-      lane,
-    };
+  /**
+   * The keyword lane's chunk locate, checked against the item the FTS read
+   * returned: one statement reads the chunk and the chunks before it, and
+   * only while the chunk still belongs to that item at that version. On the
+   * read pool the FTS read and this one are separate transactions, so the
+   * chunk may by then be gone or reused by another item; then this returns
+   * undefined and the caller drops the row. On one connection it is the
+   * same locate as chunkMatchForChunkPk.
+   */
+  private *keywordChunkMatchSteps(
+    item: Pick<ItemRow, 'item_pk' | 'local_item_id' | 'source_version'>,
+    chunkPk: number,
+    queryTerms: readonly string[],
+  ): Generator<StoreRead, ConnectorStoreChunkMatch | undefined, unknown> {
+    const rows = (yield {
+      mode: 'all',
+      sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
+        ORDER BY c.chunk_index`,
+      params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk],
+    }) as Array<{ chunk_pk: number; chunk_index: number; content_hash: string; bounded_text: string }>;
+    const row = rows.at(-1);
+    if (!row || row.chunk_pk !== chunkPk) return undefined;
+    const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, 'keyword', queryTerms);
   }
 
   // Recency lane: newest live items regardless of query match, same
@@ -15174,6 +15192,31 @@ export function chunkText(text: string, maxChunkChars: number): string[] {
     chunks.push(trimmed.slice(offset, offset + maxChunkChars));
   }
   return chunks;
+}
+
+/** A chunk locator from its row and the UTF-16 length of the item's chunks before it (chunkMatchForChunkPk). */
+function chunkMatchFromRows(
+  chunkPk: number,
+  row: { chunk_index: number; content_hash: string; bounded_text: string },
+  itemOffset: number,
+  lane: 'keyword' | 'semantic',
+  queryTerms?: readonly string[],
+): ConnectorStoreChunkMatch {
+  const chunkChars = row.bounded_text.length;
+  const { charStart, charEnd } = queryTerms?.length
+    ? firstTermSpan(row.bounded_text, queryTerms)
+    : { charStart: 0, charEnd: chunkChars };
+  return {
+    chunkId: String(chunkPk),
+    chunkIndex: row.chunk_index,
+    contentHash: row.content_hash,
+    charStart,
+    charEnd,
+    itemCharStart: itemOffset + charStart,
+    itemCharEnd: itemOffset + charEnd,
+    chunkChars,
+    lane,
+  };
 }
 
 /**
