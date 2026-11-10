@@ -42,6 +42,9 @@ import { renderDashboardAppsReceivedPage } from '../src/workers/dashboard/pages/
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
+import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -306,10 +309,10 @@ describe('the per-item override, bound to the recorded item', () => {
       fetchedAt: '2026-09-23T00:00:00.000Z',
     };
   }
-  function connectorFor(items: readonly RawItem[]): SourceConnector {
+  function connectorFor(items: readonly RawItem[], family: SourceConnector['family'] = 'file'): SourceConnector {
     return {
       id: 'fixture',
-      family: 'file',
+      family,
       async authenticate() {},
       listItems(): AsyncIterable<SourceConnectorListPage> {
         return (async function* () { yield { items, done: true }; })();
@@ -324,6 +327,47 @@ describe('the per-item override, bound to the recorded item', () => {
       },
     };
   }
+
+  test('a chat message found by search keeps its conversation, so its correction goes through', async () => {
+    const dir = tempDir();
+    const env = {
+      OLYMPUS_TIER_RULES_PATH: join(dir, 'tier-rules.json'),
+      OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'classification-ledger.jsonl'),
+    };
+    const dbPath = join(dir, 'chat.sqlite');
+    const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.telegram.chat', family: 'chat', trustDomain: 'internal' });
+    cleanups.push(() => { store.close(); clearInstalledTierClassification(); });
+    configureInstalledTierClassification({ env });
+    const message: RawItem = {
+      identity: { family: 'chat', provider: 'telegram', accountScope: 'personal', providerItemId: 'msg-7', providerConversationId: 'chat-3', localItemId: 'personal:chat-3:msg-7', sourceVersion: 'v1' },
+      mimeType: 'text/plain',
+      content: { kind: 'text', text: 'The violet turnips are ready for Saturday.' },
+      metadata: { name: 'Garden chat', pathDisplay: '/chats/garden', locatorUri: 'telegram://chat/chat-3/msg-7' },
+      fetchedAt: '2026-09-23T00:00:00.000Z',
+    };
+    await store.syncFromConnector(connectorFor([message], 'chat'), { fetchContent: true });
+    const lanes = () => ({
+      registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store }) },
+      contentProviders: { [store.corpusId]: createConnectorStoreContentProvider({ store }) },
+    });
+    const raw = await searchReleasedEvidence({ lanes: lanes as never, question: 'violet turnips Saturday' });
+    expect(raw.evidence[0]).toMatchObject({ provider_item_id: 'msg-7', provider_conversation_id: 'chat-3' });
+    const noted = createReleaseCapture();
+    runWithReleaseCapture(noted, () => searchToolResult(raw));
+    const recorded = noted.items![0]!;
+    expect(recorded).toMatchObject({ source: 'Telegram', provider: 'telegram', providerItemId: 'msg-7', providerConversationId: 'chat-3' });
+    const context = { storePaths: [dbPath], env };
+    runTierSetOnRecordedItem(recorded.locator!, 'private', {
+      provider: recorded.provider!,
+      providerItemId: recorded.providerItemId!,
+      ...(recorded.providerConversationId ? { providerConversationId: recorded.providerConversationId } : {}),
+    }, context);
+    expect(store.tierLedger()!.getOverride({ provider: 'telegram', accountScope: 'personal', providerItemId: 'msg-7', providerConversationId: 'chat-3' })).toBeDefined();
+    // The check still binds the conversation: the same message id without it is refused.
+    expect(() => runTierSetOnRecordedItem(recorded.locator!, 'private', { provider: 'telegram', providerItemId: 'msg-7' }, context))
+      .toThrow('no longer names the item');
+  });
 
   test('a locator that now names another item, or nothing, changes nothing; the recorded item is raised', async () => {
     const dir = tempDir();
