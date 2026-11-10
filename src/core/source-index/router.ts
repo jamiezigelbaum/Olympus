@@ -284,11 +284,11 @@ export interface RouteSourceIndexSearchOptions {
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
-  /** The lane deadline's clock and timers; tests pass a test clock. Defaults to the real ones. */
+  // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
   laneClock?: LaneDeadlineClock;
 }
 
-/** The time seam of the lane deadline (runCorpusLaneWithDeadline). */
+// The time seam of the lane deadline (runCorpusLaneWithDeadline).
 export interface LaneDeadlineClock {
   now(): number;
   setTimeout(callback: () => void, ms: number): unknown;
