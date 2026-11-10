@@ -67,6 +67,7 @@ import {
   type ComputerUnpairEntry,
   type ComputerUnreadableEntry,
 } from '../chatgpt/dashboard-contract.ts';
+import { archiveExportGuideLinks } from '../../core/archive-formats.ts';
 import { isUnreadablePageCursor, type UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surface.ts';
 import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
@@ -607,7 +608,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(unreadable.length > 0 ? { unreadable } : {}),
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
         ...(indexedItems > 0 ? { indexedItems } : {}),
-        ...(archives ? { archives } : {}),
+        ...(archives ? { archives, archiveGuideLinks: archiveExportGuideLinks() } : {}),
         ...(sourceImports ? { sourceImports } : {}),
         ...(archiveSources ? { archiveSources } : {}),
         ...(archiveCards ? { archiveCards } : {}),

@@ -846,6 +846,11 @@ export function archiveExportGuides(formats: readonly ArchiveFormatDefinition[] 
   return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
 }
 
+/** Each export guide's step pages, by format id: a step's https page, or null for a step without one. */
+export function archiveExportGuideLinks(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): Record<string, Array<string | null>> {
+  return Object.fromEntries(archiveExportGuides(formats).map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)]));
+}
+
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
 }

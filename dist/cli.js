@@ -2034,6 +2034,9 @@ function isTelegramJsonHead(head) {
 function archiveExportGuides(formats = ARCHIVE_FORMATS) {
   return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
 }
+function archiveExportGuideLinks(formats = ARCHIVE_FORMATS) {
+  return Object.fromEntries(archiveExportGuides(formats).map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)]));
+}
 function getArchiveFormat(formatId) {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
 }
@@ -156222,7 +156225,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.confirming = "";
     const A = H.copy.archives;
     const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
-    const links = own3 ? guideLinksOf([own3]) : guideLinksOf(allArchiveSourceMetas());
+    const links = own3 ? guideLinksOf([own3]) : allGuideLinks();
     const guides = linkedGuides(A.pick.guides, links, !!own3);
     const words2 = own3 ? { ...A.pick, guides, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, guides, account: A.account };
     picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
@@ -156232,6 +156235,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!onComputer() || !meta2 || !Array.isArray(meta2.archiveSources))
       return [];
     return meta2.archiveSources.filter((entry) => !!entry);
+  }
+  function allGuideLinks() {
+    const meta2 = state.computerMeta;
+    const full = onComputer() && meta2 && meta2.archiveGuideLinks && typeof meta2.archiveGuideLinks === "object" ? meta2.archiveGuideLinks : {};
+    return guideLinksOf([...allArchiveSourceMetas(), { guideLinks: full }]);
   }
   function guideLinksOf(sources) {
     const out = {};
@@ -189201,10 +189209,8 @@ function archiveImportScheduling(scheduler) {
   return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? "not_selected" : "on";
 }
 function guideLinksOf(formats) {
-  const entries = archiveExportGuides(formats);
-  if (entries.length === 0)
-    return {};
-  return { guideLinks: Object.fromEntries(entries.map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)])) };
+  const links = archiveExportGuideLinks(formats);
+  return Object.keys(links).length > 0 ? { guideLinks: links } : {};
 }
 function fill3(template, values) {
   let out = template;
@@ -219092,7 +219098,7 @@ function createDashboardPanelTools(options) {
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...indexedItems > 0 ? { indexedItems } : {},
-        ...archives ? { archives } : {},
+        ...archives ? { archives, archiveGuideLinks: archiveExportGuideLinks() } : {},
         ...sourceImports ? { sourceImports } : {},
         ...archiveSources ? { archiveSources } : {},
         ...archiveCards ? { archiveCards } : {}
@@ -219105,6 +219111,7 @@ function createDashboardPanelTools(options) {
 var ARCHIVE_LOCAL_SESSION_REFUSAL = "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.", UNPAIR_SOURCE_IDS, ARCHIVE_ARG_MAX = 4096;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
+  init_archive_formats();
   init_unreadable_files();
   init_mcp_surface();
   init_setup_tools();

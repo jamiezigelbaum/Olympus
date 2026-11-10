@@ -30,7 +30,7 @@ import {
   type ComputerSourceImportEntry,
   type ComputerSourceImportsMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { ARCHIVE_COMMON_FINDINGS, ARCHIVE_FORMATS, archiveExportGuides } from '../src/core/archive-formats.ts';
+import { ARCHIVE_COMMON_FINDINGS, ARCHIVE_FORMATS, archiveExportGuideLinks, archiveExportGuides } from '../src/core/archive-formats.ts';
 import { waitFor } from './helpers/test-clock.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
@@ -1834,9 +1834,8 @@ describe('Import an archive: the quick path and Get my archive (#660)', () => {
   test('a guide is one step per screen with the page to open, and ends on the drop zone', async () => {
     const takeout = guides.find((entry) => entry.formatId === 'mbox')!.guide;
     const result = dashboard('archives-none', meta([]));
-    // The step pages come from the computer meta (a source card's guideLinks), not the page's words.
-    const mail = { sourceId: 'gmail.archive', label: 'Gmail', intro: 'Drop a Takeout export.', guideLinks: { mbox: takeout.steps.map((step) => step.link?.url ?? null) } };
-    const computer = { ...result._meta[COMPUTER_META_KEY], archiveSources: [mail] };
+    // The step pages come from the computer meta's full list, not the page's words, with no source card that reads mail.
+    const computer = { ...result._meta[COMPUTER_META_KEY], archiveGuideLinks: archiveExportGuideLinks() };
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => ({ ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: computer } }),
       ...uploadServe(),

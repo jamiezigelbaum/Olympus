@@ -20,7 +20,7 @@
  */
 import { homedir } from 'node:os';
 import { posix } from 'node:path';
-import { archiveExportGuides, archiveSourceCardOf, archiveSourceCards, getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
+import { archiveExportGuideLinks, archiveSourceCardOf, archiveSourceCards, getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
 import { realpathSync } from 'node:fs';
 import type {
@@ -279,9 +279,8 @@ export const ARCHIVE_NOT_RUNNING_COPY = {
 // The export guides a source's picker offers (#660), by format id, with each
 // step's page; nothing when its formats have none.
 function guideLinksOf(formats: readonly ArchiveFormatDefinition[]): { guideLinks?: Record<string, Array<string | null>> } {
-  const entries = archiveExportGuides(formats);
-  if (entries.length === 0) return {};
-  return { guideLinks: Object.fromEntries(entries.map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)])) };
+  const links = archiveExportGuideLinks(formats);
+  return Object.keys(links).length > 0 ? { guideLinks: links } : {};
 }
 
 function fill(template: string, values: Record<string, string>): string {

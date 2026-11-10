@@ -551,6 +551,11 @@ export interface ComputerDashboardMeta {
    */
   archiveSources?: ComputerArchiveSourceMeta[];
   /**
+   * Every export guide's step pages, by format id (Get my archive, #660), for
+   * Import another archive: present with `archives`, whatever sources run.
+   */
+  archiveGuideLinks?: Record<string, Array<string | null>>;
+  /**
    * Each import-only source's card (Reflect, Roam: a format no live connector
    * reads names its card in the format registry): the imports of its formats,
    * listed as the Archives row lists its own, with Remove. `sourceId` is the card.

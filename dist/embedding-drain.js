@@ -45447,7 +45447,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.confirming = "";
     const A = H.copy.archives;
     const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
-    const links = own3 ? guideLinksOf([own3]) : guideLinksOf(allArchiveSourceMetas());
+    const links = own3 ? guideLinksOf([own3]) : allGuideLinks();
     const guides = linkedGuides(A.pick.guides, links, !!own3);
     const words2 = own3 ? { ...A.pick, guides, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, guides, account: A.account };
     picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
@@ -45457,6 +45457,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!onComputer() || !meta || !Array.isArray(meta.archiveSources))
       return [];
     return meta.archiveSources.filter((entry) => !!entry);
+  }
+  function allGuideLinks() {
+    const meta = state.computerMeta;
+    const full = onComputer() && meta && meta.archiveGuideLinks && typeof meta.archiveGuideLinks === "object" ? meta.archiveGuideLinks : {};
+    return guideLinksOf([...allArchiveSourceMetas(), { guideLinks: full }]);
   }
   function guideLinksOf(sources) {
     const out = {};

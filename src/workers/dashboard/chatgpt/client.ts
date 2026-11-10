@@ -1469,7 +1469,7 @@ export function chatgptDashboardClient(
     // A source's own picker offers only the export guides of its formats
     // (#660); the plain one offers every guide. Each step's page comes from
     // the computer meta, never from the page's own words.
-    const links = own ? guideLinksOf([own]) : guideLinksOf(allArchiveSourceMetas());
+    const links = own ? guideLinksOf([own]) : allGuideLinks();
     const guides = linkedGuides(A.pick.guides, links, !!own);
     const words = own
       ? { ...A.pick, guides, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
@@ -1483,6 +1483,13 @@ export function chatgptDashboardClient(
     const meta = state.computerMeta;
     if (!onComputer() || !meta || !Array.isArray(meta.archiveSources)) return [];
     return meta.archiveSources.filter((entry: Any) => !!entry);
+  }
+
+  /** Every export guide's step pages, for Import another archive: the computer meta's full list, and what the source cards carry. */
+  function allGuideLinks(): Record<string, Any[]> {
+    const meta = state.computerMeta;
+    const full = onComputer() && meta && meta.archiveGuideLinks && typeof meta.archiveGuideLinks === 'object' ? meta.archiveGuideLinks : {};
+    return guideLinksOf([...allArchiveSourceMetas(), { guideLinks: full }]);
   }
 
   /** The export guides' step pages these sources carry, by format id (#660). */
