@@ -89,8 +89,10 @@ export function renderBackupSection(input: { status?: BackupStatus; local: boole
   const radio = (value: string, label: string) => `<label class="bkradio"><input type="radio" name="schedule" value="${value}"${status.schedule === value ? ' checked' : ''}${off}> ${escapeHtml(label)}</label>`;
   const when = `<fieldset class="bkwhen" data-backup-schedule><legend class="bkh">${escapeHtml(C.when)}</legend>${radio('manual', C.manual)}${radio('nightly', C.nightly)}${radio('weekly', C.weekly)}<p class="pnote">${escapeHtml(C.keep)}</p></fieldset>`;
   const passphrase = `<h4 class="bkh">${escapeHtml(C.passphrase)}</h4><p>${escapeHtml(C.passphraseLine)}</p>`
-    + `<p>${status.passphraseSet ? `✓ ${escapeHtml(C.set)} · ` : `${escapeHtml(C.notSet)} · `}<button class="linkbtn" type="button" data-dialog-open="backup-passphrase">${escapeHtml(status.passphraseSet ? C.change : C.setOne)}</button></p>`
-    + (status.passphraseSet ? `<p class="pnote">${escapeHtml(C.passphraseKept)}</p>` : '');
+    + `<p>${status.passphraseProblem ? '' : status.passphraseSet ? `✓ ${escapeHtml(C.set)} · ` : `${escapeHtml(C.notSet)} · `}<button class="linkbtn" type="button" data-dialog-open="backup-passphrase">${escapeHtml(status.passphraseProblem ? 'Set the passphrase again' : status.passphraseSet ? C.change : C.setOne)}</button></p>`
+    + (status.passphraseProblem
+      ? '<p class="bkerr" role="alert" data-backup-key-problem>The key kept for your passphrase can\'t be read, so backups stop until you set the passphrase again.</p>'
+      : status.passphraseSet ? `<p class="pnote">${escapeHtml(C.passphraseKept)}</p>` : '');
   const restoreState = status.restore;
   const restoreNote = restoreState?.state === 'done'
     ? `<p class="bkok" role="status" data-backup-restored>Restored ${escapeHtml(backupWhen(restoreState.at, input.now))}.${restoreState.sign_in_again?.length ? ` Sign in again to: ${escapeHtml(restoreState.sign_in_again.join(', '))}.` : ''} <a href="/dashboard?connect">Open Sources</a></p>`

@@ -36,6 +36,7 @@ export function backupStatusBody(status: BackupStatus): Record<string, unknown> 
     folder: status.folder ?? null,
     schedule: status.schedule,
     passphrase_set: status.passphraseSet,
+    passphrase_problem: status.passphraseProblem === true,
     last: status.last ?? null,
     last_error: status.lastError ?? null,
     running: status.running,

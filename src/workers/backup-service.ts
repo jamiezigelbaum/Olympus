@@ -74,6 +74,8 @@ export interface BackupStatus {
   folder?: string;
   schedule: BackupSchedule;
   passphraseSet: boolean;
+  /** A passphrase was set but its kept key can't be used: backups fail until it is set again. */
+  passphraseProblem?: boolean;
   last?: { at: string; file: string; bytes: number; encrypted: boolean };
   lastError?: { at: string; message: string };
   running: boolean;
@@ -121,13 +123,37 @@ export function readBackupSettings(path: string): BackupSettingsFile {
   };
 }
 
-/** The stored key, if a passphrase was set; a file that does not check out is no key. */
+/** Said when a passphrase was set but its key can't be used: no backup is made without it. */
+export const BACKUP_KEY_INVALID = 'The key kept for your passphrase can\'t be read, so no backup was made. Set the passphrase again (or choose to back up without one).';
+
+/**
+ * The stored key: `absent` only when no key file exists (no passphrase was
+ * set). A file that exists but cannot be read, is malformed, or fails its
+ * key check is `invalid`, and a backup then fails closed: it is never
+ * written unencrypted in its place.
+ */
+export function readStoredBackupKeyState(path: string): { state: 'absent' } | { state: 'ok'; key: BackupKey } | { state: 'invalid' } {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { state: 'absent' } : { state: 'invalid' };
+  }
+  try {
+    const raw = JSON.parse(text) as { schema?: string; kdf?: BackupKdf; key?: string; key_check?: string };
+    if (!raw || raw.schema !== KEY_SCHEMA || !raw.kdf || typeof raw.kdf.salt !== 'string' || typeof raw.key !== 'string' || typeof raw.key_check !== 'string') return { state: 'invalid' };
+    const key = Buffer.from(raw.key, 'base64');
+    if (key.length !== 32 || backupKeyCheck(key) !== raw.key_check) return { state: 'invalid' };
+    return { state: 'ok', key: { key, kdf: raw.kdf } };
+  } catch {
+    return { state: 'invalid' };
+  }
+}
+
+/** The stored key when it is usable; undefined when absent or invalid. */
 export function readStoredBackupKey(path: string): BackupKey | undefined {
-  const raw = readJson(path) as { schema?: string; kdf?: BackupKdf; key?: string; key_check?: string } | undefined;
-  if (!raw || raw.schema !== KEY_SCHEMA || !raw.kdf || typeof raw.key !== 'string') return undefined;
-  const key = Buffer.from(raw.key, 'base64');
-  if (key.length !== 32 || backupKeyCheck(key) !== raw.key_check) return undefined;
-  return { key, kdf: raw.kdf };
+  const stored = readStoredBackupKeyState(path);
+  return stored.state === 'ok' ? stored.key : undefined;
 }
 
 /**
@@ -190,7 +216,10 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
     return {
       ...(current.folder ? { folder: current.folder } : {}),
       schedule: current.schedule,
-      passphraseSet: readStoredBackupKey(options.paths.key) !== undefined,
+      ...(() => {
+        const stored = readStoredBackupKeyState(options.paths.key).state;
+        return { passphraseSet: stored !== 'absent', ...(stored === 'invalid' ? { passphraseProblem: true } : {}) };
+      })(),
       ...(current.last ? { last: current.last } : {}),
       ...(current.last_error && current.last_error.at >= (current.last?.at ?? '') ? { lastError: current.last_error } : {}),
       running: running !== undefined,
@@ -206,7 +235,10 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
     const startedAt = now();
     save({ ...current, last_attempt_at: startedAt.toISOString() });
     try {
-      const key = readStoredBackupKey(options.paths.key);
+      const stored = readStoredBackupKeyState(options.paths.key);
+      // Fail closed: a passphrase was set, so never write this backup unencrypted.
+      if (stored.state === 'invalid') throw new OperationError('invalid_params', BACKUP_KEY_INVALID);
+      const key = stored.state === 'ok' ? stored.key : undefined;
       const result = await backupOlympusData({
         folder: current.folder,
         ...(key ? { key } : {}),

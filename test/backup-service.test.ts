@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { exportOlympusData, lifecycleEnv } from '../src/data-lifecycle.ts';
 import { BACKUP_WRONG_PASSPHRASE, listBackups } from '../src/data-backup.ts';
-import { applyPendingRestoreAtBoot, backupDue, createBackupService, type BackupServicePaths, type BackupSettingsFile } from '../src/workers/backup-service.ts';
+import { BACKUP_KEY_INVALID, applyPendingRestoreAtBoot, backupDue, createBackupService, type BackupServicePaths, type BackupSettingsFile } from '../src/workers/backup-service.ts';
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
@@ -100,6 +100,39 @@ describe('backup service', () => {
     expect(readFileSync(paths.key, 'utf8')).not.toContain('correct horse');
     expect(service.setPassphrase(null).passphraseSet).toBe(false);
     expect(existsSync(paths.key)).toBe(false);
+  });
+
+  test('a set passphrase whose kept key is malformed, unreadable or fails its check fails the backup: never an unencrypted file', async () => {
+    const dir = tempDir();
+    const home = join(dir, 'a');
+    seed(storeOf(home), 'a bookmark');
+    const { service, paths } = install(home, () => new Date(2026, 10, 1, 4, 0));
+    const folder = join(dir, 'Backups');
+    mkdirSync(folder);
+    service.saveSettings({ folder });
+    service.setPassphrase('correct horse battery');
+    const good = JSON.parse(readFileSync(paths.key, 'utf8'));
+    const cases: Array<[string, () => void]> = [
+      ['malformed', () => writeFileSync(paths.key, '{"schema": "olympus.backup.key.v1", "key": ')],
+      ['wrong check', () => writeFileSync(paths.key, JSON.stringify({ ...good, key_check: Buffer.alloc(16).toString('base64') }))],
+      ['wrong key', () => writeFileSync(paths.key, JSON.stringify({ ...good, key: Buffer.alloc(32, 7).toString('base64') }))],
+      // Unreadable: a folder where the file should be (root ignores chmod 000).
+      ['unreadable', () => { rmSync(paths.key, { force: true }); mkdirSync(paths.key); }],
+    ];
+    for (const [name, breakKey] of cases) {
+      rmSync(paths.key, { recursive: true, force: true });
+      breakKey();
+      const status = service.status();
+      expect(`${name}: ${status.passphraseProblem}`).toBe(`${name}: true`);
+      const after = await service.runNow();
+      expect(`${name}: ${after.lastError?.message}`).toBe(`${name}: ${BACKUP_KEY_INVALID}`);
+      expect(`${name}: ${readdirSync(folder).length}`).toBe(`${name}: 0`);
+      expect(renderDashboardSettingsPage({ backup: after, outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' })).toContain('Set the passphrase again');
+    }
+    // An absent key is no passphrase: that backup is unencrypted by the owner's choice.
+    rmSync(paths.key, { recursive: true, force: true });
+    expect(service.status().passphraseProblem).toBeUndefined();
+    expect((await service.runNow()).last?.encrypted).toBe(false);
   });
 
   test('restore opens and checks the backup, restarts, and the restart restores it', async () => {
