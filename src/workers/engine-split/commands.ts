@@ -47,7 +47,9 @@ export interface EngineItemIdentity {
  */
 export const ENGINE_FORWARDED_ROUTES = {
   delete_source_data: ['/dashboard/delete-source-data', '/v1/cli/data-delete'],
-  tier_override: ['/v1/cli/tier'],
+  // Every per-item override: the CLI's tier set, and the one-item privacy change
+  // from the dashboard and from an agent (tier-owner-items.ts). Finding items stays a read.
+  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise'],
   storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
   // Pairing state lives with the background's capture service: every pairing route goes there.
   capture: [

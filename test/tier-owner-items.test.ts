@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
 import { isPublicTierRetired, loadSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
@@ -228,6 +229,19 @@ describe('finding an item', () => {
     expect(recent).toEqual(['bank letter.pdf', 'orchard-plan.pdf']);
     expect(parseOwnerTierItemId(item.item_id)).toEqual(bankIdentity);
     expect(() => parseOwnerTierItemId('oti_bm9wZQ')).toThrow('item_id');
+  });
+
+  test('in the engine split\'s front, which opens nothing writable, finding still works', async () => {
+    await judged();
+    forbidWritableStoreOpens();
+    try {
+      const item = bankItem();
+      expect(item).toMatchObject({ title: 'bank letter.pdf', tier: 'Private', owner_set: false });
+      const recent = ownerItems().find({ recent: true }).items.map((found) => found.title).sort();
+      expect(recent).toEqual(['bank letter.pdf', 'orchard-plan.pdf']);
+    } finally {
+      resetStoreWriteGuardForTests();
+    }
   });
 
   test('for an agent, an item whose names are Private is left out', async () => {

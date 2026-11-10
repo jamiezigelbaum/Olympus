@@ -269,11 +269,12 @@ export function createEngineFrontRoutes(input: {
   };
   return (request) => {
     if (request.method !== 'POST') return undefined;
-    const kind = forwardedKindFor(new URL(request.url).pathname);
+    const path = new URL(request.url).pathname;
+    const kind = forwardedKindFor(path);
     if (!kind) return undefined;
     return (async (): Promise<Response | undefined> => {
       if (!input.gate.isOpen()) return restartingResponse();
-      if (kind === 'tier_override' && tierCommandOnlyReads(await request.clone().text())) return undefined;
+      if (path === '/v1/cli/tier' && tierCommandOnlyReads(await request.clone().text())) return undefined;
       if (kind !== 'delete_source_data') return send(kind, request);
       input.gate.close();
       let outcome: Awaited<ReturnType<typeof exchange>>;

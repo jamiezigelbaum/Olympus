@@ -226,7 +226,7 @@ function recentRows(limit: number, context: TierCliContext): StoredItemRow[] {
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => opened.recentDecisions(limit), ledger.boundLedgerId);
+      records = withLedgerAt(ledger.path, context.now, (opened) => opened.recentDecisions(limit), ledger.boundLedgerId, true);
     } catch {
       // A ledger that cannot be read lists nothing.
     }
@@ -287,7 +287,7 @@ function readLocatedState(items: readonly LocatedItem[], context: TierCliContext
         state.ownerTier = override.tier;
       }
       if (ledger.itemIsSecret(item.identity)) state.secret = true;
-    }, item.boundLedgerId);
+    }, item.boundLedgerId, true);
   }
   return state;
 }
