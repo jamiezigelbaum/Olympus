@@ -57298,9 +57298,12 @@ var init_vocabulary = __esm(() => {
     stop: "Stop for now",
     result: "The judge agreed with you on {agreed} of {compared}.",
     resultNone: "You answered Not sure on every item, so there is nothing to compare yet.",
+    roundMix: "Most items in a round are ones the judge was least sure about, so this count is not its accuracy.",
+    needMore: "A reliable accuracy number needs answers about {needed} items picked at random. You have answered {compared} so far, and each round adds {perRound}.",
     rangeLine: "From {compared} answers about items picked at random, it would likely agree with you on {low}% to {high}% of your items.",
     rangeLabel: "Likely range {low}% to {high}%, on a scale of 0 to 100%",
     honest: "More answers make the range narrower. The number itself can go down as well as up. Your answers fix those items; they don't change how the judge decides.",
+    fixesOnly: "Your answers fix those items; they don't change how the judge decides.",
     summary: "{changed} changed to your answer · {confirmed} confirmed · {notSure} “Not sure” left with the judge",
     seeThem: "See them in Your items",
     done: "Done",
@@ -146112,7 +146115,10 @@ function createJudgeCheck(options) {
     const now = randomTally(state.round?.items ?? []);
     const from = now.compared + (state.random_tally?.compared ?? 0);
     const agreed = now.agreed + (state.random_tally?.agreed ?? 0);
-    return from > 0 ? { range: { ...wilsonInterval(agreed, from), from, agreed } } : {};
+    return {
+      random: { compared: from, agreed, needed: JUDGE_CHECK_RANGE_MIN_ANSWERS, per_round: JUDGE_CHECK_RANDOM_PICKS },
+      ...from >= JUDGE_CHECK_RANGE_MIN_ANSWERS ? { range: { ...wilsonInterval(agreed, from), from, agreed } } : {}
+    };
   };
   const viewOf = (state) => {
     const round = state.round;
@@ -146242,7 +146248,7 @@ function createJudgeCheck(options) {
     }
   };
 }
-var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_MAX_PAGES = 20, JUDGE_CHECK_PATH_ENV = "OLYMPUS_JUDGE_CHECK_PATH", JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
+var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_RANGE_MIN_ANSWERS = 30, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_MAX_PAGES = 20, JUDGE_CHECK_PATH_ENV = "OLYMPUS_JUDGE_CHECK_PATH", JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
 var init_judge_check = __esm(() => {
   init_atomic_file();
   init_owner_config_read();
@@ -166828,6 +166834,10 @@ function judgeCheckClientScript(input) {
     }
     var result = round.compared ? esc(fill(J.result, { agreed: round.agreed, compared: round.compared })) : esc(J.resultNone);
     var range = '';
+    var mix = round.compared ? esc(J.roundMix) + ' ' : '';
+    if (!round.range && round.random) {
+      range = '<p class="jcrange" data-jc-need>' + mix + esc(fill(J.needMore, { needed: round.random.needed, compared: round.random.compared, perRound: round.random.per_round })) + '</p>';
+    }
     if (round.range) {
       var low = pct(round.range.low), high = pct(round.range.high), mark = pct(round.range.agreed / round.range.from);
       range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.range.from, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
@@ -166838,7 +166848,7 @@ function judgeCheckClientScript(input) {
     var confirmed = round.answered.filter(function (answered) { return answered.answer === answered.judge; }).length;
     html = '<div class="jccard" data-jc-result>' + head(J.roundDone)
       + '<p class="jcresult" data-jc-count>' + result + '</p>' + range
-      + '<p class="jchonest">' + esc(J.honest) + '</p>'
+      + '<p class="jchonest">' + (round.range ? mix + esc(J.honest) : esc(J.fixesOnly)) + '</p>'
       + '<div style="margin-top:12px" data-jc-fixed>' + changed.map(answeredRow).join('')
       + '<div class="jcdone jcsum"><span class="grow">' + esc(fill(J.summary, { changed: changed.length, confirmed: confirmed, notSure: round.not_sure })) + '</span><a href="' + esc(config.itemsHref) + '">' + esc(J.seeThem) + '</a></div></div>'
       + '<div class="jcnext"><button type="button" class="btn" data-jc-act="put_away">' + esc(J.done) + '</button><button type="button" class="btn primary" data-jc-act="start">' + esc(J.more) + '</button></div>' + msg + '</div>';

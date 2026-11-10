@@ -2,15 +2,16 @@
 // #887; mockups L3-4, L3-5), run in a page against the real round logic
 // (judge-check.ts) over fixture items: the judge's label is hidden until the
 // owner answers, mid-round there is a count and no range, and the finished
-// round shows the count and the Wilson range as a band.
+// round shows the count, plus the Wilson range as a band only once 30
+// randomly picked items are answered.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Window } from 'happy-dom';
 import { DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
-import { createJudgeCheck, wilsonInterval } from '../src/workers/classification/judge-check.ts';
+import { createJudgeCheck, JUDGE_CHECK_RANDOM_PICKS, JUDGE_CHECK_RANGE_MIN_ANSWERS, wilsonInterval } from '../src/workers/classification/judge-check.ts';
 import type { OwnerTierItem } from '../src/workers/classification/tier-owner-items.ts';
 import { DASHBOARD_JUDGE_CHECK_PATH, JUDGE_CHECK_ITEMS_CHANGED_EVENT } from '../src/workers/dashboard/pages/judge-check.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
@@ -32,7 +33,8 @@ const items: OwnerTierItem[] = Array.from({ length: 10 }, (_, index) => ({
   judge_reason: `ordinary:0.${index}0`, decided_at: '2026-11-03T10:00:00.000Z', preview: `Text ${index}`,
 }));
 
-async function card() {
+async function card(earlier?: { compared: number; agreed: number }) {
+  if (earlier) writeFileSync(join(root, 'judge-check.json'), JSON.stringify({ v: 1, random_tally: earlier }));
   const check = createJudgeCheck({
     items: { find: () => ({ items }), set: () => ({ ok: true, item: items[0]!, changed: 'set', applies: 'now', results: [] }) },
     get: (id) => items.find((item) => item.item_id === id),
@@ -113,28 +115,44 @@ describe('Check how Olympus labelled your items', () => {
     expect(reloads).toBe(1);
   });
 
-  test('a finished round shows the count, the likely range as a band, and Check 10 more', async () => {
-    const c = await card();
+  const finishRound = async (c: Awaited<ReturnType<typeof card>>) => {
     await c.click('[data-jc-act="start"]');
     for (let index = 0; index < 10; index += 1) {
       const id = c.current();
       const judge = items.find((candidate) => candidate.item_id === id)!.tier!;
       await c.click(`[data-jc-answer="${index === 0 ? (judge === 'Personal' ? 'Private' : 'Personal') : judge}"]`);
     }
-    expect(c.text('[data-jc-count]')).toBe('The judge agreed with you on 9 of 10.');
-    // The range rests on the random picks alone (classification/judge-check.ts).
     const stored = JSON.parse(readFileSync(join(root, 'judge-check.json'), 'utf8')) as { round: { items: Array<{ random?: boolean; answer: string; judge: string }> } };
     const picks = stored.round.items.filter((item) => item.random);
-    const range = wilsonInterval(picks.filter((item) => item.answer === item.judge).length, picks.length);
-    const low = Math.round(range.low * 100);
-    const high = Math.round(range.high * 100);
-    expect(c.text('[data-jc-result]')).toContain(`From ${picks.length} answers about items picked at random, it would likely agree with you on ${low}% to ${high}% of your items.`);
-    const band = c.$('[data-jc-range] i')!.getAttribute('style');
-    expect(band).toBe(`left:${low}%;width:${high - low}%`);
+    return { picks: picks.length, agreed: picks.filter((item) => item.answer === item.judge).length };
+  };
+
+  test('a finished round below 30 random answers shows the plain count, no percentage or range, and asks for more', async () => {
+    const c = await card();
+    const { picks } = await finishRound(c);
+    expect(c.text('[data-jc-count]')).toBe('The judge agreed with you on 9 of 10.');
+    expect(c.text('[data-jc-need]')).toBe(`${J.roundMix} A reliable accuracy number needs answers about ${JUDGE_CHECK_RANGE_MIN_ANSWERS} items picked at random. You have answered ${picks} so far, and each round adds ${JUDGE_CHECK_RANDOM_PICKS}.`);
+    expect(c.$('[data-jc-range]')).toBeNull();
+    expect(c.text('[data-jc-result]')).not.toContain('%');
+    expect(c.text('.jchonest')).toBe(J.fixesOnly);
     expect(c.text('[data-jc-fixed]')).toContain('1 changed to your answer · 9 confirmed · 0 “Not sure” left with the judge');
     expect(c.$('[data-jc-act="start"]')!.textContent).toBe(J.more);
     // "See them in Your items" goes to the list below the card, on the same tab.
     expect(c.$('[data-jc-fixed] a')!.getAttribute('href')).toBe(`#${PRIVACY_ITEMS_LIST_ID}`);
+  });
+
+  test('once 30 random answers are in, the finished round shows the likely range as a band', async () => {
+    const c = await card({ compared: 27, agreed: 24 });
+    const now = await finishRound(c);
+    // The range rests on the random picks alone (classification/judge-check.ts).
+    const from = 27 + now.picks;
+    const range = wilsonInterval(24 + now.agreed, from);
+    const low = Math.round(range.low * 100);
+    const high = Math.round(range.high * 100);
+    expect(c.text('[data-jc-result]')).toContain(`From ${from} answers about items picked at random, it would likely agree with you on ${low}% to ${high}% of your items.`);
+    expect(c.$('[data-jc-need]')).toBeNull();
+    expect(c.$('[data-jc-range] i')!.getAttribute('style')).toBe(`left:${low}%;width:${high - low}%`);
+    expect(c.text('.jchonest')).toBe(`${J.roundMix} ${J.honest}`);
   });
 });
 

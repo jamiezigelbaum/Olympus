@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createJudgeCheck } from '../src/workers/classification/judge-check.ts';
@@ -2056,9 +2056,17 @@ function previewJudgeCheckItems(): OwnerTierItem[] {
   ];
 }
 let previewJudgeCheck = createPreviewJudgeCheck();
-function createPreviewJudgeCheck() {
+/**
+ * `judge-history` starts the preview as if earlier rounds had left 27 answers
+ * about randomly picked items, 23 agreed (a realistic rate for a good judge),
+ * so the finished round shows the likely range. Without it the round is the
+ * first, and the card shows the plain count.
+ */
+function createPreviewJudgeCheck(history = false) {
   const items = previewJudgeCheckItems();
   let seed = 11;
+  const path = join(mkdtempSync(join(tmpdir(), 'olympus-preview-judge-')), 'judge-check.json');
+  if (history) writeFileSync(path, JSON.stringify({ v: 1, random_tally: { compared: 27, agreed: 23 } }));
   return createJudgeCheck({
     items: {
       find: () => ({ items }),
@@ -2069,7 +2077,7 @@ function createPreviewJudgeCheck() {
       },
     },
     get: (itemId) => items.find((candidate) => candidate.item_id === itemId),
-    path: join(mkdtempSync(join(tmpdir(), 'olympus-preview-judge-')), 'judge-check.json'),
+    path,
     random: () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; },
   });
 }
@@ -2285,7 +2293,7 @@ if (import.meta.main) {
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
       if (dashboardHtmlRoutePage(url) === 'privacy_items') previewPrivacyItems = previewPrivacyItemsFixture();
-      if (dashboardHtmlRoutePage(url) === 'privacy_items' && url.searchParams.has('judge-reset')) previewJudgeCheck = createPreviewJudgeCheck();
+      if (dashboardHtmlRoutePage(url) === 'privacy_items' && url.searchParams.has('judge-reset')) previewJudgeCheck = createPreviewJudgeCheck(url.searchParams.has('judge-history'));
       if (stateOverride?.startsWith('privacy-')) { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [

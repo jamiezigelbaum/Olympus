@@ -19,6 +19,12 @@ import type { OwnerItemChoice, OwnerTierItem, OwnerTierItems } from './tier-owne
 export const JUDGE_CHECK_ROUND_SIZE = 10;
 /** Of each round, how many are picked at random instead of by the judge's doubt. */
 export const JUDGE_CHECK_RANDOM_PICKS = 3;
+/**
+ * The fewest answers about randomly picked items before the card shows a
+ * likely range. Fewer give a range too wide to read as a measurement (owner,
+ * 2026-11-10), so until then the card shows the plain count only.
+ */
+export const JUDGE_CHECK_RANGE_MIN_ANSWERS = 30;
 /** How many recently sorted items a round is drawn from. */
 export const JUDGE_CHECK_POOL = 50;
 /** How far back a new round pages for items no round has asked about yet. */
@@ -91,6 +97,13 @@ export interface JudgeCheckView {
    * `from` is how many answers it rests on, `agreed` how many of them matched.
    */
   range?: { low: number; high: number; from: number; agreed: number };
+  /**
+   * Once the round is done: the random picks answered so far (this round's and
+   * earlier rounds'), how many the judge agreed with, how many a range
+   * needs, and how many each round adds. Below `needed` there is no range, only this plain count, because a
+   * handful of answers makes a range too wide to read as a measurement.
+   */
+  random?: { compared: number; agreed: number; needed: number; per_round: number };
 }
 
 export interface JudgeCheck {
@@ -196,11 +209,14 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     };
   };
 
-  const rangeOf = (state: StoredJudgeCheck): Pick<JudgeCheckView, 'range'> => {
+  const rangeOf = (state: StoredJudgeCheck): Pick<JudgeCheckView, 'range' | 'random'> => {
     const now = randomTally(state.round?.items ?? []);
     const from = now.compared + (state.random_tally?.compared ?? 0);
     const agreed = now.agreed + (state.random_tally?.agreed ?? 0);
-    return from > 0 ? { range: { ...wilsonInterval(agreed, from), from, agreed } } : {};
+    return {
+      random: { compared: from, agreed, needed: JUDGE_CHECK_RANGE_MIN_ANSWERS, per_round: JUDGE_CHECK_RANDOM_PICKS },
+      ...(from >= JUDGE_CHECK_RANGE_MIN_ANSWERS ? { range: { ...wilsonInterval(agreed, from), from, agreed } } : {}),
+    };
   };
 
   const viewOf = (state: StoredJudgeCheck): JudgeCheckView => {

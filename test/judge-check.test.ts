@@ -1,15 +1,16 @@
 // "Check the judge" (issue #887): a round of 10 items, the least sure plus a
 // few at random; the judge's label stays hidden until the owner answers; a
-// differing answer settles that one item; the result is a count and a Wilson
-// range. Everything is kept in one private file on this computer.
+// differing answer settles that one item; the result is a count, and a Wilson
+// range once 30 random picks are answered. Everything is kept in one private file on this computer.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   createJudgeCheck,
   JUDGE_CHECK_RANDOM_PICKS,
+  JUDGE_CHECK_RANGE_MIN_ANSWERS,
   JUDGE_CHECK_ROUND_SIZE,
   judgeConfidence,
   wilsonInterval,
@@ -113,7 +114,7 @@ describe('a round', () => {
     expect(() => check.answer(first, 'Private')).toThrow('not the item waiting');
   });
 
-  test('a finished round gives the count, and a likely range from the random picks only; Check 10 more asks about other items', () => {
+  test('a finished round gives the count and the random picks so far, with no range below 30; Check 10 more asks about other items', () => {
     const items = pool();
     const { check } = fixture(items);
     let view = check.start();
@@ -126,11 +127,12 @@ describe('a round', () => {
       view = check.answer(id, asked.length < JUDGE_CHECK_ROUND_SIZE ? judge : judge === 'Personal' ? 'Private' : 'Personal');
     }
     expect(view).toMatchObject({ state: 'done', compared: 10, agreed: 9, changed: 1 });
-    // The least-sure picks are not a fair sample of all items, so the range rests on the random ones alone.
-    const random = view.range!;
-    expect(random.from).toBe(JUDGE_CHECK_RANDOM_PICKS);
+    // The least-sure picks are not a fair sample of all items, so the tally counts the random ones alone.
+    const random = view.random!;
+    expect(random).toMatchObject({ compared: JUDGE_CHECK_RANDOM_PICKS, needed: JUDGE_CHECK_RANGE_MIN_ANSWERS, per_round: JUDGE_CHECK_RANDOM_PICKS });
     expect([JUDGE_CHECK_RANDOM_PICKS - 1, JUDGE_CHECK_RANDOM_PICKS]).toContain(random.agreed);
-    expect(random).toEqual({ ...wilsonInterval(random.agreed, JUDGE_CHECK_RANDOM_PICKS), from: JUDGE_CHECK_RANDOM_PICKS, agreed: random.agreed });
+    // Three answers make a range too wide to read as a measurement, so there is none yet.
+    expect(view.range).toBeUndefined();
     let next = check.start();
     expect(next.state).toBe('active');
     expect(asked).not.toContain(next.current!.item_id);
@@ -139,7 +141,25 @@ describe('a round', () => {
       const judge = items.find((candidate) => candidate.item_id === next.current!.item_id)!.tier as 'Personal' | 'Private';
       next = check.answer(next.current.item_id, judge);
     }
-    expect(next.range).toMatchObject({ from: 2 * JUDGE_CHECK_RANDOM_PICKS, agreed: random.agreed + JUDGE_CHECK_RANDOM_PICKS });
+    expect(next.random).toMatchObject({ compared: 2 * JUDGE_CHECK_RANDOM_PICKS, agreed: random.agreed + JUDGE_CHECK_RANDOM_PICKS });
+    expect(next.range).toBeUndefined();
+  });
+
+  test('once the random picks reach 30, a finished round gives the likely range from them alone', () => {
+    const items = pool();
+    const { check, path } = fixture(items);
+    // Earlier rounds left 27 random picks, 24 agreed.
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ v: 1, random_tally: { compared: 27, agreed: 24 } }));
+    let view = check.start();
+    while (view.current) {
+      const judge = items.find((candidate) => candidate.item_id === view.current!.item_id)!.tier as 'Personal' | 'Private';
+      view = check.answer(view.current.item_id, judge);
+    }
+    expect(view.random).toMatchObject({ compared: 27 + JUDGE_CHECK_RANDOM_PICKS, agreed: 24 + JUDGE_CHECK_RANDOM_PICKS });
+    const from = 27 + JUDGE_CHECK_RANDOM_PICKS;
+    expect(from).toBeGreaterThanOrEqual(JUDGE_CHECK_RANGE_MIN_ANSWERS);
+    expect(view.range).toEqual({ ...wilsonInterval(24 + JUDGE_CHECK_RANDOM_PICKS, from), from, agreed: 24 + JUDGE_CHECK_RANDOM_PICKS });
   });
 
   test('an answer is applied against the item\'s label now, if the owner changed it since the round began', () => {

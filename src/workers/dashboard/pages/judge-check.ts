@@ -172,6 +172,10 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
     }
     var result = round.compared ? esc(fill(J.result, { agreed: round.agreed, compared: round.compared })) : esc(J.resultNone);
     var range = '';
+    var mix = round.compared ? esc(J.roundMix) + ' ' : '';
+    if (!round.range && round.random) {
+      range = '<p class="jcrange" data-jc-need>' + mix + esc(fill(J.needMore, { needed: round.random.needed, compared: round.random.compared, perRound: round.random.per_round })) + '</p>';
+    }
     if (round.range) {
       var low = pct(round.range.low), high = pct(round.range.high), mark = pct(round.range.agreed / round.range.from);
       range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.range.from, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
@@ -182,7 +186,7 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
     var confirmed = round.answered.filter(function (answered) { return answered.answer === answered.judge; }).length;
     html = '<div class="jccard" data-jc-result>' + head(J.roundDone)
       + '<p class="jcresult" data-jc-count>' + result + '</p>' + range
-      + '<p class="jchonest">' + esc(J.honest) + '</p>'
+      + '<p class="jchonest">' + (round.range ? mix + esc(J.honest) : esc(J.fixesOnly)) + '</p>'
       + '<div style="margin-top:12px" data-jc-fixed>' + changed.map(answeredRow).join('')
       + '<div class="jcdone jcsum"><span class="grow">' + esc(fill(J.summary, { changed: changed.length, confirmed: confirmed, notSure: round.not_sure })) + '</span><a href="' + esc(config.itemsHref) + '">' + esc(J.seeThem) + '</a></div></div>'
       + '<div class="jcnext"><button type="button" class="btn" data-jc-act="put_away">' + esc(J.done) + '</button><button type="button" class="btn primary" data-jc-act="start">' + esc(J.more) + '</button></div>' + msg + '</div>';
