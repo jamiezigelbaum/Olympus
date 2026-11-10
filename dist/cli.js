@@ -110801,6 +110801,7 @@ __export(exports_engine_service, {
   requestMacServerMode: () => requestMacServerMode,
   renderEnginePlist: () => renderEnginePlist,
   redactLogLine: () => redactLogLine,
+  recoverInterruptedHelperSwap: () => recoverInterruptedHelperSwap,
   reconcileEngineConfig: () => reconcileEngineConfig,
   readEngineWorkerProblem: () => readEngineWorkerProblem,
   readEngineWorkerHealth: () => readEngineWorkerHealth,
@@ -110833,15 +110834,17 @@ __export(exports_engine_service, {
   ENGINE_RUN_COMMAND: () => ENGINE_RUN_COMMAND,
   ENGINE_QUIET_WAIT_MS: () => ENGINE_QUIET_WAIT_MS,
   ENGINE_LABEL: () => ENGINE_LABEL,
+  ENGINE_HELPER_STAGING_PREFIX: () => ENGINE_HELPER_STAGING_PREFIX,
   ENGINE_HELPER_EXECUTABLE: () => ENGINE_HELPER_EXECUTABLE,
   ENGINE_HELPER_BUNDLE_ID: () => ENGINE_HELPER_BUNDLE_ID,
+  ENGINE_HELPER_ASIDE_NAME: () => ENGINE_HELPER_ASIDE_NAME,
   ENGINE_HELPER_APP_NAME: () => ENGINE_HELPER_APP_NAME,
   ENGINE_HEALTH_TIMEOUT_MS: () => ENGINE_HEALTH_TIMEOUT_MS,
   ENGINE_BUILD_ENV: () => ENGINE_BUILD_ENV
 });
 import { spawn as spawn8, spawnSync as spawnSync13 } from "node:child_process";
 import { createHash as createHash71, randomBytes as randomBytes17 } from "node:crypto";
-import { existsSync as existsSync70, lstatSync as lstatSync36, readdirSync as readdirSync23, readFileSync as readFileSync59, renameSync as renameSync14, statSync as statSync33 } from "node:fs";
+import { existsSync as existsSync70, lstatSync as lstatSync36, readdirSync as readdirSync23, readFileSync as readFileSync59, renameSync as renameSync14, rmSync as rmSync30, statSync as statSync33 } from "node:fs";
 import { homedir as homedir31, platform as osPlatform3 } from "node:os";
 import { basename as basename15, dirname as dirname76, isAbsolute as isAbsolute31, join as join102, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -111154,6 +111157,8 @@ function installEngineUnderFence(options = {}) {
     ...options.bunBin ? { bunBin: options.bunBin } : {},
     ...options.cwd ? { cwd: options.cwd } : {}
   });
+  if (!options.dryRun)
+    recoverInterruptedHelperSwap(paths, options.helperRecovery);
   const helperPath2 = installedEngineHelper(paths);
   const program = helperPath2 ? { ...baseProgram, helperPath: helperPath2 } : baseProgram;
   const plist = paths.engineManager === "daemon" ? readFileSync59(paths.plistPath, "utf8") : renderEnginePlist({ paths, program, homeDir });
@@ -111692,6 +111697,7 @@ function startEngine(options = {}) {
       return { ok: true, action: "already_running" };
     throw new OperationError("config_error", "Olympus server mode is not running. Turn it off and on again in Keys to let your Mac repair it.");
   }
+  recoverInterruptedHelperSwap(paths, options.helperRecovery);
   mustSucceed(exec("launchctl", ["enable", target]), "enable the engine agent");
   if (launchctlLoaded(exec, target))
     return { ok: true, action: "already_running" };
@@ -111805,6 +111811,64 @@ function swapAppDirectories(paths) {
     renameSync14(parking, paths.appDir);
     throw error;
   }
+}
+function processAlive3(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function recoverInterruptedHelperSwap(paths, deps = {}) {
+  const target = paths.helperAppPath;
+  if (!target)
+    return "none";
+  let names;
+  try {
+    names = readdirSync23(paths.appSupportDir).filter((name) => name.startsWith(ENGINE_HELPER_STAGING_PREFIX));
+  } catch {
+    return "none";
+  }
+  const alive = deps.pidAlive ?? processAlive3;
+  const rename2 = deps.rename ?? renameSync14;
+  const exists = (path) => {
+    try {
+      lstatSync36(path);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const over = names.filter((name) => {
+    const pid = Number(/^\.helper-(\d+)-/.exec(name)?.[1]);
+    return !(Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid && alive(pid));
+  });
+  if (over.length === 0)
+    return "none";
+  let result = "cleaned";
+  if (!exists(target)) {
+    const aside = over.map((name) => join102(paths.appSupportDir, name, ENGINE_HELPER_ASIDE_NAME)).filter((path) => {
+      try {
+        const stat6 = lstatSync36(path);
+        return stat6.isDirectory() && !stat6.isSymbolicLink();
+      } catch {
+        return false;
+      }
+    }).sort((a, b) => statSync33(b).mtimeMs - statSync33(a).mtimeMs)[0];
+    if (aside) {
+      try {
+        rename2(aside, target);
+        result = "restored";
+      } catch (error) {
+        if (!exists(target))
+          throw error;
+      }
+    }
+  }
+  for (const name of over)
+    rmSync30(join102(paths.appSupportDir, name), { recursive: true, force: true });
+  return result;
 }
 function installedEngineHelper(paths) {
   const path = paths.helperExecutablePath;
@@ -112282,7 +112346,7 @@ function saveMacComputerUseChoice(choice) {
   saveComputerUseChoice(engineServicePaths().sovereigntyPath, choice);
   return { ok: true, status_message: "Choice saved. Continue to Private answers." };
 }
-var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, SERVER_MODE_MIN_ROLLBACK_VERSION = "1.3.2", LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
+var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, SERVER_MODE_MIN_ROLLBACK_VERSION = "1.3.2", ENGINE_HELPER_STAGING_PREFIX = ".helper-", ENGINE_HELPER_ASIDE_NAME = "previous.app", LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
 var init_engine_service = __esm(() => {
   init_mac_engine_daemon();
   init_mac_engine_daemon();
@@ -112313,7 +112377,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync14 } from "node:child_process";
-import { chmodSync as chmodSync29, closeSync as closeSync28, constants as constants15, copyFileSync, existsSync as existsSync71, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync37, linkSync as linkSync3, mkdirSync as mkdirSync45, openSync as openSync27, readFileSync as readFileSync60, readlinkSync as readlinkSync4, readdirSync as readdirSync24, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync30, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
+import { chmodSync as chmodSync29, closeSync as closeSync28, constants as constants15, copyFileSync, existsSync as existsSync71, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync37, linkSync as linkSync3, mkdirSync as mkdirSync45, openSync as openSync27, readFileSync as readFileSync60, readlinkSync as readlinkSync4, readdirSync as readdirSync24, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync31, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename16, dirname as dirname77, join as join103, relative as relative15, resolve as resolve21, sep as sep18 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
@@ -112467,7 +112531,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       const dest = `${path}.${i2}`;
       assertLinuxManagedPath(dest);
       if (i2 === retained)
-        rmSync30(dest, { force: true });
+        rmSync31(dest, { force: true });
       else if (existsSync71(dest))
         renameSync15(dest, `${path}.${i2 + 1}`);
     }
@@ -112748,7 +112812,7 @@ function durableProgram(layout, source, transaction, options) {
   const generations = join103(layout.packageDir, "generations");
   createLinuxPrivateDirectory(generations);
   const staging = transaction.stagingPath;
-  rmSync30(staging, { recursive: true, force: true });
+  rmSync31(staging, { recursive: true, force: true });
   mkdirSync45(staging, { mode: 448 });
   const stagingInfo = lstatSync37(staging);
   transaction.stagingDevice = stagingInfo.dev;
@@ -112781,7 +112845,7 @@ function durableProgram(layout, source, transaction, options) {
   if (existsSync71(generation)) {
     if (linuxMachineArtifactDigest(generation, "tree") !== digest4)
       throw new Error(`Existing engine generation ${generation} failed identity verification.`);
-    rmSync30(staging, { recursive: true });
+    rmSync31(staging, { recursive: true });
   } else {
     renameSync15(staging, generation);
     syncDirectorySync(generations);
@@ -112974,7 +113038,7 @@ function removeOwnedDirectory(path, device, inode) {
   const info = lstatSync37(path);
   if (info.dev !== device || info.ino !== inode)
     throw new Error(`Directory custody changed for ${path}; it was retained.`);
-  rmSync30(path, { recursive: true });
+  rmSync31(path, { recursive: true });
   syncDirectorySync(dirname77(path));
 }
 function cleanupTransactionTrees(transaction) {
@@ -112983,7 +113047,7 @@ function cleanupTransactionTrees(transaction) {
     if (!transaction.generationArtifact)
       throw new Error("Missing generation custody identity; it was retained.");
     assertTreeArtifactCustody(transaction.generationPath, transaction.generationArtifact);
-    rmSync30(transaction.generationPath, { recursive: true });
+    rmSync31(transaction.generationPath, { recursive: true });
     syncDirectorySync(dirname77(transaction.generationPath));
   }
 }
@@ -113068,7 +113132,7 @@ function withLegacyConsultLease(layout, run) {
         throw new FileLeaseBusyError(join103(directory, "consult.json"));
       const result = run();
       for (const name of LEGACY_CONSULT_LEASE_FILES)
-        rmSync30(join103(directory, name), { force: true });
+        rmSync31(join103(directory, name), { force: true });
       return result;
     }), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
   } catch (error) {
@@ -113511,7 +113575,7 @@ function installLinuxEngine(options) {
         if (check.status !== 0 || /Unknown (?:key|lvalue)|Unknown section|Failed to parse/i.test(check.stderr))
           throw new Error(`systemd cannot validate the engine unit: ${check.stderr.slice(0, 300)}`);
       } finally {
-        rmSync30(candidateDir, { recursive: true, force: true });
+        rmSync31(candidateDir, { recursive: true, force: true });
       }
       if (before.active || before.state === "loaded")
         waitForQuietEngine(options);
@@ -113604,7 +113668,7 @@ function pruneOldGenerations(layout) {
     if (!artifact)
       throw new Error(`Unrecognized engine generation ${path}; automatic cleanup refused.`);
     assertTreeArtifactCustody(path, artifact);
-    rmSync30(path, { recursive: true });
+    rmSync31(path, { recursive: true });
   }
   syncDirectorySync(generations);
 }
@@ -122092,7 +122156,7 @@ function tierMigrationInputsRevision(lanes, inputs) {
 async function planTierMigration(options) {
   const now = options.now ?? (() => new Date);
   const state = readTierMigrationState(options.paths.statePath);
-  const running = state.plans.find((plan) => plan.state === "running" && plan.lock && processAlive3(plan.lock.pid));
+  const running = state.plans.find((plan) => plan.state === "running" && plan.lock && processAlive4(plan.lock.pid));
   if (running) {
     throw new OperationError("invalid_request", `Tier migration plan ${running.planId} is running.`, "Wait for it to stop, then plan again.");
   }
@@ -122247,7 +122311,7 @@ async function planTierMigration(options) {
     };
     const others = state.plans.filter((plan) => plan.planId !== planId);
     for (const plan of others) {
-      const crashed = plan.state === "running" && !(plan.lock && processAlive3(plan.lock.pid));
+      const crashed = plan.state === "running" && !(plan.lock && processAlive4(plan.lock.pid));
       if (plan.state === "planned" || plan.state === "approved" || plan.state === "stopped" || crashed) {
         plan.state = "superseded";
         plan.updatedAt = now().toISOString();
@@ -122504,7 +122568,7 @@ async function approveTierMigration(options) {
     record2.approval = { entryId, approvedAt: now().toISOString() };
   });
 }
-function processAlive3(pid) {
+function processAlive4(pid) {
   if (pid === process.pid)
     return true;
   try {
@@ -122523,7 +122587,7 @@ async function runTierMigration(options) {
   if (plan.state === "done") {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is done: nothing is left to move.`);
   }
-  if (plan.state === "running" && plan.lock && plan.lock.pid !== process.pid && processAlive3(plan.lock.pid)) {
+  if (plan.state === "running" && plan.lock && plan.lock.pid !== process.pid && processAlive4(plan.lock.pid)) {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is already running (process ${plan.lock.pid}).`);
   }
   const approvalId = tierMigrationApprovalEntryId(plan);
@@ -123030,7 +123094,7 @@ async function rollbackTierMigrationBatch(options) {
   if (batch.state === "purged") {
     throw new OperationError("invalid_request", `Batch ${batch.batchId}'s superseded copies were purged; it can no longer be rolled back.`);
   }
-  if (plan.state === "running" && plan.lock && processAlive3(plan.lock.pid) && plan.lock.pid !== process.pid) {
+  if (plan.state === "running" && plan.lock && processAlive4(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is running; stop it before rolling back.`);
   }
   const entryId = `tier-migration-rollback:${batch.batchId}`;
@@ -123136,7 +123200,7 @@ async function purgeTierMigration(options) {
   const plan = options.planId ? state.plans.find((candidate) => candidate.planId === options.planId) : [...state.plans].reverse().find((candidate) => candidate.batches.some((batch) => batch.state === "done" || batch.state === "stopped"));
   if (!plan)
     throw new OperationError("invalid_params", "No tier migration plan has moved anything to purge.");
-  if (plan.state === "running" && plan.lock && processAlive3(plan.lock.pid) && plan.lock.pid !== process.pid) {
+  if (plan.state === "running" && plan.lock && processAlive4(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError("invalid_request", `Plan ${plan.planId} is running; purge after it stops.`);
   }
   const { targets, chunks, namesOnlyChunks, digest: digest4 } = purgeTargets(plan, options.lanes);
@@ -126722,7 +126786,7 @@ __export(exports_prefilter_training_dry_run, {
   runPrefilterTrainingDryRun: () => runPrefilterTrainingDryRun,
   prefilterTrainingDryRunMain: () => prefilterTrainingDryRunMain
 });
-import { copyFileSync as copyFileSync2, existsSync as existsSync88, lstatSync as lstatSync44, mkdirSync as mkdirSync52, readdirSync as readdirSync26, rmSync as rmSync33, statSync as statSync38 } from "node:fs";
+import { copyFileSync as copyFileSync2, existsSync as existsSync88, lstatSync as lstatSync44, mkdirSync as mkdirSync52, readdirSync as readdirSync26, rmSync as rmSync34, statSync as statSync38 } from "node:fs";
 import { join as join117, resolve as resolve23 } from "node:path";
 function emptyReport() {
   return { ledgers: [], errors: 0, error_reasons: Object.fromEntries(ERROR_REASONS.map((reason) => [reason, 0])), snapshot_retries: 0 };
@@ -126754,7 +126818,7 @@ function snapshot(path, destination, copy) {
 function snapshotPrefilterDatabase(path, destination, retry, copy = copyFileSync2) {
   for (let attempt = 0;attempt < 4; attempt++) {
     for (const suffix of ["", "-wal", "-shm"])
-      rmSync33(`${destination}${suffix}`, { force: true });
+      rmSync34(`${destination}${suffix}`, { force: true });
     try {
       snapshot(path, destination, copy);
       return;
@@ -126814,7 +126878,7 @@ function runPrefilterTrainingDryRun(options = {}) {
         db?.close();
       }
       if (!inspected.some((entry) => entry.snapshot === target))
-        rmSync33(dir, { recursive: true, force: true });
+        rmSync34(dir, { recursive: true, force: true });
     }
     const ledgers = new Map;
     for (const file of inspected.filter((file2) => file2.kind === "ledger")) {
@@ -126910,7 +126974,7 @@ function runPrefilterTrainingDryRun(options = {}) {
       for (const handle of opened.reverse())
         handle.close();
     } finally {
-      rmSync33(scratch, { recursive: true, force: true });
+      rmSync34(scratch, { recursive: true, force: true });
     }
   }
 }
@@ -126973,7 +127037,7 @@ var exports_prefilter_train_offline = {};
 __export(exports_prefilter_train_offline, {
   prefilterTrainOfflineMain: () => prefilterTrainOfflineMain
 });
-import { closeSync as closeSync31, fsyncSync as fsyncSync9, openSync as openSync30, realpathSync as realpathSync20, rmSync as rmSync34, writeFileSync as writeFileSync20 } from "node:fs";
+import { closeSync as closeSync31, fsyncSync as fsyncSync9, openSync as openSync30, realpathSync as realpathSync20, rmSync as rmSync35, writeFileSync as writeFileSync20 } from "node:fs";
 import { dirname as dirname88, relative as relative16, resolve as resolve24, sep as sep19 } from "node:path";
 import { randomUUID as randomUUID30 } from "node:crypto";
 function prefilterTrainOfflineMain(args) {
@@ -127044,7 +127108,7 @@ function prefilterTrainOfflineMain(args) {
         writeFileSync20(fd2, JSON.stringify(saved));
         fsyncSync9(fd2);
       } catch (error) {
-        rmSync34(output, { force: true });
+        rmSync35(output, { force: true });
         throw error;
       } finally {
         closeSync31(fd2);
@@ -143096,7 +143160,7 @@ var init_server4 = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync53, readFileSync as readFileSync76, rmSync as rmSync35, writeFileSync as writeFileSync21 } from "node:fs";
+import { mkdirSync as mkdirSync53, readFileSync as readFileSync76, rmSync as rmSync36, writeFileSync as writeFileSync21 } from "node:fs";
 import { dirname as dirname89, join as join118 } from "node:path";
 import { homedir as homedir39 } from "node:os";
 function guardStateDir(env) {
@@ -143141,7 +143205,7 @@ function readEmbeddingOperatorOverride(path) {
 }
 function writeEmbeddingOperatorOverride(path, on) {
   if (!on) {
-    rmSync35(path, { force: true });
+    rmSync36(path, { force: true });
     return;
   }
   mkdirSync53(dirname89(path), { recursive: true, mode: 448 });
@@ -148338,7 +148402,7 @@ import {
   mkdirSync as mkdirSync57,
   readFileSync as readFileSync80,
   renameSync as renameSync20,
-  rmSync as rmSync36,
+  rmSync as rmSync37,
   writeFileSync as writeFileSync23
 } from "node:fs";
 import { randomUUID as randomUUID32 } from "node:crypto";
@@ -148564,7 +148628,7 @@ function writeCatalogCache(path, catalog) {
 `, { mode: 384 });
     renameSync20(tempPath, path);
   } catch {} finally {
-    rmSync36(tempPath, { force: true });
+    rmSync37(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value2) {
@@ -150003,7 +150067,7 @@ var init_google_pilot_client = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes27 } from "node:crypto";
-import { existsSync as existsSync92, mkdirSync as mkdirSync58, readdirSync as readdirSync27, realpathSync as realpathSync21, rmSync as rmSync37, statSync as statSync40, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { existsSync as existsSync92, mkdirSync as mkdirSync58, readdirSync as readdirSync27, realpathSync as realpathSync21, rmSync as rmSync38, statSync as statSync40, statfsSync as statfsSync4, utimesSync } from "node:fs";
 import { open as open5 } from "node:fs/promises";
 import { sep as sep20, join as join125, resolve as resolve26 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -150067,7 +150131,7 @@ function createArchiveUploads(options) {
   };
   const drop = (found) => {
     sessions.delete(found.id);
-    rmSync37(found.dir, { recursive: true, force: true });
+    rmSync38(found.dir, { recursive: true, force: true });
   };
   const roomFor = async (found, needed, signal) => {
     let waited = false;
@@ -150217,7 +150281,7 @@ function createArchiveUploads(options) {
           return;
         });
       if (created && existsSync92(target))
-        rmSync37(target, { force: true });
+        rmSync38(target, { force: true });
       found.paths.delete(key2);
       found.partials.delete(key2);
       found.bytes -= offset + written;
@@ -150283,7 +150347,7 @@ function createArchiveUploads(options) {
           stop();
         sessions.delete(uploadId);
       }
-      rmSync37(dir, { recursive: true, force: true });
+      rmSync38(dir, { recursive: true, force: true });
       return true;
     },
     chosenPath(uploadId) {
@@ -150316,7 +150380,7 @@ function createArchiveUploads(options) {
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
-      rmSync37(dir, { recursive: true, force: true });
+      rmSync38(dir, { recursive: true, force: true });
     },
     sweep(needed) {
       if (!rootPath && !existsSync92(options.root))
@@ -150353,7 +150417,7 @@ function createArchiveUploads(options) {
         if (found)
           found.cancelled = true;
         sessions.delete(name);
-        rmSync37(dir, { recursive: true, force: true });
+        rmSync38(dir, { recursive: true, force: true });
       }
     },
     close() {
@@ -176382,7 +176446,7 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash93, randomUUID as randomUUID33 } from "node:crypto";
-import { realpathSync as realpathSync22, rmSync as rmSync38, readdirSync as readdirSync28 } from "node:fs";
+import { realpathSync as realpathSync22, rmSync as rmSync39, readdirSync as readdirSync28 } from "node:fs";
 import { join as join131, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -176682,7 +176746,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync28(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync38(join131(options.watch.snapshotDir, name), { force: true });
+          rmSync39(join131(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -226668,7 +226732,7 @@ import {
   readFileSync as readFileSync65,
   readdirSync as readdirSync25,
   renameSync as renameSync16,
-  rmSync as rmSync31,
+  rmSync as rmSync32,
   statSync as statSync36,
   writeFileSync as writeFileSync18
 } from "node:fs";
@@ -226743,10 +226807,10 @@ function prepareWorkerUpgradeArtifact(options) {
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
       if (options.dryRun && existsSync76(staging))
-        rmSync31(staging, { recursive: true, force: true });
+        rmSync32(staging, { recursive: true, force: true });
     }
   } finally {
-    rmSync31(snapshotDir, { recursive: true, force: true });
+    rmSync32(snapshotDir, { recursive: true, force: true });
   }
 }
 function assertVersionParentSafety(homeDir, workingDirectory) {
@@ -226995,7 +227059,7 @@ function removeStagingTree(root) {
     if (entry.isDirectory())
       removeStagingTree(join108(root, entry.name));
   }
-  rmSync31(root, { recursive: true, force: true });
+  rmSync32(root, { recursive: true, force: true });
 }
 
 // src/core/lifecycle-lock.ts
@@ -228254,7 +228318,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync19 } from "node:child_process";
-import { existsSync as existsSync85, lstatSync as lstatSync42, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync6, renameSync as renameSync18, rmSync as rmSync32 } from "node:fs";
+import { existsSync as existsSync85, lstatSync as lstatSync42, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync6, renameSync as renameSync18, rmSync as rmSync33 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 import { join as join114, resolve as resolve22 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -228285,7 +228349,9 @@ function installEngineHelper(options = {}) {
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
   mkdirSync50(paths.appSupportDir, { recursive: true, mode: 448 });
-  const staging = mkdtempSync6(join114(paths.appSupportDir, ".helper-"));
+  recoverInterruptedHelperSwap(paths, options.helperRecovery);
+  const staging = mkdtempSync6(join114(paths.appSupportDir, `${ENGINE_HELPER_STAGING_PREFIX}${process.pid}-`));
+  const aside = join114(staging, ENGINE_HELPER_ASIDE_NAME);
   try {
     let built = false;
     let candidate;
@@ -228349,7 +228415,6 @@ function installEngineHelper(options = {}) {
 `)[0] ?? ""}`);
     }
     const rename2 = options.rename ?? renameSync18;
-    const aside = join114(staging, "previous.app");
     if (replaced)
       rename2(target, aside);
     try {
@@ -228370,7 +228435,8 @@ function installEngineHelper(options = {}) {
       replaced
     };
   } finally {
-    rmSync32(staging, { recursive: true, force: true });
+    if (existsSync85(target) || !existsSync85(aside))
+      rmSync33(staging, { recursive: true, force: true });
   }
 }
 
