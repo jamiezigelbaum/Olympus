@@ -73997,7 +73997,11 @@ var BACKUP_COPY = {
   restore: "Restore",
   restoreLine: "On a new computer, restore before you connect sources. Nothing is judged or indexed again when the models match. Afterwards you sign in to each source once.",
   restoreButton: "Restore from a backup…",
-  locked: "Open dashboard controls on this computer to back up or restore."
+  locked: "Open dashboard controls on this computer to back up or restore.",
+  unlock: "Unlock on this computer",
+  unlockIntro: "Back up and restore need a session opened here, not by an agent or the launch link.",
+  unlockFailed: "Could not unlock. Try again.",
+  unreachable: "Olympus is not answering. Check that it is running."
 };
 
 // src/workers/dashboard/pages/local.ts

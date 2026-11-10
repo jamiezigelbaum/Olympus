@@ -6,7 +6,8 @@
  * no folder. Link target: `?settings#backup` (Home's setup card, "Restore
  * from a backup").
  */
-import { escapeHtml } from './components.ts';
+import { escapeHtml, escapeScriptJson } from './components.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS } from './outside-help.ts';
 import type { BackupStatus } from '../backup-service.ts';
 
 export const DASHBOARD_SETTINGS_BACKUP_ID = 'backup';
@@ -37,6 +38,10 @@ export const BACKUP_COPY = {
   restoreLine: 'On a new computer, restore before you connect sources. Nothing is judged or indexed again when the models match. Afterwards you sign in to each source once.',
   restoreButton: 'Restore from a backup…',
   locked: 'Open dashboard controls on this computer to back up or restore.',
+  unlock: 'Unlock on this computer',
+  unlockIntro: 'Back up and restore need a session opened here, not by an agent or the launch link.',
+  unlockFailed: 'Could not unlock. Try again.',
+  unreachable: 'Olympus is not answering. Check that it is running.',
 } as const;
 
 function formatBytes(bytes: number): string {
@@ -71,6 +76,14 @@ export function renderBackupSection(input: { status?: BackupStatus; local: boole
   const C = BACKUP_COPY;
   const head = `<h3 class="sect">${escapeHtml(C.title)}</h3><p class="pnote">${escapeHtml(C.intro)}</p>`;
   const status = input.status;
+  if (input.csrfToken !== undefined && !input.local) {
+    // A session opened by the owner's link or an agent is not local grade yet: offer the
+    // same in-place unlock as the other local-only panes (#1277), then show the controls.
+    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}<form class="bkunlock" data-backup-unlock>`
+      + `<button type="submit" class="btn primary">${escapeHtml(C.unlock)}</button><span class="pnote">${escapeHtml(C.unlockIntro)}</span>`
+      + `<span class="pnote" data-backup-unlock-msg role="status"></span></form>`
+      + `<script>${backupUnlockScript(input.csrfToken)}</script></section>`;
+  }
   if (!input.local || !status || input.csrfToken === undefined) {
     return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}">${head}<p class="pnote" data-backup-locked>${escapeHtml(C.locked)}</p></section>`;
   }
@@ -115,6 +128,8 @@ export function renderBackupSection(input: { status?: BackupStatus; local: boole
 }
 
 export const BACKUP_SECTION_CSS = `
+#backup .bkunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 0; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+#backup .bkunlock .pnote { margin: 0; }
 #backup .adddialog { max-width: 560px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--t1); padding: 18px 20px; }
 #backup .adddialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 #backup .adddialoghead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -139,6 +154,27 @@ export const BACKUP_SECTION_CSS = `
 .bkmore { margin: 0 0 8px; }
 .bklist .bkpick[aria-pressed="true"] { border-color: var(--link); outline: 2px solid var(--link); outline-offset: 1px; }
 `;
+
+/** The unlock form's script: mints the local session from this one, then reloads onto the controls. */
+function backupUnlockScript(csrfToken: string): string {
+  const config = { csrf: csrfToken, path: DASHBOARD_OUTSIDE_HELP_PATHS.unlock, failed: BACKUP_COPY.unlockFailed, unreachable: BACKUP_COPY.unreachable };
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config))};
+  var form = document.querySelector('form[data-backup-unlock]');
+  if (!form) return;
+  var msg = form.querySelector('[data-backup-unlock-msg]');
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var button = form.querySelector('button');
+    if (button) button.disabled = true;
+    function fail(text) { if (msg) { msg.textContent = text; msg.setAttribute('data-state', 'error'); } if (button) button.disabled = false; }
+    fetch(config.path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrf } }).then(function (response) {
+      if (response.ok) { window.location.reload(); return; }
+      fail(config.failed);
+    }, function () { fail(config.unreachable); });
+  });
+})();`;
+}
 
 /** The section's own small script: posts to the backup routes with the session's CSRF token. */
 function backupClientScript(csrfToken: string, folder: string | null): string {

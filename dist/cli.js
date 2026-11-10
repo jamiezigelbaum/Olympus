@@ -173768,6 +173768,9 @@ function renderBackupSection(input) {
   const C4 = BACKUP_COPY;
   const head = `<h3 class="sect">${escapeHtml(C4.title)}</h3><p class="pnote">${escapeHtml(C4.intro)}</p>`;
   const status = input.status;
+  if (input.csrfToken !== undefined && !input.local) {
+    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}<form class="bkunlock" data-backup-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(C4.unlock)}</button><span class="pnote">${escapeHtml(C4.unlockIntro)}</span>` + `<span class="pnote" data-backup-unlock-msg role="status"></span></form>` + `<script>${backupUnlockScript(input.csrfToken)}</script></section>`;
+  }
   if (!input.local || !status || input.csrfToken === undefined) {
     return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}">${head}<p class="pnote" data-backup-locked>${escapeHtml(C4.locked)}</p></section>`;
   }
@@ -173784,6 +173787,25 @@ function renderBackupSection(input) {
   const restore = `<h4 class="bkh">${escapeHtml(C4.restore)}</h4><p>${escapeHtml(C4.restoreLine)}</p>${restoreNote}` + (status.restoreAvailable ? `<button class="btn primaryline" type="button" data-backup-browse="restore">${escapeHtml(C4.restoreButton)}</button>` : `<p class="pnote">On this install Olympus can't restart itself. Stop Olympus, then run <code>olympus data restore --input &lt;file&gt; --passphrase-stdin</code>.</p>`);
   const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml(status.passphraseSet ? "Change the passphrase" : C4.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml(C4.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml(C4.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div><p class="bkmore"><button class="btn" type="button" data-browser-more hidden>Show more</button></p>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
   return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}${lastRow}${where2}${when}${passphrase}${restore}${dialogs}` + `<script>${backupClientScript(input.csrfToken, status.folder ?? null)}</script></section>`;
+}
+function backupUnlockScript(csrfToken) {
+  const config2 = { csrf: csrfToken, path: DASHBOARD_OUTSIDE_HELP_PATHS.unlock, failed: BACKUP_COPY.unlockFailed, unreachable: BACKUP_COPY.unreachable };
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var form = document.querySelector('form[data-backup-unlock]');
+  if (!form) return;
+  var msg = form.querySelector('[data-backup-unlock-msg]');
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var button = form.querySelector('button');
+    if (button) button.disabled = true;
+    function fail(text) { if (msg) { msg.textContent = text; msg.setAttribute('data-state', 'error'); } if (button) button.disabled = false; }
+    fetch(config.path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrf } }).then(function (response) {
+      if (response.ok) { window.location.reload(); return; }
+      fail(config.failed);
+    }, function () { fail(config.unreachable); });
+  });
+})();`;
 }
 function backupClientScript(csrfToken, folder) {
   const config2 = JSON.stringify({ csrf: csrfToken, folder }).replace(/</g, "\\u003c");
@@ -173953,6 +173975,8 @@ function backupClientScript(csrfToken, folder) {
 })();`;
 }
 var DASHBOARD_SETTINGS_BACKUP_ID = "backup", BACKUP_COPY, BACKUP_SECTION_CSS = `
+#backup .bkunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 0; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+#backup .bkunlock .pnote { margin: 0; }
 #backup .adddialog { max-width: 560px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--t1); padding: 18px 20px; }
 #backup .adddialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 #backup .adddialoghead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -173979,6 +174003,7 @@ var DASHBOARD_SETTINGS_BACKUP_ID = "backup", BACKUP_COPY, BACKUP_SECTION_CSS = `
 `;
 var init_backup_section = __esm(() => {
   init_components();
+  init_outside_help();
   BACKUP_COPY = {
     title: "Back up and restore",
     intro: "A backup holds everything Olympus can't fetch again: captured WhatsApp and Telegram messages, your privacy rules and decisions, and every privacy judgment. Sign-ins aren't included.",
@@ -174004,7 +174029,11 @@ var init_backup_section = __esm(() => {
     restore: "Restore",
     restoreLine: "On a new computer, restore before you connect sources. Nothing is judged or indexed again when the models match. Afterwards you sign in to each source once.",
     restoreButton: "Restore from a backup…",
-    locked: "Open dashboard controls on this computer to back up or restore."
+    locked: "Open dashboard controls on this computer to back up or restore.",
+    unlock: "Unlock on this computer",
+    unlockIntro: "Back up and restore need a session opened here, not by an agent or the launch link.",
+    unlockFailed: "Could not unlock. Try again.",
+    unreachable: "Olympus is not answering. Check that it is running."
   };
 });
 
