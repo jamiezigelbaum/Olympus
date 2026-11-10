@@ -34,16 +34,16 @@
       <table>
         <thead><tr><th></th><th>Local model</th><th>Private cloud service</th></tr></thead>
         <tbody>
-          <tr><th>Where your text goes</th><td>Nowhere: it stays on your computer</td><td>To the service, which says it keeps no logs</td></tr>
-          <tr><th>Answer quality</th><td>Behind the best cloud models</td><td>Close to frontier models</td></tr>
+          <tr><th>Where your text goes</th><td>Nowhere: it stays on your computer</td><td>To the service, under its own retention rules</td></tr>
+          <tr><th>Answer quality</th><td>Behind the best cloud models</td><td>Often uses strong open or frontier models</td></tr>
           <tr><th>Hardware</th><td>Needs memory and a recent chip</td><td>Any device</td></tr>
           <tr><th>Examples</th><td>Ollama, LM Studio, Jan</td><td>Proton Lumo, Venice, Duck.ai</td></tr>
         </tbody>
       </table>
-      <p>Neither protects you if you paste the wrong document into the wrong place. And a private chat service does not know your own mail and files unless you paste them in.</p>
+      <p>Neither protects you if you paste the wrong document into the wrong place. And a private chat service knows your own mail and files only through what you upload or connect, which it then receives.</p>
 
       <h2>Using both with Olympus</h2>
-      <p>Olympus keeps your mail, files and messages on your computer and uses a small model there for Private items, sized to run on a computer with 8 GB of memory. Personal items can go to ChatGPT, Claude or another assistant you connect. For harder private questions you can turn on Venice's private models, and optionally ask anonymously through zkAPI over Tor. Both are off by default. See the <a href="/privacy/">privacy policy</a> for what each choice sends.</p>
+      <p>Olympus keeps your mail, files and messages on your computer and answers from Private items with a small model there, sized to your computer's memory. Personal items can go to ChatGPT, Claude or another assistant you connect. For harder private questions you can connect Venice, which then receives the passages that match, if your settings allow it. Separately, zkAPI can send a frontier model a question Olympus has stripped of identifying details, without your documents, through Tor by default; the question's own content can still identify you. Both are off by default. See the <a href="/privacy/">privacy policy</a> for what each choice sends.</p>
       <p class="meta">Updated 10 November 2026.</p>
     </div>
   </main>
