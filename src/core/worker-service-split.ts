@@ -8,10 +8,17 @@
  * background's socket; each under the shared supervision kernel
  * (native-process-service.ts: its own process group, restart on exit with the
  * shared backoff, a bounded SIGTERM then SIGKILL on stop). On SIGTERM or
- * SIGINT the front stops first, then the background, then this process exits.
- * The unit sends its stop signal to this process only (KillMode=mixed), so the
- * order holds; with an older unit that signals every process at once, both
- * still stop and nothing outlives the unit.
+ * SIGINT it stops both and exits.
+ *
+ * The unit keeps systemd's default KillMode=control-group: a stop sends
+ * SIGTERM to every process in the unit at once, so the front and the
+ * background stop together, not in order. That is safe: the background ends
+ * or abandons its pass under its data-owner lock, as a single worker does on
+ * SIGTERM (a cut-short pass is recorded as interrupted, #803), and a front
+ * whose background has gone answers that it is unavailable. So this process
+ * stops both at once too: neither is restarted while the other is still
+ * stopping. An ordered stop (front, then background) needs KillMode=mixed, a
+ * later, opt-in change.
  *
  * Both children run `__worker-service-run` with their role already set, so
  * neither supervises again. With the switch off, or with any role set, or
@@ -20,9 +27,8 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { spawn as spawnProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, engineRoleFromEnv, prepareEngineBackgroundSocketDirectory } from './engine-split.ts';
-import { engineDescendantGroupsPath } from './engine-children.ts';
+import { descendantGroupsPath } from './descendant-groups.ts';
 import { createNativeProcessService, setNativeProcessChildStdio, type NativeProcessChildStdio, type NativeProcessServiceContext } from './native-process-service.ts';
 import { ENGINE_BACKGROUND_SERVICE_ID, engineBackgroundLaunch } from './native-worker-service.ts';
 import { WORKER_SHUTDOWN_DEADLINE_MS } from './worker-shutdown.ts';
@@ -91,7 +97,7 @@ export async function superviseWorkerServiceSplit(input: {
     label: 'background engine',
     // Extraction commands run in process groups of their own; the kernel
     // stops the ones a background left behind before its replacement starts.
-    descendantGroupsPath: engineDescendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
+    descendantGroupsPath: descendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
     prepareStart: async () => {
       const instanceId = randomUUID();
       return engineBackgroundLaunch({
@@ -110,7 +116,7 @@ export async function superviseWorkerServiceSplit(input: {
     ...shared,
     id: 'olympus-worker',
     label: 'worker front',
-    descendantGroupsPath: engineDescendantGroupsPath('olympus-worker', input.env),
+    descendantGroupsPath: descendantGroupsPath('olympus-worker', input.env),
     prepareStart: async () => ({
       command: input.runtimePath,
       args,
@@ -133,8 +139,9 @@ export async function superviseWorkerServiceSplit(input: {
   let stopping: Promise<void> | undefined;
   const stop = () => {
     stopping ??= (async () => {
-      await front.stop().catch(() => undefined);
-      await background.stop().catch(() => undefined);
+      // Both at once, so a child that the unit's own SIGTERM already ended is
+      // never started again while the other is still stopping.
+      await Promise.all([front.stop().catch(() => undefined), background.stop().catch(() => undefined)]);
       clearInterval(keepAlive);
     })();
     return stopping;
@@ -154,71 +161,3 @@ export async function superviseWorkerServiceSplit(input: {
   return { stop };
 }
 
-const WORKER_SERVICE_UNIT = 'olympus-worker.service';
-
-/**
- * The unit stops with KillMode=mixed: systemd sends SIGTERM to the unit's main
- * process alone, so the split supervisor above can stop the front before the
- * background. With the switch off the main process is the worker, and under
- * the old KillMode=control-group every process in the unit got that SIGTERM at
- * once: a running extraction command (its own process group,
- * command-runner.ts) stopped at the start of the stop, not at the final
- * SIGKILL. So the worker, when it is the unit's main process, passes the
- * SIGTERM on to every other process in its control group itself, exactly the
- * set systemd used to signal. Linux only, and only the process systemd
- * started for olympus-worker.service (SYSTEMD_EXEC_PID, where systemd sets
- * it, is this pid): a worker the engine host or the Gateway started, or a
- * process the worker started, never forwards. Returns whether it installed.
- */
-export function forwardWorkerServiceStop(input: {
-  env: Record<string, string | undefined>;
-  platform: NodeJS.Platform;
-  pid?: number;
-  readFile?: (path: string) => string;
-  kill?: (pid: number, signal: NodeJS.Signals) => void;
-  signals?: {
-    once(signal: 'SIGTERM', handler: () => void): void;
-    listenerCount(signal: 'SIGTERM'): number;
-    raise(signal: 'SIGTERM'): void;
-  };
-}): boolean {
-  if (input.platform !== 'linux' || engineRoleFromEnv(input.env) !== 'single') return false;
-  const pid = input.pid ?? process.pid;
-  const execPid = input.env.SYSTEMD_EXEC_PID?.trim();
-  if (execPid && execPid !== String(pid)) return false;
-  const readFile = input.readFile ?? ((path: string) => readFileSync(path, 'utf8'));
-  const procsPath = unitProcsPath(readFile);
-  if (!procsPath) return false;
-  const kill = input.kill ?? ((target: number, signal: NodeJS.Signals) => process.kill(target, signal));
-  const signals = input.signals ?? {
-    once: (signal: 'SIGTERM', handler: () => void) => { process.once(signal, handler); },
-    listenerCount: (signal: 'SIGTERM') => process.listenerCount(signal),
-    raise: (signal: 'SIGTERM') => { process.kill(pid, signal); },
-  };
-  signals.once('SIGTERM', () => {
-    let procs: string;
-    try { procs = readFile(procsPath); } catch { procs = ''; }
-    for (const line of procs.split('\n')) {
-      const target = Number(line.trim());
-      if (!Number.isSafeInteger(target) || target <= 1 || target === pid) continue;
-      try { kill(target, 'SIGTERM'); } catch { /* Gone already. */ }
-    }
-    // Nothing else is listening yet (the worker installs its handler as it
-    // starts): the signal's default, ending the process, still applies.
-    if (signals.listenerCount('SIGTERM') === 0) signals.raise('SIGTERM');
-  });
-  return true;
-}
-
-/** cgroup.procs of this process's unit, when that unit is olympus-worker.service. */
-function unitProcsPath(readFile: (path: string) => string): string | undefined {
-  let text: string;
-  try { text = readFile('/proc/self/cgroup'); } catch { return undefined; }
-  const lines = text.split('\n');
-  // cgroup v2 (the unified hierarchy), then v1's systemd hierarchy.
-  const unified = lines.find((line) => line.startsWith('0::'))?.slice(3);
-  const legacy = lines.map((line) => /^\d+:name=systemd:(.*)$/.exec(line)?.[1]).find(Boolean);
-  const path = unified && unified !== '/' ? unified : legacy;
-  if (!path || !path.endsWith(`/${WORKER_SERVICE_UNIT}`)) return undefined;
-  return path === unified ? `/sys/fs/cgroup${path}/cgroup.procs` : `/sys/fs/cgroup/systemd${path}/cgroup.procs`;
-}

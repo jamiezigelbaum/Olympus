@@ -94,17 +94,6 @@ export function engineChildrenPath(env: Record<string, string | undefined> = pro
   return join(olympusDataDir(env), 'engine', 'children.json');
 }
 
-/**
- * The record of the process groups a supervised child started outside its own
- * group (extraction commands: command-runner.ts), one file per service. The
- * supervision kernel hands its path to the child (DESCENDANT_GROUPS_ENV) and
- * stops what is recorded there once the child is gone
- * (native-process-service.ts, `descendantGroupsPath`).
- */
-export function engineDescendantGroupsPath(serviceId: string, env: Record<string, string | undefined> = process.env): string {
-  return join(olympusDataDir(env), 'engine', `descendants-${serviceId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
-}
-
 export function readEngineChildren(path: string): EngineChildrenFile | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as { schema?: unknown; host_pid?: unknown; children?: unknown };

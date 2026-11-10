@@ -16,7 +16,7 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { loadConfig, loadWorkerConfig } from './core/config.ts';
-import { forwardWorkerServiceStop, superviseWorkerServiceSplit, workerServiceSplitApplies } from './core/worker-service-split.ts';
+import { superviseWorkerServiceSplit, workerServiceSplitApplies } from './core/worker-service-split.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
 
@@ -2143,7 +2143,6 @@ export async function runWorkerForeground(options: {
   engineSplit?: () => boolean;
   platform?: NodeJS.Platform;
   superviseSplit?: (env: Record<string, string | undefined>) => Promise<unknown>;
-  forwardUnitStop?: (input: { env: Record<string, string | undefined>; platform: NodeJS.Platform }) => unknown;
 } = {}): Promise<void> {
   const env = options.env ?? process.env;
   const managedInstanceId = options.managedInstanceId;
@@ -2174,12 +2173,6 @@ export async function runWorkerForeground(options: {
   })) {
     await (options.superviseSplit ?? superviseWorkerServiceSplitHere)(env);
     return;
-  }
-  // The unit stops its main process alone (KillMode=mixed, for the split's
-  // ordered stop); as that main process the worker passes the stop on to the
-  // rest of the unit, as KillMode=control-group did.
-  if (managedInstanceId === undefined) {
-    (options.forwardUnitStop ?? forwardWorkerServiceStop)({ env, platform: options.platform ?? process.platform });
   }
   const startWorker = options.startWorker
     ?? (await import('./workers/email-source/server.ts')).startWorkerWithLaunch;

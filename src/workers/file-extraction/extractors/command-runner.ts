@@ -32,8 +32,8 @@ import { Buffer } from 'node:buffer';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { engineChildrenRecorder } from '../../../core/engine-children.ts';
-import { DESCENDANT_GROUPS_ENV, type NativeProcessChildObserver } from '../../../core/native-process-service.ts';
+import { descendantGroupsRecorder, descendantGroupsSupported } from '../../../core/descendant-groups.ts';
+import { DESCENDANT_GROUPS_ENV } from '../../../core/native-process-service.ts';
 
 export interface ExtractionCommandRunRequest {
   command: string;
@@ -239,12 +239,12 @@ function executableFile(path: string): boolean {
  * supervisor stops the command before the replacement starts: the timeout
  * that would have ended it died with this process.
  */
-let groupRecorder: { path: string; recorder: NativeProcessChildObserver } | undefined;
+let groupRecorder: { path: string; recorder: ReturnType<typeof descendantGroupsRecorder> } | undefined;
 
-function commandGroupRecorder(): NativeProcessChildObserver | undefined {
+function commandGroupRecorder(): ReturnType<typeof descendantGroupsRecorder> | undefined {
   const path = process.env[DESCENDANT_GROUPS_ENV]?.trim();
-  if (!path || process.platform === 'win32') return undefined;
-  if (groupRecorder?.path !== path) groupRecorder = { path, recorder: engineChildrenRecorder({ path }) };
+  if (!path || !descendantGroupsSupported()) return undefined;
+  if (groupRecorder?.path !== path) groupRecorder = { path, recorder: descendantGroupsRecorder(path) };
   return groupRecorder.recorder;
 }
 
@@ -263,10 +263,10 @@ export async function runExtractionCommand(
     const recorder = commandGroupRecorder();
     const pid = child.pid;
     if (recorder && pid) {
-      try { recorder.spawned('extraction', pid, [command, ...request.args]); } catch { /* Advisory. */ }
+      try { recorder.spawned(pid); } catch { /* Advisory. */ }
       // 'close': the command and its output are done; a group killed on
       // timeout is gone by then too.
-      child.once('close', () => { try { recorder.stopped('extraction', pid); } catch { /* Advisory. */ } });
+      child.once('close', () => { try { recorder.stopped(pid); } catch { /* Advisory. */ } });
     }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

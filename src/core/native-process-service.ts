@@ -1,5 +1,5 @@
 import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
-import { reapRecordedEngineChildren } from './engine-children.ts';
+import { descendantGroupsSupported, stopRecordedDescendantGroups } from './descendant-groups.ts';
 
 const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
@@ -180,16 +180,15 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
    */
   descendantSettleMs?: number;
   /**
-   * A record of the process groups the child starts outside its own group.
-   * The kernel's group stop cannot reach them: an extraction command runs
-   * detached, as the leader of its own group, so its timeout can kill all of
-   * it (command-runner.ts), and that timeout dies with the child. With this
-   * set the child is told the path (DESCENDANT_GROUPS_ENV) and records each
-   * such group there with its leader's identity; whenever the kernel has
-   * stopped the child's own group (a crash, a self-restart, a stop) and
-   * before every spawn, it stops each recorded group still provably the one
-   * recorded (engine-children.ts, reapRecordedEngineChildren). That check
-   * reads the process table and may wait out a short grace synchronously.
+   * A record of the process groups the child starts outside its own group
+   * (descendant-groups.ts). The kernel's group stop cannot reach them: an
+   * extraction command runs detached, as the leader of its own group, so its
+   * timeout can kill all of it (command-runner.ts), and that timeout dies
+   * with the child. With this set the child is told the path
+   * (DESCENDANT_GROUPS_ENV) and records each such group there; whenever the
+   * kernel has stopped the child's own group (a crash, a self-restart, a
+   * stop) and before every spawn, it stops each recorded group whose leader
+   * /proc still shows with the recorded start time. Linux only.
    */
   descendantGroupsPath?: string;
 }
@@ -325,13 +324,19 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
 
   const isCurrent = (lifetime: ServiceLifetime<TSettings>): boolean => current === lifetime && !lifetime.stopping;
 
-  const reapDescendants = (lifetime: ServiceLifetime<TSettings>): void => {
+  let descendantsUnsupportedLogged = false;
+  const reapDescendants = async (lifetime: ServiceLifetime<TSettings>): Promise<void> => {
     if (!options.descendantGroupsPath) return;
-    try {
-      const result = reapRecordedEngineChildren(options.descendantGroupsPath);
-      if (result.stopped.length > 0) {
-        warn(lifetime, `Olympus ${options.label} left ${result.stopped.length} command process group(s) running; stopped them.`);
+    if (!descendantGroupsSupported()) {
+      if (!descendantsUnsupportedLogged) {
+        descendantsUnsupportedLogged = true;
+        warn(lifetime, `Olympus ${options.label}: command process groups it leaves behind are stopped on Linux only.`);
       }
+      return;
+    }
+    try {
+      const stopped = await stopRecordedDescendantGroups(options.descendantGroupsPath);
+      if (stopped > 0) warn(lifetime, `Olympus ${options.label} left ${stopped} command process group(s) running; stopped them.`);
     } catch {
       // Advisory: never changes supervision.
     }
@@ -498,10 +503,10 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (!lifetime.startupFailure) reportFailure(lifetime, `Olympus ${options.label} is starting.`);
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     // Groups an earlier child (or an earlier supervisor) left behind.
-    reapDescendants(lifetime);
+    await reapDescendants(lifetime);
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
-      env: options.descendantGroupsPath ? { ...settings.env, [DESCENDANT_GROUPS_ENV]: options.descendantGroupsPath } : settings.env,
+      env: options.descendantGroupsPath && descendantGroupsSupported() ? { ...settings.env, [DESCENDANT_GROUPS_ENV]: options.descendantGroupsPath } : settings.env,
       stdio: childStdio === 'inherit' ? ['ignore', 'inherit', 'inherit'] : 'ignore',
       detached: process.platform !== 'win32',
       ...(options.workingDirectory ? { cwd: options.workingDirectory } : {}),
@@ -748,7 +753,7 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
   graceMs: number,
   settleMs: number,
   expectedChild?: ChildProcess,
-  afterGroupStopped?: () => void,
+  afterGroupStopped?: () => Promise<void>,
 ): Promise<GroupStopResult> {
   if (lifetime.cleanupPromise) return await lifetime.cleanupPromise;
   const child = lifetime.child;
@@ -770,7 +775,7 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
     notifyChildObserver('stopped', lifetime.serviceId, child.pid);
     // The child is gone, so it records nothing more: stop what it started
     // outside its own group.
-    afterGroupStopped?.();
+    await afterGroupStopped?.();
     lifetime.previousChildReleased = result === 'stopped';
     if (lifetime.child === child) lifetime.child = undefined;
     return result;

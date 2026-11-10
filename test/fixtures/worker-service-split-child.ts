@@ -46,9 +46,12 @@ if (role === 'background') {
   if (readyDelay > 0) setTimeout(serve, readyDelay);
   else serve();
   if (process.env.SPAWN_EXTRACTION) {
+    // Through a shell that execs the real program, as an interpreter-launched
+    // tool does: the process table then shows a different command line than
+    // the one spawned, under the same pid.
     void runExtractionCommand({
-      command: process.execPath,
-      args: [join(import.meta.dir, 'extraction-sleeper.ts')],
+      command: '/bin/sh',
+      args: ['-c', `exec "${process.execPath}" "${join(import.meta.dir, 'extraction-sleeper.ts')}"`],
       timeoutMs: 120_000,
     }).catch(() => undefined);
   }

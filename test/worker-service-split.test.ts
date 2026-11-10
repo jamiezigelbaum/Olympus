@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runWorkerForeground } from '../src/cli.ts';
 import { engineBackgroundSocketPath } from '../src/core/engine-split.ts';
-import { forwardWorkerServiceStop, superviseWorkerServiceSplit, workerServiceSplitApplies } from '../src/core/worker-service-split.ts';
+import { superviseWorkerServiceSplit, workerServiceSplitApplies } from '../src/core/worker-service-split.ts';
 import { installWorkerService } from '../src/core/worker-service.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -122,7 +122,7 @@ describe('the worker service runs the engine split itself', () => {
     expect(again.filter((e) => e.role === 'front' && e.event === 'start')).toHaveLength(1);
   }, 30_000);
 
-  test('a stop ends the front first, then the background, then the unit\'s process', async () => {
+  test('a stop of the unit\'s process alone stops both children, then exits', async () => {
     const context = setup();
     await supervise(context);
     const started = await waitFor(() => context.read().filter((e) => e.event === 'start').length >= 2 ? context.read() : undefined);
@@ -130,8 +130,27 @@ describe('the worker service runs the engine split itself', () => {
     await waitFor(() => context.exits.length > 0 ? true : undefined);
     expect(context.exits).toEqual([143]);
     const stops = context.read().filter((e) => e.event === 'stop').map((e) => e.role);
-    expect(stops).toEqual(['front', 'background']);
+    expect(stops.sort()).toEqual(['background', 'front']);
     for (const child of started) expect(alive(child.pid)).toBe(false);
+  }, 30_000);
+});
+
+describe('a unit stop signals every process at once (KillMode=control-group)', () => {
+  test('the supervisor, the front and the background all get SIGTERM: all stop, none is started again, exit 143', async () => {
+    const context = setup();
+    const { child, exited } = superviseAsProcess(context);
+    const started = await waitFor(() => { const all = context.read(); return all.filter((e) => e.event === 'start').length >= 2 ? all : undefined; });
+    const background = started.find((e) => e.role === 'background')!;
+    const front = started.find((e) => e.role === 'front')!;
+    process.kill(background.pid, 'SIGTERM');
+    process.kill(front.pid, 'SIGTERM');
+    child.kill('SIGTERM');
+    expect(await exited).toBe(143);
+    const events = context.read();
+    expect(events.filter((e) => e.event === 'start')).toHaveLength(2);
+    expect(events.filter((e) => e.event === 'stop').map((e) => e.role).sort()).toEqual(['background', 'front']);
+    expect(alive(background.pid)).toBe(false);
+    expect(alive(front.pid)).toBe(false);
   }, 30_000);
 });
 
@@ -185,6 +204,8 @@ describe('the unit\'s process stays the supervisor for its whole life', () => {
     expect(spawnedRoles).toEqual(['background']);
   }, 30_000);
 
+  // The command runs the way an interpreter-launched tool (ocrmypdf: python3
+  // plus a script) does: what the process table shows is not what was spawned.
   test('a background that dies leaves no extraction command of its running', async () => {
     const context = setup();
     context.env.SPAWN_EXTRACTION = '1';
@@ -197,63 +218,6 @@ describe('the unit\'s process stays the supervisor for its whole life', () => {
     await waitFor(() => context.read().filter((e) => e.role === 'background' && e.event === 'start').length >= 2 ? true : undefined);
     expect(alive(extraction.pid)).toBe(false);
   }, 30_000);
-});
-
-describe('with the switch off, a stop still reaches every process in the unit', () => {
-  const unitCgroup = '0::/user.slice/user-1000.slice/user@1000.service/app.slice/olympus-worker.service\n';
-  function fakeHost(input: { cgroup?: string; procs?: string; execPid?: string; env?: Record<string, string> } = {}) {
-    const handlers = new Map<string, () => void>();
-    const killed: Array<[number, string]> = [];
-    const raised: string[] = [];
-    const installed = forwardWorkerServiceStop({
-      env: { SYSTEMD_EXEC_PID: input.execPid ?? '100', ...input.env },
-      platform: 'linux',
-      pid: 100,
-      readFile: (path) => {
-        if (path === '/proc/self/cgroup') return input.cgroup ?? unitCgroup;
-        if (path === '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/olympus-worker.service/cgroup.procs') return input.procs ?? '100\n201\n202\n';
-        throw new Error(`unexpected read ${path}`);
-      },
-      kill: (pid, signal) => { killed.push([pid, signal]); },
-      signals: {
-        once: (signal, handler) => { handlers.set(signal, handler); },
-        listenerCount: () => 1,
-        raise: (signal) => { raised.push(signal); },
-      },
-    });
-    return { installed, handlers, killed, raised };
-  }
-
-  test('the unit\'s process passes SIGTERM on to everything else in its control group, as KillMode=control-group did', () => {
-    const host = fakeHost();
-    expect(host.installed).toBe(true);
-    host.handlers.get('SIGTERM')!();
-    expect(host.killed).toEqual([[201, 'SIGTERM'], [202, 'SIGTERM']]);
-  });
-
-  test('only the unit\'s own main process forwards', () => {
-    // A process the worker started inherits the environment, not the pid.
-    expect(fakeHost({ execPid: '555' }).installed).toBe(false);
-    // A worker under another unit (the engine host's) is not this unit.
-    expect(fakeHost({ cgroup: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/olympus-engine.service\n' }).installed).toBe(false);
-    // The split's children have a role and never forward.
-    expect(fakeHost({ env: { OLYMPUS_WORKER_ENGINE_ROLE: 'front' } }).installed).toBe(false);
-  });
-
-  test('a SIGTERM before the worker installed its own handler still ends the process', () => {
-    const handlers = new Map<string, () => void>();
-    const raised: string[] = [];
-    forwardWorkerServiceStop({
-      env: { SYSTEMD_EXEC_PID: '100' },
-      platform: 'linux',
-      pid: 100,
-      readFile: (path) => path === '/proc/self/cgroup' ? unitCgroup : '100\n',
-      kill: () => {},
-      signals: { once: (signal, handler) => { handlers.set(signal, handler); }, listenerCount: () => 0, raise: (signal) => { raised.push(signal); } },
-    });
-    handlers.get('SIGTERM')!();
-    expect(raised).toEqual(['SIGTERM']);
-  });
 });
 
 describe('when it applies', () => {
@@ -273,7 +237,6 @@ describe('when it applies', () => {
   test('with the switch off __worker-service-run starts the worker exactly as before', async () => {
     const launches: unknown[] = [];
     let supervised = 0;
-    let forwarded = 0;
     await runWorkerForeground({
       env: {},
       applySetupEnv: () => {},
@@ -281,11 +244,9 @@ describe('when it applies', () => {
       engineSplit: () => false,
       platform: 'linux',
       superviseSplit: async () => { supervised += 1; },
-      forwardUnitStop: () => { forwarded += 1; },
     });
     expect(launches).toEqual([{ nativeServiceSupervised: false }]);
     expect(supervised).toBe(0);
-    expect(forwarded).toBe(1);
     await runWorkerForeground({
       env: {},
       applySetupEnv: () => {},
@@ -293,21 +254,17 @@ describe('when it applies', () => {
       engineSplit: () => true,
       platform: 'linux',
       superviseSplit: async () => { supervised += 1; },
-      forwardUnitStop: () => { forwarded += 1; },
     });
     expect(launches).toHaveLength(1);
     expect(supervised).toBe(1);
-    // The supervisor stops its children in order itself.
-    expect(forwarded).toBe(1);
   });
 });
 
 describe('the systemd unit', () => {
-  test('signals only its main process on stop, so the supervisor stops the front before the background', async () => {
+  test('keeps the default control-group stop: every process in the unit gets SIGTERM at once', async () => {
     const result = await installWorkerService({ platform: 'linux', homeDir: '/home/friend', workingDirectory: '/home/friend/olympus', dryRun: true });
-    expect(result.unit).toContain('KillMode=mixed');
-    // Room for the front's and then the background's shutdown deadline, in turn.
-    expect(result.unit).toMatch(/TimeoutStopSec=\d+/);
-    expect(Number(/TimeoutStopSec=(\d+)/.exec(result.unit)![1])).toBeGreaterThanOrEqual(60);
+    // An ordered stop (front, then background) needs KillMode=mixed: a later, opt-in change.
+    expect(result.unit).not.toContain('KillMode=');
+    expect(result.unit).not.toContain('TimeoutStopSec=');
   });
 });
