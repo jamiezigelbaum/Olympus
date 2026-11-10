@@ -1,3 +1,4 @@
+import { dashboardPeopleRow } from './people.ts';
 import { judgeArchiveEstimate, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
 import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
@@ -365,6 +366,8 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
     `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER}</span></div>`,
+    // People (#1076): who is who across these sources, at the bottom of Sources.
+    dashboardPeopleRow(token),
     rows.map((entry) => entry.dialogs).join(''),
     sheet,
     connectorDialog(),

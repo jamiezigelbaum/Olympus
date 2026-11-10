@@ -1,3 +1,5 @@
+import type { DashboardPeopleBackend } from './dashboard-people.ts';
+import { DASHBOARD_PEOPLE_PATH, type DashboardPeopleView } from '../dashboard/pages/people.ts';
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
@@ -621,6 +623,14 @@ export interface EmailSourceWorkerOptions {
      * answers 501.
      */
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
+    /**
+     * People (#1076; dashboard-people.ts): the people index as the People page
+     * shows it, and the owner's corrections. The list is Private: the page
+     * shows it and the route answers only inside a local control session
+     * (workers/http.ts). Absent: the page says it is not ready and the route
+     * answers 501.
+     */
+    people?: DashboardPeopleBackend;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
@@ -1622,6 +1632,24 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
+          if (page === 'people') {
+            // The people list only for a locally minted control session.
+            const localSession = controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
+            let people: DashboardPeopleView | undefined;
+            if (localSession && sourceDashboard?.people) {
+              try {
+                people = sourceDashboard.people.view();
+              } catch {
+                people = undefined;
+              }
+            }
+            return html(renderDashboardLocalPage('people', {
+              url,
+              options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) },
+              ...(people ? { people } : {}),
+              peopleLocalSession: localSession,
+            }));
+          }
           if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
           if (page === 'json' || page === 'keys' || page === 'connect' || page === 'help') {
             if (!sourceIndexStatus || !sourceDashboard) {
@@ -2392,6 +2420,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           } catch {
             return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
           }
+        }
+
+        // People (#1076): Same person, Not the same, Merge, Split, Rename.
+        // Local control session only, like Private answers below.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_PEOPLE_PATH) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'People opens only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.people) {
+            throw new EmailSourceWorkerError(501, 'people_not_supported', 'People is not available in this worker yet.');
+          }
+          const record = await parseObjectBody(request);
+          const outcome = sourceDashboard.people.handle(record);
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
         }
 
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {

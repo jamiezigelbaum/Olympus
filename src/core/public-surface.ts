@@ -319,6 +319,10 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // Answer or Dismiss on a waiting question. Local control session only, as
   // above (workers/http.ts DASHBOARD_PRIVATE_ANSWERS_PATH).
   { method: 'POST', path: '/dashboard/private-answers' },
+  // People (#1076): Same person, Not the same, Merge, Split and Rename. The
+  // people list is Private: local control session only, as above
+  // (workers/http.ts DASHBOARD_PEOPLE_PATH).
+  { method: 'POST', path: '/dashboard/people' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [

@@ -1,3 +1,4 @@
+import { createDashboardPeople } from './dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
@@ -3848,8 +3849,9 @@ export async function main(): Promise<void> {
   // it, answers keep each item's own sender label and filters match labels.
   const peopleIndex = openPeopleIndexOrUndefined();
   const peopleRefresher = peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
-  // `force` rebuilds now; otherwise only after a sync or a tier visibility
-  // change, at most once a minute (the markers are cheap to read).
+  // After every scheduler tick (below) and on a one-minute check: a
+  // rebuild only after a sync or a tier visibility change, at most once a
+  // minute (the markers are cheap to read); `force` rebuilds now.
   const refreshPeople = (force = false): void => {
     if (!peopleRefresher) return;
     try {
@@ -5785,11 +5787,19 @@ export async function main(): Promise<void> {
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
       sources: schedulerSources,
+      ...(!(sourceIndexStatus && sourceIngestionLedger)
+        ? {
+            afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
+            afterTick: () => refreshPeople(),
+          }
+        : {}),
       ...(sourceIndexStatus && sourceIngestionLedger
         ? {
             // Each delivery reads every store's status; at most one every 30 s.
             afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
             afterTick: async (schedulerStatus) => {
+              // A sync that just completed brings new senders: link them now.
+              refreshPeople();
               const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
@@ -6300,6 +6310,10 @@ export async function main(): Promise<void> {
                 return dashboardPanelTools.call(name, args, context);
               },
             },
+            // People (#1076): the people index and the owner's corrections.
+            ...(peopleIndex
+              ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) }
+              : {}),
             // Private answers on this computer; bound late like the panel's tools.
             ...(sourceAnswerLanes
               ? {
