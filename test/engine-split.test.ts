@@ -20,6 +20,7 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex as SecretLocations } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { EngineCommandClient, OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
 import {
   createEngineCommandHandler,
@@ -569,6 +570,34 @@ describe('the front writes nothing the background owns', () => {
     openReadOnlyDashboardHistory(dashboard).close();
     new LocalSourceWatchStore(watches, { readOnly: true }).close();
     new LocalFileExtractionJobStore(jobs, { readonly: true }).close();
+  });
+
+  test('a lane\'s tiered set in the front opens read-only and does no write work', async () => {
+    const root = tempRoot();
+    const internalPath = join(root, 'internal.sqlite');
+    const securePath = join(root, 'secure.sqlite');
+    const writableStores = [
+      new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.fixture', family: 'file', trustDomain: 'internal' }),
+      new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.fixture', family: 'file', trustDomain: 'secure_local' }),
+    ] as const;
+    createLaneTieredStoreSet({ setId: 'front-set', internalStore: writableStores[0], secureStore: writableStores[1], registerWithLedger: false });
+    await flushMicrotasks(50);
+    for (const store of writableStores) store.close();
+    forbidWritableStoreOpens();
+    const internalStore = new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.fixture', family: 'file', trustDomain: 'internal', readOnly: true });
+    const secureStore = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.fixture', family: 'file', trustDomain: 'secure_local', readOnly: true });
+    const failures: unknown[] = [];
+    const onRejection = (reason: unknown) => { failures.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      createLaneTieredStoreSet({ setId: 'front-set', internalStore, secureStore, registerWithLedger: false });
+      await flushMicrotasks(50);
+      internalStore.close();
+      secureStore.close();
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+    expect(failures).toEqual([]);
   });
 
   test('the people index is the background\'s: the front opens it read-only and picks up each rebuild', () => {

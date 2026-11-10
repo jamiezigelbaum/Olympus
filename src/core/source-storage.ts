@@ -34,6 +34,7 @@ import { existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, rmdirSync, sta
 import { basename, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { writableStoreOpensForbidden } from './store-write-guard.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
@@ -99,11 +100,22 @@ export function enableSourceRegistryAdoption(): void {
   adoptionEnabled = true;
 }
 
+/**
+ * The engine split's front writes nothing the background owns
+ * (core/store-write-guard.ts): every store and sidecar it opens through this
+ * service is opened read-only, whatever its lane asked for, and the
+ * background, which syncs and judges, is the one writer.
+ */
+function frontReadOnly<T extends { readOnly?: boolean }>(options: T): T {
+  return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
+}
+
 export function openConnectorStore(
   account: StorageAccount,
-  options: LocalConnectorStoreOptions,
+  requested: LocalConnectorStoreOptions,
   env: LayoutEnv = process.env,
 ): LocalConnectorStore {
+  const options = frontReadOnly(requested);
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
   let registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, slot);
@@ -122,25 +134,28 @@ export function openConnectorStore(
 
 // A sidecar can be the first file of an account: a tiered set opens its ledger
 // before its stores.
-export function openTierLedger(account: StorageAccount, options: TierLedgerOptions, env: LayoutEnv = process.env): TierLedger {
-  placeSidecar(env, account, options.dbPath);
+export function openTierLedger(account: StorageAccount, requested: TierLedgerOptions, env: LayoutEnv = process.env): TierLedger {
+  const options = frontReadOnly(requested);
+  placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierLedger(options);
 }
 
 export function openSecretLocations(
   account: StorageAccount,
-  options: ConstructorParameters<typeof SecretLocationsIndex>[0],
+  requested: ConstructorParameters<typeof SecretLocationsIndex>[0],
   env: LayoutEnv = process.env,
 ): SecretLocationsIndex {
+  const options = frontReadOnly(requested);
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new SecretLocationsIndex(options);
 }
 
 export function openTierSniffer(
   account: StorageAccount,
-  options: ConstructorParameters<typeof TierSnifferStore>[0],
+  requested: ConstructorParameters<typeof TierSnifferStore>[0],
   env: LayoutEnv = process.env,
 ): TierSnifferStore {
+  const options = frontReadOnly(requested);
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierSnifferStore(options);
 }

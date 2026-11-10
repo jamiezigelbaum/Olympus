@@ -19327,6 +19327,7 @@ var init_local_index = __esm(() => {
 // src/core/source-storage.ts
 var CAPTURE_CLAIM_RECLAIM_AGE_MS;
 var init_source_storage = __esm(() => {
+  init_store_write_guard();
   init_secret_locations();
   init_sniffer_store();
   init_tier_ledger();
@@ -19956,6 +19957,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
+  init_store_write_guard();
   init_control_path_headroom();
   init_types();
   init_engine();

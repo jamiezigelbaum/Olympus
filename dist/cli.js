@@ -17396,6 +17396,28 @@ var init_cli_via_worker = __esm(() => {
   };
 });
 
+// src/core/store-write-guard.ts
+function forbidWritableStoreOpens() {
+  forbidden = true;
+}
+function writableStoreOpensForbidden() {
+  return forbidden;
+}
+function assertWritableStoreOpenAllowed(kind, dbPath) {
+  if (forbidden && dbPath !== ":memory:")
+    throw new FrontStoreWriteError(kind);
+}
+var FrontStoreWriteError, forbidden = false;
+var init_store_write_guard = __esm(() => {
+  FrontStoreWriteError = class FrontStoreWriteError extends Error {
+    code = "front_store_write";
+    constructor(kind) {
+      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
+      this.name = "FrontStoreWriteError";
+    }
+  };
+});
+
 // node_modules/n-gram/index.js
 function nGram(n) {
   if (typeof n !== "number" || Number.isNaN(n) || n < 1 || n === Number.POSITIVE_INFINITY) {
@@ -18513,28 +18535,6 @@ function validateMigrations(migrations) {
 var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
-});
-
-// src/core/store-write-guard.ts
-function forbidWritableStoreOpens() {
-  forbidden = true;
-}
-function writableStoreOpensForbidden() {
-  return forbidden;
-}
-function assertWritableStoreOpenAllowed(kind, dbPath) {
-  if (forbidden && dbPath !== ":memory:")
-    throw new FrontStoreWriteError(kind);
-}
-var FrontStoreWriteError, forbidden = false;
-var init_store_write_guard = __esm(() => {
-  FrontStoreWriteError = class FrontStoreWriteError extends Error {
-    code = "front_store_write";
-    constructor(kind) {
-      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
-      this.name = "FrontStoreWriteError";
-    }
-  };
 });
 
 // node_modules/entities/dist/esm/decode-codepoint.js
@@ -44058,7 +44058,11 @@ import { tmpdir as tmpdir3 } from "node:os";
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
-function openConnectorStore(account, options, env = process.env) {
+function frontReadOnly(options) {
+  return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
+}
+function openConnectorStore(account, requested, env = process.env) {
+  const options = frontReadOnly(requested);
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
   let registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, slot);
@@ -44072,15 +44076,18 @@ function openConnectorStore(account, options, env = process.env) {
   const mediaHolder = placedStoreHolder({ sourceId: account.sourceId, slot }, options, env, registry);
   return new LocalConnectorStore(mediaHolder ? { ...options, mediaHolder } : options);
 }
-function openTierLedger(account, options, env = process.env) {
-  placeSidecar(env, account, options.dbPath);
+function openTierLedger(account, requested, env = process.env) {
+  const options = frontReadOnly(requested);
+  placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierLedger(options);
 }
-function openSecretLocations(account, options, env = process.env) {
+function openSecretLocations(account, requested, env = process.env) {
+  const options = frontReadOnly(requested);
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new SecretLocationsIndex(options);
 }
-function openTierSniffer(account, options, env = process.env) {
+function openTierSniffer(account, requested, env = process.env) {
+  const options = frontReadOnly(requested);
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierSnifferStore(options);
 }
@@ -44496,6 +44503,7 @@ function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
 }
 var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
 var init_source_storage = __esm(() => {
+  init_store_write_guard();
   init_secret_locations();
   init_sniffer_store();
   init_tier_ledger();
@@ -67576,8 +67584,10 @@ class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
-    this.repairLowerContent();
-    this.sweepOrphanedChildren();
+    if (!writableStoreOpensForbidden()) {
+      this.repairLowerContent();
+      this.sweepOrphanedChildren();
+    }
   }
   static CHILD_SWEEP_PAGE = 200;
   childLane = {
@@ -68161,7 +68171,7 @@ class TieredStoreSet {
   }
 }
 function createLaneTieredStoreSet(options) {
-  const ledger = options.ledger ?? options.secureStore.tierLedger() ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+  const ledger = options.ledger ?? options.secureStore.tierLedger() ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath), ...writableStoreOpensForbidden() ? { readOnly: true } : {} });
   return new TieredStoreSet({
     setId: options.setId,
     ledger,
@@ -68839,6 +68849,7 @@ function handoffConnector(source, item) {
 }
 var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
+  init_store_write_guard();
   init_control_path_headroom();
   init_types();
   init_engine();

@@ -41,6 +41,7 @@
 // Everything here is source-neutral: a lane declares its legs; nothing
 // branches on which source an item came from.
 
+import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -322,9 +323,12 @@ export class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
-    void this.repairLowerContent();
-    // Orphans left by a parent that went while the worker was down.
-    void this.sweepOrphanedChildren();
+    // Repairs and sweeps write; in the engine split's front the background does them.
+    if (!writableStoreOpensForbidden()) {
+      void this.repairLowerContent();
+      // Orphans left by a parent that went while the worker was down.
+      void this.sweepOrphanedChildren();
+    }
   }
 
   // ---- Child items whose parent is gone ---------------------------------------
@@ -1263,7 +1267,8 @@ export interface LaneTieredStoreSetOptions {
 export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): TieredStoreSet {
   const ledger = options.ledger
     ?? options.secureStore.tierLedger()
-    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+    // The engine split's front reads the set ledger the background writes.
+    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath), ...(writableStoreOpensForbidden() ? { readOnly: true } : {}) });
   return new TieredStoreSet({
     setId: options.setId,
     ledger,
