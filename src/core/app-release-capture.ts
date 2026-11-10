@@ -33,6 +33,8 @@ export interface ReleasedItem {
   tier: ReleasedTier;
   corpusId?: string;
   provider?: string;
+  /** The account the item came from (an imported archive's id): removing one archive takes only its rows. */
+  accountScope?: string;
   providerItemId?: string;
   providerConversationId?: string;
   /** The item's locator or link as the answer cited it: the per-item correction finds the item by it. */
@@ -137,6 +139,7 @@ export function releasedItemFromEvidence(evidence: Record<string, unknown>, sour
   const shownTitle = boundedString(title, TITLE_MAX);
   const corpusId = boundedString(evidence.corpus_id, ID_MAX);
   const provider = boundedString(evidence.provider, ID_MAX);
+  const accountScope = boundedString(evidence.account_scope, ID_MAX);
   const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
   const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
   const locator = boundedString(evidence.uri, ID_MAX);
@@ -146,6 +149,7 @@ export function releasedItemFromEvidence(evidence: Record<string, unknown>, sour
     tier: releasedTierOf(evidence.trust_domain),
     ...(corpusId ? { corpusId } : {}),
     ...(provider ? { provider } : {}),
+    ...(accountScope ? { accountScope } : {}),
     ...(providerItemId ? { providerItemId } : {}),
     ...(providerConversationId ? { providerConversationId } : {}),
     ...(locator ? { locator } : {}),
