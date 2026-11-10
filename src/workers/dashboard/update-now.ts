@@ -207,15 +207,17 @@ function updateNoticeProgram(config: {
     }
   }
   // async, not Promise.resolve: a page's VM may not expose the Promise global by name.
-  async function unlock(): Promise<void> {
-    if (local && csrf) return;
+  /** True when this page now holds a newly minted session (its control cookie was replaced). */
+  async function unlock(): Promise<boolean> {
+    if (local && csrf) return false;
     // This computer's own session: the worker grants it only to a loopback
     // browser presenting no bearer, so an agent never reaches Update now.
     try {
       const response = await fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' });
       const body = (response.ok ? await response.json() : undefined) as { csrf_token?: unknown } | undefined;
-      if (body && typeof body.csrf_token === 'string' && body.csrf_token) { csrf = body.csrf_token; local = true; }
+      if (body && typeof body.csrf_token === 'string' && body.csrf_token) { csrf = body.csrf_token; local = true; return true; }
     } catch { /* The start call then says why it was refused. */ }
+    return false;
   }
   function post(path: string): Promise<{ status: number; body: { ok?: boolean; update?: Status; error?: { message?: string } } }> {
     return fetch(path, {
@@ -252,28 +254,59 @@ function updateNoticeProgram(config: {
     poll();
   }
   const button = q<HTMLButtonElement>('[data-update-now]');
+  // A newly minted session replaces this page's control cookie, so every other
+  // control here (Home's tools, Settings) would still send the old session's
+  // CSRF token and be refused. The page reloads to take the new session, and
+  // these one-shot marks carry on what it was doing after the reload.
+  const resumeKey = 'olympus-update-now';
+  const followKey = 'olympus-update-follow';
+  function take(key: string): string {
+    try { const value = window.sessionStorage.getItem(key) || ''; window.sessionStorage.removeItem(key); return value; } catch { return ''; }
+  }
+  function keep(key: string, value: string): boolean {
+    try { window.sessionStorage.setItem(key, value); return true; } catch { return false; }
+  }
+  const resume = take(resumeKey);
+  const followed = take(followKey);
+  function startUpdate(target: HTMLButtonElement): void {
+    target.disabled = true;
+    post(config.startPath).then(({ body }) => {
+      if (body && body.ok && body.update) {
+        if (body.update.state === 'running') lastRunning = body.update;
+        render(body.update);
+        if (body.update.state === 'running') startPolling();
+        return;
+      }
+      const noteEl = q<HTMLElement>('[data-update-note]');
+      if (noteEl) { noteEl.textContent = (body && body.error && body.error.message) || words.failedFallback; noteEl.hidden = false; }
+      target.disabled = false;
+    }, () => {
+      const noteEl = q<HTMLElement>('[data-update-note]');
+      if (noteEl) { noteEl.textContent = words.failedFallback; noteEl.hidden = false; }
+      target.disabled = false;
+    });
+  }
   if (button && config.selfUpdate) {
     button.addEventListener('click', () => {
       button.disabled = true;
-      unlock().then(() => post(config.startPath)).then(({ body }) => {
-        if (body && body.ok && body.update) {
-          if (body.update.state === 'running') lastRunning = body.update;
-          render(body.update);
-          if (body.update.state === 'running') startPolling();
-          return;
-        }
-        const noteEl = q<HTMLElement>('[data-update-note]');
-        if (noteEl) { noteEl.textContent = (body && body.error && body.error.message) || words.failedFallback; noteEl.hidden = false; }
-        button.disabled = false;
-      }, () => {
-        const noteEl = q<HTMLElement>('[data-update-note]');
-        if (noteEl) { noteEl.textContent = words.failedFallback; noteEl.hidden = false; }
-        button.disabled = false;
+      unlock().then((fresh) => {
+        if (!fresh) { startUpdate(button); return; }
+        // Without storage the reload still happens; a second click then starts it.
+        keep(resumeKey, config.available);
+        window.location.reload();
       });
     });
+    // After that reload: the update the click asked for, once.
+    if (resume && resume === config.available && local && csrf && !button.hidden) startUpdate(button);
   }
-  // A page opened, or reloaded, while an update runs keeps following it.
-  if (config.running && config.selfUpdate) unlock().then(startPolling);
+  // A page opened, or reloaded, while an update runs keeps following it
+  // (reloading once first if that took a new session).
+  if (config.running && config.selfUpdate) {
+    unlock().then((fresh) => {
+      if (fresh && !followed && keep(followKey, '1')) { window.location.reload(); return; }
+      startPolling();
+    });
+  }
 }
 
 export { WORDS as UPDATE_NOTICE_WORDS };

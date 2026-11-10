@@ -69814,6 +69814,7 @@ init_update_check();
 
 // src/core/self-update.ts
 init_atomic_file();
+init_linux_engine_layout();
 
 // src/core/release-signing.ts
 var RELEASE_MANIFEST_MAX_BYTES = 64 * 1024;

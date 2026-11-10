@@ -147247,10 +147247,30 @@ import { spawn as spawn11 } from "node:child_process";
 import { randomBytes as randomBytes24 } from "node:crypto";
 import { chmodSync as chmodSync35, existsSync as existsSync91, mkdirSync as mkdirSync56, readdirSync as readdirSync27, readFileSync as readFileSync79, rmSync as rmSync36 } from "node:fs";
 import { join as join122 } from "node:path";
+function linuxSelfUpdateRunArgs(runner, runDir, layoutEnv2) {
+  return [
+    "--user",
+    "--collect",
+    "--quiet",
+    `--unit=olympus-update-${runDir.slice(-16)}`,
+    ...Object.entries(layoutEnv2).map(([name, value2]) => `--setenv=${name}=${value2}`),
+    "--",
+    "/bin/sh",
+    runner,
+    runDir
+  ];
+}
 function defaultLaunch(platform2, homeDir) {
   return (runner, runDir) => new Promise((resolve26, reject) => {
     if (platform2 === "linux") {
-      const child3 = spawn11("/usr/bin/systemd-run", ["--user", "--collect", "--quiet", `--unit=olympus-update-${runDir.slice(-16)}`, "--", "/bin/sh", runner, runDir], { stdio: "ignore" });
+      let args;
+      try {
+        args = linuxSelfUpdateRunArgs(runner, runDir, linuxEngineEnvironment(resolveLinuxEngineLayout(process.env)));
+      } catch (error2) {
+        reject(error2);
+        return;
+      }
+      const child3 = spawn11("/usr/bin/systemd-run", args, { stdio: "ignore" });
       child3.once("error", reject);
       child3.once("exit", (code) => code === 0 ? resolve26() : reject(new Error("systemd-run failed")));
       return;
@@ -147442,6 +147462,7 @@ printf '%s %s\\n' "$code" "$(date +%s)" > "$dir/result.next" && mv -f "$dir/resu
 `, RESTORED;
 var init_self_update = __esm(() => {
   init_atomic_file();
+  init_linux_engine_layout();
   init_release_signing();
   init_update_check();
   SELF_UPDATE_STALE_MS = 30 * 60000;
@@ -163300,15 +163321,17 @@ function updateNoticeProgram(config2) {
   }
   async function unlock() {
     if (local && csrf)
-      return;
+      return false;
     try {
       const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" });
       const body = response.ok ? await response.json() : undefined;
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrf = body.csrf_token;
         local = true;
+        return true;
       }
     } catch {}
+    return false;
   }
   function post2(path) {
     return fetch(path, {
@@ -163359,36 +163382,77 @@ function updateNoticeProgram(config2) {
     poll();
   }
   const button = q("[data-update-now]");
+  const resumeKey = "olympus-update-now";
+  const followKey = "olympus-update-follow";
+  function take(key2) {
+    try {
+      const value2 = window.sessionStorage.getItem(key2) || "";
+      window.sessionStorage.removeItem(key2);
+      return value2;
+    } catch {
+      return "";
+    }
+  }
+  function keep(key2, value2) {
+    try {
+      window.sessionStorage.setItem(key2, value2);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const resume = take(resumeKey);
+  const followed = take(followKey);
+  function startUpdate(target) {
+    target.disabled = true;
+    post2(config2.startPath).then(({ body }) => {
+      if (body && body.ok && body.update) {
+        if (body.update.state === "running")
+          lastRunning = body.update;
+        render(body.update);
+        if (body.update.state === "running")
+          startPolling();
+        return;
+      }
+      const noteEl = q("[data-update-note]");
+      if (noteEl) {
+        noteEl.textContent = body && body.error && body.error.message || words2.failedFallback;
+        noteEl.hidden = false;
+      }
+      target.disabled = false;
+    }, () => {
+      const noteEl = q("[data-update-note]");
+      if (noteEl) {
+        noteEl.textContent = words2.failedFallback;
+        noteEl.hidden = false;
+      }
+      target.disabled = false;
+    });
+  }
   if (button && config2.selfUpdate) {
     button.addEventListener("click", () => {
       button.disabled = true;
-      unlock().then(() => post2(config2.startPath)).then(({ body }) => {
-        if (body && body.ok && body.update) {
-          if (body.update.state === "running")
-            lastRunning = body.update;
-          render(body.update);
-          if (body.update.state === "running")
-            startPolling();
+      unlock().then((fresh2) => {
+        if (!fresh2) {
+          startUpdate(button);
           return;
         }
-        const noteEl = q("[data-update-note]");
-        if (noteEl) {
-          noteEl.textContent = body && body.error && body.error.message || words2.failedFallback;
-          noteEl.hidden = false;
-        }
-        button.disabled = false;
-      }, () => {
-        const noteEl = q("[data-update-note]");
-        if (noteEl) {
-          noteEl.textContent = words2.failedFallback;
-          noteEl.hidden = false;
-        }
-        button.disabled = false;
+        keep(resumeKey, config2.available);
+        window.location.reload();
       });
     });
+    if (resume && resume === config2.available && local && csrf && !button.hidden)
+      startUpdate(button);
   }
-  if (config2.running && config2.selfUpdate)
-    unlock().then(startPolling);
+  if (config2.running && config2.selfUpdate) {
+    unlock().then((fresh2) => {
+      if (fresh2 && !followed && keep(followKey, "1")) {
+        window.location.reload();
+        return;
+      }
+      startPolling();
+    });
+  }
 }
 var C2, WORDS, UPDATE_NOTICE_CSS;
 var init_update_now = __esm(() => {

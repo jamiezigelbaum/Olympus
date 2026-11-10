@@ -11,7 +11,9 @@ import { Window } from 'happy-dom';
 import {
   RELEASE_SIGNING_PUBLIC_KEY, releasePublicKey, verifySignedReleaseManifest,
 } from '../src/core/release-signing.ts';
-import { createSelfUpdater, type SelfUpdaterOptions } from '../src/core/self-update.ts';
+import { createSelfUpdater, linuxSelfUpdateRunArgs, type SelfUpdaterOptions } from '../src/core/self-update.ts';
+import { linuxEngineEnvironment, resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
+import { renderEngineSystemdUnit } from '../src/core/linux-engine-service.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -229,6 +231,30 @@ describe('Update now in the engine', () => {
   });
 });
 
+describe('Update now on Linux runs in the engine\'s own layout', () => {
+  test('the transient unit gets every layout variable the engine unit sets', () => {
+    const layout = resolveLinuxEngineLayout({ HOME: '/home/u', XDG_CONFIG_HOME: '/srv/u/config', XDG_DATA_HOME: '/srv/u/data', XDG_STATE_HOME: '/srv/u/state', XDG_CACHE_HOME: '/srv/u/cache', XDG_RUNTIME_DIR: '/run/user/1000' });
+    const args = linuxSelfUpdateRunArgs('/s/run/runner.sh', '/s/run/0123456789abcdef', linuxEngineEnvironment(layout));
+    expect(args).toEqual([
+      '--user', '--collect', '--quiet', '--unit=olympus-update-0123456789abcdef',
+      '--setenv=HOME=/home/u',
+      '--setenv=XDG_CONFIG_HOME=/srv/u/config',
+      '--setenv=XDG_DATA_HOME=/srv/u/data',
+      '--setenv=XDG_STATE_HOME=/srv/u/state',
+      '--setenv=XDG_CACHE_HOME=/srv/u/cache',
+      '--setenv=XDG_RUNTIME_DIR=/run/user/1000',
+      '--setenv=OLYMPUS_SOVEREIGNTY_CONFIG=/srv/u/config/olympus/sovereignty.json',
+      '--', '/bin/sh', '/s/run/runner.sh', '/s/run/0123456789abcdef',
+    ]);
+    // The same layout the engine unit carries, so the two cannot drift apart.
+    const unit = renderEngineSystemdUnit(layout, { runtimePath: '/opt/bun', entryPath: '/opt/olympus.js', workingDirectory: '/home/u' } as Parameters<typeof renderEngineSystemdUnit>[1]);
+    const environment = unit.split('\n').find(line => line.startsWith('Environment='))!;
+    const unitVars = [...environment.matchAll(/"([A-Z_]+)=([^"]*)"/g)].map(m => [m[1]!, m[2]!] as const)
+      .filter(([name]) => name === 'HOME' || name.startsWith('XDG_') || name === 'OLYMPUS_SOVEREIGNTY_CONFIG');
+    expect(args.filter(arg => arg.startsWith('--setenv=')).map(arg => arg.slice('--setenv='.length))).toEqual(unitVars.map(([name, value]) => `${name}=${value}`));
+  });
+});
+
 describe('Update now is this computer\'s own: never the bearer, a launch link or a remote browser', () => {
   const TOKEN = 'self-update-boundary-secret';
   const ORIGIN = 'http://127.0.0.1:28193';
@@ -366,6 +392,52 @@ describe('the notice on Home and Settings', () => {
       expect(paths[0]).toBe(DASHBOARD_SELF_UPDATE_PATHS.start);
       expect(paths.slice(1).every(path => path === DASHBOARD_SELF_UPDATE_PATHS.status)).toBe(true);
     } finally { await window.happyDOM.close(); }
+  });
+
+  test('Update now on a page with a bearer or launch session reloads to share the new local session, then starts once', async () => {
+    // The local mint replaces the control cookie, so Home's tools and Settings
+    // would keep a dead CSRF token: the page reloads before the update starts.
+    const page = (csrfToken: string, localSession: boolean) => renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, csrfToken, localSession });
+    const calls: { url: string; csrf: string | null }[] = [];
+    const open = (html: string, resume?: string) => {
+      const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+      let reloads = 0;
+      Object.defineProperty(window.location, 'reload', { value: () => { reloads++; } });
+      Object.defineProperty(window, 'setInterval', { value: () => 1 });
+      Object.defineProperty(window, 'setTimeout', { value: () => 1 });
+      Object.defineProperty(window, 'fetch', { value: async (url: string, init?: { headers?: Record<string, string> }) => {
+        if (url === '/v1/health') return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }));
+        calls.push({ url, csrf: init?.headers?.['X-Olympus-CSRF'] ?? null });
+        if (url === DASHBOARD_LOCAL_CONTROL_SESSION_PATH) return new window.Response(JSON.stringify({ csrf_token: 'local-c' }));
+        return new window.Response(JSON.stringify({ ok: true, update: { state: 'running', step: 1, from: '1.5.0', to: '1.5.1' } }));
+      } });
+      if (resume !== undefined) window.sessionStorage.setItem('olympus-update-now', resume);
+      window.document.write(html); window.document.close();
+      return { window, reloads: () => reloads };
+    };
+    const before = open(page('bearer-c', false));
+    try {
+      (before.window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
+      await waitFor(() => before.reloads() === 1, { description: 'reload after the new session' });
+      expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: null }]);
+      expect(before.window.sessionStorage.getItem('olympus-update-now')).toBe('1.5.1');
+    } finally { await before.window.happyDOM.close(); }
+    // The reloaded page holds the local session everywhere and carries on.
+    calls.length = 0;
+    const after = open(page('local-c', true), '1.5.1');
+    try {
+      await waitFor(() => calls.length === 1, { description: 'update started after the reload' });
+      expect(calls).toEqual([{ url: DASHBOARD_SELF_UPDATE_PATHS.start, csrf: 'local-c' }]);
+      expect(after.window.sessionStorage.getItem('olympus-update-now')).toBeNull();
+      expect(after.reloads()).toBe(0);
+    } finally { await after.window.happyDOM.close(); }
+    // A later visit with no click behind it starts nothing.
+    calls.length = 0;
+    const later = open(page('local-c', true));
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(calls).toEqual([]);
+    } finally { await later.window.happyDOM.close(); }
   });
 
   test('a refused update shows the reason beside the button', async () => {

@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { linuxEngineEnvironment, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import {
   checkInstallerAgainstManifest, RELEASE_MANIFEST_MAX_BYTES, RELEASE_SIGNING_PUBLIC_KEY, releaseManifestUrl,
   releasePlatformFor, releasePublicKey, verifySignedReleaseManifest,
@@ -105,12 +106,29 @@ printf '%s %s\\n' "$code" "$(date +%s)" > "$dir/result.next" && mv -f "$dir/resu
  */
 const RESTORED = /previous version was (?:restored|put back)|Previous installation restoration proved healthy/i;
 
+/**
+ * The systemd-run arguments for the update on Linux. A transient unit takes the
+ * user manager's environment, not the engine's, so the engine's own layout
+ * (the variables its unit sets, linuxEngineEnvironment) is passed in full:
+ * otherwise install-linux.sh would fall back to $HOME defaults and could
+ * update a different tree.
+ */
+export function linuxSelfUpdateRunArgs(runner: string, runDir: string, layoutEnv: Record<string, string>): string[] {
+  return [
+    '--user', '--collect', '--quiet', `--unit=olympus-update-${runDir.slice(-16)}`,
+    ...Object.entries(layoutEnv).map(([name, value]) => `--setenv=${name}=${value}`),
+    '--', '/bin/sh', runner, runDir,
+  ];
+}
+
 function defaultLaunch(platform: string, homeDir: string | undefined): (runner: string, runDir: string) => Promise<void> {
   return (runner, runDir) => new Promise((resolve, reject) => {
     if (platform === 'linux') {
       // Its own transient unit: the engine unit's restart stops every process
       // in the engine's cgroup, so a plain child would die with it.
-      const child = spawn('/usr/bin/systemd-run', ['--user', '--collect', '--quiet', `--unit=olympus-update-${runDir.slice(-16)}`, '--', '/bin/sh', runner, runDir], { stdio: 'ignore' });
+      let args: string[];
+      try { args = linuxSelfUpdateRunArgs(runner, runDir, linuxEngineEnvironment(resolveLinuxEngineLayout(process.env))); } catch (error) { reject(error); return; }
+      const child = spawn('/usr/bin/systemd-run', args, { stdio: 'ignore' });
       child.once('error', reject);
       child.once('exit', code => code === 0 ? resolve() : reject(new Error('systemd-run failed')));
       return;
