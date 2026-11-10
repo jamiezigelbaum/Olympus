@@ -154628,7 +154628,8 @@ function releasePlatformFor(platform2) {
 function sha256Hex(bytes) {
   return createHash87("sha256").update(bytes).digest("hex");
 }
-function releasePublicKey(pem = RELEASE_SIGNING_PUBLIC_KEY) {
+function releasePublicKey(...given) {
+  const pem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   if (!pem?.trim())
     return;
   try {
@@ -154669,7 +154670,8 @@ function parseReleaseManifest(value2) {
     return;
   return { schema: RELEASE_MANIFEST_SCHEMA, version: record6.version, platform: record6.platform, installer, artifacts };
 }
-function verifySignedReleaseManifest(envelope, publicKeyPem = RELEASE_SIGNING_PUBLIC_KEY) {
+function verifySignedReleaseManifest(envelope, ...given) {
+  const publicKeyPem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   const key2 = releasePublicKey(publicKeyPem);
   if (!key2)
     return { ok: false, reason: "no_key" };
@@ -154749,7 +154751,10 @@ function checkInstallerAgainstManifest(manifest2, installer, platform2) {
     return { ok: false, reason: "installer_mismatch" };
   return { ok: true };
 }
-var RELEASE_SIGNING_PUBLIC_KEY = undefined, RELEASE_MANIFEST_SCHEMA = "olympus.release-manifest.v1", SIGNED_RELEASE_SCHEMA = "olympus.signed-release.v1", RELEASE_SIGNATURE_CONTEXT = `olympus-release-manifest-v1
+var RELEASE_SIGNING_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAmdoxHVa13VJXq8lzxpbPs0E4RhMPNdlmMsbU8zi0dyA=
+-----END PUBLIC KEY-----
+`, RELEASE_MANIFEST_SCHEMA = "olympus.release-manifest.v1", SIGNED_RELEASE_SCHEMA = "olympus.signed-release.v1", RELEASE_SIGNATURE_CONTEXT = `olympus-release-manifest-v1
 `, RELEASE_MANIFEST_MAX_BYTES, VERSION_PATTERN2, FILE_NAME, SHA256;
 var init_release_signing = __esm(() => {
   RELEASE_MANIFEST_MAX_BYTES = 64 * 1024;

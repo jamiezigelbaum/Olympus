@@ -13,12 +13,17 @@
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto';
 
 /**
- * PLACEHOLDER: no release signing key exists yet. The release thread creates
- * the key on the release runner and replaces `undefined` with its public key
- * (SPKI PEM, from `bun scripts/sign-release-manifest.ts --public-key`).
- * Until then Update now refuses every update rather than run one unsigned.
+ * The release key's public half (Ed25519, SPKI PEM), as
+ * `bun scripts/sign-release-manifest.ts --public-key` prints it for the key on
+ * the release runner (created 2026-11-10; where it lives:
+ * olympus-ops docs/ops/release-runner.md). Changing it is a key rotation: the
+ * new key must ship in a release users already run before anything is signed
+ * with it, or Update now refuses every update.
  */
-export const RELEASE_SIGNING_PUBLIC_KEY: string | undefined = undefined;
+export const RELEASE_SIGNING_PUBLIC_KEY: string | undefined = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAmdoxHVa13VJXq8lzxpbPs0E4RhMPNdlmMsbU8zi0dyA=
+-----END PUBLIC KEY-----
+`;
 
 export const RELEASE_MANIFEST_SCHEMA = 'olympus.release-manifest.v1';
 export const SIGNED_RELEASE_SCHEMA = 'olympus.signed-release.v1';
@@ -53,7 +58,9 @@ export function sha256Hex(bytes: Uint8Array): string {
 }
 
 /** The shipped key, or undefined while the placeholder is in place or it does not parse as Ed25519. */
-export function releasePublicKey(pem: string | undefined = RELEASE_SIGNING_PUBLIC_KEY): KeyObject | undefined {
+export function releasePublicKey(...given: [pem?: string | undefined]): KeyObject | undefined {
+  // An explicit undefined means no key (tests, a caller with none); only an omitted argument means the shipped key.
+  const pem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   if (!pem?.trim()) return undefined;
   try {
     const key = createPublicKey(pem);
@@ -90,7 +97,9 @@ export type ManifestCheck =
   | { ok: false; reason: 'no_key' | 'malformed' | 'bad_signature' };
 
 /** Check a signed release envelope against the shipped key (or a given one, for tests and tooling). */
-export function verifySignedReleaseManifest(envelope: string | Uint8Array, publicKeyPem: string | undefined = RELEASE_SIGNING_PUBLIC_KEY): ManifestCheck {
+export function verifySignedReleaseManifest(envelope: string | Uint8Array, ...given: [publicKeyPem?: string | undefined]): ManifestCheck {
+  // An explicit undefined means no key (tests, a caller with none); only an omitted argument means the shipped key.
+  const publicKeyPem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
   const key = releasePublicKey(publicKeyPem);
   if (!key) return { ok: false, reason: 'no_key' };
   const text = typeof envelope === 'string' ? envelope : new TextDecoder().decode(envelope);
