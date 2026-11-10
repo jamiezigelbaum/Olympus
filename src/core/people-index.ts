@@ -349,7 +349,14 @@ export function linkPeople(input: {
   }
 
   const pairKey = (a: string, b: string) => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
-  const { merges, rejected, splits, renames } = replayCorrections(input.corrections ?? [], pairKey);
+  // The owner is always one "You": a stored split of an owner identity, or a
+  // Not the same between two of them, is ignored (correct() refuses new
+  // ones), so an old one can never leave two people named You.
+  const ownerKeys = new Set([...identities.values()].filter((identity) => identity.isOwner).map((identity) => identity.identityKey));
+  const { merges, rejected, splits, renames } = replayCorrections(
+    (input.corrections ?? []).filter((correction) => !separatesOwner(correction, ownerKeys)),
+    pairKey,
+  );
 
   const uf = new UnionFind();
   for (const key of identities.keys()) uf.add(key);
@@ -510,6 +517,21 @@ export function linkPeople(input: {
     });
   }
   return people.sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || b.itemCount - a.itemCount || a.personId.localeCompare(b.personId));
+}
+
+/** A correction that would split the owner into more than one person. */
+function separatesOwner(correction: PeopleCorrection, ownerKeys: ReadonlySet<string>): boolean {
+  if (correction.kind === 'split') return ownerKeys.has(correction.identity);
+  if (correction.kind === 'not_same') return ownerKeys.has(correction.identityA) && ownerKeys.has(correction.identityB);
+  return false;
+}
+
+/** The owner's correction cannot be kept (it would make two people named You). */
+export class PeopleCorrectionRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PeopleCorrectionRefusedError';
+  }
 }
 
 interface ReplayedCorrections {
@@ -788,6 +810,11 @@ export class LocalPeopleIndex {
    * same observations to `rebuild` to see it at once) and every one after.
    */
   correct(correction: PeopleCorrection): void {
+    const ownerKeys = new Set((this.db.query('SELECT identity_key FROM people_identities WHERE is_owner = 1').all() as Array<{ identity_key: string }>)
+      .map((row) => row.identity_key));
+    if (separatesOwner(correction, ownerKeys)) {
+      throw new PeopleCorrectionRefusedError('Your own accounts are always You; they cannot be split apart.');
+    }
     const at = this.now().toISOString();
     const insert = this.db.query(`
       INSERT INTO people_corrections (kind, identity_a, identity_b, name, created_at) VALUES (?, ?, ?, ?, ?)

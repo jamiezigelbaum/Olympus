@@ -332,6 +332,46 @@ describe('people index: owner corrections', () => {
     });
   });
 
+  test('the owner is always one "You": owner-separating corrections are refused, and old ones ignored', () => {
+    const owners = [
+      obs('mail', 'me@example.com', 'Me', { isOwner: true }),
+      obs('chat-a', '42', 'Me', { isOwner: true }),
+      obs('chat-b', '777', 'Brianna Reyes'),
+    ];
+    const ME_MAIL = 'sender:mail:me@example.com';
+    const ME_CHAT = 'sender:chat-a:42';
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    try {
+      index.rebuild(owners);
+      expect(() => index.correct({ kind: 'split', identity: ME_CHAT })).toThrow();
+      expect(() => index.correct({ kind: 'not_same', identityA: ME_MAIL, identityB: ME_CHAT })).toThrow();
+      // Telling the owner apart from someone else is still the owner's call.
+      index.correct({ kind: 'not_same', identityA: ME_MAIL, identityB: 'sender:chat-b:777' });
+      expect(index.corrections()).toHaveLength(1);
+    } finally {
+      index.close();
+    }
+    // A stored correction from before this rule never wedges a rebuild.
+    const people = linkPeople({
+      observations: owners,
+      corrections: [
+        { kind: 'split', identity: ME_CHAT },
+        { kind: 'not_same', identityA: ME_MAIL, identityB: ME_CHAT },
+      ],
+    });
+    expect(people.filter((person) => person.isOwner)).toHaveLength(1);
+    expect(personOf(people, ME_CHAT).personId).toBe(OWNER_PERSON_ID);
+    const stored = new LocalPeopleIndex({ dbPath: ':memory:' });
+    try {
+      stored.rebuild([obs('mail', 'me@example.com', 'Me'), obs('chat-a', '42', 'Me')]);
+      stored.correct({ kind: 'split', identity: ME_CHAT });
+      expect(() => stored.rebuild(owners)).not.toThrow();
+      expect(stored.list().filter((person) => person.isOwner)).toHaveLength(1);
+    } finally {
+      stored.close();
+    }
+  });
+
   test('split keeps an identity on its own until the owner merges it', () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     try {
