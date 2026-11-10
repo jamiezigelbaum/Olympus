@@ -50508,6 +50508,7 @@ function legacyWhatsAppCaptureState(account, env, pairing) {
     env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join44(stateDir, "spool"),
     ...pairing,
     join44(stateDir, "media"),
+    join44(stateDir, "history-pending"),
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ];
 }
