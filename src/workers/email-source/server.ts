@@ -7914,6 +7914,7 @@ export async function main(): Promise<void> {
         source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
         people: ({ request }) => runForwarded(request),
+        source_sync: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
         judge_boost: ({ identities }) => {

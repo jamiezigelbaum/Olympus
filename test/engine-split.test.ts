@@ -41,6 +41,7 @@ import {
   createFrontGate,
   engineStatusSnapshotPath,
   OwnerBusyMarks,
+  SOURCE_SYNC_WAIT_MS,
   tierCommandOnlyReads,
   waitForProcessExit,
 } from '../src/workers/engine-split/runtime.ts';
@@ -347,6 +348,17 @@ describe('owner actions the background runs, forwarded from the front', () => {
       .toEqual({ kind: 'delete_source_data', request: deleting, frontPid: 42 });
   });
 
+  test('a forwarded sync waits for its pass, as the route did in one process', async () => {
+    const waits: Array<number | undefined> = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command, options) => { waits.push(options?.timeoutMs); return sentReceipt({ status: 200, body: { ran: command.kind } }); } },
+      gate: createFrontGate(), restartFront: () => {},
+    });
+    await routes(new Request('http://127.0.0.1/v1/source/index/sync', { method: 'POST', body: '{}' }));
+    expect(waits).toEqual([SOURCE_SYNC_WAIT_MS]);
+    expect(SOURCE_SYNC_WAIT_MS).toBeGreaterThan(30 * 60_000);
+  });
+
   test('tier reads stay in the front; every tier write and the other owner actions go to the background', async () => {
     const sent: EngineCommand[] = [];
     const routes = createEngineFrontRoutes({
@@ -377,7 +389,11 @@ describe('owner actions the background runs, forwarded from the front', () => {
       expect(await response!.json(), path).toEqual({ ran: 'tier_override' });
     }
     // Check the judge's correction and People's corrections write background-owned data too (#1224).
-    for (const [path, kind] of [['/dashboard/privacy/judge-check', 'tier_override'], ['/dashboard/people', 'people']] as const) {
+    for (const [path, kind] of [
+      ['/dashboard/privacy/judge-check', 'tier_override'], ['/dashboard/people', 'people'],
+      // A sync an agent or the CLI asks for, and X's content recovery, write the lanes' stores.
+      ['/v1/source/index/sync', 'source_sync'], ['/v1/source/index/x-bookmarks/content/recover', 'source_sync'],
+    ] as const) {
       const response = await routes(post(path, { action: 'answer' }));
       expect(await response!.json(), path).toEqual({ ran: kind });
     }

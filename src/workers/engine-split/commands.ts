@@ -54,6 +54,9 @@ export const ENGINE_FORWARDED_ROUTES = {
   tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise', '/dashboard/privacy/judge-check'],
   // People's corrections write the people index the background rebuilds (#1224).
   people: ['/dashboard/people'],
+  // A sync asked for by path (an agent, the CLI) and X's content recovery run
+  // the lanes' syncs, which write their stores (#1224).
+  source_sync: ['/v1/source/index/sync', '/v1/source/index/x-bookmarks/content/recover'],
   storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
   // Pairing state lives with the background's capture service: every pairing route goes there.
   capture: [
@@ -153,7 +156,6 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/v1/source/index/files/status': 'Reads the extraction queue.',
   '/v1/source/index/search': 'Searches read-only stores.',
   '/v1/source/index/status': 'Reads status.',
-  '/v1/source/index/sync': 'The front scheduler posts sync_now; the background runs the pass.',
   '/v1/source/scheduler/status': 'Reads the background\'s snapshot.',
   '/v1/source/watches': 'Lists watches read-only.',
   '/v1/cli/ingestion-status': 'Reads status.',
@@ -358,6 +360,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'source_watch':
     case 'extraction_queue':
     case 'people':
+    case 'source_sync':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');

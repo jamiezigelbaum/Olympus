@@ -16,9 +16,11 @@ function workerPostRoutes(): Set<string> {
   const routes = new Set<string>();
   for (const route of V0_4_PUBLIC_DASHBOARD_ROUTES) if (route.method === 'POST') routes.add(route.path);
   const worker = readFileSync(join(import.meta.dir, '../src/workers/email-source/index.ts'), 'utf8');
-  for (const line of worker.split('\n')) {
-    if (!line.includes("'POST'")) continue;
-    for (const match of line.matchAll(/url\.pathname(?: === |\.startsWith\()`\$\{basePath\}(\/[^`]*)`/g)) routes.add(`/v1${match[1]}`);
+  // A POST test and a path test in one condition, in either order, on one line or several.
+  const path = String.raw`url\.pathname(?: === |\.startsWith\()\`\$\{basePath\}(\/[^\`]*)\``;
+  const post = String.raw`request\.method === 'POST'`;
+  for (const pattern of [new RegExp(`${post}[^{;]{0,240}?${path}`, 'g'), new RegExp(`${path}[^{;]{0,240}?${post}`, 'g')]) {
+    for (const match of worker.matchAll(pattern)) routes.add(`/v1${match[1]}`);
   }
   for (const operation of WORKER_CLI_OPERATIONS) routes.add(`/v1/cli/${operation}`);
   return routes;

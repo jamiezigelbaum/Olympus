@@ -153,6 +153,9 @@ export function createEngineFront(input: {
   return { client, ownerBusy: relay, status, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
+/** A forwarded sync answers when its pass ends, as the route did in one process: up to a long pass. */
+export const SOURCE_SYNC_WAIT_MS = 35 * 60_000;
+
 function restartingResponse(): Response {
   return Response.json({ error: { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' } }, { status: 503 });
 }
@@ -257,7 +260,7 @@ export function createEngineFrontRoutes(input: {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
