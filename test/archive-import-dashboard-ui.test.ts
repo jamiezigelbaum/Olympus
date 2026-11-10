@@ -1833,8 +1833,12 @@ describe('Import an archive: the quick path and Get my archive (#660)', () => {
 
   test('a guide is one step per screen with the page to open, and ends on the drop zone', async () => {
     const takeout = guides.find((entry) => entry.formatId === 'mbox')!.guide;
+    const result = dashboard('archives-none', meta([]));
+    // The step pages come from the computer meta (a source card's guideLinks), not the page's words.
+    const mail = { sourceId: 'gmail.archive', label: 'Gmail', intro: 'Drop a Takeout export.', guideLinks: { mbox: takeout.steps.map((step) => step.link?.url ?? null) } };
+    const computer = { ...result._meta[COMPUTER_META_KEY], archiveSources: [mail] };
     const page = await mount({
-      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      [DASHBOARD_TOOL_NAME]: () => ({ ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: computer } }),
       ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
     }, { upload: noteUploads });
@@ -1884,9 +1888,10 @@ describe('Import an archive: the quick path and Get my archive (#660)', () => {
 
   test("a source's own picker offers only its own formats' guides, and none without them", async () => {
     const telegram = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Drop a Telegram export.' };
-    for (const [guideIds, expected] of [[['telegram_json'], ['Telegram']], [undefined, []]] as const) {
+    const telegramLinks = guides.find((entry) => entry.formatId === 'telegram_json')!.guide.steps.map((step) => step.link?.url ?? null);
+    for (const [guideLinks, expected] of [[{ telegram_json: telegramLinks }, ['Telegram']], [undefined, []]] as const) {
       const result = dashboard('archives-none', meta([]));
-      const computer = { ...result._meta[COMPUTER_META_KEY], archiveSources: [{ ...telegram, ...(guideIds ? { guideIds } : {}) }] };
+      const computer = { ...result._meta[COMPUTER_META_KEY], archiveSources: [{ ...telegram, ...(guideLinks ? { guideLinks } : {}) }] };
       const page = await mount({ [DASHBOARD_TOOL_NAME]: () => ({ ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: computer } }) });
       const row = Array.from(page.doc.querySelectorAll('li.row.source')).find((node) => node.querySelector('.source-name')?.textContent === 'Telegram')!;
       (Array.from(row.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
@@ -1907,5 +1912,7 @@ describe('Import an archive: the quick path and Get my archive (#660)', () => {
       }
     }
     expect(A.pick.guides.map((guide) => guide.id)).toEqual(guides.map((entry) => entry.formatId));
+    // The page's own words name no page: those travel in the computer meta.
+    expect(JSON.stringify(A.pick.guides)).not.toContain('https:');
   });
 });

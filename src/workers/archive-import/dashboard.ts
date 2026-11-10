@@ -276,10 +276,12 @@ export const ARCHIVE_NOT_RUNNING_COPY = {
   not_selected: "Background syncing in Olympus's settings leaves out archives, so imports and removals can't run. The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it.",
 } as const;
 
-// The export guides a source's picker offers (#660), by format id; nothing when its formats have none.
-function guideIdsOf(formats: readonly ArchiveFormatDefinition[]): { guideIds?: string[] } {
-  const ids = archiveExportGuides(formats).map((entry) => entry.formatId);
-  return ids.length > 0 ? { guideIds: ids } : {};
+// The export guides a source's picker offers (#660), by format id, with each
+// step's page; nothing when its formats have none.
+function guideLinksOf(formats: readonly ArchiveFormatDefinition[]): { guideLinks?: Record<string, Array<string | null>> } {
+  const entries = archiveExportGuides(formats);
+  if (entries.length === 0) return {};
+  return { guideLinks: Object.fromEntries(entries.map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)])) };
 }
 
 function fill(template: string, values: Record<string, string>): string {
@@ -1110,12 +1112,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         const target = options.runtime.targets.forSource(sourceId);
         const formats = target ? sourceFormats(target) : [];
         if (!target || formats.length === 0) return [];
-        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats), ...guideIdsOf(formats) }];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats), ...guideLinksOf(formats) }];
       });
       // Import-only sources: their card imports their formats (a source that reads one live wins it).
       const imported = archiveSourceCards()
         .filter((card) => !live.some((entry) => entry.sourceId === card.id))
-        .map((card): ComputerArchiveSourceMeta => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats), ...guideIdsOf(card.formats) }));
+        .map((card): ComputerArchiveSourceMeta => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats), ...guideLinksOf(card.formats) }));
       return [...live, ...imported];
     },
 

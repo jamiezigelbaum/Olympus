@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ARCHIVE_FORMATS, archiveSourceCardOf, archiveSourceCards } from '../src/core/archive-formats.ts';
+import { ARCHIVE_FORMATS, archiveSourceCardOf, archiveSourceCards, getArchiveFormat } from '../src/core/archive-formats.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { buildSourceDashboardViewModel, DASHBOARD_SUPPORTED_SOURCES } from '../src/workers/source-dashboard.ts';
@@ -134,9 +134,11 @@ describe('an import-only source\'s card', () => {
     expect(reflect.intro).toContain('a Reflect export');
     expect(reflect.intro).not.toContain('mail export');
     // Its picker's Get my archive offers its own formats' guides, from their registry entries (#660).
-    expect(f.dashboard.archiveSources().map((entry) => [entry.sourceId, entry.guideIds])).toEqual([
+    expect(f.dashboard.archiveSources().map((entry) => [entry.sourceId, Object.keys(entry.guideLinks ?? {})])).toEqual([
       ['reflect.archive', ['reflect-json']], ['roam.archive', ['roam-json']], ['evernote.notes', ['evernote-enex']],
     ]);
+    // Each step's page travels with the card, from the registry entry.
+    expect(reflect.guideLinks!['reflect-json']).toEqual(getArchiveFormat('reflect-json')!.exportGuide!.steps.map((step) => step.link?.url ?? null));
 
     const path = f.write('Reflect notes.json', reflectJson(reflectNotes(3)));
     const started = await approveStaged(f.dashboard, path, { sourceId: 'reflect.archive' });

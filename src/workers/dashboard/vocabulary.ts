@@ -2223,7 +2223,13 @@ export const DASHBOARD_ARCHIVE_COPY = {
       ready: "Come back when it's ready",
       wait: 'Exports can take a few minutes, hours or days. When yours arrives, come back to this page.',
     },
-    guides: archiveExportGuides().map((entry) => ({ id: entry.formatId, ...entry.guide })),
+    // The words only: each step's page reaches the picker in the computer
+    // meta (archiveSources guideLinks), so this page names no outside origin.
+    guides: archiveExportGuides().map((entry) => ({
+      id: entry.formatId,
+      ...entry.guide,
+      steps: entry.guide.steps.map(({ link, ...step }) => (link ? { ...step, link: { label: link.label } } : step)),
+    })),
   },
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },

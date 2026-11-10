@@ -41055,7 +41055,11 @@ var init_vocabulary = __esm(() => {
         ready: "Come back when it's ready",
         wait: "Exports can take a few minutes, hours or days. When yours arrives, come back to this page."
       },
-      guides: archiveExportGuides().map((entry) => ({ id: entry.formatId, ...entry.guide }))
+      guides: archiveExportGuides().map((entry) => ({
+        id: entry.formatId,
+        ...entry.guide,
+        steps: entry.guide.steps.map(({ link, ...step }) => link ? { ...step, link: { label: link.label } } : step)
+      }))
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
@@ -45327,9 +45331,42 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.confirming = "";
     const A = H.copy.archives;
     const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
-    const ownGuides = own3 && Array.isArray(own3.guideIds) ? A.pick.guides.filter((guide) => own3.guideIds.indexOf(guide.id) >= 0) : [];
-    const words2 = own3 ? { ...A.pick, guides: ownGuides, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, account: A.account };
+    const links = own3 ? guideLinksOf([own3]) : guideLinksOf(allArchiveSourceMetas());
+    const guides = linkedGuides(A.pick.guides, links, !!own3);
+    const words2 = own3 ? { ...A.pick, guides, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, guides, account: A.account };
     picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
+  }
+  function allArchiveSourceMetas() {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.archiveSources))
+      return [];
+    return meta.archiveSources.filter((entry) => !!entry);
+  }
+  function guideLinksOf(sources) {
+    const out = {};
+    for (const source of sources) {
+      const links = source && source.guideLinks;
+      if (!links || typeof links !== "object")
+        continue;
+      for (const id of Object.keys(links))
+        if (Array.isArray(links[id]))
+          out[id] = links[id];
+    }
+    return out;
+  }
+  function linkedGuides(guides, links, only) {
+    const list = Array.isArray(guides) ? guides : [];
+    return list.filter((guide) => !only || Object.prototype.hasOwnProperty.call(links, guide.id)).map((guide) => {
+      const pages = links[guide.id] || [];
+      return {
+        ...guide,
+        steps: guide.steps.map((step, index) => {
+          const { link, ...rest } = step;
+          const url = pages[index];
+          return link && typeof url === "string" && url.slice(0, 6) === "https:" ? { ...rest, link: { label: link.label, url } } : rest;
+        })
+      };
+    });
   }
   function archiveSourceMeta(id) {
     const meta = state.computerMeta;
