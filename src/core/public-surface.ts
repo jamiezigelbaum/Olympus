@@ -25,6 +25,11 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   // Hermes, remote or relay lists: those reach Olympus from outside this
   // computer.
   'archive_import',
+  // The one-item privacy change (issue #1060): an agent finds an item and
+  // raises it to Private; lowering is only on the dashboard on this computer.
+  // Like archive_import, not on the Hermes, remote or relay lists yet.
+  'privacy_item_find',
+  'privacy_item_set',
   // Remote mode's agent route (owner decision, 2026-10-10): native only,
   // because only OpenClaw can vouch that the caller is the owner and run the
   // commands on the owner's computer (a paired node).
@@ -50,6 +55,8 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'olympus_setup_status',
   'ask_anonymously',
   'archive_import',
+  'privacy_item_find',
+  'privacy_item_set',
 ] as const;
 
 // Operation names, not typed command lines. `olympus_doctor` is exposed to the
@@ -66,6 +73,8 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'olympus_setup_status',
   'ask_anonymously',
   'archive_import',
+  'privacy_item_find',
+  'privacy_item_set',
 ] as const;
 
 // `ask_anonymously` (one typed question through zkAPI, owner decision
@@ -211,6 +220,8 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'doctor',
   'ask',
   'archive',
+  'privacy item find',
+  'privacy item set',
   'argus ping',
   'argus list',
   'argus complete',
@@ -301,6 +312,12 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/archive-import/decline' },
   { method: 'POST', path: '/dashboard/archive-import/remove' },
   { method: 'POST', path: '/dashboard/archive-import/stop' },
+  // One item's privacy label on the Privacy tab (classification/
+  // tier-owner-items.ts): find an item, and set it Personal or Private or back
+  // to the judge. Local control session only (workers/http.ts
+  // DASHBOARD_PRIVACY_ITEM_PATHS).
+  { method: 'POST', path: '/dashboard/privacy/items/find' },
+  { method: 'POST', path: '/dashboard/privacy/items/set' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as
   // every route above.

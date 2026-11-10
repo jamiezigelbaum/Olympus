@@ -165,6 +165,12 @@ export interface ChatGptArchivePickWords {
   several: string;
   /** Beside an approval the engine refused, to start over. */
   chooseAnother: string;
+  /** The quick path's heading, above the drop zone (#660). */
+  have?: string;
+  /** The guided path's words: its heading and line, and the step sheet's (#660). */
+  get?: { title: string; line: string; step: string; open: string; next: string; back: string; ready: string; wait: string };
+  /** One guide per app, from the archive format registry; the drop zone alone when empty. */
+  guides?: ReadonlyArray<{ id: string; title: string; provider: string; steps: ReadonlyArray<{ title: string; instructions: readonly string[]; link?: { label: string; url: string } }>; ready: string }>;
   /**
    * When the engine asks which account an export belongs to: the question, what
    * each answer does, and the two answers (`{name}` the file, `{source}` the source).
@@ -463,6 +469,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       // idle | reading | uploading | approving | confirm | error
       phase: 'idle', name: '', uploadId: '', total: 0, sent: 0, files: 0, filesDone: 0, paused: false,
       error: '', access: null, confirm: null, poll: null, paint: null, input: null, skipped: [],
+      // The export guide open (Get my archive): {index, step}, or null on the two paths.
+      guide: null,
     };
     kit.render('picker:back');
   }
@@ -803,6 +811,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function dropView(): HTMLElement {
+    if (drop.guide && (drop.phase === 'idle' || drop.phase === 'error')) return guideView();
     const page = el('main', 'page picker');
     const words = drop.words;
     const top = el('div', 'picker-top');
@@ -821,10 +830,107 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       if (drop.access) add(body, accessNote(drop.access, null));
     }
     const phase = drop.phase;
-    if (phase === 'idle' || phase === 'error') add(body, dropZone());
+    if (phase === 'idle' || phase === 'error') {
+      // The quick path first (#660): an archive already here is dropped at once, with no steps.
+      const guides = Array.isArray(words.guides) ? words.guides : [];
+      if (guides.length && words.have) add(body, el('h2', '', words.have));
+      add(body, dropZone());
+      if (guides.length && words.get) add(body, guideList(guides, words.get));
+    }
     else if (phase === 'confirm') add(body, confirmBox());
     else add(body, progressBox());
     add(page, body);
+    return page;
+  }
+
+  // ---- the guided path (Get my archive, #660) -----------------------------
+  // One step per screen from the format's registry entry, then "Come back
+  // when it's ready" with the drop zone: an export can take days, so it ends
+  // on the quick path rather than a check.
+
+  function guideList(guides: Any[], words: Any): HTMLElement {
+    const section = el('section', 'guide-list');
+    add(section, el('h2', '', words.title), el('p', 'muted', words.line));
+    const list = el('ul', 'rows');
+    guides.forEach((guide: Any, index: number) => {
+      add(list, add(el('li', 'row'), kit.button(String(guide.title), 'picker:guide:' + String(guide.id), () => openGuide(index, 0), 'plain')));
+    });
+    return add(section, list);
+  }
+
+  function openGuide(index: number, step: number): void {
+    if (!drop) return;
+    drop.guide = index < 0 ? null : { index, step };
+    drop.error = '';
+    drop.access = null;
+    if (drop.phase === 'error') drop.phase = 'idle';
+    kit.render(index < 0 ? 'picker:drop:zone' : 'picker:guide:title');
+  }
+
+  /** A step's line, with each **name** of a control in bold, built from text nodes only. */
+  function stepLine(text: string): HTMLElement {
+    const item = el('li');
+    String(text).split('**').forEach((part: string, index: number) => {
+      if (part) add(item, el(index % 2 ? 'strong' : 'span', '', part));
+    });
+    return item;
+  }
+
+  function guideView(): HTMLElement {
+    const words = drop.words;
+    const get = words.get;
+    const guide = words.guides[drop.guide.index];
+    const steps = guide.steps;
+    const count = steps.length + 1;
+    const at = drop.guide.step;
+    // Like the privacy step sheet: no top bar; Back below goes a step back, and to the two paths from the first.
+    const page = el('main', 'page picker privacy');
+    add(page, el('h1', '', String(guide.title)));
+    const counter = fill(get.step, { n: at + 1, of: count });
+    add(page, el('p', 'muted', counter));
+    const progress = el('progress') as HTMLProgressElement;
+    progress.max = count;
+    progress.value = at + 1;
+    progress.setAttribute('aria-label', counter);
+    add(page, progress);
+    const body = el('div', 'picker-body drop-body');
+    if (drop.error) {
+      const banner = el('div', 'banner');
+      banner.setAttribute('role', 'alert');
+      add(banner, add(el('div', 'banner-body'), el('p', '', drop.error)));
+      add(body, banner);
+      if (drop.access) add(body, accessNote(drop.access, null));
+    }
+    if (at < steps.length) {
+      const step = steps[at];
+      const heading = el('h2', '', String(step.title));
+      heading.setAttribute('data-key', 'picker:guide:title');
+      heading.setAttribute('tabindex', '-1');
+      add(body, heading);
+      const list = el('ol', 'steps');
+      for (const line of step.instructions) add(list, stepLine(line));
+      add(body, list);
+      if (step.link && /^https:\/\//.test(String(step.link.url))) {
+        const href = String(step.link.url);
+        add(body, add(el('p'), kit.button(fill(get.open, { provider: String(guide.provider) }), 'picker:guide:open', () => kit.openLink(href), 'main')));
+        // The link itself too, for a browser that blocks the button's new tab (Safari).
+        const fallback = el('a', '', String(step.link.label) + ' ↗') as HTMLAnchorElement;
+        fallback.href = href;
+        fallback.target = '_blank';
+        fallback.rel = 'noopener noreferrer';
+        add(body, add(el('p', 'fnote'), fallback));
+      }
+    } else {
+      const heading = el('h2', '', get.ready);
+      heading.setAttribute('data-key', 'picker:guide:title');
+      heading.setAttribute('tabindex', '-1');
+      add(body, heading, el('p', '', String(guide.ready)), el('p', 'muted', get.wait));
+      add(body, dropZone());
+    }
+    add(page, body);
+    add(page, add(el('div', 'actions privacy-sheet-actions'),
+      kit.button(get.back, 'picker:guide:back', () => openGuide(at > 0 ? drop.guide.index : -1, at - 1), 'plain'),
+      at < steps.length ? kit.button(get.next, 'picker:guide:next', () => openGuide(drop.guide.index, at + 1), 'main') : null));
     return page;
   }
 

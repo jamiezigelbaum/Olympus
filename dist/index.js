@@ -1235,6 +1235,8 @@ var init_public_surface = __esm(() => {
     "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
+    "privacy_item_find",
+    "privacy_item_set",
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
@@ -1248,7 +1250,9 @@ var init_public_surface = __esm(() => {
     "olympus_doctor",
     "olympus_setup_status",
     "ask_anonymously",
-    "archive_import"
+    "archive_import",
+    "privacy_item_find",
+    "privacy_item_set"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -1260,7 +1264,9 @@ var init_public_surface = __esm(() => {
     "olympus_doctor",
     "olympus_setup_status",
     "ask_anonymously",
-    "archive_import"
+    "archive_import",
+    "privacy_item_find",
+    "privacy_item_set"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
@@ -6139,6 +6145,9 @@ function isTelegramJsonHead(head) {
   const text2 = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
 }
+function archiveExportGuides(formats = ARCHIVE_FORMATS) {
+  return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
+}
 function archiveSourceCards(formats = ARCHIVE_FORMATS) {
   const cards = new Map;
   for (const format of formats) {
@@ -6172,6 +6181,15 @@ var init_archive_formats = __esm(() => {
     provider: "mbox",
     chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
+    exportGuide: Object.freeze({
+      title: "Gmail, from Google Takeout",
+      provider: "Google",
+      steps: Object.freeze([
+        { title: "Choose your mail", instructions: ["Choose **Deselect all**.", "Scroll to **Mail** and tick it.", "Choose **Next step** at the bottom of the page."], link: { label: "Google Takeout", url: "https://takeout.google.com/" } },
+        { title: "Ask for the export", instructions: ["Keep **Send download link via email** and **Export once**.", "Keep **.zip** as the file type.", "Choose **Create export**."] }
+      ]),
+      ready: "Google emails you a download link when the export is ready. Download it, open the zip, and drop the .mbox file from its Mail folder."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
@@ -6196,6 +6214,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "WhatsApp",
     probeNames: Object.freeze(["*.txt", "*.zip"]),
     signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    exportGuide: Object.freeze({
+      title: "A WhatsApp chat",
+      provider: "WhatsApp",
+      steps: Object.freeze([
+        { title: "Open the chat", instructions: ["On your phone, open WhatsApp and the chat you want.", "Tap the chat's name at the top (on Android, tap **⋮** then **More**)."] },
+        { title: "Export it", instructions: ["Choose **Export chat**.", "Choose **Attach media** (on Android, **Include media**) to keep photos and voice notes, or **Without media** for a smaller file.", "Send the file to this computer, for example by AirDrop or to yourself by email."] }
+      ]),
+      ready: "WhatsApp makes the file straight away. Drop the .zip or the .txt file it sent."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
@@ -6225,6 +6252,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Reflect",
+      provider: "Reflect",
+      steps: Object.freeze([
+        { title: "Export your notes", instructions: ["In Reflect, open **Settings**.", "Find the export option and choose **JSON** (Markdown works too).", "Save the file in **Downloads**."], link: { label: "Reflect", url: "https://reflect.app/" } }
+      ]),
+      ready: "Drop the .json file, or the .zip Reflect saved."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
   REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
@@ -6257,6 +6292,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Roam",
     sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Roam",
+      provider: "Roam",
+      steps: Object.freeze([
+        { title: "Export your graph", instructions: ["Open your graph in Roam.", "Choose **⋯** at the top right, then **Export All**.", "Set the format to **JSON** and choose **Export All**."], link: { label: "Roam", url: "https://roamresearch.com/" } }
+      ]),
+      ready: "Drop the .zip Roam saved, or the .json file inside it."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
   EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
@@ -6268,6 +6311,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Evernote",
     sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
     probeNames: Object.freeze(["*.enex"]),
+    exportGuide: Object.freeze({
+      title: "Evernote",
+      provider: "Evernote",
+      steps: Object.freeze([
+        { title: "Open the Evernote app", instructions: ["Export works in the Evernote app on a computer, not on the web.", "Install it if you do not have it, and sign in."], link: { label: "Evernote", url: "https://evernote.com/download" } },
+        { title: "Export a notebook", instructions: ["In **Notebooks**, choose **⋯** beside a notebook.", "Choose **Export notebook…** and keep the **ENEX** format.", "Save the file. Repeat for each notebook you want."] }
+      ]),
+      ready: "Drop the .enex file, or a folder holding several."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
@@ -6310,6 +6362,15 @@ var init_archive_formats = __esm(() => {
         advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
       })
     ]),
+    exportGuide: Object.freeze({
+      title: "Telegram",
+      provider: "Telegram",
+      steps: Object.freeze([
+        { title: "Open Telegram Desktop", instructions: ["Export works in Telegram Desktop, not in the phone app.", "Install it if you do not have it, and sign in."], link: { label: "Telegram Desktop", url: "https://desktop.telegram.org/" } },
+        { title: "Ask for the export", instructions: ["Open **Settings**, then **Advanced**.", "Choose **Export Telegram data**.", "Tick the chats you want and set the format to **Machine-readable JSON**.", "Choose **Export**. Telegram may ask you to confirm on your phone and wait before it starts."] }
+      ]),
+      ready: "Drop the folder Telegram saved, or the result.json file in it."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
@@ -15394,7 +15455,23 @@ var init_vocabulary = __esm(() => {
       unreadable: "Olympus could not read what you dropped. Try again.",
       failed: "The upload stopped before it finished. Nothing was imported. Try again.",
       several: "{n} items",
-      chooseAnother: "Start over"
+      chooseAnother: "Start over",
+      have: "I already have my archive",
+      get: {
+        title: "Get my archive",
+        line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+        step: "Step {n} of {of}",
+        open: "Open this page in {provider}",
+        next: "I've done this, next",
+        back: "Back",
+        ready: "Come back when it's ready",
+        wait: "Exports can take a few minutes, hours or days. When yours arrives, come back to this page."
+      },
+      guides: archiveExportGuides().map((entry) => ({
+        id: entry.formatId,
+        ...entry.guide,
+        steps: entry.guide.steps.map(({ link, ...step }) => link ? { ...step, link: { label: link.label } } : step)
+      }))
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
@@ -19906,7 +19983,10 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_parent_context();
+  init_stored_names();
   init_tier_rejudge();
+  init_tier_rules_sweep();
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
@@ -27506,6 +27586,25 @@ class EmailClient {
         ...options.path !== undefined ? { path: options.path } : {},
         ...options.archiveId !== undefined ? { archive_id: options.archiveId } : {}
       })
+    });
+  }
+  async privacyItem(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError("source_index_not_enabled", "Privacy labels cannot be changed because the source index is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up.");
+    }
+    const body = options.action === "find" ? {
+      ...options.query !== undefined ? { query: options.query } : {},
+      ...options.recent !== undefined ? { recent: options.recent } : {},
+      ...options.limit !== undefined ? { limit: options.limit } : {}
+    } : { item_id: options.itemId };
+    return this.transport.requestJson(`${this.config.email.baseUrl}/privacy-item/${options.action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
+      body: JSON.stringify(body)
     });
   }
   async sourceAnswer(options) {
@@ -35630,6 +35729,15 @@ var ARCHIVE_IMPORT_PARAMS = {
   path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, a WhatsApp chat export: its .txt or .zip, or a folder of them, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
   archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
 };
+var PRIVACY_ITEM_FIND_PARAMS = {
+  query: { type: "string", description: "Words from the item's title, sender or file name, as the user named it. Omit with recent." },
+  recent: { type: "boolean", description: "true lists the items Olympus sorted most recently instead of searching." },
+  limit: { type: "number", description: "Max items (default 20, at most 50)." }
+};
+var PRIVACY_ITEM_SET_PARAMS = {
+  item_id: { type: "string", required: true, description: "The item_id privacy_item_find returned." },
+  tier: { type: "string", required: true, enum: ["private"], description: 'Always "private": an AI app can only make an item Private.' }
+};
 var operations = [
   {
     name: "argus_ping",
@@ -36116,6 +36224,57 @@ var operations = [
         ...archiveId !== undefined ? { archiveId } : {},
         ...ctx.signal ? { signal: ctx.signal } : {}
       });
+    }
+  },
+  {
+    name: "privacy_item_find",
+    description: [
+      "Find one of the user's items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).",
+      "Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge's category and confidence) where the judge decided it.",
+      "Items whose names are Private, and Secret items, are never listed here.",
+      "Use it when the user says an item should be private, then call privacy_item_set."
+    ].join(" "),
+    params: PRIVACY_ITEM_FIND_PARAMS,
+    mutating: false,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "privacy item find", positional: ["query"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_FIND_PARAMS, params, "Privacy item find");
+      const query = optionalString4(params.query);
+      const recent = optionalBoolean(params.recent, "recent");
+      const limit = optionalNumber2(params.limit, "limit");
+      if (query === undefined === (recent !== true)) {
+        throw new OperationError("invalid_params", "Give query, or recent: true, not both.");
+      }
+      return ctx.email.privacyItem({
+        action: "find",
+        ...query !== undefined ? { query } : {},
+        ...recent !== undefined ? { recent } : {},
+        ...limit !== undefined ? { limit } : {},
+        ...ctx.signal ? { signal: ctx.signal } : {}
+      });
+    }
+  },
+  {
+    name: "privacy_item_set",
+    description: [
+      'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
+      "It is the user's decision on that one item, never a rule for its sender, chat or folder.",
+      "Making an item Personal, or putting it back to the judge's label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.",
+      "Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words."
+    ].join(" "),
+    params: PRIVACY_ITEM_SET_PARAMS,
+    mutating: true,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "privacy item set", positional: ["item_id", "tier"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_SET_PARAMS, params, "Privacy item set");
+      const itemId = asString(params.item_id, "item_id");
+      const tier = asString(params.tier, "tier");
+      if (tier !== "private") {
+        throw new OperationError("invalid_params", "An AI app can only make an item Private.", "To make it Personal, or put it back to the judge's label, use Privacy on the Olympus dashboard on this computer.");
+      }
+      return ctx.email.privacyItem({ action: "raise", itemId, ...ctx.signal ? { signal: ctx.signal } : {} });
     }
   },
   {

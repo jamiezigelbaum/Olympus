@@ -39,7 +39,7 @@ import { authorizationServerMetadata as relayAuthorizationServerMetadata, relayO
 import { pinnedClientForRedirect, registerPinnedClient } from '../connect-relay/server/client-registration.ts';
 import { bridgeAppName } from '../connect-relay/server/authorize-bridge.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import { dashboardOwnerSessionCheck, withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   createInProcessOperationContext,
   createRemoteMcpHandler,
@@ -57,6 +57,7 @@ import type {
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 
 const WORKER_TOKEN = 'worker-bearer-token-for-remote-oauth-tests-0123456789';
+const SESSION_SECRET = 'dashboard-session-secret-for-remote-oauth-tests';
 // ChatGPT, as pinned (src/workers/remote-oauth/pinned-clients.ts): never fetched.
 const CHATGPT = { client_id: CHATGPT_CLIENT_ID, redirect_uris: [CHATGPT_REDIRECT_URI] };
 const INSTALL_ID = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -106,6 +107,11 @@ let urls: RemotePublicUrls;
 let clock: number;
 let handle: (request: Request) => Promise<Response>;
 let sleeps: number[];
+/**
+ * The owner's dashboard control cookie, as their browser holds it after
+ * opening the dashboard; sent with every approval POST (relay mode needs it, #1186).
+ */
+let ownerCookie: string;
 
 interface AssembleOptions {
   publicBaseUrl?: string | undefined;
@@ -150,6 +156,7 @@ function assemble(options: AssembleOptions = {}): void {
       connections: () => store,
       now: () => clock,
       sleep: async (ms) => { sleeps.push(ms); },
+      ownerSession: dashboardOwnerSessionCheck({ authToken: WORKER_TOKEN, sessionSecret: SESSION_SECRET, now: () => clock }),
       ...(options.demoConsent ? { demoConsent: options.demoConsent } : {}),
       ...(options.peerAddress ? { peerAddress: options.peerAddress } : {}),
       ...(options.registrationBurst !== undefined ? { registrationBurst: options.registrationBurst } : {}),
@@ -158,7 +165,7 @@ function assemble(options: AssembleOptions = {}): void {
       createRemoteOpenApiHandler(agentOptions),
       withRemoteMcpRoute(
         createRemoteMcpHandler(agentOptions),
-        withWorkerBearerAuth(worker.fetch, { authToken: WORKER_TOKEN }),
+        withWorkerBearerAuth(worker.fetch, { authToken: WORKER_TOKEN, sessionSecret: SESSION_SECRET, now: () => clock }),
       ),
     ),
   );
@@ -175,8 +182,19 @@ beforeEach(() => {
   // As the worker serves it: each request's peer is recorded for the relay-mode approval check.
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: withRequestPeer((request) => handle(request)) });
   base = `http://127.0.0.1:${server.port}`;
+  ownerCookie = '';
   assemble();
 });
+
+/** The owner opens the dashboard in this browser (here with the token, as the manual unlock does). */
+async function openOwnerDashboard(): Promise<string> {
+  const response = await fetch(`${base}/dashboard/control/session`, {
+    method: 'POST', headers: { Authorization: `Bearer ${WORKER_TOKEN}`, Origin: base },
+  });
+  expect(response.status).toBe(200);
+  await response.body?.cancel();
+  return (response.headers.get('set-cookie') ?? '').split(';')[0]!;
+}
 
 afterEach(() => {
   server.stop(true);
@@ -224,6 +242,8 @@ async function connectWith(provider: OAuthClientProvider): Promise<Client> {
 }
 
 interface ConsentForm {
+  /** Where the page's form posts. */
+  action?: string;
   requestId: string;
   csrf: string;
   cookie: string;
@@ -237,18 +257,23 @@ async function openConsent(authorizationUrl: string | URL): Promise<ConsentForm>
   const requestId = /name="request_id" value="([^"]+)"/.exec(html)?.[1] ?? '';
   const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? '';
   const cookie = (response.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
-  return { requestId, csrf, cookie, html, response };
+  const action = /<form method="post" action="([^"]+)"/.exec(html)?.[1];
+  return { ...(action ? { action } : {}), requestId, csrf, cookie, html, response };
 }
 
 function submitConsent(
-  form: Pick<ConsentForm, 'requestId' | 'csrf' | 'cookie'>,
+  form: Pick<ConsentForm, 'requestId' | 'csrf' | 'cookie' | 'action'>,
   fields: Record<string, string>,
+  // Under the page's no-referrer policy a browser sends `Origin: null`; the checks never rely on it.
   headers: Record<string, string> = { Origin: base, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'navigate' },
 ): Promise<Response> {
-  return fetch(`${base}/connect/authorize`, {
+  const action = form.action ?? '/connect/authorize';
+  // The browser sends the dashboard cookie (Path=/dashboard) only to a path under it.
+  const cookie = [form.cookie, ...(ownerCookie && action.startsWith('/dashboard/') ? [ownerCookie] : [])].filter(Boolean).join('; ');
+  return fetch(`${base}${action}`, {
     method: 'POST',
     redirect: 'manual',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: form.cookie, ...headers },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie, ...headers },
     body: new URLSearchParams({ request_id: form.requestId, csrf: form.csrf, ...fields }).toString(),
   });
 }
@@ -421,7 +446,11 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     }).toString();
     return url;
   };
-  beforeEach(() => assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID }));
+  beforeEach(async () => {
+    assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID });
+    // The owner has the dashboard open in this browser (#1186).
+    ownerCookie = await openOwnerDashboard();
+  });
 
   test('Claude approval revisited after token exchange stays connected without another code or cookie', async () => {
     const verifier = 'v'.repeat(50);
