@@ -1148,7 +1148,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // The dashboard's public routes, and the worker's writing routes
         // (write-routes.ts): any other writer is refused before a handler runs.
         if (!workerRouteAllowed(request.method, url.pathname, basePath)) {
-          return new Response('Not Found', { status: 404 });
+          if (url.pathname.startsWith('/dashboard') || url.pathname.startsWith('/oauth/callback/')) {
+            return new Response('Not Found', { status: 404 });
+          }
+          return workerRouteNotFound();
         }
 
         // The family-scoped extraction paths are aliases of the generic
@@ -4345,16 +4348,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             `The connector store for ${corpusId} is not mounted.`,
           );
         }
-        return json(
-          {
-            error: {
-              code: 'not_found',
-              message: 'Email source worker route not found.',
-            },
-            policy: { raw_email_exposed: false },
-          },
-          404,
-        );
+        return workerRouteNotFound();
       } catch (error) {
         const failedUrl = new URL(request.url);
         if (request.method === 'GET' && failedUrl.pathname === '/dashboard' && dashboardHtmlRoutePage(failedUrl) === 'help') {
@@ -6128,6 +6122,19 @@ const FILE_EXTRACTION_ROUTE_ALIASES: ReadonlyMap<string, FileExtractionRouteAlia
     provider: DROPBOX_FILE_EXTRACTION_PROVIDER,
   }],
 ]);
+
+function workerRouteNotFound(): Response {
+  return json(
+    {
+      error: {
+        code: 'not_found',
+        message: 'Email source worker route not found.',
+      },
+      policy: { raw_email_exposed: false },
+    },
+    404,
+  );
+}
 
 function fileExtractionAliasFor(pathname: string, basePath: string): FileExtractionRouteAlias | undefined {
   if (!pathname.startsWith(basePath)) return undefined;

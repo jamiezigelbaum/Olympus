@@ -182738,7 +182738,10 @@ function createEmailSourceWorker(options = {}) {
       try {
         const url2 = new URL(request.url);
         if (!workerRouteAllowed(request.method, url2.pathname, basePath)) {
-          return new Response("Not Found", { status: 404 });
+          if (url2.pathname.startsWith("/dashboard") || url2.pathname.startsWith("/oauth/callback/")) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return workerRouteNotFound();
         }
         const filesAlias = fileExtractionAliasFor(url2.pathname, basePath);
         const filesAliasTaken = filesAlias !== undefined && fileExtraction !== undefined;
@@ -185035,13 +185038,7 @@ function createEmailSourceWorker(options = {}) {
           }
           throw new EmailSourceWorkerError(501, "source_index_embedding_not_supported", `The connector store for ${corpusId} is not mounted.`);
         }
-        return json2({
-          error: {
-            code: "not_found",
-            message: "Email source worker route not found."
-          },
-          policy: { raw_email_exposed: false }
-        }, 404);
+        return workerRouteNotFound();
       } catch (error2) {
         const failedUrl = new URL(request.url);
         if (request.method === "GET" && failedUrl.pathname === "/dashboard" && dashboardHtmlRoutePage(failedUrl) === "help") {
@@ -186213,6 +186210,15 @@ function sourceSchedulerSourceIdForCorpus(corpusId) {
   if (corpusId === "secure_local.evernote.notes" || corpusId === "internal.evernote.notes")
     return "evernote.notes";
   return;
+}
+function workerRouteNotFound() {
+  return json2({
+    error: {
+      code: "not_found",
+      message: "Email source worker route not found."
+    },
+    policy: { raw_email_exposed: false }
+  }, 404);
 }
 function fileExtractionAliasFor(pathname, basePath) {
   if (!pathname.startsWith(basePath))
