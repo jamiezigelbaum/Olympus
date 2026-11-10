@@ -62,26 +62,39 @@ export function procIdentity(pid: number, read: ReadProcStat = readProcStatFile)
   return { pgid, starttime };
 }
 
-function readRecord(path: string): DescendantGroup[] {
+/** The process that recorded the groups: while it runs, they are its own. */
+interface RecordOwner {
+  pid: number;
+  starttime: string;
+}
+
+const validIdentity = (value: Partial<DescendantGroup> | Partial<RecordOwner> | null | undefined, key: 'pgid' | 'pid'): boolean => {
+  const id = (value as Record<string, unknown> | null | undefined)?.[key];
+  return !!value && Number.isSafeInteger(id) && (id as number) > 1 && typeof value.starttime === 'string' && /^\d+$/.test(value.starttime);
+};
+
+function readRecord(path: string): { owner: RecordOwner | undefined; groups: DescendantGroup[] } {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { schema?: unknown; groups?: unknown };
-    if (parsed.schema !== DESCENDANT_GROUPS_SCHEMA || !Array.isArray(parsed.groups)) return [];
-    return (parsed.groups as Array<Partial<DescendantGroup> | null>).filter((group): group is DescendantGroup =>
-      !!group && Number.isSafeInteger(group.pgid) && group.pgid! > 1 && typeof group.starttime === 'string' && /^\d+$/.test(group.starttime));
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { schema?: unknown; owner?: Partial<RecordOwner>; groups?: unknown };
+    if (parsed.schema !== DESCENDANT_GROUPS_SCHEMA || !Array.isArray(parsed.groups)) return { owner: undefined, groups: [] };
+    return {
+      owner: validIdentity(parsed.owner, 'pid') ? parsed.owner as RecordOwner : undefined,
+      groups: (parsed.groups as Array<Partial<DescendantGroup> | null>).filter((group): group is DescendantGroup => validIdentity(group, 'pgid')),
+    };
   } catch {
-    return [];
+    return { owner: undefined, groups: [] };
   }
 }
 
-function writeRecord(path: string, groups: DescendantGroup[]): void {
+function writeRecord(path: string, owner: RecordOwner | undefined, groups: DescendantGroup[]): void {
   try {
-    if (groups.length === 0) {
+    if (groups.length === 0 || !owner) {
       if (existsSync(path)) rmSync(path, { force: true });
       return;
     }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, groups })}\n`, { mode: 0o600 });
+    writeFileSync(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}\n`, { mode: 0o600 });
     renameSync(temporary, path);
   } catch {
     // Advisory: the supervisor simply has less to clean up.
@@ -93,14 +106,19 @@ function writeRecord(path: string, groups: DescendantGroup[]): void {
  * A group whose start time cannot be read is not recorded (it could never be
  * proved ours).
  */
-export function descendantGroupsRecorder(path: string, read: ReadProcStat = readProcStatFile): {
+export function descendantGroupsRecorder(path: string, read: ReadProcStat = readProcStatFile, ownerPid: number = process.pid): {
   spawned(pgid: number): void;
   stopped(pgid: number): void;
 } {
   const groups = new Map<number, DescendantGroup>();
-  const write = () => writeRecord(path, [...groups.values()]);
+  let owner: RecordOwner | undefined;
+  const write = () => writeRecord(path, owner, [...groups.values()]);
   return {
     spawned(pgid) {
+      // Without its own identity the record could be taken for leftovers
+      // while this process still runs; then nothing is recorded.
+      owner ??= (() => { const self = procIdentity(ownerPid, read); return self ? { pid: ownerPid, starttime: self.starttime } : undefined; })();
+      if (!owner) return;
       const identity = procIdentity(pgid, read);
       if (!identity || identity.pgid !== pgid) return;
       groups.set(pgid, { pgid, starttime: identity.starttime });
@@ -126,10 +144,14 @@ export interface StopDescendantGroupsDeps {
  * fresh identity check. Removes the record. Returns how many groups it signalled.
  */
 export async function stopRecordedDescendantGroups(path: string, deps: StopDescendantGroupsDeps = {}): Promise<number> {
-  const groups = readRecord(path);
-  writeRecord(path, []);
-  if (groups.length === 0) return 0;
   const read = deps.read ?? readProcStatFile;
+  const { owner, groups } = readRecord(path);
+  // The process that recorded them still runs (another supervisor's live
+  // child, say, before this one meets the data-owner lock): they are its
+  // own commands, not leftovers.
+  if (owner && procIdentity(owner.pid, read)?.starttime === owner.starttime) return 0;
+  writeRecord(path, undefined, []);
+  if (groups.length === 0) return 0;
   const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const delay = deps.delay ?? ((ms: number) => new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }));
   const ours = (group: DescendantGroup) => {

@@ -40,8 +40,9 @@ describe('stopping what a dead child left running', () => {
   test('an interpreter-launched command is stopped: its command line is never compared', async () => {
     const file = recordFile();
     try {
-      const fake = host({ 300: stat(300, 300, 5000, 'python3') });
-      descendantGroupsRecorder(file.path, fake.read).spawned(300);
+      const fake = host({ 300: stat(300, 300, 5000, 'python3'), 999: stat(999, 999, 1, 'bun') });
+      descendantGroupsRecorder(file.path, fake.read, 999).spawned(300);
+      fake.table.delete(999); // The child that recorded it died.
       // Still running after its parent died: SIGTERM, then (still there) SIGKILL.
       const stopped = await stopRecordedDescendantGroups(file.path, { read: fake.read, kill: fake.kill, delay: async () => {}, graceMs: 100 });
       expect(stopped).toBe(1);
@@ -53,8 +54,9 @@ describe('stopping what a dead child left running', () => {
   test('a group that ends on SIGTERM gets no SIGKILL', async () => {
     const file = recordFile();
     try {
-      const fake = host({ 300: stat(300, 300, 5000) });
-      descendantGroupsRecorder(file.path, fake.read).spawned(300);
+      const fake = host({ 300: stat(300, 300, 5000), 999: stat(999, 999, 1, 'bun') });
+      descendantGroupsRecorder(file.path, fake.read, 999).spawned(300);
+      fake.table.delete(999);
       const kill = (pid: number, signal: NodeJS.Signals) => { fake.kill(pid, signal); fake.table.delete(300); };
       await stopRecordedDescendantGroups(file.path, { read: fake.read, kill, delay: async () => {}, graceMs: 100 });
       expect(fake.signals).toEqual([[-300, 'SIGTERM']]);
@@ -65,7 +67,7 @@ describe('stopping what a dead child left running', () => {
     const file = recordFile();
     try {
       const recorded = host({ 300: stat(300, 300, 5000), 301: stat(301, 301, 6000), 302: stat(302, 302, 7000) });
-      const recorder = descendantGroupsRecorder(file.path, recorded.read);
+      const recorder = descendantGroupsRecorder(file.path, { ...recorded, read: (pid: number) => pid === 999 ? stat(999, 999, 1) : recorded.read(pid) }.read, 999);
       recorder.spawned(300);
       recorder.spawned(301);
       recorder.spawned(302);
@@ -78,13 +80,32 @@ describe('stopping what a dead child left running', () => {
   test('a command that finished is no longer recorded', async () => {
     const file = recordFile();
     try {
-      const fake = host({ 300: stat(300, 300, 5000) });
-      const recorder = descendantGroupsRecorder(file.path, fake.read);
+      const fake = host({ 300: stat(300, 300, 5000), 999: stat(999, 999, 1, 'bun') });
+      const recorder = descendantGroupsRecorder(file.path, fake.read, 999);
       recorder.spawned(300);
+      expect(existsSync(file.path)).toBe(true);
       recorder.stopped(300);
       expect(existsSync(file.path)).toBe(false);
       expect(await stopRecordedDescendantGroups(file.path, { read: fake.read, kill: fake.kill })).toBe(0);
       expect(fake.signals).toEqual([]);
+    } finally { file.done(); }
+  });
+});
+
+describe('a record whose owner is still running', () => {
+  // Another supervisor starting (olympus worker run beside the running
+  // service) must not take a live worker's commands for leftovers.
+  test('is left alone: nothing is signalled and the record stays', async () => {
+    const file = recordFile();
+    try {
+      const fake = host({ 300: stat(300, 300, 5000), 999: stat(999, 999, 1234, 'bun') });
+      descendantGroupsRecorder(file.path, fake.read, 999).spawned(300);
+      expect(await stopRecordedDescendantGroups(file.path, { read: fake.read, kill: fake.kill, delay: async () => {}, graceMs: 100 })).toBe(0);
+      expect(fake.signals).toEqual([]);
+      expect(existsSync(file.path)).toBe(true);
+      // Once the owner is gone (or its pid now belongs to another process), they are leftovers.
+      fake.table.set(999, stat(999, 999, 4321, 'bun'));
+      expect(await stopRecordedDescendantGroups(file.path, { read: fake.read, kill: fake.kill, delay: async () => {}, graceMs: 100 })).toBe(1);
     } finally { file.done(); }
   });
 });

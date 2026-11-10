@@ -47076,31 +47076,41 @@ function readRecord(path) {
   try {
     const parsed = JSON.parse(readFileSync31(path, "utf8"));
     if (parsed.schema !== DESCENDANT_GROUPS_SCHEMA || !Array.isArray(parsed.groups))
-      return [];
-    return parsed.groups.filter((group) => !!group && Number.isSafeInteger(group.pgid) && group.pgid > 1 && typeof group.starttime === "string" && /^\d+$/.test(group.starttime));
+      return { owner: undefined, groups: [] };
+    return {
+      owner: validIdentity(parsed.owner, "pid") ? parsed.owner : undefined,
+      groups: parsed.groups.filter((group) => validIdentity(group, "pgid"))
+    };
   } catch {
-    return [];
+    return { owner: undefined, groups: [] };
   }
 }
-function writeRecord(path, groups) {
+function writeRecord(path, owner, groups) {
   try {
-    if (groups.length === 0) {
+    if (groups.length === 0 || !owner) {
       if (existsSync36(path))
         rmSync12(path, { force: true });
       return;
     }
     mkdirSync24(dirname40(path), { recursive: true, mode: 448 });
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync7(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, groups })}
+    writeFileSync7(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
 `, { mode: 384 });
     renameSync6(temporary, path);
   } catch {}
 }
-function descendantGroupsRecorder(path, read = readProcStatFile) {
+function descendantGroupsRecorder(path, read = readProcStatFile, ownerPid = process.pid) {
   const groups = new Map;
-  const write = () => writeRecord(path, [...groups.values()]);
+  let owner;
+  const write = () => writeRecord(path, owner, [...groups.values()]);
   return {
     spawned(pgid) {
+      owner ??= (() => {
+        const self = procIdentity(ownerPid, read);
+        return self ? { pid: ownerPid, starttime: self.starttime } : undefined;
+      })();
+      if (!owner)
+        return;
       const identity2 = procIdentity(pgid, read);
       if (!identity2 || identity2.pgid !== pgid)
         return;
@@ -47114,11 +47124,13 @@ function descendantGroupsRecorder(path, read = readProcStatFile) {
   };
 }
 async function stopRecordedDescendantGroups(path, deps = {}) {
-  const groups = readRecord(path);
-  writeRecord(path, []);
+  const read = deps.read ?? readProcStatFile;
+  const { owner, groups } = readRecord(path);
+  if (owner && procIdentity(owner.pid, read)?.starttime === owner.starttime)
+    return 0;
+  writeRecord(path, undefined, []);
   if (groups.length === 0)
     return 0;
-  const read = deps.read ?? readProcStatFile;
   const kill = deps.kill ?? ((pid, signal2) => process.kill(pid, signal2));
   const delay = deps.delay ?? ((ms) => new Promise((resolve14) => {
     const timer = setTimeout(resolve14, ms);
@@ -47146,7 +47158,10 @@ async function stopRecordedDescendantGroups(path, deps = {}) {
     signal(group, "SIGKILL");
   return terminated.length;
 }
-var DESCENDANT_GROUPS_SCHEMA = "olympus.descendant-groups.v1", DEFAULT_GRACE_MS = 2000, POLL_MS = 50;
+var DESCENDANT_GROUPS_SCHEMA = "olympus.descendant-groups.v1", DEFAULT_GRACE_MS = 2000, POLL_MS = 50, validIdentity = (value, key2) => {
+  const id = value?.[key2];
+  return !!value && Number.isSafeInteger(id) && id > 1 && typeof value.starttime === "string" && /^\d+$/.test(value.starttime);
+};
 var init_descendant_groups = __esm(() => {
   init_remote_access();
 });
