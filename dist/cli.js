@@ -30500,6 +30500,38 @@ function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
     suggestion: "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds."
   };
 }
+async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
+  const clock2 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
+  const text2 = query.trim();
+  if (!text2 || !Number.isFinite(budgetMs) || budgetMs <= 0)
+    return;
+  const deadline = clock2.now() + budgetMs;
+  const expiresIn = (ms) => {
+    let timer;
+    const done = new Promise((resolve12) => {
+      timer = clock2.setTimeout(() => resolve12("expired"), ms);
+    });
+    return { done, cancel: () => clock2.clearTimeout(timer) };
+  };
+  let retryMs = STARTING_MODEL_FIRST_RETRY_MS;
+  for (;; ) {
+    const remaining = deadline - clock2.now();
+    if (remaining <= 0)
+      return;
+    const attempt = provider.embed([{ text: text2 }], { taskType: "RETRIEVAL_QUERY" }).then(() => "done", (error) => error instanceof TransientSourceEmbeddingError && error.modelStarting ? "starting" : "done");
+    const expiry = expiresIn(remaining);
+    const outcome = await Promise.race([attempt, expiry.done]);
+    expiry.cancel();
+    if (outcome !== "starting")
+      return;
+    const pause = Math.min(retryMs, deadline - clock2.now());
+    if (pause <= 0)
+      return;
+    const wait = expiresIn(pause);
+    await wait.done;
+    retryMs = Math.min(retryMs * 2, STARTING_MODEL_MAX_RETRY_MS);
+  }
+}
 function abortableDelay(ms, signal) {
   return new Promise((resolve12) => {
     if (signal.aborted)
@@ -31263,7 +31295,7 @@ function mediaJudgeMethods(provider) {
     ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {}
   };
 }
-var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
+var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError, REAL_QUERY_EMBEDDING_WAIT_TIMERS, STARTING_MODEL_FIRST_RETRY_MS = 250, STARTING_MODEL_MAX_RETRY_MS = 1000;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
@@ -31292,12 +31324,19 @@ var init_embeddings = __esm(() => {
   TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
   TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
     reason;
-    constructor(provider, reason, attempts, budgetMs = 0) {
+    modelStarting;
+    constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
       const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
       super("source_index_error", message2, suggestion);
       this.name = "TransientSourceEmbeddingError";
       this.reason = reason;
+      this.modelStarting = options.modelStarting === true;
     }
+  };
+  REAL_QUERY_EMBEDDING_WAIT_TIMERS = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
   };
 });
 
@@ -32164,6 +32203,9 @@ function createConnectorStoreCorpusAdapter(options) {
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
+  if (embeddingProvider && embeddingProvider.backend === "local" && (options.retrievalMode ?? "hybrid") === "hybrid") {
+    expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
+  }
   return expanded;
 }
 function chatRecencyLaneRows(store, accountScope, filters) {
@@ -64155,7 +64197,10 @@ class BuiltInSourceEmbeddingProvider {
         this.load().catch(() => {
           return;
         });
-        throw new BuiltInEmbeddingNotReadyError(this.status());
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
+        });
       }
     }
     const model = await this.ready();
@@ -64630,8 +64675,8 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status, cause) {
-      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
+    constructor(status, cause, options = {}) {
+      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
       this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
@@ -70263,10 +70308,26 @@ async function routePreparedSourceIndexSearch(options) {
     }
     searchableCorpora.push(corpus);
   }
+  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
+    corpus.corpusId,
+    retrievalStateForAdapter(options.adapters[corpus.corpusId], {
+      query: request.query,
+      maxResults: request.maxResults,
+      corpus,
+      context: request.context
+    })
+  ]));
+  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
   await Promise.all(searchableCorpora.map(async (corpus) => {
+    const adapter = options.adapters[corpus.corpusId];
     try {
-      await options.adapters[corpus.corpusId].prepareKeywords?.(request.query);
+      await adapter.prepareKeywords?.(request.query);
     } catch {}
+    if (adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable) {
+      try {
+        await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs);
+      } catch {}
+    }
   }));
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
@@ -70279,7 +70340,7 @@ async function routePreparedSourceIndexSearch(options) {
       context: request.context,
       ...cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}
     };
-    const retrievalState = retrievalStateForAdapter(adapter, corpusRequest);
+    const retrievalState = retrievalStates.get(corpus.corpusId).state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(() => metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
     return { corpus, outcome, retrievalState };
@@ -70453,10 +70514,13 @@ function retrievalStateForAdapter(adapter, request) {
   } catch {
     hybridAvailability = { servable: false, reason: "hybrid_capability_unreported" };
   }
-  return assessSourceIndexRetrievalState({
-    declaredMode: request.corpus.activationMode,
-    ...hybridAvailability ? { hybridAvailability } : {}
-  });
+  return {
+    state: assessSourceIndexRetrievalState({
+      declaredMode: request.corpus.activationMode,
+      ...hybridAvailability ? { hybridAvailability } : {}
+    }),
+    hybridServable: hybridAvailability?.servable === true
+  };
 }
 function normalizeSearchRequest(request) {
   const query = request.query.trim();
@@ -70637,7 +70701,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key2) {
   return key2.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
   init_keyword_context();
   init_types();
@@ -70693,7 +70757,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
   const candidates = [];
   const candidateCorpusIds = [];
-  const extractionGaps = [];
+  const extractionGaps = semanticLaneSkippedGaps(routed.degradations, input);
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes = [];
@@ -71108,6 +71172,25 @@ function expansionQueries(literalQuery, planned) {
 }
 function hitProvenance(hit) {
   return hit.provenance ?? { sourceItem: hit.sourceItem };
+}
+function semanticLaneSkippedGap(corpusId, detail) {
+  return `${corpusId}: the meaning-based search was skipped for this question` + `${detail ? ` (${detail})` : ""}; only keyword matches were searched, so related items may be missing.`;
+}
+function semanticLaneSkippedGaps(degradations, input) {
+  const gaps = [];
+  const seen = new Set;
+  for (const degradation of degradations) {
+    if (degradation.reason !== "semantic_lane_skipped")
+      continue;
+    const corpusId = degradation.laneName.endsWith(":semantic") ? degradation.laneName.slice(0, -":semantic".length) : degradation.laneName;
+    if (input.excludeSecureSensitivity && input.registry.get(corpusId)?.trustDomain === "secure_local")
+      continue;
+    if (seen.has(corpusId))
+      continue;
+    seen.add(corpusId);
+    gaps.push(semanticLaneSkippedGap(corpusId, degradation.detail));
+  }
+  return gaps;
 }
 function extractionGapFor(hit, hasProvider, content) {
   const label = locatorLabel(hit);
