@@ -682,7 +682,8 @@ load the packaged Agent Skills folder
 
 `olympus serve` exposes the same sanitized read operations — `source_answer`,
 `source_answer_result`, `source_index_status`, capability-gated
-`source_index_search`, `ask_anonymously`, and `archive_import` — to any MCP-capable agent. The
+`source_index_search`, `ask_anonymously`, `archive_import`, `privacy_item_find` and
+`privacy_item_set` — to any MCP-capable agent. The
 supported Hermes configuration narrows that server to exactly `source_answer`,
 `source_answer_result`, `source_index_status` and `ask_anonymously` through its
 per-server tool allowlist.
@@ -695,6 +696,14 @@ their computer (Sources, Archives), and `remove` works the same way. `status`
 reports each archive's progress, counts, date range and gaps, never message
 text. It is on the native, MCP and CLI surfaces only, not on Hermes, remote MCP
 or the ChatGPT relay.
+
+`privacy_item_find` and `privacy_item_set` let an agent act on "that email should
+be private": find the item by words from its title, sender or file name (items
+whose names are Private, and Secret items, are never listed), then make it
+Private. That is the user's decision on that one item, never a rule for its
+sender, chat or folder. An agent can only raise an item: making it Personal, or
+putting it back to the judge's label, is the user's on their own computer
+(`olympus tier set`). Same surfaces as `archive_import`.
 
 `ask_anonymously` sends one typed question to a frontier model through zkAPI
 (paid per question, anonymously, from the user's own balance; what the
@@ -787,10 +796,11 @@ handler.
 
 There are no operator agent tools. Index maintenance — sync, extraction,
 embedding, retries — is the worker's own scheduler, and what a person drives by
-hand goes through the `olympus` CLI. The whole agent tool surface is fourteen tools —
+hand goes through the `olympus` CLI. The whole agent tool surface is sixteen tools —
 `argus_ping`, `argus_list_models`, `argus_complete`, `source_answer`,
 `source_answer_result` (MCP and remote only), `source_index_status`, `source_index_search`, `source_watch_create`,
-`source_watches`, `source_watch_cancel`, `olympus_doctor`, `olympus_setup_status`, `ask_anonymously`, `archive_import` — declared in
+`source_watches`, `source_watch_cancel`, `olympus_doctor`, `olympus_setup_status`, `ask_anonymously`, `archive_import`,
+`privacy_item_find`, `privacy_item_set` — declared in
 [`src/core/public-surface.ts`](src/core/public-surface.ts); Hermes over MCP sees
 the subset above, and worker bearer auth is enforced throughout.
 
