@@ -302,7 +302,24 @@ function orphanedOverride(ledger: TierLedger, identity: TierLedgerIdentity): Ite
 
 // --- set / explain -----------------------------------------------------------------
 
-export function runTierSet(args: readonly string[], context: TierCliContext = {}): Record<string, unknown> {
+/** The item a correction was recorded for (workers/apps-received.ts): the located item must be this one. */
+export interface TierSetExpectedItem {
+  provider: string;
+  providerItemId: string;
+  providerConversationId?: string;
+}
+
+/**
+ * `tier set <locator> <tier>` on exactly the item recorded: the locator must
+ * still resolve, and to that item's provider, item and conversation. Anything
+ * else (the item gone, or the locator now naming another item) is refused
+ * and nothing is written.
+ */
+export function runTierSetOnRecordedItem(locator: string, word: string, expected: TierSetExpectedItem, context: TierCliContext = {}): Record<string, unknown> {
+  return runTierSet([locator, word], context, expected);
+}
+
+export function runTierSet(args: readonly string[], context: TierCliContext = {}, expected?: TierSetExpectedItem): Record<string, unknown> {
   const [locator, word] = args;
   if (!locator || !word || args.length > 2) {
     throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier set']}`);
@@ -319,6 +336,14 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     override = { kind: 'tier', tier };
   }
   const items = locateTierItem(locator, context);
+  if (expected) {
+    const identity = items[0]!.identity;
+    if (identity.provider !== expected.provider
+      || identity.providerItemId !== expected.providerItemId
+      || (identity.providerConversationId ?? undefined) !== (expected.providerConversationId ?? undefined)) {
+      throw new OperationError('invalid_params', 'That locator no longer names the item it was recorded for, so nothing was changed.');
+    }
+  }
   const results = items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
     if (override === 'clear') {
       const cleared = ledger.clearOverride(item.identity);

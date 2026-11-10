@@ -515,9 +515,12 @@ export function dashboardAttentionParts(
   // is in, because the row exists and has to explain itself; it just stops
   // quantifying a fault nobody can act on by the size of it.
   if (source.queue_health.needs_attention > 0) return withCapture('some items could not be read');
-  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture('a sync is retrying on its own');
+  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture(DASHBOARD_RETRYING_ON_ITS_OWN);
   return withCapture('');
 }
+
+/** A sync that failed and is trying again by itself: progress, not the owner's (#1044). */
+export const DASHBOARD_RETRYING_ON_ITS_OWN = 'a sync is retrying on its own';
 
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
@@ -1851,8 +1854,15 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     itemsOne: '1 item',
     itemsMany: '{n} items',
     checked: 'checked {when}',
-    allSources: 'All sources',
     progress: 'In progress',
+    /** A first index's time left, after its percent: "about 40 min left". */
+    left: 'about {duration} left',
+    /** Privacy items waiting to be checked: the Needs you line's button (#1085). */
+    openPrivacy: 'Open Privacy',
+    /** A source Olympus parked on its own budget (#1044), and when it resumes. */
+    waitBudget: 'daily {api} API budget used',
+    waitRateLimit: '{api} rate limit reached',
+    resumes: 'resumes at {local} ({utc} UTC)',
   },
   needsYou: 'Needs you',
   sources: 'Sources',
@@ -1959,10 +1969,12 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
   /**
    * The page-wide progress line names what stopped instead of a bare
-   * "stalled" (2026-10-10): "Dropbox paused", "Dropbox and Gmail paused",
-   * "Dropbox, Gmail and 2 more paused".
+   * "stalled" (2026-10-10), by why: a sync that keeps failing retries on its
+   * own; a lane the owner switched off says so. "Paused" is only an owner
+   * pause, and a source idle between runs is not named at all (#1044).
    */
-  stalledSources: '{sources} paused',
+  stalledRetrying: '{sources} retrying',
+  stalledOff: '{sources} switched off',
   stalledAnd: '{first} and {last}',
   stalledMore: '{count} more',
   /**
@@ -2098,6 +2110,33 @@ export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
  * "Other ways". It is the only place the locked state is explained: the
  * panel's controls are disabled without a reason of their own.
  */
+/**
+ * "Set up with my agent" (#1077, approved mockup 2-agent-brief, owner
+ * 2026-11-10): the short brief the owner copies to the agent they already
+ * use. It points the agent at `olympus setup status` (core/setup-checklist.ts)
+ * and says what the agent may and may not change.
+ */
+export const DASHBOARD_SETUP_AGENT_COPY = {
+  open: 'Set up with my agent',
+  title: 'Set up with my agent',
+  intro: "Copy this to the agent you already use (Claude, ChatGPT, Codex, OpenClaw). It will check what's done, run the steps it's allowed to, and send you a link here for anything that needs your click.",
+  brief: [
+    'Help me finish setting up Olympus on this computer.',
+    '',
+    '1. Run: olympus setup status',
+    "   It lists every setup step, what's done, and the one way forward for each.",
+    '2. Do the steps marked "you can run this" yourself.',
+    '3. For steps marked "needs the owner", give me the link it shows, wait for me, then run setup status again. Don\'t ask me what\'s on screen.',
+    "4. To change several settings at once, use olympus settings propose. I'll apply them with one click.",
+    '',
+    "You can't change what's Private, who has access, or what Olympus spends. Those always need my click in the dashboard.",
+  ].join('\n'),
+  copy: 'Copy for my agent',
+  copied: 'Copied',
+  copyFailed: 'Select the text and copy it.',
+  close: 'Close',
+} as const;
+
 export const DASHBOARD_HOST_GATE_COPY = {
   title: 'Dashboard controls are locked',
   open: 'Open dashboard controls',
@@ -3276,6 +3315,42 @@ export const DASHBOARD_LOCAL_COPY = {
 } as const;
 
 /**
+ * What AI apps received (pages/apps-received.ts, #1061; signed-off mockup
+ * 3-shared-with-apps): one row per request an AI app or agent made.
+ */
+export const DASHBOARD_APPS_RECEIVED_COPY = {
+  title: 'What AI apps received',
+  intro: 'Every question an AI app asked Olympus, and the items Olympus shared to answer it. Only on this computer: never on a remote page or through the relay.',
+  keptFor: 'Kept for',
+  keptLabel: 'How long to keep this list',
+  includedInDeleteAll: 'included in Delete all',
+  retention: { 7: '7 days', 30: '30 days', 90: '90 days', 0: "Don't keep" } as Record<string, string>,
+  clear: 'Clear',
+  clearConfirm: 'Clear the list of what AI apps received? The items themselves stay in Olympus.',
+  none: 'No AI app has asked Olympus anything yet.',
+  notKept: 'Olympus is not keeping this list. Choose how long to keep it to start.',
+  shared: { one: '{n} Personal item shared', other: '{n} Personal items shared' } as Record<string, string>,
+  sharedPrivate: { one: '{n} Private item shared', other: '{n} Private items shared' } as Record<string, string>,
+  heldBack: '{n} Private held back',
+  noItems: 'answered without your items',
+  withheld: 'answer withheld under your privacy rules',
+  heldBackLine: { one: '1 Private item was held back.', other: '{n} Private items were held back.' } as Record<string, string>,
+  answeredPrivately: '{app} got an answer written on this computer, not the item.',
+  agentSuffix: '(agent)',
+  makePrivate: 'This should be Private',
+  madePrivate: 'Now Private',
+  makingPrivate: 'Making it Private…',
+  yesterday: 'Yesterday',
+  locked: 'Open dashboard controls to see what AI apps received.',
+  openControls: 'Open dashboard controls →',
+  unlock: 'Unlock on this computer',
+  unlockIntro: 'This list holds your questions and the titles shared, so it opens only on this computer.',
+  unavailable: 'This list is not available in this Olympus yet.',
+  failed: 'Olympus could not do that. Try again.',
+  unreachable: 'Olympus is not answering. Check that it is running.',
+} as const;
+
+/**
  * The Private answers page (pages/private-answers.ts; design
  * background-agents.md sections A and B, "Dashboard changes" 1 and 2).
  * The privacy ladder offers Local, zkAPI and Venice models; setup lives in Models.
@@ -3285,6 +3360,8 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   /** The Privacy page's two tabs: Private questions (?private-answers) and Privacy settings (?keys). */
   tabQuestions: 'Private questions',
   tabSettings: 'Privacy rules',
+  /** The third tab (#1061): what each AI app received (pages/apps-received.ts). */
+  tabApps: 'What AI apps received',
   tabsLabel: 'Privacy',
   title: 'Ask privately',
   intro: "When you ask your AI app about Private things, the app still sees the question. Asked here, it doesn't.",

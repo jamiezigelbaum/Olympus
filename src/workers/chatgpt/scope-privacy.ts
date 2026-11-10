@@ -27,6 +27,8 @@ export interface SecretLocations {
   labelIds: ReadonlySet<string>;
   /** Lowercased sender rules: addresses, `@domain` suffixes or fragments. */
   senders: readonly string[];
+  /** Lowercased chat keys (conversation ids) of Secrets chat rules. */
+  chatKeys: ReadonlySet<string>;
 }
 
 export const NO_SECRET_LOCATIONS: SecretLocations = {
@@ -34,6 +36,7 @@ export const NO_SECRET_LOCATIONS: SecretLocations = {
   pathPrefixes: [],
   labelIds: new Set(),
   senders: [],
+  chatKeys: new Set(),
 };
 
 export function secretLocationsFromRules(rules: readonly OwnerTierRule[]): SecretLocations {
@@ -41,6 +44,7 @@ export function secretLocationsFromRules(rules: readonly OwnerTierRule[]): Secre
   const pathPrefixes: string[] = [];
   const labelIds = new Set<string>();
   const senders: string[] = [];
+  const chatKeys = new Set<string>();
   for (const rule of rules) {
     if (rule.tier !== 'secrets') continue;
     const value = rule.match.value;
@@ -49,10 +53,11 @@ export function secretLocationsFromRules(rules: readonly OwnerTierRule[]): Secre
       case 'pathPrefix': if (value.trim()) pathPrefixes.push(normalizeLocationPath(value)); break;
       case 'label': labelIds.add(value.trim().toLowerCase()); break;
       case 'sender': senders.push(value.trim().toLowerCase()); break;
+      case 'chat': chatKeys.add(value.trim().toLowerCase()); break;
       default: break;
     }
   }
-  return { folderKeys, pathPrefixes, labelIds, senders };
+  return { folderKeys, pathPrefixes, labelIds, senders, chatKeys };
 }
 
 /** The owner's Secrets locations from their tier rules file. Throws when the file is unreadable. */
@@ -72,6 +77,17 @@ export function isSecretFolder(locations: SecretLocations, key: string, ancestor
 export function isSecretLabel(locations: SecretLocations, labelId: string): boolean {
   for (const label of locations.labelIds) if (locationKeyMatches([labelId], label)) return true;
   return false;
+}
+
+/**
+ * A chat on a Secrets location, by its conversation id (any chat source: a
+ * match hides more, never less). Chat connectors publish the conversation id
+ * among an item's folder keys, and the classifier matches `folderKey` and
+ * `chat` rules alike against them, so either kind of Secrets rule counts.
+ */
+export function isSecretChat(locations: SecretLocations, chatKey: string): boolean {
+  const key = chatKey.trim().toLowerCase();
+  return key !== '' && (locations.chatKeys.has(key) || locations.folderKeys.has(key));
 }
 
 export function isSecretSender(locations: SecretLocations, sender: string): boolean {

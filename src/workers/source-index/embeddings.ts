@@ -269,12 +269,90 @@ function transientEmbeddingMessage(
  */
 export class TransientSourceEmbeddingError extends OperationError {
   reason: TransientEmbeddingReason;
+  /**
+   * The model is starting on this computer (loaded from disk, not downloaded)
+   * and the same call can succeed in seconds: a caller with time to spare may
+   * wait and retry (awaitStartingQueryEmbedding). False for an outage, a
+   * download or a failed start, which a short wait does not fix.
+   */
+  readonly modelStarting: boolean;
 
-  constructor(provider: string, reason: TransientEmbeddingReason, attempts: number, budgetMs = 0) {
+  constructor(
+    provider: string,
+    reason: TransientEmbeddingReason,
+    attempts: number,
+    budgetMs = 0,
+    options: { modelStarting?: boolean } = {},
+  ) {
     const { message, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
     super('source_index_error', message, suggestion);
     this.name = 'TransientSourceEmbeddingError';
     this.reason = reason;
+    this.modelStarting = options.modelStarting === true;
+  }
+}
+
+/** Time seams for awaitStartingQueryEmbedding; tests pass a test clock. */
+export interface QueryEmbeddingWaitTimers<T = unknown> {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): T;
+  clearTimeout(timer: T): void;
+}
+
+const REAL_QUERY_EMBEDDING_WAIT_TIMERS: QueryEmbeddingWaitTimers<ReturnType<typeof setTimeout>> = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
+const STARTING_MODEL_FIRST_RETRY_MS = 250;
+const STARTING_MODEL_MAX_RETRY_MS = 1_000;
+
+/**
+ * Embeds a query once, and while the provider says its model is still
+ * starting (TransientSourceEmbeddingError.modelStarting), retries with a short
+ * back-off until it embeds or `budgetMs` runs out (#1172). The first question
+ * after idle used to lose its vector lane to a cold local model's immediate
+ * "not ready"; through a request-scoped memoizeQueryEmbeddings provider, the
+ * vector this produces is the one the lane then reads, so a model that starts
+ * within the budget serves that question.
+ *
+ * Never throws and never waits longer than `budgetMs`: any other failure, a
+ * success, or the budget running out ends it, and the lane's own embed then
+ * reports whatever is still wrong (embedding_query_unavailable:...).
+ */
+export async function awaitStartingQueryEmbedding<T>(
+  provider: SourceEmbeddingProvider,
+  query: string,
+  budgetMs: number,
+  timers?: QueryEmbeddingWaitTimers<T>,
+): Promise<void> {
+  const clock = (timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS) as QueryEmbeddingWaitTimers<unknown>;
+  const text = query.trim();
+  if (!text || !Number.isFinite(budgetMs) || budgetMs <= 0) return;
+  const deadline = clock.now() + budgetMs;
+  const expiresIn = (ms: number): { done: Promise<'expired'>; cancel(): void } => {
+    let timer: unknown;
+    const done = new Promise<'expired'>((resolve) => { timer = clock.setTimeout(() => resolve('expired'), ms); });
+    return { done, cancel: () => clock.clearTimeout(timer) };
+  };
+  let retryMs = STARTING_MODEL_FIRST_RETRY_MS;
+  for (;;) {
+    const remaining = deadline - clock.now();
+    if (remaining <= 0) return;
+    const attempt = provider.embed([{ text }], { taskType: 'RETRIEVAL_QUERY' }).then(
+      () => 'done' as const,
+      (error: unknown) => (error instanceof TransientSourceEmbeddingError && error.modelStarting ? 'starting' as const : 'done' as const),
+    );
+    const expiry = expiresIn(remaining);
+    const outcome = await Promise.race([attempt, expiry.done]);
+    expiry.cancel();
+    if (outcome !== 'starting') return;
+    const pause = Math.min(retryMs, deadline - clock.now());
+    if (pause <= 0) return;
+    const wait = expiresIn(pause);
+    await wait.done;
+    retryMs = Math.min(retryMs * 2, STARTING_MODEL_MAX_RETRY_MS);
   }
 }
 

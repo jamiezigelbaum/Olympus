@@ -74,6 +74,8 @@ export const SHARED_DATA_FILES = {
   'credential-broker-state': 'credential-broker-state.json',
   // Beside the remote connections, where the relay's private questions wait.
   'waiting-private-questions': 'waiting-private-questions.sqlite',
+  // What each AI app received (core/app-release-log.ts), beside them too.
+  'app-release-log': 'app-release-log.sqlite',
   'tier-migration': 'tier-migration',
   // The engine split (core/engine-split.ts): the background's private command
   // socket folder off Linux, and the status snapshot it publishes.

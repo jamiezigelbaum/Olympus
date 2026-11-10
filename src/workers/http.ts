@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { dashboardSessionMarker } from './dashboard/session-marker.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
@@ -207,6 +208,17 @@ export function withWorkerBearerAuth(
       // The socket peer, as the server recorded it (core/request-peer.ts):
       // loopback, or no mint. A request with no recorded peer is remote.
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request)))) return dashboardControlForbiddenResponse('origin_mismatch');
+      // A peer, socket or loopback, is not the owner's browser. Without the
+      // owner socket (macOS) a loopback peer is any account on this computer
+      // (#1153). With it (Linux), `olympus remote open` forwards the socket to
+      // a loopback port on the client computer, one socket connection per TCP
+      // connection, so a request any account there sends through that forward
+      // arrives exactly as the owner's own would (#1188). The owner proof on
+      // every platform is a live control session in this same browser: one the
+      // owner's launch link, remote opening link, desktop bridge or token
+      // opened, each of which needs the worker token only the owner can read
+      // (worker.env, 0600). No session, no mint.
+      if (!hasOwnerControlSession(request, sessionSecret, now())) return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
@@ -456,6 +468,19 @@ function isDashboardLocalControlSessionRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
 }
 
+/**
+ * The local mint's owner proof, with or without the owner socket: this browser's
+ * live control session, signed by this worker, unexpired and bound to this
+ * origin. The CSRF token is not asked for, so a page opened before this check
+ * existed can still unlock: the session cookie is HttpOnly and
+ * SameSite=Strict, the caller has already proved a loopback Origin equal to
+ * the request's own, and the answer is a new session readable only by that
+ * same origin.
+ */
+function hasOwnerControlSession(request: Request, sessionSecret: string, nowMs: number): boolean {
+  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === 'allowed';
+}
+
 function isLoopbackOrigin(origin: string): boolean {
   try {
     const host = new URL(origin).hostname.toLowerCase();
@@ -599,6 +624,17 @@ function isDashboardPrivateAnswersRoute(request: Request): boolean {
 }
 
 /**
+ * What AI apps received (workers/apps-received.ts): the questions apps asked
+ * and the titles Olympus released to them. Private-grade data, so the same
+ * grade as Private answers: a local control session only.
+ */
+export const DASHBOARD_APPS_RECEIVED_ROUTE = '/dashboard/apps-received';
+
+function isDashboardAppsReceivedRoute(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_APPS_RECEIVED_ROUTE;
+}
+
+/**
  * Uploading an archive the person dropped on the dashboard, importing
  * it, declining an agent's request for one, and removing one
  * (archive-import/dashboard.ts): only the person at this computer's dashboard
@@ -632,19 +668,21 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
 function dashboardLocalGradeRefusal(request: Request): Response {
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
         ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
-        : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
+        : isDashboardAppsReceivedRoute(request)
+          ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
+          : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {
     status: 403,
@@ -890,6 +928,7 @@ function dashboardControlSessionResponse(
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: csrfToken,
+    session_marker: dashboardSessionMarker(csrfToken),
     expires_at: new Date(expiresAtMs).toISOString(),
     policy: {
       bearer_token_persisted_in_browser_storage: false,

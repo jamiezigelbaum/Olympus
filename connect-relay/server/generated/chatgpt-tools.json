@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=0409a8c23cee"
+          "resourceUri": "ui://olympus/dashboard?v=c8ccf9a906b8"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=0409a8c23cee",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=c8ccf9a906b8",
         "openai/ui": {
           "entrypoints": [
             {
@@ -843,7 +843,8 @@
                   "enum": [
                     "folder",
                     "label",
-                    "sender"
+                    "sender",
+                    "chat"
                   ]
                 },
                 "source_id": {
@@ -853,7 +854,9 @@
                     "google_drive.docs",
                     "dropbox.files",
                     "local.files",
-                    "evernote.notes"
+                    "evernote.notes",
+                    "telegram.messages",
+                    "whatsapp.personal.messages"
                   ]
                 },
                 "key": {
@@ -1054,7 +1057,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=0409a8c23cee",
+      "uri": "ui://olympus/dashboard?v=c8ccf9a906b8",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

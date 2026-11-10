@@ -11,6 +11,7 @@
 // held count is the engine's own, before and after the private model judges.
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,8 +34,7 @@ import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts'
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   archiveImportScheduling,
   createArchiveImportDashboard,
@@ -896,9 +896,7 @@ describe('the dashboard routes', () => {
 
     // This computer's own session (the local unlock; archive-import-local-session.test.ts
     // has the refusals of every other kind).
-    const unlock = new Request(`${origin}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: origin } });
-    recordRequestPeer(unlock, '127.0.0.1');
-    const mint = await guarded(unlock);
+    const mint = await ownerLocalMint(guarded, origin, 'worker-secret');
     const control = {
       Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!,
       'X-Olympus-CSRF': (await mint.json() as { csrf_token: string }).csrf_token,

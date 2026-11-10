@@ -2019,6 +2019,13 @@ export interface AnalystReleaseOutcome {
   facts: StructuredEvidenceFact[];
   opsec: OpsecReleaseAudit;
   answer: string;
+  /**
+   * The coverage notes the released answer carries, one entry per note,
+   * exactly as composed into `answer`: structured, so a reader never parses
+   * them back out of the text. Empty when nothing was released, or when the
+   * released text is not one of the composed drafts.
+   */
+  unanswered: string[];
 }
 
 export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystReleaseOutcome {
@@ -2060,10 +2067,8 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   );
   const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
-  const safeUnsupportedDraft = composeReleasedAnswer(
-    safeUnsupportedAnswer,
-    safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack),
-  );
+  const safeUnsupportedGaps = safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack);
+  const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
     unsupportedNoContent ? safeUnsupportedDraft : input.result.answer,
     unsupportedNoContent ? [] : releasedUnanswered,
@@ -2122,11 +2127,23 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
         input.detail,
         input.releaseSecureContent,
       );
+  const answer = answerForReleaseDecision(decision);
+  // Each draft the gate may release, with the notes composed into it.
+  const draftNotes: ReadonlyArray<readonly [string, readonly string[]]> = [
+    [finalDraftAnswer, unsupportedNoContent ? safeUnsupportedGaps : releasedUnanswered],
+    [safeUnsupportedDraft, safeUnsupportedGaps],
+    [originalDraftAnswer, input.result.unanswered],
+  ];
+  const released = decision.decision === 'allow' || decision.decision === 'redact';
+  const unanswered = released
+    ? (draftNotes.find(([draft]) => draft === answer)?.[1] ?? []).map((note) => note.trim()).filter(Boolean)
+    : [];
   return {
     decision,
     facts,
     opsec: buildOpsecReleaseAudit(facts, decision),
-    answer: answerForReleaseDecision(decision),
+    answer,
+    unanswered,
   };
 }
 
@@ -2810,6 +2827,10 @@ export async function searchReleasedEvidence(input: {
       family: item.family,
       provider: item.provider,
       provider_item_id: item.providerItemId,
+      // The same identity the release manifest names (a chat message's
+      // conversation included), so the owner's list of what each AI app
+      // received can point at exactly this item (core/app-release-capture.ts).
+      ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
       ...(cite?.title ? { title: cite.title } : {}),
       ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
       ...(cite?.uri ? { uri: cite.uri } : {}),

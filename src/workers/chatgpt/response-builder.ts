@@ -1,6 +1,7 @@
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
+import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '../../core/app-release-capture.ts';
 /**
  * The allowlisted response builder: the ONLY way a ChatGPT-bound response
  * leaves the engine. Every tool result (text content, structuredContent,
@@ -47,6 +48,7 @@ import type {
   DashboardSource,
   DashboardUnreadable,
   DashboardViewModelV1,
+  DashboardSourceWait,
   DeleteSourceDataResult,
   DisconnectSourceResult,
   FolderScopeList,
@@ -59,6 +61,7 @@ import type {
   ModelLoadFailedReason,
   ModelRetryResult,
   ModelSetResult,
+  PrivacyChatSourceId,
   PrivacyRuleView,
   PrivacySettings,
   PrivacySummary,
@@ -137,6 +140,8 @@ const FOLDER_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['google_drive.docs', 'd
 const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', ...FOLDER_SOURCE_IDS]);
 /** Folder sources an always-Private rule may name (privacy-profile.ts RULE_SOURCES.folder). */
 const PRIVACY_FOLDER_SOURCE_IDS = new Set<string>(['google_drive.docs', 'dropbox.files', 'evernote.notes']);
+/** Chat sources an always-Private chat rule may name (privacy-profile.ts RULE_SOURCES.chat). */
+const PRIVACY_CHAT_SOURCE_IDS = new Set<PrivacyChatSourceId>(['telegram.messages', 'whatsapp.personal.messages']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);
 const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
@@ -234,6 +239,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     generatedAt: iso(view.generatedAt) ?? new Date().toISOString(),
   };
   if (view.blocker) out.blocker = copyItem(view.blocker);
+  const waits = (view.waits ?? []).flatMap(copyWait);
+  if (waits.length) out.waits = waits;
   const answers = view.models?.answers;
   if (answers && ANSWER_KINDS.has(answers.kind)) {
     out.models.answers = { kind: answers.kind, label: text(answers.label), ready: answers.ready === true };
@@ -745,16 +752,23 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   // Set only when Private evidence reached this answer despite the request
   // (a policy breach the answer is withheld for), never by the probe.
   let privateMatched = false;
+  let privateDropped = 0;
   const citations: ChatGptCitation[] = [];
+  // What the app receives, by name, for the owner's list of what each AI app received.
+  const released: ReleasedItem[] = [];
   for (const value of Array.isArray(record.evidence) ? record.evidence : []) {
     const evidence = asRecord(value);
     if (!evidence) continue;
     if (typeof evidence.trust_domain !== 'string' || !CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
       privateMatched = true;
+      privateDropped += 1;
       continue;
     }
     const citation = citationFrom(evidence);
-    if (citation && citations.length < MAX_CITATIONS) citations.push(citation);
+    if (citation && citations.length < MAX_CITATIONS) {
+      citations.push(citation);
+      released.push(releasedItemFromEvidence(evidence, citation.source, citation.title));
+    }
   }
   const synthesis = asRecord(asRecord(record.audit)?.answer_synthesis);
   const usedPrivate = synthesis?.private_context_used === true
@@ -762,6 +776,9 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (usedPrivate) privateMatched = true;
   const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
   const shownCitations = usedPrivate ? [] : citations;
+  const consulted = typeof synthesis?.secure_local_items_consulted === 'number' && Number.isFinite(synthesis.secure_local_items_consulted)
+    ? Math.max(0, Math.floor(synthesis.secure_local_items_consulted)) : 0;
+  noteReleasedItems(usedPrivate ? [] : released, privateDropped + consulted, usedPrivate);
   // A released answer with citations is evidence the model answers from.
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
@@ -845,11 +862,14 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   let privateMatched = false;
   let flagged = false;
   const evidence: SearchEvidence[] = [];
+  const released: ReleasedItem[] = [];
+  let privateDropped = 0;
   for (const value of record.evidence) {
     const item = asRecord(value);
     if (!item) continue;
     if (typeof item.trust_domain !== 'string' || !CITABLE_TRUST_DOMAINS.has(item.trust_domain)) {
       privateMatched = true;
+      privateDropped += 1;
       continue;
     }
     const source = sourceLabel(item.provider, item.family);
@@ -865,8 +885,10 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     }
     if (item.source_instructions_flagged === true) flagged = true;
     evidence.push(entry);
+    released.push(releasedItemFromEvidence(item, source, entry.title));
   }
   const coverageRecord = asRecord(record.coverage) ?? {};
+  noteReleasedItems(released, privateDropped + whole(record.withheld) + whole(coverageRecord.content_private_items));
   const coverage: SearchResult['coverage'] = {
     searchedSources: whole(coverageRecord.searched_corpora),
     unreadableItems: whole(coverageRecord.unreadable_items),
@@ -1158,7 +1180,7 @@ export function privacyToolResult(
         ? 'Not saved: the privacy settings changed since they were shown. The Olympus panel shows the current ones to save again.'
         : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
-  if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
+  if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label, sender or chat rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
   if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the computer.`);
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
@@ -1167,7 +1189,7 @@ export function privacyToolResult(
   };
 }
 
-const PRIVACY_RULE_KINDS = new Set(['folder', 'label', 'sender']);
+const PRIVACY_RULE_KINDS = new Set(['folder', 'label', 'sender', 'chat']);
 const MAX_PRIVACY_RULES = 100;
 const MAX_PRIVACY_DESCRIPTION = 2_000;
 
@@ -1178,7 +1200,13 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       ? settings.description.replace(UNSAFE_CHARS, ' ').trim().slice(0, MAX_PRIVACY_DESCRIPTION)
       : '',
     rules: (settings.rules ?? []).slice(0, MAX_PRIVACY_RULES).flatMap((rule): PrivacyRuleView[] => {
-      if (!PRIVACY_RULE_KINDS.has(rule.kind) || !SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
+      if (!PRIVACY_RULE_KINDS.has(rule.kind)) return [];
+      if (rule.kind === 'chat') {
+        if (!PRIVACY_CHAT_SOURCE_IDS.has(rule.source_id)) return [];
+        const display = text(rule.display);
+        return [{ kind: 'chat', source_id: rule.source_id, key: opaque(rule.key), ...(display ? { display } : {}) }];
+      }
+      if (!SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
       if (rule.kind === 'sender') return [{ kind: 'sender', source_id: 'gmail.email', value: text(rule.value) }];
       if (rule.kind === 'label') return [{ kind: 'label', source_id: 'gmail.email', key: opaque(rule.key), value: text(rule.value) }];
       const sourceId = PRIVACY_FOLDER_SOURCE_IDS.has(rule.source_id) ? rule.source_id : undefined;
@@ -1602,6 +1630,13 @@ function whole(value: unknown): number {
 
 function percent(value: unknown): number {
   return finite(value) ? Math.max(0, Math.min(100, Math.round(value * 10) / 10)) : 0;
+}
+
+/** A source waiting on a budget or a rate limit (#1044): closed words, a label and a time only. */
+function copyWait(wait: DashboardSourceWait): DashboardSourceWait[] {
+  if (!wait || typeof wait.sourceId !== 'string' || (wait.reason !== 'daily_budget' && wait.reason !== 'rate_limit')) return [];
+  const resumesAt = iso(wait.resumesAt);
+  return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api), ...(resumesAt ? { resumesAt } : {}) }];
 }
 
 function iso(value: unknown): string | undefined {

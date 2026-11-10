@@ -23,6 +23,8 @@ import {
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { olympusPackageRoot } from './package-root.ts';
+import { VERSION } from '../version.ts';
 import { homedir } from 'node:os';
 import { inspectEngine } from './engine-service.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
@@ -161,6 +163,18 @@ export interface DoctorHostFacts {
   legacyWorkerUnit: boolean;
   /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
   insideOpenClaw?: boolean;
+  /** Inside OpenClaw: the version the Gateway loaded, and the one now on disk (#896). */
+  plugin?: { running: string; installed?: string | undefined };
+}
+
+/** The plugin version on disk now, read fresh (the loaded VERSION is fixed at import). */
+function installedPluginVersion(): string | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(olympusPackageRoot(), 'openclaw.plugin.json'), 'utf8')).version;
+    return typeof value === 'string' ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function defaultDoctorHostProbe(
@@ -181,7 +195,7 @@ export async function defaultDoctorHostProbe(
     ...(openclawPath ? { openclawPath } : {}),
     engine: { ...('manager' in engine && engine.manager !== 'systemd' ? { manager: engine.manager } : {}), installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
-    ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
+    ...(options.insideOpenClaw ? { insideOpenClaw: true, plugin: { running: VERSION, installed: installedPluginVersion() } } : {}),
   };
 }
 
@@ -556,6 +570,11 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
  */
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
+  // Checked first: code the Gateway has not reloaded yet explains every other
+  // symptom it reports, so name that before anything else (#896).
+  if (facts.insideOpenClaw && facts.plugin?.installed && facts.plugin.installed !== facts.plugin.running) return { name: 'host', ok: false,
+    detail: `OpenClaw is still running Olympus ${facts.plugin.running}, but ${facts.plugin.installed} is installed: activation is pending, so what the rest of this report says comes from the older version.`,
+    hint: 'Run openclaw plugins reload olympus --wait, then run olympus doctor again.' };
   if (facts.engine.workerProblem) return { name: 'host', ok: false, detail: facts.engine.workerProblem,
     hint: facts.engine.workerProblem === WORKER_SOCKET_RETAINED_MESSAGE
       ? 'Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket.'
