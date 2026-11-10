@@ -16,7 +16,8 @@ import { Database } from 'bun:sqlite';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { copyFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LocalConnectorStore, TierVisibilityNotCurrentError } from '../src/workers/connector-store/index.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { controlPathHeadroom } from '../src/workers/control-path-headroom.ts';
 import { assertSqliteSchemaCanOpen } from '../src/core/sqlite-migrations.ts';
 import type { TierLedger, TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
 import {
@@ -29,6 +30,7 @@ import {
   type FixtureSpec,
   type TierFixture,
 } from './helpers/tier-fixtures.ts';
+import { createTestClock, waitFor, type TestClock } from './helpers/test-clock.ts';
 
 const MODEL = 'saved-set-fixture-model';
 
@@ -45,6 +47,10 @@ interface Probe {
   db: Database;
   tierHiddenItemPks(): HiddenSet;
   visibilityLedger(): TierLedger | undefined;
+  visibilityPublishChunk: number;
+  visibilityTimers: Pick<TestClock, 'setTimeout' | 'clearTimeout' | 'setInterval' | 'clearInterval'>;
+  visibilityPublishSteps(): Generator<void, void>;
+  publishVisibility(): Promise<void>;
 }
 
 const probe = (store: LocalConnectorStore) => store as unknown as Probe;
@@ -65,6 +71,13 @@ afterEach(() => {
 const SPECS: FixtureSpec[] = ['plain', 'hid', 'held', 'names', 'staged', 'late'].map((id) => ({
   id, name: `${id}.txt`, text: `Ordinary picnic notes about ${id}.`,
 }));
+
+/** The saved set's stamp, generation and size, as a reader would find it. */
+function ledgerStamp(db: Database): { generation: number; ledger_cursor: number; store_cursor: number; members: number } | null {
+  return db.query(`SELECT generation, ledger_cursor, store_cursor,
+    (SELECT COUNT(*) FROM tier_visibility_members m WHERE m.generation = s.generation) AS members
+    FROM tier_visibility_state s WHERE id = 1`).get() as { generation: number; ledger_cursor: number; store_cursor: number; members: number } | null;
+}
 
 /** Counts full rebuilds: a walk of the whole corpus asks the ledger for every copy (no identities). */
 function countFullRebuilds(ledger: TierLedger): { readonly count: number; restore(): void } {
@@ -149,6 +162,7 @@ test('a second connection serves the saved set, applies the writer\'s later comm
   const { f, writer, ledgerDb, pk, embed, openReader } = await fixtureWithEveryState();
   // The writer's set, built from scratch and saved in the store.
   const expected = sorted(probe(writer).tierHiddenItemPks());
+  await writer.saveVisibilityInTurns();
   expect(expected.hidden).toEqual([pk('hid'), pk('staged'), pk('hid#child:photo')].sort((a, b) => a - b));
   expect(expected.held).toEqual([pk('held')]);
   expect(expected.metadataLayer).toEqual([pk('names')]);
@@ -189,7 +203,7 @@ test('a second connection serves the saved set, applies the writer\'s later comm
 
 test('a copy raised after the reader read its cursors is not returned by its next search', async () => {
   const { ledgerDb, openReader, writer } = await fixtureWithEveryState();
-  probe(writer).tierHiddenItemPks();
+  await writer.saveVisibilityInTurns();
   const reader = openReader();
   const ledger = probe(reader).visibilityLedger()!;
   const original = ledger.visibilityChangesSince.bind(ledger);
@@ -210,35 +224,158 @@ test('a copy raised after the reader read its cursors is not returned by its nex
   } finally { spy.mockRestore(); }
 });
 
-test('a retention gap in either feed fails closed on a read-only connection until the writer saves again', async () => {
-  const { ledgerDb, storeDb, openReader, writer } = await fixtureWithEveryState();
-  probe(writer).tierHiddenItemPks();
+test('a retention gap in either feed never serves the saved set: a read-only connection rebuilds from the ledger', async () => {
+  const { ledgerDb, storeDb, openReader, writer, pk } = await fixtureWithEveryState();
+  await writer.saveVisibilityInTurns();
   const reader = openReader();
   probe(reader).tierHiddenItemPks();
+  const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
+  cleanups.push(() => rebuilds.restore());
+  // Nothing here runs the writer, so the saved set stays where it was.
 
-  // Ledger: more entries than its feed keeps, past both the reader's cursor and the saved stamp.
+  // Ledger: a supersede, then more entries than its feed keeps, past both the
+  // reader's cursor and the saved stamp. The saved set does not know about
+  // the supersede; serving it would show the copy.
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  ledgerDb.transaction(() => {
+    for (let n = 0; n < 4_100; n++) ledgerDb.query("UPDATE tier_copies SET embed_hold = 0 WHERE provider_item_id = 'names'").run();
+  })();
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
+  expect(reader.hasEmbeddings(MODEL)).toBe(false);
+  const fresh = openReader();
+  expect(probe(fresh).tierHiddenItemPks().hidden).toContain(pk('plain'));
+  expect(reader.status().counts).toEqual(fresh.status().counts);
+  expect(rebuilds.count).toBe(1);
+
+  // Store: an item change, then more item writes than the item feed keeps.
+  storeDb.query("UPDATE items SET parent_local_item_id = ? WHERE provider_item_id = 'held'").run(localId('hid'));
+  storeDb.transaction(() => {
+    for (let n = 0; n < 33_000; n++) storeDb.query("UPDATE items SET tombstoned = 0 WHERE provider_item_id = 'names'").run();
+  })();
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('held'));
+  expect(probe(openReader()).tierHiddenItemPks().hidden).toContain(pk('held'));
+  expect(rebuilds.count).toBe(2);
+}, 60_000);
+
+test('the writer publishes its set in bounded steps and switches the saved set in one small step', async () => {
+  const { ledgerDb, writer } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  probe(writer).visibilityTimers = clock;
+  probe(writer).visibilityPublishChunk = 2;
+  await writer.saveVisibilityInTurns();
+  const saved = () => ledgerStamp(probe(writer).db);
+  const before = saved();
+  expect(before?.members).toBe(4);
+
+  // A gap: the writer rebuilds from scratch, which publishes a new generation.
   ledgerDb.transaction(() => {
     for (let n = 0; n < 4_100; n++) ledgerDb.query("UPDATE tier_copies SET embed_hold = 0 WHERE provider_item_id = 'plain'").run();
   })();
-  expect(() => probe(reader).tierHiddenItemPks()).toThrow(TierVisibilityNotCurrentError);
-  expect(() => reader.hasEmbeddings(MODEL)).toThrow(TierVisibilityNotCurrentError);
-  expect(() => reader.status()).toThrow(TierVisibilityNotCurrentError);
-  // The writer rebuilds and saves; the reader is current again.
-  const expected = sorted(probe(writer).tierHiddenItemPks());
-  expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(expected);
+  probe(writer).tierHiddenItemPks();
+  const changes = () => (probe(writer).db.query('SELECT total_changes() AS n').get() as { n: number }).n;
+  const steps = probe(writer).visibilityPublishSteps();
+  let largest = 0;
+  let switchedAt = -1;
+  for (let n = 0; ; n += 1) {
+    const last = changes();
+    const step = steps.next();
+    largest = Math.max(largest, changes() - last);
+    const now = saved();
+    if (switchedAt < 0 && now?.generation !== before?.generation) {
+      switchedAt = n;
+      // The new set is whole the moment it is switched to.
+      expect(now?.members).toBe(4);
+    } else if (switchedAt < 0) {
+      // Until then readers find the old set whole.
+      expect(now).toEqual(before);
+    }
+    if (step.done) break;
+  }
+  expect(switchedAt).toBeGreaterThan(1);
+  // No step writes more than one chunk of members, or the stamp alone.
+  expect(largest).toBeLessThanOrEqual(2);
+  // The old generation is cleared, in chunks too.
+  expect((probe(writer).db.query('SELECT COUNT(DISTINCT generation) AS n FROM tier_visibility_members').get() as { n: number }).n).toBe(1);
+});
 
-  // Store: more item writes than the item feed keeps.
-  storeDb.transaction(() => {
-    for (let n = 0; n < 33_000; n++) storeDb.query("UPDATE items SET tombstoned = 0 WHERE provider_item_id = 'plain'").run();
-  })();
-  expect(() => probe(reader).tierHiddenItemPks()).toThrow(TierVisibilityNotCurrentError);
-  expect(sorted(probe(writer).tierHiddenItemPks())).toEqual(expected);
-  expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(expected);
-}, 60_000);
+test('a save that finds the store busy is retried', async () => {
+  const { storeDb, writer, openReader, ledgerDb, pk } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  probe(writer).visibilityTimers = clock;
+  await writer.saveVisibilityInTurns();
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  const stampBefore = ledgerStamp(probe(writer).db);
+  storeDb.exec('BEGIN IMMEDIATE');
+  try {
+    probe(writer).tierHiddenItemPks();
+    await probe(writer).publishVisibility();
+    expect(ledgerStamp(probe(writer).db)).toEqual(stampBefore);
+  } finally {
+    storeDb.exec('COMMIT');
+  }
+  // The retry fires on its own timer; nothing reads or saves the writer again.
+  await clock.advance(1_000);
+  await waitFor(() => ledgerStamp(probe(writer).db)!.ledger_cursor > stampBefore!.ledger_cursor, { description: 'the retried save' });
+  const reader = openReader();
+  const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
+  cleanups.push(() => rebuilds.restore());
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
+  expect(rebuilds.count).toBe(0);
+});
+
+test('a read-only reader stays served from the saved set while another store\'s import moves the ledger feed past its window', async () => {
+  const { f, writer, ledgerDb, openReader, pk } = await fixtureWithEveryState();
+  await writer.saveVisibilityInTurns();
+  const reader = openReader();
+  const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
+  cleanups.push(() => rebuilds.restore());
+  expect(probe(reader).tierHiddenItemPks().moving).toBe(1);
+  const cursor = () => (ledgerDb.query('SELECT MAX(seq) AS seq FROM tier_visibility_changes').get() as { seq: number }).seq;
+  const start = cursor();
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  // The secure_local store imports; nothing reads the internal writer, whose
+  // only work is the refresh the shared ledger's movement asks of it. Its own
+  // leg of each sync runs without the end-of-import refresh, so only the
+  // other store's import can keep it current.
+  const held = (writer as unknown as { syncFromConnectorHeld: LocalConnectorStore['syncFromConnector'] }).syncFromConnectorHeld.bind(writer);
+  const ownLeg = spyOn(writer, 'syncFromConnector').mockImplementation((connector, options) => held(connector, options));
+  cleanups.push(() => ownLeg.mockRestore());
+  const churn: FixtureSpec[] = Array.from({ length: 3_000 }, (_, n) => ({
+    id: `secure-${n}`, name: `secure-${n}.txt`, text: `Secure note ${n}.`, legacyDomain: 'secure_local' as const,
+  }));
+  // Mid-import, once the ledger feed has moved past its whole window since
+  // the reader's last read and the writer's saved stamp, the reader serves a
+  // request.
+  let served = false;
+  const realTurn = controlPathHeadroom.ingestionTurn.bind(controlPathHeadroom);
+  const turns = spyOn(controlPathHeadroom, 'ingestionTurn').mockImplementation(() => {
+    if (!served && cursor() - start > 8_192 + 500) {
+      served = true;
+      expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
+    }
+    return realTurn();
+  });
+  try {
+    await f.set.sync(fixtureConnector(() => [...SPECS, ...churn]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  } finally {
+    turns.mockRestore();
+  }
+  expect(served).toBe(true);
+  // The reader never rebuilt: each read applied only the feed past the saved
+  // stamp, and matches a connection that rebuilds from the ledger.
+  const truth = openReader();
+  spyOn(truth as unknown as { savedVisibilitySteps(): Generator<void, undefined> }, 'savedVisibilitySteps')
+    .mockImplementation(function* () { return undefined; });
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
+  expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(sorted(probe(truth).tierHiddenItemPks()));
+  expect(reader.hasEmbeddings(MODEL)).toBe(truth.hasEmbeddings(MODEL));
+  expect(rebuilds.count).toBe(0);
+}, 120_000);
 
 test('a reopened writer starts from the saved set instead of rebuilding', async () => {
   const { f, writer, ledgerDb, pk } = await fixtureWithEveryState();
   const expected = sorted(probe(writer).tierHiddenItemPks());
+  await writer.saveVisibilityInTurns();
   const rebuilds = countFullRebuilds(f.ledger);
   cleanups.push(() => rebuilds.restore());
   const again = new LocalConnectorStore({ dbPath: f.paths.internal, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', tierLedger: f.ledger });
@@ -273,7 +410,7 @@ test('a read-only open of a store from before the saved set keeps the older full
 
 test('the previous build still opens a store this build wrote, and its item writes reach the feed', async () => {
   const { f, writer, storeDb, pk, addChild, openReader } = await fixtureWithEveryState();
-  probe(writer).tierHiddenItemPks();
+  await writer.saveVisibilityInTurns();
   const reader = openReader();
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
   cleanups.push(() => rebuilds.restore());
@@ -303,7 +440,7 @@ test('the previous build still opens a store this build wrote, and its item writ
 
 test('a read-only store reads its ledger without writing it', async () => {
   const { ledgerDb, openReader, writer } = await fixtureWithEveryState();
-  probe(writer).tierHiddenItemPks();
+  await writer.saveVisibilityInTurns();
   // A hold with no pending judgment: a writable ledger open settles it.
   ledgerDb.query("UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
   const before = ledgerDb.query('SELECT MAX(seq) AS seq FROM tier_visibility_changes').get();

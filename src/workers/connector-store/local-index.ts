@@ -496,12 +496,14 @@ const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
  *   were inserted, deleted or changed in what decides visibility, written by
  *   real triggers in the item write's own transaction (like the ledger's
  *   `tier_visibility_changes`).
- * - `tier_visibility_members`: the set a writer last built, one row per item
+ * - `tier_visibility_members`: the set a writer last saved, one row per item
  *   identity with a copy here the ledger does not simply serve (its flags and
- *   the item pks it maps to).
- * - `tier_visibility_state`: which ledger, corpus and feed cursors that set
- *   covers. A reader applies only the feed entries past them, and fails closed
- *   when either feed no longer holds them.
+ *   the item pks it maps to), by generation: a whole new set is written as a
+ *   new generation a chunk at a time and switched to in one small step.
+ * - `tier_visibility_state`: which ledger, corpus, generation and feed
+ *   cursors that set covers. A reader applies only the feed entries past
+ *   them; when either feed no longer holds them it never serves the saved set
+ *   and rebuilds from the ledger instead.
  *
  * Created idempotently on every writable open, without a schema version: the
  * tables and triggers are additive, so the previous build (which checks
@@ -520,18 +522,20 @@ function createConnectorStoreVisibilityTables(db: Database): void {
       provider_item_id TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS tier_visibility_members (
+      generation INTEGER NOT NULL,
       provider TEXT NOT NULL,
       account_scope TEXT NOT NULL,
       conversation_key TEXT NOT NULL,
       provider_item_id TEXT NOT NULL,
       flags INTEGER NOT NULL,
       item_pks_json TEXT NOT NULL,
-      PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+      PRIMARY KEY (generation, provider, account_scope, conversation_key, provider_item_id)
     ) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS tier_visibility_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       corpus_id TEXT NOT NULL,
       ledger_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
       ledger_cursor INTEGER NOT NULL,
       store_cursor INTEGER NOT NULL
     );
@@ -1091,24 +1095,6 @@ export class TierLedgerUnavailableError extends Error {
   }
 }
 
-/**
- * A connection that does not build visibility itself (a read-only store)
- * could not prove its hidden-copy set current: the saved set is missing, was
- * made under another ledger or corpus, or a change feed no longer holds the
- * entries past it. Nothing from the store is counted or embedded until the
- * writer's next visibility build saves a set the feeds cover. A kind of
- * TierLedgerUnavailableError, so every caller that fails closed on a lost
- * ledger fails closed here too.
- */
-export class TierVisibilityNotCurrentError extends TierLedgerUnavailableError {
-  constructor(corpusId: string) {
-    super(corpusId);
-    this.message = `Which copies in ${corpusId} are visible cannot be proven current on this connection yet: `
-      + 'the store\'s saved visibility set is missing or behind its change feed. Try again after the writer\'s next refresh.';
-    this.name = 'TierVisibilityNotCurrentError';
-  }
-}
-
 /** Bits of `tier_visibility_members.flags`. */
 const VISIBILITY_MEMBER_BITS = {
   hidden: 1, held: 2, heldForJudgment: 4, metadataLayer: 8, metadataLayerContentUnread: 16, moving: 32,
@@ -1117,9 +1103,35 @@ const VISIBILITY_MEMBER_BITS = {
 interface SavedVisibilityState {
   corpus_id: string;
   ledger_id: string;
+  generation: number;
   ledger_cursor: number;
   store_cursor: number;
 }
+
+interface VisibilityTimers {
+  setTimeout(callback: () => void, ms?: number): unknown;
+  clearTimeout(timer: unknown): void;
+  setInterval(callback: () => void, ms?: number): unknown;
+  clearInterval(timer: unknown): void;
+}
+
+/**
+ * Members one publish step writes or one saved-set page reads. On Sparta's
+ * largest store a whole publish in one transaction took 2.05 s for 645k
+ * members (#1167 review), about 3 us a member, so a chunk is ~13 ms.
+ */
+const VISIBILITY_PUBLISH_CHUNK = 4_096;
+/** How often a writer checks, with no import running, that its saved set is within both feeds. */
+const VISIBILITY_BACKSTOP_MS = 5_000;
+/** A failed save is retried after 1 s, doubling to at most a minute. */
+const VISIBILITY_RETRY_MIN_MS = 1_000;
+const VISIBILITY_RETRY_MAX_MS = 60_000;
+/** Entries the ledger's tier_visibility_changes feed keeps (its trigger in tier-ledger.ts). */
+const LEDGER_VISIBILITY_FEED_RETENTION = 8_192;
+/** Items an import writes between checks that the writers on its ledger are within both feeds. */
+const VISIBILITY_TICK_ITEMS = 256;
+/** The writable stores in this process that save a visibility set, by the ledger they judge with. */
+const VISIBILITY_WRITERS = new Map<TierLedger, Set<LocalConnectorStore>>();
 
 function emptyTierVisibilityMemo(
   ledger: TierLedger,
@@ -3052,6 +3064,7 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    this.stopVisibilityPublisher();
     try {
       if (!this.readOnly) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
@@ -3422,12 +3435,8 @@ export class LocalConnectorStore {
       try {
         const value = await this.tierHiddenItemPksInTurns();
         this.tierHiddenCountsMemo = { at: Date.now(), value };
-      } catch (error) {
+      } catch {
         // A closed or busy store: the older set stands until the next ask.
-        // One that cannot be proven current is not kept either: the next ask
-        // fails closed instead of counting from a set this connection can
-        // no longer bring up to date.
-        if (error instanceof TierVisibilityNotCurrentError) this.tierHiddenCountsMemo = undefined;
       } finally {
         this.tierHiddenCountsRefresh = undefined;
       }
@@ -3455,20 +3464,44 @@ export class LocalConnectorStore {
 
   /**
    * Brings this writer's visibility set up to date and saves it in the store,
-   * with a turn between lookups, for read-only connections to start from. A
-   * writer's own reads already do this; a writer that only writes (an import
-   * in another process) calls it between batches so its readers stay within
-   * the change feeds. Does nothing on a read-only store.
+   * with a turn between steps, for read-only connections to start from. The
+   * writer also does this on its own (refreshVisibilityIfBehind); this is for
+   * a caller that wants the saved set current now. Does nothing on a
+   * read-only store.
    */
   async saveVisibilityInTurns(): Promise<void> {
     if (this.readOnly) return;
     await runStepsInTurns(this.tierLedgerHiddenSteps());
+    await this.publishVisibility();
   }
 
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
   private visibilityJournal = false;
   private visibilityFeedPresent = false;
   private visibilitySqlMemo: TierVisibilityMemo | undefined;
+  /** What the next publish writes: the whole set, or the identities changed since `from`. */
+  private visibilityPending: {
+    memo: TierVisibilityMemo;
+    full: boolean;
+    from?: { ledger: number; store: number };
+    ids: Map<string, TierLedgerIdentity>;
+  } | undefined;
+  private visibilityPublishing: Promise<void> | undefined;
+  private visibilityPublishTimer: unknown;
+  private visibilityRetryDelay = 0;
+  private visibilityBackstop: unknown;
+  private visibilityRefreshing: Promise<void> | undefined;
+  private visibilityRegisteredLedger: TierLedger | undefined;
+  private visibilityClosed = false;
+  /** Members written per publish step (tests make it small). */
+  private visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
+  /** The timers the publisher uses (tests pass a test clock). */
+  private visibilityTimers: VisibilityTimers = {
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    setInterval: (callback, ms) => setInterval(callback, ms),
+    clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+  };
 
   /** The writer's indexed copy of its own set, for the SQL filters below (temp: this connection only). */
   private createVisibilityJournal(): void {
@@ -3508,13 +3541,12 @@ export class LocalConnectorStore {
    * commit on another connection is only more feed entries, never a reason
    * to start again. A connection with no current set of its own starts from
    * the set the writer saved in the store and applies the feed entries past
-   * its stamp. When a saved set exists but a feed no longer holds the entries
-   * past its stamp (a retention gap), only a writable connection rebuilds
-   * from scratch (and saves the result); a read-only one fails closed
-   * (TierVisibilityNotCurrentError). With nothing saved yet, a connection's
-   * first build is a full one, as before. No partial rebuild is published.
-   * Changes during a yielded build remain after its saved cursors and are
-   * picked up by the next current read.
+   * its stamp. When neither its own set nor the saved one is within both
+   * feeds (a retention gap), or nothing is saved for this ledger and corpus,
+   * the connection rebuilds from the ledger, as every connection did before
+   * the saved set: a stale set is never served. No partial rebuild is
+   * published. Changes during a yielded build remain after its saved cursors
+   * and are picked up by the next current read.
    *
    * The set is what it always was: what counts, aggregates, the vector-lane
    * check and the embedding work lists leave out. It is never the authority
@@ -3523,6 +3555,7 @@ export class LocalConnectorStore {
    */
   private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
     const ledger = this.visibilityLedger(); // binding verification must precede every cache use
+    this.registerVisibilityWriter(ledger);
     if (!ledger) {
       if (this.visibilitySqlMemo) this.db.exec('DELETE FROM temp.tier_visibility_pks');
       this.visibilitySqlMemo = undefined;
@@ -3541,18 +3574,9 @@ export class LocalConnectorStore {
     let base: TierVisibilityMemo | undefined = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined
       ? prior : undefined;
     if (!base && this.visibilityFeedPresent) {
-      const saved = this.savedVisibility(ledger);
-      if (saved === 'gap') {
-        // A saved set the feeds no longer reach: a writer maintains this
-        // store but has fallen behind. A reader serves nothing rather than
-        // rebuild on the request path; the writer rebuilds and saves.
-        if (this.readOnly) throw new TierVisibilityNotCurrentError(this.corpusId);
-      } else if (saved) {
-        ({ memo: base, ledgerChanges, storeChanges } = saved);
-      }
-      // Nothing saved for this ledger and corpus (no writer has built one
-      // since the store was upgraded): this connection's first build is a
-      // full one, as it always was.
+      const saved = yield* this.savedVisibilitySteps(ledger);
+      if (saved) ({ memo: base, ledgerChanges, storeChanges } = saved);
+      if (this.tierLedgerHiddenMemo !== prior) return yield* this.tierLedgerHiddenSteps();
     }
     const incremental = base !== undefined;
     const memo: TierVisibilityMemo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor,
@@ -3595,6 +3619,10 @@ export class LocalConnectorStore {
       || (incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor))) {
       return yield* this.tierLedgerHiddenSteps();
     }
+    // What a publish must rewrite: identities this store holds or held, not
+    // every other corpus's ledger entries.
+    const touched = updates.filter(({ identity, pks, flags }) => flags !== undefined || pks.length > 0
+      || memo.members.has(tierLedgerIdentityKey(identity))).map(({ identity }) => identity);
     try { this.applyVisibilityUpdates(memo, updates); }
     catch (error) { this.tierLedgerHiddenMemo = undefined; this.visibilitySqlMemo = undefined; throw error; }
     if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
@@ -3608,8 +3636,9 @@ export class LocalConnectorStore {
     memo.ledgerCursor = ledgerChanges.cursor;
     memo.storeCursor = storeChanges.cursor;
     this.tierLedgerHiddenMemo = memo;
-    if (!this.readOnly && this.visibilityFeedPresent) {
-      this.saveVisibility(memo, { ledger: startLedgerCursor, store: startStoreCursor }, incremental ? updates : undefined);
+    const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
+    if (!this.readOnly && this.visibilityFeedPresent && moved) {
+      this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
     }
     return memo.value;
   }
@@ -3618,111 +3647,330 @@ export class LocalConnectorStore {
     try { return ledger.ledgerId(); } catch { return undefined; }
   }
 
-  /**
-   * The set the writer saved, as a memo at the saved cursors, with the feed
-   * entries past them. Undefined when none is saved for this ledger and
-   * corpus; 'gap' when one is but either feed no longer holds every entry
-   * past its cursors (a retention gap). The stamp and the members are
-   * read in one transaction, so they always belong together.
-   */
-  private savedVisibility(ledger: TierLedger): {
-    memo: TierVisibilityMemo;
-    ledgerChanges: { cursor: number; identities?: TierLedgerIdentity[] };
-    storeChanges: { cursor: number; identities?: TierLedgerIdentity[] };
-  } | 'gap' | undefined {
-    const ledgerId = this.ledgerIdOf(ledger);
-    if (ledgerId === undefined) return undefined;
-    const saved = this.db.transaction(() => {
-      const state = this.db.query(`SELECT corpus_id, ledger_id, ledger_cursor, store_cursor
-        FROM main.tier_visibility_state WHERE id = 1`).get() as SavedVisibilityState | null;
-      if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
-      const rows = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-        FROM main.tier_visibility_members`).all() as Array<{
-          provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
-          flags: number; item_pks_json: string;
-        }>;
-      return { state, rows };
-    })();
-    if (!saved) return undefined;
-    // Read after the saved set, so every entry past its stamp is included.
-    const ledgerChanges = ledger.visibilityChangesSince(saved.state.ledger_cursor);
-    const storeChanges = this.itemVisibilityChangesSince(saved.state.store_cursor);
-    if (ledgerChanges.identities === undefined || storeChanges.identities === undefined) return 'gap';
-    const memo = emptyTierVisibilityMemo(ledger, ledgerId, saved.state.ledger_cursor, saved.state.store_cursor, 0);
-    for (const row of saved.rows) {
-      const identity: TierLedgerIdentity = {
-        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
-        ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
-      };
-      const pks = JSON.parse(row.item_pks_json) as number[];
-      const flags: TierCorpusVisibility = { ...identity,
-        hidden: (row.flags & VISIBILITY_MEMBER_BITS.hidden) !== 0,
-        held: (row.flags & VISIBILITY_MEMBER_BITS.held) !== 0,
-        heldForJudgment: (row.flags & VISIBILITY_MEMBER_BITS.heldForJudgment) !== 0,
-        metadataLayer: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayer) !== 0,
-        metadataLayerContentUnread: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayerContentUnread) !== 0,
-        moving: (row.flags & VISIBILITY_MEMBER_BITS.moving) !== 0 };
-      for (const flag of VISIBILITY_PK_FLAGS) if (flags[flag]) for (const pk of pks) memo.lists[flag].add(pk);
-      if (flags.moving) memo.value.moving += 1;
-      memo.members.set(tierLedgerIdentityKey(identity), { pks, flags });
-    }
-    return { memo, ledgerChanges, storeChanges };
+  private readVisibilityState(): SavedVisibilityState | null {
+    return this.db.query(`SELECT corpus_id, ledger_id, generation, ledger_cursor, store_cursor
+      FROM main.tier_visibility_state WHERE id = 1`).get() as SavedVisibilityState | null;
   }
 
   /**
-   * Saves this writer's set in the store, members and stamp in one
-   * transaction, for every other connection (and this one after a restart)
-   * to start from. `updates` are the identities this build recomputed since
-   * `from`; they are applied to a saved set whose stamp lies between `from`
-   * and the new cursors, because every identity changed in between is among
-   * them. Otherwise the whole set is written, unless the saved one is
-   * already as new. A failure keeps the older saved set, which is still exact
-   * at its own stamp.
+   * The set the writer saved, as a memo at the saved cursors, with the feed
+   * entries past them. Undefined when none is saved for this ledger and
+   * corpus, or when either feed no longer holds every entry past its cursors
+   * (a retention gap).
+   *
+   * Read a page at a time, with a step between pages. The writer only ever
+   * moves a saved row to a state at or after the stamp read first, and moves
+   * the stamp after the rows, so the rows plus the feed past that first stamp
+   * give the current set. A new generation switched in during the read means
+   * the rows read may have been cleared, and the read starts again.
    */
-  private saveVisibility(
-    memo: TierVisibilityMemo,
-    from: { ledger: number; store: number },
-    updates: ReadonlyArray<{ identity: TierLedgerIdentity }> | undefined,
-  ): void {
-    const ledgerId = memo.ledgerId;
-    if (ledgerId === undefined) return;
-    const put = this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_members
-      (provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json) VALUES (?, ?, ?, ?, ?, ?)`);
-    const remove = this.db.query(`DELETE FROM main.tier_visibility_members
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`);
-    const write = (identity: TierLedgerIdentity): void => {
-      const key = [identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId] as const;
-      const member = memo.members.get(tierLedgerIdentityKey(identity));
-      if (member) put.run(...key, visibilityMemberBits(member.flags), JSON.stringify(member.pks));
-      else remove.run(...key);
-    };
-    // Never wait on another writer's lock from a read: a busy store keeps the
-    // older saved set until this connection's next build.
-    const nested = this.db.inTransaction;
-    if (!nested) this.db.exec('PRAGMA busy_timeout = 0');
-    try {
-      this.db.transaction(() => {
-        const state = this.db.query(`SELECT corpus_id, ledger_id, ledger_cursor, store_cursor
-          FROM main.tier_visibility_state WHERE id = 1`).get() as SavedVisibilityState | null;
-        const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
-        if (sameAuthority && state.ledger_cursor >= memo.ledgerCursor && state.store_cursor >= memo.storeCursor) return;
-        if (updates && sameAuthority
-          && state.ledger_cursor >= from.ledger && state.ledger_cursor <= memo.ledgerCursor
-          && state.store_cursor >= from.store && state.store_cursor <= memo.storeCursor) {
-          for (const { identity } of updates) write(identity);
-        } else {
-          this.db.exec('DELETE FROM main.tier_visibility_members');
-          for (const { flags } of memo.members.values()) write(flags);
+  private *savedVisibilitySteps(ledger: TierLedger): Generator<void, {
+    memo: TierVisibilityMemo;
+    ledgerChanges: { cursor: number; identities?: TierLedgerIdentity[] };
+    storeChanges: { cursor: number; identities?: TierLedgerIdentity[] };
+  } | undefined> {
+    const ledgerId = this.ledgerIdOf(ledger);
+    if (ledgerId === undefined) return undefined;
+    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+      FROM main.tier_visibility_members
+      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const state = this.readVisibilityState();
+      if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
+      let after: [string, string, string, string] = ['', '', '', ''];
+      for (;;) {
+        const rows = page.all(state.generation, ...after, VISIBILITY_PUBLISH_CHUNK) as Array<{
+          provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+          flags: number; item_pks_json: string;
+        }>;
+        for (const row of rows) {
+          const identity: TierLedgerIdentity = {
+            provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+            ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+          };
+          const pks = JSON.parse(row.item_pks_json) as number[];
+          const flags: TierCorpusVisibility = { ...identity,
+            hidden: (row.flags & VISIBILITY_MEMBER_BITS.hidden) !== 0,
+            held: (row.flags & VISIBILITY_MEMBER_BITS.held) !== 0,
+            heldForJudgment: (row.flags & VISIBILITY_MEMBER_BITS.heldForJudgment) !== 0,
+            metadataLayer: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayer) !== 0,
+            metadataLayerContentUnread: (row.flags & VISIBILITY_MEMBER_BITS.metadataLayerContentUnread) !== 0,
+            moving: (row.flags & VISIBILITY_MEMBER_BITS.moving) !== 0 };
+          for (const flag of VISIBILITY_PK_FLAGS) if (flags[flag]) for (const pk of pks) memo.lists[flag].add(pk);
+          if (flags.moving) memo.value.moving += 1;
+          memo.members.set(tierLedgerIdentityKey(identity), { pks, flags });
         }
-        this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_state (id, corpus_id, ledger_id, ledger_cursor, store_cursor)
-          VALUES (1, ?, ?, ?, ?)`).run(this.corpusId, ledgerId, memo.ledgerCursor, memo.storeCursor);
-      })();
-    } catch {
-      // A busy or failing write keeps the older saved set; this connection's
-      // own result stands and is saved on its next build.
-    } finally {
-      if (!nested) this.db.exec('PRAGMA busy_timeout = 10000');
+        if (rows.length < VISIBILITY_PUBLISH_CHUNK) break;
+        const last = rows[rows.length - 1]!;
+        after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+        yield;
+      }
+      if (this.readVisibilityState()?.generation !== state.generation) continue;
+      // Read after the rows, so every entry past the stamp is included.
+      const ledgerChanges = ledger.visibilityChangesSince(state.ledger_cursor);
+      const storeChanges = this.itemVisibilityChangesSince(state.store_cursor);
+      if (ledgerChanges.identities === undefined || storeChanges.identities === undefined) return undefined;
+      return { memo, ledgerChanges, storeChanges };
     }
+    return undefined;
+  }
+
+  /** Queues this build's result for the publisher. */
+  private notePublish(
+    memo: TierVisibilityMemo,
+    from: { ledger: number; store: number } | undefined,
+    touched: readonly TierLedgerIdentity[],
+  ): void {
+    const pending = this.visibilityPending;
+    if (pending?.memo === memo) {
+      if (!pending.full) for (const identity of touched) pending.ids.set(tierLedgerIdentityKey(identity), identity);
+    } else {
+      this.visibilityPending = from
+        ? { memo, full: false, from, ids: new Map(touched.map(identity => [tierLedgerIdentityKey(identity), identity])) }
+        : { memo, full: true, ids: new Map() };
+    }
+    this.scheduleVisibilityPublish(0);
+  }
+
+  private scheduleVisibilityPublish(delayMs: number): void {
+    if (this.visibilityClosed || this.visibilityPublishTimer !== undefined) return;
+    const timer = this.visibilityTimers.setTimeout(() => {
+      this.visibilityPublishTimer = undefined;
+      void this.publishVisibility();
+    }, delayMs);
+    (timer as { unref?: () => void } | undefined)?.unref?.();
+    this.visibilityPublishTimer = timer;
+    if (this.visibilityBackstop === undefined) {
+      // For ledger writes no import here announces (another process, a tier
+      // move, a judgment): keep the saved set within both feeds.
+      const backstop = this.visibilityTimers.setInterval(() => this.refreshVisibilityIfBehind(), VISIBILITY_BACKSTOP_MS);
+      (backstop as { unref?: () => void } | undefined)?.unref?.();
+      this.visibilityBackstop = backstop;
+    }
+  }
+
+  /**
+   * Saves what the builds queued, with a turn between steps. A failure
+   * (most often a busy store) keeps the older saved set, which is still exact
+   * at its own stamp, and is retried with backoff.
+   */
+  private publishVisibility(): Promise<void> {
+    if (this.visibilityPublishTimer !== undefined) {
+      this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
+      this.visibilityPublishTimer = undefined;
+    }
+    this.visibilityPublishing ??= (async () => {
+      try {
+        while (this.visibilityPending && !this.visibilityClosed) await runStepsInTurns(this.visibilityPublishSteps());
+        this.visibilityRetryDelay = 0;
+      } catch {
+        if (!this.visibilityClosed) {
+          this.visibilityRetryDelay = Math.min(Math.max(this.visibilityRetryDelay * 2, VISIBILITY_RETRY_MIN_MS), VISIBILITY_RETRY_MAX_MS);
+          this.scheduleVisibilityPublish(this.visibilityRetryDelay);
+        }
+      } finally {
+        this.visibilityPublishing = undefined;
+      }
+    })();
+    return this.visibilityPublishing;
+  }
+
+  /** One small write transaction that never waits on another writer's lock. */
+  private visibilityWrite<T>(write: () => T): T {
+    if (this.db.inTransaction) throw new Error('The store is in another transaction; the visibility save waits.');
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try { return this.db.transaction(write)(); }
+    finally { this.db.exec('PRAGMA busy_timeout = 10000'); }
+  }
+
+  /**
+   * One publish, in steps that each write at most one chunk of members. The
+   * identities changed since the saved stamp are rewritten in place when the
+   * saved stamp lies between this build's start and its cursors (every
+   * identity changed in between is among them); otherwise the whole set is
+   * written as a new generation. Either way the stamp moves last, in one
+   * small transaction that first checks nobody else moved it, and only to
+   * the cursors the set had when this publish started: rows written later
+   * reflect later states, which the feed past the stamp covers.
+   */
+  private *visibilityPublishSteps(): Generator<void, void> {
+    const pending = this.visibilityPending;
+    if (!pending) return;
+    this.visibilityPending = undefined;
+    const { memo } = pending;
+    const ledgerId = memo.ledgerId;
+    const current = () => !this.visibilityClosed && this.tierLedgerHiddenMemo === memo;
+    if (ledgerId === undefined || !current()) return; // replaced: its successor is queued
+    const stamp = { ledger: memo.ledgerCursor, store: memo.storeCursor };
+    const chunk = Math.max(1, this.visibilityPublishChunk);
+    const put = (generation: number, flags: TierLedgerIdentity) => {
+      const key = [generation, flags.provider, flags.accountScope, flags.providerConversationId ?? '', flags.providerItemId] as const;
+      const member = memo.members.get(tierLedgerIdentityKey(flags));
+      if (member) {
+        this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_members
+          (generation, provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(...key, visibilityMemberBits(member.flags), JSON.stringify(member.pks));
+      } else {
+        this.db.query(`DELETE FROM main.tier_visibility_members
+          WHERE generation = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...key);
+      }
+    };
+    try {
+      const state = this.readVisibilityState();
+      const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
+      if (sameAuthority && state.ledger_cursor >= stamp.ledger && state.store_cursor >= stamp.store) return;
+      const moveStamp = (generation: number) => this.visibilityWrite(() => {
+        const now = this.readVisibilityState();
+        if (now?.generation !== state?.generation || now?.ledger_cursor !== state?.ledger_cursor
+          || now?.store_cursor !== state?.store_cursor || now?.corpus_id !== state?.corpus_id || now?.ledger_id !== state?.ledger_id) {
+          throw new Error('Another connection saved this store\'s visibility set first.');
+        }
+        this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_state (id, corpus_id, ledger_id, generation, ledger_cursor, store_cursor)
+          VALUES (1, ?, ?, ?, ?, ?)`).run(this.corpusId, ledgerId, generation, stamp.ledger, stamp.store);
+      });
+      const from = pending.from;
+      if (!pending.full && from && sameAuthority
+        && state.ledger_cursor >= from.ledger && state.ledger_cursor <= stamp.ledger
+        && state.store_cursor >= from.store && state.store_cursor <= stamp.store) {
+        const ids = [...pending.ids.values()];
+        for (let start = 0; start < ids.length; start += chunk) {
+          yield;
+          if (!current()) return;
+          this.visibilityWrite(() => { for (const identity of ids.slice(start, start + chunk)) put(state.generation, identity); });
+        }
+        yield;
+        if (!current()) return;
+        moveStamp(state.generation);
+        return;
+      }
+      const generation = Math.max(state?.generation ?? 0,
+        (this.db.query('SELECT MAX(generation) AS generation FROM main.tier_visibility_members').get() as { generation: number | null }).generation ?? 0) + 1;
+      // The live members: one changed after this publish started is written
+      // as it is now (a later state the feed covers), or not at all when it
+      // left the set (also in the feed).
+      let batch: TierLedgerIdentity[] = [];
+      const flush = () => {
+        const rows = batch;
+        batch = [];
+        this.visibilityWrite(() => { for (const identity of rows) put(generation, identity); });
+      };
+      for (const { flags } of memo.members.values()) {
+        batch.push(flags);
+        if (batch.length < chunk) continue;
+        yield;
+        if (!current()) return;
+        flush();
+      }
+      if (batch.length > 0) {
+        yield;
+        if (!current()) return;
+        flush();
+      }
+      yield;
+      if (!current()) return;
+      moveStamp(generation);
+      // Older generations (and any a failed publish left) go a chunk at a time.
+      for (;;) {
+        yield;
+        if (this.visibilityClosed) return;
+        const removed = this.visibilityWrite(() => this.db.query(`DELETE FROM main.tier_visibility_members
+          WHERE (generation, provider, account_scope, conversation_key, provider_item_id) IN (
+            SELECT generation, provider, account_scope, conversation_key, provider_item_id
+            FROM main.tier_visibility_members WHERE generation <> ? LIMIT ?)`).run(generation, chunk).changes);
+        if (removed < chunk) return;
+      }
+    } catch (error) {
+      // Put back what this publish was to save, with anything queued since.
+      if (current()) {
+        const queued = this.visibilityPending as typeof pending | undefined; // queued again while this publish yielded
+        if (!queued) this.visibilityPending = pending;
+        else if (queued.memo === memo) {
+          queued.full ||= pending.full;
+          if (!queued.full) {
+            for (const [key, identity] of pending.ids) if (!queued.ids.has(key)) queued.ids.set(key, identity);
+            if (pending.from) queued.from = pending.from;
+          }
+        }
+      }
+      throw error;
+    }
+  }
+
+  /** Called as feeds move: refreshes and saves this writer's set before a feed drops what the saved stamp needs. */
+  private refreshVisibilityIfBehind(options: { anyMovement?: boolean; ledgerCursor?: number } = {}): void {
+    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing) return;
+    try {
+      const ledger = this.visibilityRegisteredLedger;
+      const state = this.readVisibilityState();
+      if (!ledger || !state || state.corpus_id !== this.corpusId) return; // nothing saved for readers to fall behind on
+      const ledgerCursor = options.ledgerCursor ?? ledger.visibilityChangesSince().cursor;
+      const storeCursor = (this.db.query("SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed'")
+        .get() as { seq: number } | null)?.seq ?? 0;
+      const ledgerLag = ledgerCursor - state.ledger_cursor;
+      const storeLag = storeCursor - state.store_cursor;
+      const behind = options.anyMovement === true
+        ? ledgerLag > 0 || storeLag > 0
+        : ledgerLag > LEDGER_VISIBILITY_FEED_RETENTION / 2 || storeLag > ITEM_VISIBILITY_FEED_RETENTION / 2;
+      if (!behind) return;
+    } catch {
+      return; // a closed or busy store: the backstop asks again
+    }
+    this.visibilityRefreshing = (async () => {
+      try {
+        await runStepsInTurns(this.tierLedgerHiddenSteps());
+        await this.publishVisibility();
+      } catch {
+        // The next movement or the backstop asks again.
+      } finally {
+        this.visibilityRefreshing = undefined;
+      }
+    })();
+  }
+
+  /**
+   * Every writer sharing this store's ledger checks whether the feeds moved
+   * more than half their retention past its saved stamp, and refreshes if
+   * so. The ledger feed is shared, so another store's import moves it too.
+   */
+  private tickVisibilityWriters(options: { completed?: boolean } = {}): void {
+    const ledger = this.visibilityRegisteredLedger;
+    if (!ledger) return;
+    let ledgerCursor: number;
+    try { ledgerCursor = ledger.visibilityChangesSince().cursor; } catch { return; }
+    for (const store of VISIBILITY_WRITERS.get(ledger) ?? []) {
+      store.refreshVisibilityIfBehind({ ledgerCursor, anyMovement: options.completed === true && store === this });
+    }
+  }
+
+  private registerVisibilityWriter(ledger: TierLedger | undefined): void {
+    if (this.readOnly || !this.visibilityFeedPresent || this.visibilityClosed || ledger === this.visibilityRegisteredLedger) return;
+    this.unregisterVisibilityWriter();
+    if (!ledger) return;
+    let writers = VISIBILITY_WRITERS.get(ledger);
+    if (!writers) VISIBILITY_WRITERS.set(ledger, writers = new Set());
+    writers.add(this);
+    this.visibilityRegisteredLedger = ledger;
+  }
+
+  private unregisterVisibilityWriter(): void {
+    const ledger = this.visibilityRegisteredLedger;
+    if (!ledger) return;
+    const writers = VISIBILITY_WRITERS.get(ledger);
+    writers?.delete(this);
+    if (writers?.size === 0) VISIBILITY_WRITERS.delete(ledger);
+    this.visibilityRegisteredLedger = undefined;
+  }
+
+  private stopVisibilityPublisher(): void {
+    this.visibilityClosed = true;
+    this.unregisterVisibilityWriter();
+    if (this.visibilityPublishTimer !== undefined) this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
+    if (this.visibilityBackstop !== undefined) this.visibilityTimers.clearInterval(this.visibilityBackstop);
+    this.visibilityPublishTimer = undefined;
+    this.visibilityBackstop = undefined;
+    this.visibilityPending = undefined;
   }
 
   private applyVisibilityUpdates(memo: TierVisibilityMemo, updates: ReadonlyArray<{
@@ -8843,9 +9091,14 @@ export class LocalConnectorStore {
     connector: SourceConnector,
     options?: ConnectorStoreSyncOptions,
   ): Promise<ConnectorStoreSyncSummary> {
+    try { this.registerVisibilityWriter(this.visibilityLedger()); } catch { /* the sync itself reports a missing ledger */ }
     // A sync can tombstone or replace items; their pictures are released here.
     try {
-      return await this.syncFromConnectorHeld(connector, options);
+      const summary = await this.syncFromConnectorHeld(connector, options);
+      // Import completion: this writer's saved set catches up with what it
+      // wrote, and every writer on the ledger checks its distance.
+      this.tickVisibilityWriters({ completed: true });
+      return summary;
     } finally {
       this.releaseUnreferencedChunkMedia();
     }
@@ -8977,6 +9230,7 @@ export class LocalConnectorStore {
             break;
           }
           itemsSeen += 1;
+          if (itemsSeen % VISIBILITY_TICK_ITEMS === 0) this.tickVisibilityWriters();
           // SQLite's item work is synchronous. Return to the event loop once
           // the thread has run a time slice, so a large page cannot starve the
           // Bun HTTP server that owns this same loop (control-path-headroom.ts;
@@ -17269,9 +17523,9 @@ function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: stri
   assertExactTableColumns(db, 'item_visibility_feed',
     ['seq', 'provider', 'account_scope', 'conversation_key', 'provider_item_id'], false, versionLabel);
   assertExactTableColumns(db, 'tier_visibility_members',
-    ['provider', 'account_scope', 'conversation_key', 'provider_item_id', 'flags', 'item_pks_json'], false, versionLabel);
+    ['generation', 'provider', 'account_scope', 'conversation_key', 'provider_item_id', 'flags', 'item_pks_json'], false, versionLabel);
   assertExactTableColumns(db, 'tier_visibility_state',
-    ['id', 'corpus_id', 'ledger_id', 'ledger_cursor', 'store_cursor'], false, versionLabel);
+    ['id', 'corpus_id', 'ledger_id', 'generation', 'ledger_cursor', 'store_cursor'], false, versionLabel);
   for (const trigger of CONNECTOR_STORE_VISIBILITY_TRIGGERS) assertTriggerExists(db, trigger, versionLabel);
 }
 
