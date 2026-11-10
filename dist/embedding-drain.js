@@ -41435,13 +41435,44 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
+  DASHBOARD_UPDATE_COPY = {
+    notice: (version) => `Olympus ${version} is available.`,
+    updateNow: "Update now",
+    terminal: "Update in Terminal instead",
+    terminalHow: "Run this in Terminal:",
+    copy: "Copy command",
+    copied: "Copied",
+    copyFailed: "Select the command and copy it.",
+    steps: ["downloading the update", "checking the download's signature", "installing", "restarting Olympus"],
+    updating: (version) => `Updating to Olympus ${version}`,
+    step: (step, words2) => `step ${step} of 4: ${words2}`,
+    pause: (to, from) => `Your sources pause for about a minute while Olympus restarts. If ${to} doesn't start, Olympus puts ${from} back by itself.`,
+    done: (version) => `Olympus ${version} is running.`,
+    rolledBack: (to, from) => `Olympus ${to} didn't start, so Olympus put ${from} back. Nothing else changed.`,
+    failures: {
+      download_failed: "Olympus could not download the update. Check the internet connection and try again.",
+      bad_signature: "The update's signature did not check out, so Olympus did not use it. Nothing changed.",
+      installer_mismatch: "The downloaded installer did not match its signed release, so Olympus did not run it. Nothing changed.",
+      launch_failed: "Olympus could not start the installer. Nothing changed.",
+      install_failed: "The update did not finish. Try again, or update in Terminal.",
+      interrupted: "Olympus restarted before the update began. Nothing changed. Try again.",
+      did_not_finish: "The update did not finish. Try again, or update in Terminal."
+    },
+    refusals: {
+      no_release_key: "This version of Olympus can't check an update's signature yet, so it won't update itself. Update in Terminal instead.",
+      not_available: "Olympus can update itself only when it was installed with the Olympus installer. Update in Terminal instead.",
+      no_update: "Olympus is already up to date."
+    },
+    unreachable: "Olympus is restarting…",
+    failedFallback: "The update could not start. Update in Terminal instead."
+  };
   DASHBOARD_STATUS_PRESENTATION = {
     Fresh: { label: "Fresh", colorToken: "good", glyphKind: "dot" },
     Working: { label: "Working", colorToken: "run", glyphKind: "donut" },
@@ -44983,6 +45014,19 @@ var init_source_watch = __esm(() => {
 
 // src/workers/dashboard/session-marker.ts
 var init_session_marker = () => {};
+
+// src/workers/http.ts
+var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
+var init_http = __esm(() => {
+  init_session_marker();
+  init_request_peer();
+  init_worker_auth();
+  init_dashboard_launch();
+  DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+  AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+  AGENT_MINT_WINDOW_MS = 10 * 60000;
+  REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
+});
 
 // src/workers/chatgpt/dashboard-contract.ts
 var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
@@ -51756,19 +51800,6 @@ var init_dashboard_resource = __esm(() => {
   init_dashboard_contract();
   DASHBOARD_HTML = chatgptDashboardPageHtml();
   DASHBOARD_RESOURCE_VERSIONED_URI = versionedResourceUri(DASHBOARD_RESOURCE_URI, DASHBOARD_HTML);
-});
-
-// src/workers/http.ts
-var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
-var init_http = __esm(() => {
-  init_session_marker();
-  init_request_peer();
-  init_worker_auth();
-  init_dashboard_launch();
-  DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-  AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
-  AGENT_MINT_WINDOW_MS = 10 * 60000;
-  REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -70652,6 +70683,20 @@ init_vocabulary();
 init_local_private_answers();
 init_linux_owner_bridge_host();
 init_update_check();
+
+// src/core/self-update.ts
+init_atomic_file();
+init_linux_engine_layout();
+
+// src/core/release-signing.ts
+var RELEASE_MANIFEST_MAX_BYTES = 64 * 1024;
+
+// src/core/self-update.ts
+init_update_check();
+var SELF_UPDATE_STALE_MS = 30 * 60000;
+var SELF_UPDATE_SHOWN_MS = 10 * 60000;
+
+// src/workers/email-source/server.ts
 init_open_targets();
 init_linux_owner_bridge();
 init_linux_desktop_opener();
@@ -71942,6 +71987,51 @@ var OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervi
 
 // src/workers/dashboard/host-page.ts
 init_update_check();
+
+// src/workers/dashboard/update-now.ts
+init_http();
+init_page();
+init_vocabulary();
+var C = DASHBOARD_UPDATE_COPY;
+var WORDS = {
+  notice: C.notice("{version}"),
+  updateNow: C.updateNow,
+  updating: C.updating("{to}"),
+  step: C.step(0, "{words}").replace("step 0", "step {n}"),
+  steps: [...C.steps],
+  pause: C.pause("{to}", "{from}"),
+  done: C.done("{version}"),
+  rolledBack: C.rolledBack("{to}", "{from}"),
+  failures: C.failures,
+  refusals: C.refusals,
+  unreachable: C.unreachable,
+  failedFallback: C.failedFallback,
+  copied: C.copied,
+  copyFailed: C.copyFailed
+};
+function palette(p) {
+  return `--upd-bg:${p.infoBg};--upd-line:${p.infoLine};--upd-fill:${p.accent};--upd-on:${p.onAccent};--upd-track:${p.line};--upd-muted:${p.muted}`;
+}
+var UPDATE_NOTICE_CSS = `
+.upd{${palette(CHATGPT_DASHBOARD_LIGHT)};background:var(--upd-bg);border-left:4px solid var(--upd-line);border-radius:8px;padding:0.875rem 1.125rem;margin:1rem 0}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .upd{${palette(CHATGPT_DASHBOARD_DARK)}}}
+:root[data-theme=dark] .upd{${palette(CHATGPT_DASHBOARD_DARK)}}
+.upd[hidden],.upd [hidden]{display:none}
+.upd p{margin:0}
+.upd-row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem}
+.upd-title{flex:1 1 16rem;min-width:0}
+.upd-now.btn,.upd-now.btn.primary{background:var(--upd-fill);border-color:var(--upd-fill);color:var(--upd-on);font-weight:600;border-radius:999px;padding:0.4rem 1.1rem;min-height:2.25rem}
+.upd-bar{height:6px;border-radius:3px;background:var(--upd-track);margin:0.6rem 0 0.5rem;overflow:hidden}
+.upd-bar span{display:block;height:100%;background:var(--upd-fill);border-radius:3px;transition:width .3s}
+.upd-note{color:var(--upd-muted);font-size:0.875rem}
+.upd-terminal{margin-top:0.5rem}
+.upd-terminal summary{cursor:pointer;color:var(--upd-muted);font-size:0.875rem}
+.upd-terminal p{margin-top:0.4rem}
+.upd-terminal code{overflow-wrap:anywhere;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem}
+.upd-status{color:var(--upd-muted);font-size:0.875rem}
+`;
+
+// src/workers/dashboard/host-page.ts
 init_dashboard_contract();
 init_page();
 init_vocabulary();
@@ -71952,9 +72042,7 @@ var HOST_CSS = `
 *{box-sizing:border-box}
 html,body{height:100%}
 body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:0.9375rem;line-height:1.45}
-.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}
-.update p{margin:0 0 0.5rem}
-.update code{overflow-wrap:anywhere;white-space:pre-wrap}
+.update{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:0 auto}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
