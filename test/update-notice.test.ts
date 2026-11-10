@@ -146,9 +146,11 @@ for (const remote of ['1.0.0', '0.9.0', '1.1.0-beta.1', 'bad']) test(`no notice 
   expect(checker.available()).toBeUndefined(); checker.stop();
 });
 
-test('Mac dashboard renders a plain notice and copies the exact README command', async () => {
+test('Mac dashboard renders a plain notice and copies the exact README command (Update in Terminal instead)', async () => {
   const html = renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', updateAvailable: { version: '1.0.1' } });
-  expect(html).toContain('Olympus 1.0.1 is available. To update, run this in Terminal:');
+  expect(html).toContain('Olympus 1.0.1 is available.');
+  expect(html).toContain('Update in Terminal instead');
+  expect(html).toContain('Run this in Terminal:');
   const command = 'curl -fsSL https://olympusplugin.ai/install.sh | sh';
   expect(readFileSync('README.md', 'utf8')).toContain(command);
   const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
@@ -209,7 +211,7 @@ test('an already-open Mac dashboard shows and removes a notice from local health
     update = { version: '1.0.1' }; poll!();
     await new Promise(resolve => setTimeout(resolve, 10));
     expect((window.document.querySelector('[data-update-notice]') as unknown as HTMLElement).hidden).toBe(false);
-    expect(window.document.querySelector('[data-update-text]')!.textContent).toBe('Olympus 1.0.1 is available. To update, run this in Terminal:');
+    expect(window.document.querySelector('[data-update-text]')!.textContent).toBe('Olympus 1.0.1 is available.');
     update = undefined; poll!();
     await new Promise(resolve => setTimeout(resolve, 10));
     expect((window.document.querySelector('[data-update-notice]') as unknown as HTMLElement).hidden).toBe(true);

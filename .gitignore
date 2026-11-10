@@ -18,6 +18,7 @@ release-artifacts/
 # scripts/publish-release-to-site.ts, published by site/deploy/deploy.sh.
 site/install.sh
 site/install-linux.sh
+site/*.release.json
 site/releases/
 .env
 .env.*
