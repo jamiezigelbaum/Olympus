@@ -42,7 +42,7 @@ import {
   type OAuthRelayStateKeys,
 } from '../../core/oauth-relay.ts';
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type ExternalPendingOAuthConnection, type OAuthFetch } from '../../core/connect.ts';
+import { connectPublicApiKeySource, DROPBOX_MISSING_SCOPE_MESSAGE, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type ExternalPendingOAuthConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
   callerClaimsRemoteConnection,
@@ -7684,7 +7684,8 @@ function safeVeniceCheckFailure(error: unknown): string {
 
 function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource, clientIdSource?: 'publisher' | 'byo'): string {
   const message = error instanceof Error ? error.message : '';
-  if (source === 'dropbox' && clientIdSource === 'byo' && message === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
+  // The check's own sentence is worded for the CLI; on the dashboard it names the walkthrough's step.
+  if (source === 'dropbox' && clientIdSource === 'byo' && message === DROPBOX_MISSING_SCOPE_MESSAGE) return 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.';
   // Only fixed setup-check sentences may cross the callback HTML boundary.
   const setupMessages = source === 'x' ? [
     'X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.',

@@ -1,3 +1,4 @@
+import { isSourceIndexLaneBusyError } from './lane-busy.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -759,6 +760,11 @@ async function runCorpusLaneWithDeadline(
       });
       return { kind: 'response', response, elapsedMs };
     } catch (error) {
+      if (isSourceIndexLaneBusyError(error)) {
+        const elapsedMs = Math.max(0, Date.now() - startedAt);
+        recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: 'timeout' });
+        return { kind: 'timeout', elapsedMs };
+      }
       recordSourceAnswerCorpusTiming({
         corpus_id: corpusId,
         elapsed_ms: Math.max(0, Date.now() - startedAt),
@@ -819,6 +825,11 @@ async function runCorpusLaneWithDeadline(
         elapsed_ms: elapsedMs,
         outcome: 'timeout',
       });
+      return { kind: 'timeout', elapsedMs };
+    }
+    if (settled.kind === 'error' && isSourceIndexLaneBusyError(settled.error)) {
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: 'timeout' });
       return { kind: 'timeout', elapsedMs };
     }
     if (settled.kind === 'error') {

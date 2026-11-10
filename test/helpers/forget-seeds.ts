@@ -32,6 +32,7 @@ import { TierLedger, tierLedgerPathForStore } from '../../src/workers/classifica
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../../src/workers/source-scheduler-state.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../../src/workers/file-extraction/job-store.ts';
 import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
+import { LocalPeopleIndex, peopleIndexPath } from '../../src/core/people-index.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
 import { accountFolder, xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
 import { judgeSecondRoundStatePath } from '../../src/workers/classification/judge-second-round.ts';
@@ -372,6 +373,35 @@ export const SEEDED_FILES: readonly SeededFile[] = [
         + count(path, 'secret_restored_rereads', 'job_id IN (SELECT job_id FROM extraction_jobs WHERE corpus_id = ?)', source.corpus_id)
         + count(path, 'secret_item_redaction_claims', 'claimant = ?', tierLedgerIdOf(source))
         + count(path, 'secret_item_redactions', 'account_scope = ?', `${source.ledger_id}@example.com`);
+    },
+  },
+  {
+    stepId: 'people-index',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => peopleIndexPath(layout.env),
+    seed(layout) {
+      const index = new LocalPeopleIndex({ dbPath: peopleIndexPath(layout.env) });
+      try {
+        index.rebuild([MINE, OTHER].map((source) => ({
+          provider: source.ledger_id,
+          senderId: `ada@${source.ledger_id}.example`,
+          senderLabel: 'Ada Example',
+          isOwner: false,
+          itemCount: 2,
+          corpusId: source.corpus_id,
+        })));
+        index.correct({ kind: 'rename', identity: `sender:${MINE.ledger_id}:ada@${MINE.ledger_id}.example`, name: 'Ada' });
+        index.correct({ kind: 'rename', identity: `sender:${OTHER.ledger_id}:ada@${OTHER.ledger_id}.example`, name: 'Ada' });
+      } finally {
+        index.close();
+      }
+    },
+    left(layout, source) {
+      const path = peopleIndexPath(layout.env);
+      const key = `sender:${source.ledger_id}:ada@${source.ledger_id}.example`;
+      return count(path, 'people_identities', 'identity_key = ?', key)
+        + count(path, 'people_corrections', 'identity_a = ?', key);
     },
   },
   {

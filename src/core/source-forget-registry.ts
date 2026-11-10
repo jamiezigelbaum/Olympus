@@ -21,6 +21,7 @@ import {
   forgetWaitingPrivateQuestions,
   waitingPrivateQuestionsDbPath,
 } from './waiting-private-questions.ts';
+import { forgetPeopleIndexRows, peopleIndexPath } from './people-index.ts';
 import { forgetSourceWatches, defaultSourceWatchDbPath } from './source-watch.ts';
 import { defaultIngestionHealthStatePath, forgetIngestionHealthState } from './ingestion-health-state.ts';
 import { defaultFileSourceScopeStatePath, forgetFileSourceScopeApproval } from './source-scope-approval.ts';
@@ -283,6 +284,21 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
       return unreadable > 0 && paths[0] !== undefined
         ? [...withSpool, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
         : withSpool;
+    },
+  },
+  {
+    // People (#1076): the deleted source's identities, the owner's corrections
+    // and contact-card entries that name them, and the derived people, which
+    // the next refresh rebuilds from the stores that remain.
+    id: 'people-index',
+    file: 'people-index',
+    modules: ['src/core/people-index.ts'],
+    // The worker's refresh can link the deleting source's senders again
+    // from stores still open while it winds down.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = peopleIndexPath(context.env);
+      return line(path, 'people', forgetPeopleIndexRows(path, { corpusIds: account.corpus_ids }, { dryRun }));
     },
   },
   {
