@@ -242,6 +242,19 @@ export function unreadableNames(input: unknown): string[] {
   });
 }
 
+/**
+ * A source waiting on a daily API budget or a rate limit (#1044). `reason` is
+ * a closed word; `api` names whose budget it is ("X"); `resumesAt` is an ISO
+ * time when known (a daily budget resets at 00:00 UTC).
+ */
+export interface DashboardSourceWait {
+  sourceId: string;
+  label: string;
+  reason: 'daily_budget' | 'rate_limit';
+  api: string;
+  resumesAt?: string;
+}
+
 /** A Sync now press's state on the row: `checking` while its sync runs, then what it found. */
 export type ManualSyncOutcome = 'checking' | 'checked' | 'failed' | 'busy';
 
@@ -266,6 +279,12 @@ export interface DashboardViewModelV1 {
   blocker?: DashboardItem;
   /** Includes an unreachable local model; models never block on their own. */
   needsYou: DashboardItem[];
+  /**
+   * Sources Olympus parked on its own budget or a provider's rate limit
+   * (#1044): nothing for the owner to do and no Sync now, only the reason and
+   * when it resumes. Absent when none waits.
+   */
+  waits?: DashboardSourceWait[];
   /**
    * Server-ordered, one list: sources that need the owner first, then
    * connected sources, then sources not connected yet (2026-10-09). `group`

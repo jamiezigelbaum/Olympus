@@ -86,8 +86,8 @@ describe('an import beside a live input is judged', () => {
   test('the source is unpaired the way the owner does it: its menu, Unpair, the confirmation, then it reads disconnected', () => {
     const journey = unpairJourney('telegram.messages', 'Telegram');
     expect(journey.steps.map((step) => step.do)).toEqual([
-      { go: '/dashboard' },
-      { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
+      { go: '/dashboard#olympus-open=source.telegram.messages' },
+      { observe: true },
       { observe: true },
       { click: { css: '[data-key="summary:menu:telegram.messages"]' }, frame: 'panel' },
       { click: { role: 'button', name: 'Unpair Telegram' }, frame: 'panel' },

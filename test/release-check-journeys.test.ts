@@ -44,7 +44,8 @@ class DomDriver implements JourneyDriver {
   show(path: string): void {
     this.window.document.body.innerHTML = this.pagesByPath[path] ?? '<p>not found</p>';
     this.path = path;
-    this.host.document.body.innerHTML = '<iframe id="olympus-panel"></iframe>';
+    // Home holds the panel's frame; the computer's other pages (Sources, Settings) are the host page itself.
+    this.host.document.body.innerHTML = path === '/dashboard' ? '<iframe id="olympus-panel"></iframe>' : this.pagesByPath[path] ?? '<p>not found</p>';
     evalIn(this.window, PROBE_SOURCE);
     evalIn(this.host, PROBE_SOURCE);
   }
@@ -77,10 +78,12 @@ class DomDriver implements JourneyDriver {
 /** A clock that moves 7 s per read and never sleeps, so a step that never reaches its outcome gives up at once. */
 const options = () => ({ now: ((): (() => number) => { let t = 0; return () => (t += 7_000); })(), sleep: async () => {} });
 
-// Home as 1.4.0 draws it: every source folded under All sources.
-const GOOD_DASHBOARD = `<main><h1>Olympus</h1><details class="home-sources"><summary data-key="summary:home-sources">All sources (2)</summary><section><h2>Sources</h2>
-  <div class="row"><span>Readwise</span> <span>Working</span><button aria-label="${PANEL.moreActions.replace('{source}', 'Readwise')}">...</button></div>
-  <div class="row"><span>Files on this computer</span><button>Connect</button></div></section></details></main>`;
+// Home as 1.5 draws it (#1085): the status line, no source list; the Sources tab is the list.
+const GOOD_DASHBOARD = `<main><h1>Olympus</h1><section class="home-status" data-home-status="ok"><p>Olympus is up to date</p><p>2 sources · checked just now</p></section></main>`;
+const GOOD_SOURCES = `<main><div class="srcrows" id="sources">
+  <div class="srcrow" data-source-row="readwise.library"><b>Readwise</b> <span>Synced just now</span><button>Sync now</button></div>
+  <div class="srcrow" data-source-row="local.files"><b>Files on this computer</b><button>Choose folders</button></div></div></main>`;
+const SOURCES_PAGES = { '/dashboard': GOOD_DASHBOARD, '/dashboard?connect': GOOD_SOURCES };
 
 describe('journey runner', () => {
   const saveJourney: Journey = {
@@ -316,19 +319,18 @@ function modelsPanel(driver: DomDriver, empty = false): void {
 describe('the shipped journeys, on a DOM', () => {
   const find = (id: string): Journey => JOURNEYS.find((journey) => journey.id === id)!;
 
-  test('sources-healthy passes on a healthy Sources page and FAILS when the Files on this computer card is gone', async () => {
-    const good = await runJourney(new DomDriver({ '/dashboard': GOOD_DASHBOARD }), find('sources-healthy'), options());
-    expect(good.steps.at(-1)!.actual).toContain('Connect');
+  test('sources-healthy passes on a healthy Sources tab and FAILS when the Files on this computer card is gone', async () => {
+    const good = await runJourney(new DomDriver(SOURCES_PAGES), find('sources-healthy'), options());
     expect(good.ok).toBe(true);
-    const without = GOOD_DASHBOARD.replace(/<div class="row"><span>Files on this computer.*?<\/div>/s, '');
-    const bad = await runJourney(new DomDriver({ '/dashboard': without }), find('sources-healthy'), options());
+    const without = GOOD_SOURCES.replace(/<div class="srcrow" data-source-row="local.files">.*?<\/div>/s, '');
+    const bad = await runJourney(new DomDriver({ ...SOURCES_PAGES, '/dashboard?connect': without }), find('sources-healthy'), options());
     expect(bad.ok).toBe(false);
-    expect(journeyChecks([bad])[0]!.detail).toContain('Files on this computer');
+    expect(journeyChecks([bad])[0]!.detail).toContain('local.files');
   });
 
   test('sources-healthy FAILS when the source shows a stuck state', async () => {
-    const stuck = GOOD_DASHBOARD.replace('<span>Readwise</span> <span>Working</span>', '<span>Readwise — Needs you</span>');
-    const bad = await runJourney(new DomDriver({ '/dashboard': stuck }), find('sources-healthy'), options());
+    const stuck = GOOD_SOURCES.replace('<b>Readwise</b> <span>Synced just now</span>', '<b>Readwise — Needs you</b>');
+    const bad = await runJourney(new DomDriver({ ...SOURCES_PAGES, '/dashboard?connect': stuck }), find('sources-healthy'), options());
     expect(bad.ok).toBe(false);
   });
 

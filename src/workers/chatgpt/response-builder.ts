@@ -47,6 +47,7 @@ import type {
   DashboardSource,
   DashboardUnreadable,
   DashboardViewModelV1,
+  DashboardSourceWait,
   DeleteSourceDataResult,
   DisconnectSourceResult,
   FolderScopeList,
@@ -234,6 +235,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     generatedAt: iso(view.generatedAt) ?? new Date().toISOString(),
   };
   if (view.blocker) out.blocker = copyItem(view.blocker);
+  const waits = (view.waits ?? []).flatMap(copyWait);
+  if (waits.length) out.waits = waits;
   const answers = view.models?.answers;
   if (answers && ANSWER_KINDS.has(answers.kind)) {
     out.models.answers = { kind: answers.kind, label: text(answers.label), ready: answers.ready === true };
@@ -1602,6 +1605,13 @@ function whole(value: unknown): number {
 
 function percent(value: unknown): number {
   return finite(value) ? Math.max(0, Math.min(100, Math.round(value * 10) / 10)) : 0;
+}
+
+/** A source waiting on a budget or a rate limit (#1044): closed words, a label and a time only. */
+function copyWait(wait: DashboardSourceWait): DashboardSourceWait[] {
+  if (!wait || typeof wait.sourceId !== 'string' || (wait.reason !== 'daily_budget' && wait.reason !== 'rate_limit')) return [];
+  const resumesAt = iso(wait.resumesAt);
+  return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api), ...(resumesAt ? { resumesAt } : {}) }];
 }
 
 function iso(value: unknown): string | undefined {

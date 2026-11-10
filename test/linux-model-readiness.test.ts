@@ -17,10 +17,11 @@ test('fresh Linux models report actual downloads, lazy transcription and missing
     const missing = linuxModelReadiness(env, { totalMemoryBytes: 4 * 1024 ** 3, decoderPresent: () => false });
     expect(missing[1]!.state).toBe('unavailable'); expect(missing[1]!.detail).toContain('memory');
     expect(missing[2]!.detail).toContain('Install ffmpeg');
-    const mac = renderComputerHostPage({ panelHtml: '<p>Frozen panel</p>', origin: 'http://127.0.0.1:8010' });
-    expect(mac).not.toContain('Built-in models on this computer');
-    const linux = renderComputerHostPage({ panelHtml: '<p>Frozen panel</p>', origin: 'http://127.0.0.1:8010', modelReadiness: missing });
-    expect(linux).toContain('Install ffmpeg'); expect(linux).toContain('not have enough memory');
+    expect(missing[1]!.cause).toBe('this computer does not have enough memory for it');
+    expect(missing[2]!.cause).toBe('ffmpeg is not installed');
+    // Home never shows the built-in models (#1085): they are on Settings › Models on this computer.
+    const home = renderComputerHostPage({ panelHtml: '<p>Frozen panel</p>', origin: 'http://127.0.0.1:8010' });
+    expect(home).not.toContain('Built-in models on this computer');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -32,6 +33,7 @@ test('transcription off by setting says so, without ffmpeg advice (#1046)', () =
     expect(off.state).toBe('unavailable');
     expect(off.detail).toContain('turned off by OLYMPUS_BUILT_IN_TRANSCRIPTION=off');
     expect(off.detail).not.toContain('ffmpeg');
+    expect(off.cause).toBe('OLYMPUS_BUILT_IN_TRANSCRIPTION is set to off');
     const noDecoder = linuxModelReadiness({ HOME: root, XDG_DATA_HOME: root }, { totalMemoryBytes: 16 * 1024 ** 3, decoderPresent: () => false })[2]!;
     expect(noDecoder.detail).toBe('Built-in transcription needs ffmpeg, which is not installed. Install ffmpeg, then restart Olympus.');
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -42,8 +44,10 @@ test('Linux engine status and local dashboard carry the worker model readiness',
   const rows = [{ name: 'Transcription', state: 'unavailable', detail: 'Install ffmpeg.', downloadBytes: 1019141728 }];
   const worker = createEmailSourceWorker({ localModelReadiness: () => rows });
   try {
-    const html = await (await worker.fetch(new Request('http://127.0.0.1:8010/dashboard'))).text();
-    expect(html).toContain('Install ffmpeg.');
+    const home = await (await worker.fetch(new Request('http://127.0.0.1:8010/dashboard'))).text();
+    expect(home).not.toContain('Install ffmpeg.');
+    const settings = await (await worker.fetch(new Request('http://127.0.0.1:8010/dashboard?settings'))).text();
+    expect(settings).toContain('<b>Transcription</b> — Install ffmpeg.');
     const report = await engineStatusReport({ homeDir: root, env: { HOME: root, XDG_RUNTIME_DIR: root }, platform: 'linux',
       exec: () => ({ status: 0, stdout: 'LoadState=not-found\nActiveState=inactive\n', stderr: '' }), openclawPath: () => undefined,
       fetchImpl: (async () => Response.json({ status: 'ok', built_in_models: rows, desktop_bridge: { state: 'port_in_use', remedy: 'Free the port or use the owner SSH socket forward.' } })) as unknown as typeof fetch });
