@@ -31,6 +31,8 @@ type RecordLine = Header | Result;
 export interface ReplayOptions {
   stores: string; endpoint: string; model: string; ownerWords: string; out: string; disagreements: string;
   sources?: string[]; limit?: number; deadlineSeconds?: number;
+  /** The clock the deadline is read on (tests); defaults to performance.now(). */
+  now?: () => number;
 }
 
 export function loopbackEndpoint(endpoint: string): string {
@@ -168,7 +170,8 @@ export async function replay(options: ReplayOptions) {
   for (const value of [options.limit, options.deadlineSeconds]) if (value !== undefined && (!Number.isFinite(value) || value < 0)) throw new Error('Limits must be finite and nonnegative.');
   if (options.limit !== undefined && !Number.isInteger(options.limit)) throw new Error('Limit must be an integer.');
   if ([options.out, options.disagreements].some(path => (resolve(path) === resolve(options.stores) || resolve(path).startsWith(resolve(options.stores) + '/'))) || resolve(options.out) === resolve(options.disagreements) || [options.out, options.disagreements].some(path => resolve(path) === resolve(options.ownerWords))) throw new Error('Outputs must be separate from inputs.');
-  const deadline = performance.now() + (options.deadlineSeconds ?? Infinity) * 1_000;
+  const now = options.now ?? (() => performance.now());
+  const deadline = now() + (options.deadlineSeconds ?? Infinity) * 1_000;
   const ownerContext = readFileSync(options.ownerWords, 'utf8');
   const loaded = sources.map(source => loadSource(options.stores, source));
   const identity = digest(JSON.stringify({ endpoint, model: options.model, owner: digest(ownerContext), prompt: snifferPromptVersions(ownerContext).cache,
@@ -212,7 +215,7 @@ export async function replay(options: ReplayOptions) {
           storedTier: old.tier, storedModelId: old.model_id, storedPromptVersion: old.prompt_version, storedMapRevision: old.map_revision,
           storedBucket: bucket(old), storedInjection: old.category === 'injection' };
         if (done.has(key(base))) continue;
-        if (performance.now() >= deadline || processed >= (options.limit ?? Infinity)) return reportFile(options.out);
+        if (now() >= deadline || processed >= (options.limit ?? Infinity)) return reportFile(options.out);
         let answer = answers.get(old.material_hash);
         if (!answer) {
           const material = source.materials.get(old.material_hash)!.material;
@@ -222,7 +225,7 @@ export async function replay(options: ReplayOptions) {
           if (snifferMaterialCarriesSecret(own)) { answer.newTier = 'secrets'; answer.failure = 'secret'; }
           else if (snifferInjectionRule(own)) { answer.newTier = 'private'; answer.injection = true; answer.failSafe = true; }
           else {
-            const remaining = Math.max(1, Math.min(60_000, Math.ceil(deadline - performance.now())));
+            const remaining = Math.max(1, Math.min(60_000, Math.ceil(deadline - now())));
             const signal = AbortSignal.timeout(remaining);
             try {
               const completion = await completeSnifferQuestion(model, { pass: 'content', material, ownerContext, signal });
