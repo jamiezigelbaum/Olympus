@@ -37,7 +37,11 @@ export function withFirstRunPrivacyGate(
     if (path.startsWith('/.well-known/') || path.startsWith('/connect/')
       || path === RELAY_SURFACES_PATH || path === '/openapi.json'
       || ['/dashboard/launch', '/dashboard/control/launch', '/dashboard/control/launch/redeem', '/dashboard/control/session', '/dashboard/control/session/local'].includes(path)
-      || (request.method === 'GET' && path === '/v1/service/readiness')) {
+      || (request.method === 'GET' && path === '/v1/service/readiness')
+      // Reading and proposing settings (#1050) carry no source data, and the
+      // first choices are what an agent helping with setup proposes; the
+      // worker bearer still guards both, and applying stays a local click.
+      || (request.method === 'POST' && ['/v1/cli/settings', '/v1/cli/settings-propose'].includes(path))) {
       return handler(request);
     }
     if ((path === '/mcp' || path === '/openai/mcp') && request.method === 'POST') {

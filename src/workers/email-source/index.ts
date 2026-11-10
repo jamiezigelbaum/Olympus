@@ -3,6 +3,8 @@ import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistrati
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
 import { privateAnswerMode } from '../../core/first-run-privacy.ts';
+import { parseProposalFrom, parseSettingsProposalInput, SettingsProposalError } from '../../core/settings-proposal.ts';
+import { createSettingsProposalHolder, type SettingsProposalHolder } from '../settings-proposal-holder.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
@@ -594,6 +596,10 @@ export interface EmailSourceWorkerOptions {
     computerSetup?: () => Pick<ModelSetupView, 'computer_use_pending' | 'engine_server_mode'>;
     saveComputerUseChoice?: (choice: 'everyday' | 'server') => { ok: true; status_message: string };
     saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
+    /** Change the Private-answer mode after the first run (an applied settings proposal, #1050). */
+    savePrivateAnswerMode?: (choice: SovereigntyPresetName) => { ok: true; message?: string } | { ok: false; message: string };
+    /** Hold the reloads the writers request until a whole settings proposal is saved. */
+    deferReloads?: <T>(writes: () => Promise<T>) => Promise<T>;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
      * Outside help (consults): the Mac dashboard card's backend
@@ -870,6 +876,38 @@ function dashboardConnectSourceLabel(source: string): string {
     ?? source;
 }
 
+/** Where the Settings page's Apply all and Discard post (local control session only, workers/http.ts). */
+export const DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = '/dashboard/settings/proposal/apply';
+export const DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = '/dashboard/settings/proposal/discard';
+
+/** Agent-proposed settings (#1050), bound to the same writers the dashboard's own controls use. */
+function settingsProposalHolderFor(dashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>): SettingsProposalHolder {
+  const judge = dashboard.judgeSetup;
+  const models = dashboard.modelChoices;
+  const saveComputerUse = dashboard.saveComputerUseChoice;
+  return createSettingsProposalHolder({
+    answerMode: () => {
+      const id = privateAnswerMode(dashboard.sovereigntyEngine.config);
+      return { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id] };
+    },
+    ...(dashboard.savePrivateAnswerMode ? { saveAnswerMode: dashboard.savePrivateAnswerMode } : {}),
+    ...(dashboard.deferReloads ? { deferReloads: dashboard.deferReloads } : {}),
+    ...(dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {}),
+    ...(saveComputerUse ? { saveComputerUse: (choice: 'everyday' | 'server') => ({ ok: true as const, message: saveComputerUse(choice).status_message }) } : {}),
+    ...(judge ? {
+      judge: judge.status,
+      saveJudge: async (choice: 'local' | 'venice', cap: number) => ({ ok: true as const, message: (await judge.save(choice, cap)).status_message }),
+    } : {}),
+    ...(models ? {
+      modelChoices: () => models.status(),
+      saveModel: async (provider: 'local' | 'venice' | 'zkapi', value: string) => {
+        const saved = await models.save(provider, value);
+        return saved.ok ? { ok: true as const, message: saved.status_message } : { ok: false as const, message: saved.message };
+      },
+    } : {}),
+  });
+}
+
 export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}): {
   fetch(request: Request): Promise<Response>;
   /**
@@ -928,6 +966,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
   const serviceInstanceId = options.serviceInstanceId?.trim() || undefined;
@@ -1217,6 +1256,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'tier': return json(await tierForCli(body));
               case 'pairing-placement': return json(pairingPlacementForCli(body));
               case 'pairing-account': return json(pairingAccountForCli(body));
+              case 'settings-propose': {
+                if (!settingsProposal) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to change.');
+                try {
+                  const proposal = await settingsProposal.propose(parseSettingsProposalInput(body.proposal), parseProposalFrom(body.from));
+                  return json({
+                    kind: 'olympus_settings_proposal',
+                    id: proposal.id,
+                    changes: proposal.rows,
+                    next: 'Nothing has changed yet. Ask the owner to open the dashboard on this computer, go to Settings, check the proposed changes and click Apply all.',
+                  });
+                } catch (error) {
+                  if (error instanceof SettingsProposalError) throw new EmailSourceWorkerError(400, 'invalid_params', error.message, 'Run olympus settings schema and olympus settings show for what can be set.');
+                  throw error;
+                }
+              }
               case 'settings': {
                 if (!sourceDashboard) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to show.');
                 const dashboard = sourceDashboard;
@@ -1538,6 +1592,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
                 ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
+                ...(settingsProposal ? { settingsProposal: { current: settingsProposal.current(), lastApplied: settingsProposal.lastApplied() } } : {}),
                 settings: {
                   ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
@@ -2224,6 +2279,30 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
           return json(result.ok ? result : { ok: false, error: { code: 'model_choice_failed', message: result.message } }, result.ok ? 200 : 409);
+        }
+
+        if (request.method === 'POST' && (url.pathname === DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH || url.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Apply proposed settings in an unlocked dashboard on this computer.' } }, 403);
+          }
+          if (!settingsProposal) throw new EmailSourceWorkerError(501, 'not_available', 'Proposed settings are unavailable.');
+          const input = await parseObjectBody(request);
+          if (typeof input.id !== 'string' || input.id === '') throw new EmailSourceWorkerError(400, 'invalid_request', 'Refresh the page to see the current proposal.');
+          if (url.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH) {
+            return settingsProposal.discard(input.id)
+              ? json({ ok: true, status_message: 'Discarded. Nothing was changed.' })
+              : json({ ok: false, error: { code: 'proposal_changed', message: 'This proposal was replaced or already handled. Refresh the page.' } }, 409);
+          }
+          const applied = await settingsProposal.apply(input.id);
+          if (!applied) return json({ ok: false, error: { code: 'proposal_changed', message: 'This proposal was replaced or already handled. Refresh the page.' } }, 409);
+          const failed = applied.rows.filter((row) => !row.applied);
+          return json({
+            ok: true,
+            rows: applied.rows,
+            status_message: failed.length === 0
+              ? `Applied ${applied.rows.length} ${applied.rows.length === 1 ? 'change' : 'changes'}.`
+              : `Applied ${applied.rows.length - failed.length} of ${applied.rows.length}. Not applied: ${failed.map((row) => `${row.label} (${row.message ?? 'not saved'})`).join('; ')}.`,
+          }, failed.length === 0 ? 200 : 409);
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/judge') {

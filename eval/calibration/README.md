@@ -113,6 +113,103 @@ bun eval/calibration/score.ts --dir ~/.local/share/olympus-calibration/round2
 `score.ts` classifies from the stored names, so it has the same gaps as a
 rebuilt input.
 
+## Whole-item round: a probability sample of whole items (#883, #864)
+
+```bash
+bun eval/calibration/whole-item-commands.ts   # prints exactly what to run, and where
+```
+
+Sample on the machine that holds the stores (Sparta), then label on the Mac:
+
+```bash
+# On Sparta
+bun eval/calibration/sample-whole.ts --from-install --count 200
+# On the Mac
+mkdir -p ~/.local/share/olympus-calibration/whole && chmod 700 ~/.local/share/olympus-calibration/whole
+rsync -a --chmod=go-rwx sparta:~/.local/share/olympus-calibration/whole/sample.json \
+  sparta:~/.local/share/olympus-calibration/whole/manifest.json ~/.local/share/olympus-calibration/whole/
+bun eval/calibration/label.ts --dir ~/.local/share/olympus-calibration/whole
+```
+
+- **Copy:** `--from-install` finds this machine's stores the way the running
+  Olympus does. It copies every active account's stores, tier ledger and
+  sniffer file into `whole/stores`, plus the extraction jobs, using
+  production's snapshot (the copier never opens an install file with SQLite).
+  Imported archives are included, one store set per family, and each family is
+  a source of its own for stratification (`archive.imports.<family>`). It
+  removes the copies after sampling unless you pass `--keep-stores`.
+  `--install-home DIR` does the same for a copy of another machine's home
+  folder, read with the default layout under it. `--stores DIR` reads copies
+  you already made.
+- **Population:** every tier-ledger item that is not moving, not in Secrets,
+  still stored and top-level, from the last two years (`--since`). It must
+  have at least 15 characters of text, or be an item whose extraction failed.
+  Attachments are not counted on their own; they are shown with their parent.
+  Counts are taken after these filters, so they describe exactly what the
+  sample is drawn from. The recipe also records each source's ledger rows and
+  every exclusion by reason.
+- **Design:** a stratified simple random sample, stratified by source and by
+  whether the judge called the item Private (30% of the count, for recall).
+  Every cell gets at least 3, and the rest follows population size. There are
+  no per-group caps and nothing is rejected after the draw. Each item records
+  its inclusion probability, and a score reweights by cell population over the
+  items labeled in that cell.
+- **Split:** each item's half is decided by the related group it belongs to:
+  its conversation, folder, or an email's sender (which stands in for a
+  template). Items that share any of these land in the same half, and the id
+  is never used.
+- **Whole items:** each item is stored with all of its text, up to 400,000
+  characters. Attachments come with their own text and how each was read. The
+  item also records its extraction outcome (read, OCR, transcript, failed or
+  pending), whether the judge reads all of it, and whether the injection
+  screen holds it. Text comes from the ledger's current copy, not a
+  superseded one left after a tier move.
+- **Frozen:** `manifest.json` holds the sample's SHA-256 and the acceptance
+  criteria (`whole-item-criteria.json`: weighted Private precision of at least
+  95% and recall of at least 99%, and no Important or Secret item let through,
+  read on the test half), hashed together. The scorer refuses a sample or
+  manifest that has changed since.
+
+The labeling page shows the whole item, with the part the judge reads
+highlighted, then each attachment, and flags any text Olympus could not read.
+The keys are **P** Personal, **I** Private: important, **M** Private: minor,
+**X** Secret and **U** Not sure. For Private or Secret it then asks where the
+sensitive part is: **E** in the highlighted part, **O** only outside it,
+**A** in an attachment, **T** in the name.
+
+Once the items are labeled, run each judge with its usual tool, then score
+them together:
+
+```bash
+bun eval/calibration/score.ts --dir ~/.local/share/olympus-calibration/whole            # built-in 4B
+bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 --dir ~/.local/share/olympus-calibration/whole \
+  --model NAME --owner-words FILE --passes 0                                              # Delphi 35B, via SSH tunnel
+bun eval/calibration/score-whole.ts --dir ~/.local/share/olympus-calibration/whole \
+  --judge builtin-4b=FILE --judge delphi-35b=FILE [--judge venice=FILE]
+```
+
+For each judge, the scorer reports:
+
+- the whole matrix of owner label by verdict;
+- Private→Personal and Personal→Private, as counts, unweighted rates, and
+  weighted rates with Wilson intervals at Kish's effective sample size;
+- injections, counted apart from the matrix;
+- per-source counts and scores;
+- the frozen criteria, read on their half;
+- scores broken down by extraction outcome and by attachments, by whether the
+  judge read the whole text, and by where the owner said the sensitive part
+  was. These measure extraction and excerpt selection separately from the
+  judge. Scoring production's own placement, per component, is #1159.
+
+It also reports paired disagreements between every two judges, with an exact
+McNemar test. Output is counts and rates only, with no text, names or item
+ids. `judge-run.ts` and `score.ts` now record the sample's hash. The scorer
+refuses a result that has no hash or a different one. Both tools score Secret
+labels as Private instead of dropping them. On a whole-item sample they also
+use each item's group split for `--split`. A judge without a verdict on every
+labeled item fails the criteria on `coverage`, so a subset never passes.
+`--owner-words saved` reads this machine's saved privacy words.
+
 ## Judge runs on a llama.cpp server
 
 `judge-run.ts` runs the private judge over either round and scores it against
