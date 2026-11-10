@@ -330,6 +330,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // DASHBOARD_PRIVACY_ITEM_PATHS).
   { method: 'POST', path: '/dashboard/privacy/items/find' },
   { method: 'POST', path: '/dashboard/privacy/items/set' },
+  { method: 'POST', path: '/dashboard/privacy/judge-check' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as
   // every route above.

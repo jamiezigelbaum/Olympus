@@ -69,6 +69,12 @@ interface SovereigntyModelProfileBase {
   baseUrl?: string;
   /** Native one-token privacy sniffer; local OpenAI-compatible profiles only. */
   snifferMode?: 'auto' | 'decision' | 'full';
+  /**
+   * The P(Private) at or above which this profile's decision verdicts hold an
+   * item Private, when measured on the owner's labels for its model. Above 0
+   * and at most 0.5, so it can only lean Private; local profiles only.
+   */
+  snifferDecisionBar?: number;
   secretRef?: string;
   // `consult` carries one approved question and never raw evidence: a consult
   // profile is refused for every analyst route, embedding, vision and
@@ -914,6 +920,7 @@ function parseProfiles(value: unknown, label: string): Record<string, Sovereignt
       ...optionalString(profile, 'baseUrl'),
       ...optionalString(profile, 'secretRef'),
       ...(profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode as NonNullable<SovereigntyModelProfile['snifferMode']> } : {}),
+      ...(profile.snifferDecisionBar !== undefined ? { snifferDecisionBar: profile.snifferDecisionBar as number } : {}),
     };
     // openclaw-infer alone may omit model: absent means OpenClaw's configured
     // default model (the infer CLI runs without --model). Every other provider
@@ -1031,6 +1038,11 @@ function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPor
   if (profile.snifferMode !== undefined && (profile.provider !== 'local-openai-compatible'
     || profile.trust !== 'local' || !['auto', 'decision', 'full'].includes(profile.snifferMode))) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
+  }
+  if (profile.snifferDecisionBar !== undefined && (profile.provider !== 'local-openai-compatible' || profile.trust !== 'local'
+    || typeof profile.snifferDecisionBar !== 'number' || !Number.isFinite(profile.snifferDecisionBar)
+    || profile.snifferDecisionBar <= 0 || profile.snifferDecisionBar > 0.5)) {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" snifferDecisionBar requires a local profile and a number above 0 and at most 0.5.`);
   }
   if (profile.provider === 'zkapi') validateZkapiProfile(id, profile);
   if (profile.provider === 'built-in') {

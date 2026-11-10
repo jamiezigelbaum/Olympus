@@ -7800,7 +7800,8 @@ function parseProfiles(value, label) {
       trust,
       ...optionalString2(profile, "baseUrl"),
       ...optionalString2(profile, "secretRef"),
-      ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {}
+      ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {},
+      ...profile.snifferDecisionBar !== undefined ? { snifferDecisionBar: profile.snifferDecisionBar } : {}
     };
     const parsedProfile = provider === "openclaw-infer" ? {
       provider,
@@ -7894,6 +7895,9 @@ function validateProfile(id, profile, daemonPorts) {
   }
   if (profile.snifferMode !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || !["auto", "decision", "full"].includes(profile.snifferMode))) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
+  }
+  if (profile.snifferDecisionBar !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || typeof profile.snifferDecisionBar !== "number" || !Number.isFinite(profile.snifferDecisionBar) || profile.snifferDecisionBar <= 0 || profile.snifferDecisionBar > 0.5)) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" snifferDecisionBar requires a local profile and a number above 0 and at most 0.5.`);
   }
   if (profile.provider === "zkapi")
     validateZkapiProfile(id, profile);
@@ -18967,7 +18971,7 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, SNIFFER_DECISION_BARS, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -18989,7 +18993,10 @@ var init_sniffer = __esm(() => {
     "other"
   ];
   SNIFFER_PRIVATE_KINDS = ["none", "health", "therapy", "financial", "legal", "identity", "intimate", "family", "other"];
-  SNIFFER_DECISION_BARS = [[QWEN35_4B.modelId, 0.15]];
+  SNIFFER_DECISION_BARS = [
+    [QWEN35_4B.modelId, 0.15],
+    [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374]
+  ];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
@@ -24323,6 +24330,12 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/classification/judge-check.ts
+var init_judge_check = __esm(() => {
+  init_atomic_file();
+  init_owner_config_read();
+});
+
 // src/workers/classification-ledger.ts
 var init_classification_ledger = __esm(() => {
   init_tier_ledger_path();
@@ -24361,6 +24374,7 @@ var init_source_forget_registry = __esm(() => {
   init_source_scheduler_state();
   init_job_names();
   init_spool();
+  init_judge_check();
   init_olympus_layout();
   init_judge_second_round();
   init_source_placement();

@@ -356,6 +356,14 @@ section consolidates and supersedes all other policy wording.
 ### Change log
 
 - 2026-11-10 (no contract type version change; native sniffer cache stays
+  `decision-v2`): **the 35B-A3B's measured bar (#1184, #883).** Qwen3.6
+  35B-A3B (`qwen36-35b-a3b-text`) holds Private at P(Private) 0.374, chosen
+  on the dev half of the fresh whole-item sample (0 of 21 important Private
+  missed overall, 90.5% agreement; 0.5 missed 2). A local profile may set
+  `snifferDecisionBar` (above 0, at most 0.5) for a model it names through a
+  router alias. As with #1184, the bar applies on read, so stored decisions
+  re-tier through the existing re-judge pass with no judge call.
+- 2026-11-10 (no contract type version change; native sniffer cache stays
   `decision-v2`): **every decision judge leans Private (#1184).** The
   decision-mode P(Private) bar is per lane (`snifferDecisionBar`): Qwen3.5 4B
   at 0.15, every other judge at 0.5 until measured, never above 0.5. It is

@@ -1,3 +1,8 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createJudgeCheck } from '../src/workers/classification/judge-check.ts';
+import type { OwnerTierItem } from '../src/workers/classification/tier-owner-items.ts';
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { buildSetupChecklist } from '../src/core/setup-checklist.ts';
 import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
@@ -21,7 +26,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=<name>  that preview state, in one load
 //   /dashboard?state=inbox-failed&private-answers&controls  settled Inbox failure
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
-//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?apps-received | ?connector
+//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?apps-received | ?privacy-items | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
 //   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth (a source's
@@ -2013,6 +2018,111 @@ export function previewWaitingQuestions(count: number, state = '') {
 }
 
 /** The inbox's real client actions against synthetic, in-memory fixture state. */
+// Privacy › Your items (#1060): the mockup's items (L3-1), held in memory so
+// the find, the change, the confirm and Undo can be walked. Nothing is written.
+interface PreviewPrivacyItem {
+  item_id: string; source: string; family: string; title: string; sender: string | null; location: string | null;
+  tier: string; names_tier: string; decided_by: string; owner_set: boolean; judge_reason: string | null; decided_at: string;
+  preview: string; judge: string;
+}
+function previewPrivacyItemsFixture(): PreviewPrivacyItem[] {
+  const item = (id: string, source: string, family: string, title: string, sender: string | null, location: string | null, tier: string, judge_reason: string | null, decided_at: string, preview: string, owner?: string): PreviewPrivacyItem => ({
+    item_id: `oti_preview_${id}`, source, family, title, sender, location, tier: owner ?? tier, names_tier: 'Personal',
+    decided_by: owner ? 'override' : 'sniffer', owner_set: owner !== undefined, judge_reason: owner ? null : judge_reason, decided_at, preview, judge: tier,
+  });
+  return [
+    item('appt', 'gmail', 'email', 'Appointment confirmed: Leo, Saturday 8 November', 'Clínica Sorriso', null, 'Personal', 'ordinary:0.93', '2026-11-06T09:12:00.000Z',
+      'Clínica Sorriso <marcacoes@clinicasorriso.example>\nHello, this confirms Leo\'s appointment on Saturday 8 November at 10:30 with Dr. Marta Reis, Rua da Escola Politécnica 42, Lisbon. Please arrive 10 minutes early. To change it, reply to this email.'),
+    item('flat', 'telegram', 'message', '“Here are the numbers for the flat in Alfama…”', 'Tiago Ferreira', null, 'Private', 'financial:0.88', '2026-11-04T18:40:00.000Z',
+      'Here are the numbers for the flat in Alfama: rent €1,450 a month, two months\' deposit, and the agency fee on top.', 'Personal'),
+    item('inv', 'dropbox', 'file', 'Invoice_2026-014_Northwind_Labs.pdf', null, '/Money/Invoices/Invoice_2026-014_Northwind_Labs.pdf', 'Private', 'financial:0.90', '2026-11-02T11:05:00.000Z',
+      'Invoice 2026-014 · Northwind Labs, Lda.\nDesign sprint, October 2026 · €4,200.00 + VAT\nPay by 30 November to IBAN PT50 •••• •••• 4471'),
+    item('gate', 'whatsapp', 'message', '“See you at the school gate at 1”', 'Ana', null, 'Private', 'family:0.71', '2026-11-07T12:02:00.000Z',
+      'See you at the school gate at 1. Leo has his bag, I\'ll bring the permission slip.'),
+    item('fair', 'gmail', 'email', 'Escola Azul: autumn fair on 22 November', 'Escola Azul', null, 'Personal', 'reference:0.95', '2026-11-05T08:30:00.000Z',
+      'Dear parents, the autumn fair is on Saturday 22 November from 10:00 in the school garden. Stalls, games and a cake sale for the library fund.'),
+  ];
+}
+let previewPrivacyItems = previewPrivacyItemsFixture();
+function previewPrivacyItemsAction(path: string, body: Record<string, unknown>): Response {
+  const shown = ({ judge: _judge, ...item }: PreviewPrivacyItem) => item;
+  if (path.endsWith('/find')) {
+    const words = typeof body.query === 'string' ? body.query.trim().toLowerCase() : '';
+    const filter = body.filter;
+    const found = words
+      ? previewPrivacyItems.filter((item) => [item.title, item.sender ?? '', item.location ?? ''].some((field) => field.toLowerCase().includes(words)))
+      : previewPrivacyItems.filter((item) => filter === 'changed' ? item.owner_set : filter === 'personal' ? item.tier === 'Personal' : filter === 'private' ? item.tier === 'Private' : true);
+    // The mockup's counts, as a large install would show them.
+    const counts = { personal: 47_006, private: 1_204, changed: previewPrivacyItems.filter((item) => item.owner_set).length };
+    return Response.json({ ok: true, items: found.map(shown), counts });
+  }
+  const item = previewPrivacyItems.find((candidate) => candidate.item_id === body.item_id);
+  if (!item) return Response.json({ ok: false, code: 'not_found', message: 'Olympus no longer holds that item.' });
+  if (body.tier === 'judge') {
+    if (!item.owner_set) return Response.json({ ok: false, code: 'not_owner_set', message: 'This item already has the judge\'s label: nobody changed it by hand.' });
+    Object.assign(item, { tier: item.judge, owner_set: false, decided_by: 'sniffer' });
+    return Response.json({ ok: true, item: shown(item), changed: 'cleared', applies: 'next_pass', results: [] });
+  }
+  Object.assign(item, { tier: body.tier === 'personal' ? 'Personal' : 'Private', owner_set: true, decided_by: 'override', judge_reason: null });
+  return Response.json({ ok: true, item: shown(item), changed: 'set', applies: 'now', results: [] });
+}
+
+// "Check how Olympus labelled your items" (#887): the real round logic (judge-check.ts) over ten
+// fixture items, its file in a temporary folder. Nothing reaches a worker.
+function previewJudgeCheckItems(): OwnerTierItem[] {
+  const item = (id: string, source: string, title: string, sender: string | null, tier: 'Personal' | 'Private', confidence: number, preview: string): OwnerTierItem => ({
+    item_id: `oti_judge_${id}`, source, family: 'message', title, sender, location: null, tier, names_tier: 'Personal', decided_by: 'sniffer',
+    owner_set: false, judge_reason: `ordinary:${confidence.toFixed(2)}`, decided_at: '2026-11-03T10:00:00.000Z', preview,
+  });
+  return [
+    item('quote', 'gmail', 'Re: Quote for kitchen works, Obras Lisboa', 'Obras Lisboa', 'Private', 0.52, 'Here is the revised quote: €18,400 for the kitchen, with the worktop and the electrics.'),
+    item('enrol', 'dropbox', 'Escola_Azul_enrolment_form.pdf', null, 'Personal', 0.55, 'Enrolment form · Escola Azul · pupil name, date of birth, parent contacts, health notes.'),
+    item('dinner', 'whatsapp', '“Dinner Thursday at ours? Bring Leo”', 'Marta', 'Personal', 0.58, 'Dinner Thursday at ours? Bring Leo, the kids can play in the garden.'),
+    item('pdf', 'telegram', 'Tiago Ferreira', 'Tiago Ferreira', 'Private', 0.6, '“Can you send me the PDF from last week? The one for the bank. They want it before Friday or the transfer for the Alfama flat slips to next month.”'),
+    item('gym', 'gmail', 'Your class schedule for November', 'Ginásio Central', 'Personal', 0.62, 'Your classes this month: Tuesday and Thursday at 7:30.'),
+    item('rent', 'gmail', 'Rent receipt, November', 'Tiago Ferreira', 'Private', 0.64, 'Received €1,450 for November rent. Thank you.'),
+    item('book', 'telegram', 'Book club', 'Ana', 'Personal', 0.66, 'Next book is The Years. We meet on the 20th.'),
+    item('scan', 'dropbox', 'passport_scan.jpg', null, 'Private', 0.9, 'Passport scan.'),
+    item('fair', 'gmail', 'Escola Azul: autumn fair on 22 November', 'Escola Azul', 'Personal', 0.95, 'Dear parents, the autumn fair is on Saturday 22 November.'),
+    item('trip', 'whatsapp', '“Train at 9:14 from Santa Apolónia”', 'Ana', 'Personal', 0.97, 'Train at 9:14 from Santa Apolónia, platform 3.'),
+  ];
+}
+let previewJudgeCheck = createPreviewJudgeCheck();
+/**
+ * `judge-history` starts the preview as if earlier rounds had left 27 answers
+ * about randomly picked items, 23 agreed (a realistic rate for a good judge),
+ * so the finished round shows the likely range. Without it the round is the
+ * first, and the card shows the plain count.
+ */
+function createPreviewJudgeCheck(history = false) {
+  const items = previewJudgeCheckItems();
+  let seed = 11;
+  const path = join(mkdtempSync(join(tmpdir(), 'olympus-preview-judge-')), 'judge-check.json');
+  if (history) writeFileSync(path, JSON.stringify({ v: 1, random_tally: { compared: 27, agreed: 23 } }));
+  return createJudgeCheck({
+    items: {
+      find: () => ({ items }),
+      set: ({ itemId, choice }) => {
+        const found = items.find((candidate) => candidate.item_id === itemId)!;
+        Object.assign(found, { tier: choice === 'personal' ? 'Personal' : 'Private', owner_set: true });
+        return { ok: true, item: found, changed: 'set', applies: 'now', results: [] };
+      },
+    },
+    get: (itemId) => items.find((candidate) => candidate.item_id === itemId),
+    path,
+    random: () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; },
+  });
+}
+function previewJudgeCheckAction(body: Record<string, unknown>): Response {
+  const action = body.action;
+  const round = action === 'start' ? previewJudgeCheck.start()
+    : action === 'answer' ? previewJudgeCheck.answer(String(body.item_id), body.answer as 'Personal' | 'Private' | 'not_sure')
+      : action === 'put_away' ? previewJudgeCheck.putAway()
+        : action === 'resume' ? previewJudgeCheck.resume()
+          : previewJudgeCheck.status();
+  return Response.json({ ok: true, round });
+}
+
 function previewPrivateAnswersAction(body: Record<string, unknown>, count: number, state: string): Response {
   const answered = {
     ok: true,
@@ -2139,6 +2249,14 @@ if (import.meta.main) {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
       return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount, state);
     }
+    if (request.method === 'POST' && url.pathname === '/dashboard/privacy/judge-check') {
+      if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
+      return previewJudgeCheckAction(await request.json().catch(() => ({})) as Record<string, unknown>);
+    }
+    if (request.method === 'POST' && url.pathname.startsWith('/dashboard/privacy/items/')) {
+      if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
+      return previewPrivacyItemsAction(url.pathname, await request.json().catch(() => ({})) as Record<string, unknown>);
+    }
     // One file of an upload: the body is read (slowly in archives-upload-slow, so progress and Cancel can be seen) and only its size kept.
     if (request.method === 'POST' && url.pathname === '/dashboard/archive-import/upload-file') {
       const slow = state === 'archives-upload-slow';
@@ -2233,6 +2351,8 @@ if (import.meta.main) {
       const namedState = url.searchParams.get('state') ?? '';
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
+      if (dashboardHtmlRoutePage(url) === 'privacy_items') previewPrivacyItems = previewPrivacyItemsFixture();
+      if (dashboardHtmlRoutePage(url) === 'privacy_items' && url.searchParams.has('judge-reset')) previewJudgeCheck = createPreviewJudgeCheck(url.searchParams.has('judge-history'));
       if (stateOverride?.startsWith('privacy-')) { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [

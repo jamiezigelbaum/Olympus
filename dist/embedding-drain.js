@@ -11397,7 +11397,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -11426,7 +11426,10 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
-  SNIFFER_DECISION_BARS = [[QWEN35_4B.modelId, 0.15]];
+  SNIFFER_DECISION_BARS = [
+    [QWEN35_4B.modelId, 0.15],
+    [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374]
+  ];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
@@ -13355,10 +13358,22 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25) {
+  recentDecisions(limit = 25, contentTier, before, beforeItem) {
+    const capped = Math.max(1, Math.min(limit, 200));
+    const tie = before !== undefined && beforeItem !== undefined ? [beforeItem.provider, beforeItem.accountScope, beforeItem.providerConversationId ?? "", beforeItem.providerItemId] : undefined;
+    const where = [
+      ...contentTier === undefined ? [] : ["content_tier = ?"],
+      ...before === undefined ? [] : [tie ? "(decided_at < ? OR (decided_at = ? AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)))" : "decided_at < ?"]
+    ];
+    const params = [
+      ...contentTier === undefined ? [] : [contentTier],
+      ...before === undefined ? [] : tie ? [before, before, ...tie] : [before],
+      capped
+    ];
     const rows = this.db.query(`
-      SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 200)));
+      SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(...params);
     return rows.map(recordFromRow);
   }
   listClearedOverrideRows(limit = 100, after) {
@@ -22286,9 +22301,9 @@ function validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkCo
 function validateConnectorStoreFtsOwnership(db, versionLabel) {
   assertExactTableColumns(db, "connector_store_fts_rows", ["fts_rowid", "item_pk", "chunk_pk"], false, versionLabel);
   assertIndexColumns(db, "idx_connector_store_fts_rows_item", ["item_pk"], versionLabel);
-  const ftsRows = Number(db.query("SELECT COUNT(*) AS count FROM connector_store_fts").get().count);
-  const mappedRows = Number(db.query("SELECT COUNT(*) AS count FROM connector_store_fts_rows").get().count);
-  if (ftsRows !== mappedRows) {
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error("Connector store schema FTS row ownership map is incomplete.");
   }
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
@@ -43729,6 +43744,12 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/classification/judge-check.ts
+var init_judge_check = __esm(() => {
+  init_atomic_file();
+  init_owner_config_read();
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -43754,6 +43775,7 @@ var init_source_forget_registry = __esm(() => {
   init_source_scheduler_state();
   init_job_names();
   init_spool();
+  init_judge_check();
   init_olympus_layout();
   init_judge_second_round();
   init_source_placement();
@@ -72043,6 +72065,9 @@ init_tier_classifier();
 init_tier_ledger();
 init_tier_rules();
 
+// src/workers/email-source/server.ts
+init_judge_check();
+
 // src/workers/source-index/built-in-reranker.ts
 init_evidence_reranker();
 init_assets();
@@ -73550,6 +73575,7 @@ init_source_corpus_registry();
 init_selected_item_safety();
 init_venice_models();
 init_public_surface();
+init_judge_check();
 init_unpaired_sources();
 init_pairing_session_paths();
 
@@ -73790,6 +73816,12 @@ ${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .set
 `;
 
 // src/workers/dashboard/pages/apps-received.ts
+init_vocabulary();
+
+// src/workers/dashboard/pages/privacy-items.ts
+init_vocabulary();
+
+// src/workers/dashboard/pages/judge-check.ts
 init_vocabulary();
 
 // src/workers/dashboard/index.ts

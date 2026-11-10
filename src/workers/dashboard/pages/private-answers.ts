@@ -11,12 +11,14 @@ import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts'
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
+  DASHBOARD_PRIVACY_ITEMS_COPY,
   dashboardRelativeFromMs,
   PRIVATE_ANSWER_FAILURES,
   privateAnswerFailure,
 } from '../vocabulary.ts';
 import type { AskDestinationStates } from '../../email-source/venice-inbox-answer.ts';
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
+import { SOURCE_LOGO_CSS } from '../source-logos.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
 export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous-setup';
@@ -128,19 +130,20 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     nav: dashboardTopNav({ active: 'privacy', unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...(readToken(basePath) ? { token: readToken(basePath)! } : {}) }),
     meta: '',
     body: dashboardPrivacyTabs('questions', readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS],
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS, SOURCE_LOGO_CSS],
     // The local inbox carries its own small controller and visible-page poll.
   });
 }
 
-/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), What AI apps received (?apps-received). */
-export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'apps', token?: string): string {
-  const tab = (id: 'questions' | 'settings' | 'apps', href: string, label: string) => id === active
+/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), Your items (?privacy-items), What AI apps received (?apps-received). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'items' | 'apps', token?: string): string {
+  const tab = (id: 'questions' | 'settings' | 'items' | 'apps', href: string, label: string) => id === active
     ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
     : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
     + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
     + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
+    + tab('items', dashboardLocalPageHref('privacyItems', token), DASHBOARD_PRIVACY_ITEMS_COPY.tab)
     + tab('apps', dashboardLocalPageHref('appsReceived', token), W.tabApps)
     + '</nav>';
 }

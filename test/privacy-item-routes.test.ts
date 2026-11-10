@@ -169,7 +169,7 @@ describe('the dashboard\'s routes', () => {
     const found = await f.guarded(post('/dashboard/privacy/items/find', session, { query: 'bank' }));
     expect(found.status).toBe(200);
     expect(await found.json()).toEqual({ ok: true, items: [] });
-    expect(f.finds).toEqual([{ query: 'bank' }]);
+    expect(f.finds).toEqual([{ query: 'bank', withPreview: true }]);
     for (const tier of ['personal', 'private', 'judge']) {
       expect((await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier }))).status).toBe(200);
     }
@@ -179,5 +179,12 @@ describe('the dashboard\'s routes', () => {
       { itemId: ITEM_ID, choice: 'judge', allowLower: true },
     ]);
     expect((await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier: 'secrets' }))).status).toBe(400);
+  });
+
+  test('Check the judge answers a local session only, and says when it is not set up', async () => {
+    const f = fixture();
+    const session = await localSession(f.guarded);
+    const response = await f.guarded(post('/dashboard/privacy/judge-check', session, { action: 'status' }));
+    expect(response.status).toBe(501);
   });
 });

@@ -122,7 +122,11 @@ test('production decoder failures and transport failure stay undecided without i
   for (const mode of ['coverage', 'parse', 'error', 'slow']) {
     const f = fixture(), s = server(); s.mode(mode);
     try {
-      const report = await replay({ ...f, endpoint: s.endpoint, limit: 1, ...(mode === 'slow' ? { deadlineSeconds: 0.05 } : {}) });
+      // The slow case reads its deadline on a clock that stands still until the call is sent, so a loaded machine
+      // can't spend the deadline before the first dispatch (#1209); the call itself is still cut off for real.
+      let clock = 0;
+      const slow = mode === 'slow' ? { deadlineSeconds: 0.05, now: () => (s.calls() > 0 ? (clock += 1_000) : clock) } : {};
+      const report = await replay({ ...f, endpoint: s.endpoint, limit: 1, ...slow });
       expect(report.overall.rows).toBe(1);
       expect(report.overall[mode === 'coverage' ? 'coverageBelowFloor' : mode === 'parse' ? 'parseFailures' : mode === 'slow' ? 'timeouts' : 'errors']).toBe(1);
       expect(report.overall.matrix['private']!['undecided']).toBe(1);

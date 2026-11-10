@@ -47,6 +47,20 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, snapshotStore, type FixtureSpec } from './helpers/tier-fixtures.ts';
 import { MINE, OTHER, SEEDED_FOR_MINE, seedAllFiles, seedTierLedgerBeside, type ForgetLayout } from './helpers/forget-seeds.ts';
 
+/**
+ * The chunks a running worker has committed to one store, as text, or '' while the store is not there yet. The file
+ * appears before the worker commits its schema, so a store with no items table yet is "not yet", like a missing file.
+ */
+function storedChunksText(path: string): string {
+  if (!existsSync(path)) return '';
+  try {
+    return JSON.stringify(snapshotStore(path).chunks);
+  } catch (error) {
+    if (error instanceof Error && /no such table/.test(error.message)) return '';
+    throw error;
+  }
+}
+
 const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'e2e-worker-token-0123456789abcdef0123456789abcdef';
@@ -579,7 +593,7 @@ describe('source storage, end to end on this host', () => {
       let text = '';
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
-        text = paths.filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        text = paths.map(storedChunksText).join('\n');
         if (text.includes('explicitlane')) break;
         await Bun.sleep(100);
       }
@@ -639,7 +653,7 @@ describe('source storage, end to end on this host', () => {
       let text = '';
       const deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {
-        text = [securePath, internalPath].filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        text = [securePath, internalPath].map(storedChunksText).join('\n');
         if (text.includes('zephyrdropbox')) break;
         await Bun.sleep(100);
       }
