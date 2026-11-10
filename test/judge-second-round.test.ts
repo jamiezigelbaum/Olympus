@@ -379,7 +379,7 @@ test('deleting a source forgets its sweep positions and keeps the others', () =>
 test('a decision judge held Private at its own bar goes to Venice, and the observed held share counts it (#1136 review)', async () => {
   // Held at a 0.15 bar with P(Private) 0.3: below an even chance, so only the lane's own bar holds it.
   const held = { tier: 'private' as const, category: SNIFFER_DECISION_CATEGORY, confidence: 0.3, failSafe: false };
-  const local = { complete: async () => ({ text: '', modelId: 'synthetic-local', decisionVerdict: held }) };
+  const local = { complete: async (_request: AnalystModelRequest) => ({ text: '', modelId: 'synthetic-local', decisionVerdict: held }) };
   const request = { system: 's', prompt: 'Lowchance', localOnly: true, snifferItem: { pass: 'content' as const, material: 'Lowchance' } } as AnalystModelRequest;
   const sent: string[] = [];
   const counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };

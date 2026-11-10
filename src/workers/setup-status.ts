@@ -18,7 +18,7 @@ import type { DashboardSourceCard, SourceDashboardViewModel } from './source-das
 export interface SetupWorkerFacts {
   version: string;
   privateAnswers: { chosen: boolean; label?: string };
-  judge?: { chosen: boolean; choice: 'local' | 'venice'; limitDollars: number | null };
+  judge?: { chosen: boolean; choice: 'local' | 'local-then-venice' | 'venice'; limitDollars: number | null };
   /** Active agent connections' names, plus the host agent Olympus runs inside. */
   aiApps?: readonly string[];
 }
