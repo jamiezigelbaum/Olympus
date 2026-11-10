@@ -241,7 +241,7 @@ describe('finding an item', () => {
     install.lane.ledger.recordRoutedPlacement(bankIdentity, {
       metadataTier: 'private', contentTier: current.contentTier, decidedBy: 'sniffer', reasons: [], state: 'pending',
       contentRead: true, metadataPending: true, contentPending: false, metadataForced: false, metadataFlagged: true,
-      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: current.snifferId,
+      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: 'test',
     }, { copies: [], embedHold: false }, { staleCopiesGone: true });
     expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ metadataPending: true, metadataTier: 'private' });
     expect(ownerItems().find({ query: 'bank', personalNamesOnly: true }).items).toEqual([]);
