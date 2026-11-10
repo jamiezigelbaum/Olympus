@@ -545,8 +545,14 @@ export const JOURNEYS: readonly Journey[] = [
       },
       { name: 'Reload the dashboard', do: { reload: true }, expect: [{ present: HOME_STATUS, frame: 'panel' }, { noText: PRIVACY_SETUP.sentence, frame: 'panel' }] },
       {
-        name: 'Open the privacy settings again',
-        do: { click: { role: 'button', name: new RegExp(`^(${PRIVACY.edit}|${PRIVACY.editLabel})$`) }, frame: 'panel' },
+        // Once privacy is saved Home has no way in; Privacy rules › What's private › Open lands on the settings (#1223, #1228).
+        name: "Privacy rules offers What's private › Open",
+        do: { go: '/dashboard?keys' },
+        expect: [{ present: { css: 'a[data-privacy-open][href*="olympus-open=privacy"]' }, frame: 'host' }],
+      },
+      {
+        name: 'Open the privacy settings again from that landing',
+        do: { go: '/dashboard#olympus-open=privacy' },
         // The saved description shows as text, with Edit (the approved #684 design), before any box opens.
         expect: [{ text: 'my medical records and my tax papers', frame: 'panel' }, { present: { css: 'button[data-key="privacy:description:edit"]', text: PRIVACY.edit }, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
       },
