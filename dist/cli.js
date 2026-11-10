@@ -32162,6 +32162,7 @@ function assertConnectorStoreCorpusRequest(store, request) {
   }
 }
 function provenanceFromSearchRow(corpusId, row) {
+  const authorLabel = citationAuthorLabel(row);
   return {
     sourceItem: row.sourceItem,
     ...row.chunk ? {
@@ -32189,11 +32190,16 @@ function provenanceFromSearchRow(corpusId, row) {
       ...row.title ? { title: row.title } : {},
       sourceLabel: row.sourceItem.provider,
       ...row.conversationLabel ? { conversationLabel: row.conversationLabel } : {},
-      ...row.authorLabel ? { authorLabel: row.authorLabel } : {},
+      ...authorLabel ? { authorLabel } : {},
       ...row.authoredAt ? { authoredAt: row.authoredAt } : {},
       ...row.updatedAt ? { updatedAt: row.updatedAt } : {}
     }
   };
+}
+function citationAuthorLabel(row) {
+  if (row.senderIsOwner === true)
+    return OWNER_AUTHOR_LABEL;
+  return row.authorLabel;
 }
 function connectorStoreKeywordLaneAudit(corpusId, candidateCount, returnedCount) {
   return {
@@ -34165,7 +34171,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_job_names();
   init_keyword_context();
@@ -83997,6 +84003,12 @@ function whatsAppConversationSignals(jid) {
     return { conversationSize: "direct" };
   return {};
 }
+function whatsAppAddressLabel(jid) {
+  const match = /^(\d{5,20})(?::\d+)?@(s\.whatsapp\.net|lid)$/.exec(jid?.trim() ?? "");
+  if (!match)
+    return;
+  return match[2] === "lid" ? "Unsaved WhatsApp contact" : `+${match[1]}`;
+}
 function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
   const identity2 = recordIdentity(message2, account);
   const mediaIsChild = message2.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message2.mediaType);
@@ -84005,7 +84017,7 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
   const text3 = spoolMessageText(message2);
   const hasPreviewEnrichment = text3 !== resolveMentionText(message2.text, message2.mentions);
   const status = isWhatsAppStatusBroadcast(message2.chatJid);
-  const senderName = message2.senderContactName || message2.senderName;
+  const senderName = message2.senderContactName || message2.senderName || whatsAppAddressLabel(message2.senderJid);
   return {
     identity: identity2,
     mimeType: isMedia ? message2.mediaMime ?? "application/octet-stream" : TEXT_MIME_TYPE,
@@ -84014,7 +84026,7 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
       titleIsConversation: true,
       ...message2.mediaType === undefined && !redacted ? { textComplete: true } : {},
       ...whatsAppConversationSignals(message2.chatJid),
-      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || whatsAppAddressLabel(message2.chatJid) || message2.chatJid,
       sender: senderName || message2.senderJid,
       senderId: message2.senderJid || undefined,
       senderLabel: senderName || message2.senderJid || undefined,
@@ -84035,7 +84047,7 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
 function rawItemFromChild(message2, child2, account, fetchedAt) {
   const parent = recordIdentity(message2, account);
   const status = isWhatsAppStatusBroadcast(message2.chatJid);
-  const senderName = message2.senderContactName || message2.senderName;
+  const senderName = message2.senderContactName || message2.senderName || whatsAppAddressLabel(message2.senderJid);
   return {
     identity: childIdentity(parent, child2),
     mimeType: child2.mimeType,
@@ -84044,7 +84056,7 @@ function rawItemFromChild(message2, child2, account, fetchedAt) {
       name: child2.name,
       title: child2.name,
       ...whatsAppConversationSignals(message2.chatJid),
-      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || whatsAppAddressLabel(message2.chatJid) || message2.chatJid,
       sender: senderName || message2.senderJid,
       senderLabel: senderName || message2.senderJid || undefined,
       senderIsOwner: message2.fromMe,

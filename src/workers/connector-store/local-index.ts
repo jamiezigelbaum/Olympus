@@ -14002,6 +14002,7 @@ function assertConnectorStoreCorpusRequest(store: LocalConnectorStore, request: 
 }
 
 function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow): SourceIndexProvenance {
+  const authorLabel = citationAuthorLabel(row);
   return {
     sourceItem: row.sourceItem,
     // The frozen provenance shape has carried an optional `chunk` since the
@@ -14035,11 +14036,25 @@ function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow)
       ...(row.title ? { title: row.title } : {}),
       sourceLabel: row.sourceItem.provider,
       ...(row.conversationLabel ? { conversationLabel: row.conversationLabel } : {}),
-      ...(row.authorLabel ? { authorLabel: row.authorLabel } : {}),
+      ...(authorLabel ? { authorLabel } : {}),
       ...(row.authoredAt ? { authoredAt: row.authoredAt } : {}),
       ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
     },
   };
+}
+
+/**
+ * Who a citation says wrote the item. The owner's own messages read "You"
+ * whatever name or id the source recorded for the owner's account (#1073):
+ * the answer is written to the owner, and a stored label (a profile name, a
+ * phone id) next to a chat titled with the other person's name let the owner's
+ * words be attributed to someone else.
+ */
+export const OWNER_AUTHOR_LABEL = 'You';
+
+function citationAuthorLabel(row: ConnectorStoreSearchRow): string | undefined {
+  if (row.senderIsOwner === true) return OWNER_AUTHOR_LABEL;
+  return row.authorLabel;
 }
 
 function connectorStoreKeywordLaneAudit(
