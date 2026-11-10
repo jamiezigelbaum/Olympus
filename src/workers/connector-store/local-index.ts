@@ -5348,14 +5348,22 @@ export class LocalConnectorStore {
   private peopleNames: ConnectorStorePeopleNames | undefined;
 
   peopleObservations(): PeopleSenderObservation[] {
+    // A copy the tier ledger keeps out of view (superseded, staged, or held
+    // for classification) never names anyone: an old Personal copy of an item
+    // now judged Private must not make its sender's name shareable.
+    const tierHidden = this.tierHiddenItemPks();
+    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
     const rows = this.db.query(`
-      SELECT provider, sender_id, sender_label, provider_conversation_id AS conversation_id, trust_tier,
-        MAX(COALESCE(sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items
-      WHERE tombstoned = 0
-        AND ((sender_id IS NOT NULL AND TRIM(sender_id) <> '') OR (sender_label IS NOT NULL AND TRIM(sender_label) <> ''))
-      GROUP BY provider, sender_id, sender_label, provider_conversation_id, trust_tier
-    `).all() as Array<{
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
       provider: string;
       sender_id: string | null;
       sender_label: string | null;
