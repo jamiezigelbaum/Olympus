@@ -7116,10 +7116,9 @@ function strongKeysFromText(value) {
   const keys = new Set;
   for (const match of value.matchAll(ADDRESS)) {
     const local = match[1];
+    keys.add(`email:${match[0].toLowerCase()}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
-    else
-      keys.add(`email:${match[0].toLowerCase()}`);
   }
   if (keys.size === 0) {
     const phone = normalizePhone(value);
@@ -28271,14 +28270,19 @@ var init_local_index = __esm(() => {
     }
     peopleNames;
     peopleObservations() {
+      const tierHidden = this.tierHiddenItemPks();
+      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
       const rows = this.db.query(`
-      SELECT provider, sender_id, sender_label, provider_conversation_id AS conversation_id, trust_tier,
-        MAX(COALESCE(sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items
-      WHERE tombstoned = 0
-        AND ((sender_id IS NOT NULL AND TRIM(sender_id) <> '') OR (sender_label IS NOT NULL AND TRIM(sender_label) <> ''))
-      GROUP BY provider, sender_id, sender_label, provider_conversation_id, trust_tier
-    `).all();
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
       const bySender = new Map;
       for (const row of rows) {
         const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;

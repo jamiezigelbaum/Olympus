@@ -16024,10 +16024,9 @@ function strongKeysFromText(value) {
   const keys = new Set;
   for (const match of value.matchAll(ADDRESS)) {
     const local = match[1];
+    keys.add(`email:${match[0].toLowerCase()}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
-    else
-      keys.add(`email:${match[0].toLowerCase()}`);
   }
   if (keys.size === 0) {
     const phone = normalizePhone(value);

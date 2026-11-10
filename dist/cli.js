@@ -36101,14 +36101,19 @@ var init_local_index = __esm(() => {
     }
     peopleNames;
     peopleObservations() {
+      const tierHidden = this.tierHiddenItemPks();
+      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
       const rows = this.db.query(`
-      SELECT provider, sender_id, sender_label, provider_conversation_id AS conversation_id, trust_tier,
-        MAX(COALESCE(sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items
-      WHERE tombstoned = 0
-        AND ((sender_id IS NOT NULL AND TRIM(sender_id) <> '') OR (sender_label IS NOT NULL AND TRIM(sender_label) <> ''))
-      GROUP BY provider, sender_id, sender_label, provider_conversation_id, trust_tier
-    `).all();
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
       const bySender = new Map;
       for (const row of rows) {
         const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;
@@ -43175,10 +43180,9 @@ function strongKeysFromText(value) {
   const keys = new Set;
   for (const match of value.matchAll(ADDRESS)) {
     const local = match[1];
+    keys.add(`email:${match[0].toLowerCase()}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
-    else
-      keys.add(`email:${match[0].toLowerCase()}`);
   }
   if (keys.size === 0) {
     const phone = normalizePhone(value);
@@ -43289,22 +43293,8 @@ function linkPeople(input) {
         identity2.conversations.add(`${observation.provider}\x00${conversation}`);
     }
   }
-  const corrections = input.corrections ?? [];
-  const rejected = new Set;
   const pairKey = (a, b) => a < b ? `${a}\x00${b}` : `${b}\x00${a}`;
-  const merges = [];
-  const renames = new Map;
-  for (const correction of corrections) {
-    if (correction.kind === "not_same")
-      rejected.add(pairKey(correction.identityA, correction.identityB));
-    else if (correction.kind === "merge")
-      merges.push([correction.identityA, correction.identityB]);
-    else if (correction.kind === "rename")
-      renames.set(correction.identity, correction.name);
-  }
-  const splits = new Set(corrections.flatMap((c) => c.kind === "split" ? [c.identity] : []));
-  for (const [a, b] of merges)
-    rejected.delete(pairKey(a, b));
+  const { merges, rejected, splits, renames } = replayCorrections(input.corrections ?? [], pairKey);
   const uf = new UnionFind;
   for (const key2 of identities.keys())
     uf.add(key2);
@@ -43324,16 +43314,28 @@ function linkPeople(input) {
   };
   const link = (a, b, why) => {
     if (!identities.has(a) || !identities.has(b))
-      return;
+      return false;
     const ra = uf.find(a);
     const rb = uf.find(b);
-    if (ra === rb || blocked(ra, rb))
-      return;
+    if (ra === rb)
+      return true;
+    if (blocked(ra, rb))
+      return false;
     uf.union(a, b);
     if (!reason.has(b))
       reason.set(b, why);
     else if (!reason.has(a))
       reason.set(a, why);
+    return true;
+  };
+  const linkAll = (members, why) => {
+    const sorted = [...members].sort();
+    for (let i = 1;i < sorted.length; i += 1) {
+      for (let j = 0;j < i; j += 1) {
+        if (link(sorted[j], sorted[i], why))
+          break;
+      }
+    }
   };
   for (const [a, b] of merges) {
     const ra = identities.has(a) ? uf.find(a) : undefined;
@@ -43352,10 +43354,7 @@ function linkPeople(input) {
       byKey.set(key2, [...byKey.get(key2) ?? [], identity2.identityKey]);
   }
   for (const [key2, members] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
-    const why = key2.startsWith("phone:") ? "phone" : "email";
-    const sorted = [...members].sort();
-    for (const member of sorted.slice(1))
-      link(sorted[0], member, why);
+    linkAll(members, key2.startsWith("phone:") ? "phone" : "email");
   }
   for (const card of [...input.contacts ?? []].sort((a, b) => a.cardId.localeCompare(b.cardId))) {
     const members = new Set;
@@ -43369,9 +43368,7 @@ function linkPeople(input) {
       for (const member of byKey.get(normalizeCardKey(key2) ?? "") ?? [])
         members.add(member);
     }
-    const sorted = [...members].sort();
-    for (const member of sorted.slice(1))
-      link(sorted[0], member, "contacts");
+    linkAll([...members], "contacts");
   }
   const byName = new Map;
   for (const identity2 of identities.values()) {
@@ -43429,7 +43426,7 @@ function linkPeople(input) {
     const members = [...memberSet].sort().map((key2) => identities.get(key2));
     const isOwner = members.some((member) => member.isOwner);
     const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash20("sha256").update(members[0].identityKey).digest("hex").slice(0, 16)}`;
-    const renamed = [...renames].filter(([identity2]) => memberSet.has(identity2)).map(([, name]) => name).at(-1);
+    const renamed = [...memberSet].map((identity2) => renames.get(identity2)).reduce((best, next) => next && (!best || next.at > best.at) ? next : best, undefined)?.name;
     const displayName = isOwner ? OWNER_DISPLAY_NAME : renamed ?? bestName(members);
     const nameShareable = isOwner || renamed !== undefined || members.some((member) => member.publicNames.size > 0);
     const linkedBy = new Set;
@@ -43463,6 +43460,76 @@ function linkPeople(input) {
   }
   return people.sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || b.itemCount - a.itemCount || a.personId.localeCompare(b.personId));
 }
+function replayCorrections(corrections, pairKey) {
+  const merges = new Map;
+  const rejected = new Set;
+  const splits = new Set;
+  const renames = new Map;
+  const mergePath = (from, to) => {
+    const edges = new Map;
+    for (const [key2, merge] of merges) {
+      edges.set(merge.a, [...edges.get(merge.a) ?? [], { next: merge.b, key: key2, at: merge.at }]);
+      edges.set(merge.b, [...edges.get(merge.b) ?? [], { next: merge.a, key: key2, at: merge.at }]);
+    }
+    const via = new Map([[from, null]]);
+    const queue = [from];
+    while (queue.length > 0) {
+      const node = queue.shift();
+      if (node === to)
+        break;
+      for (const edge of edges.get(node) ?? []) {
+        if (via.has(edge.next))
+          continue;
+        via.set(edge.next, { from: node, key: edge.key, at: edge.at });
+        queue.push(edge.next);
+      }
+    }
+    if (!via.has(to))
+      return;
+    const path = [];
+    for (let step = via.get(to);step; step = via.get(step.from))
+      path.push({ key: step.key, at: step.at });
+    return path;
+  };
+  corrections.forEach((correction, at) => {
+    if (correction.kind === "merge") {
+      const { identityA: a, identityB: b } = correction;
+      if (a === b)
+        return;
+      merges.set(pairKey(a, b), { a, b, at });
+      splits.delete(a);
+      splits.delete(b);
+      for (const pair of [...rejected]) {
+        const [x, y] = pair.split("\x00");
+        if (mergePath(x, y))
+          rejected.delete(pair);
+      }
+    } else if (correction.kind === "not_same") {
+      const { identityA: a, identityB: b } = correction;
+      if (a === b)
+        return;
+      rejected.add(pairKey(a, b));
+      for (let path = mergePath(a, b);path && path.length > 0; path = mergePath(a, b)) {
+        const newest = path.reduce((best, edge) => edge.at > best.at ? edge : best);
+        merges.delete(newest.key);
+      }
+    } else if (correction.kind === "split") {
+      for (const [key2, merge] of [...merges]) {
+        if (merge.a === correction.identity || merge.b === correction.identity)
+          merges.delete(key2);
+      }
+      splits.add(correction.identity);
+    } else {
+      renames.set(correction.identity, { name: correction.name, at });
+    }
+  });
+  return {
+    merges: [...merges.values()].sort((x, y) => x.at - y.at).map((merge) => [merge.a, merge.b]),
+    rejected,
+    splits,
+    renames
+  };
+}
 function bestName(members) {
   const counts = new Map;
   for (const member of members) {
@@ -43473,7 +43540,8 @@ function bestName(members) {
   const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named)
     return named;
-  const key2 = members.flatMap((member) => member.keys).sort()[0];
+  const numericAddress = (key3) => Number(/^email:\d+@/.test(key3));
+  const key2 = members.flatMap((member) => member.keys).sort((a, b) => numericAddress(a) - numericAddress(b) || a.localeCompare(b))[0];
   if (key2)
     return key2.slice(key2.indexOf(":") + 1);
   return members[0].senderLabel ?? members[0].senderId ?? "Unknown sender";
