@@ -139,7 +139,11 @@ function pickLane(candidates: readonly SovereigntyResolvedProfile[]): SnifferLan
     try {
       const kind = assertSnifferProfileAllowed(candidate.id, candidate.profile);
       const modelId = 'model' in candidate.profile && candidate.profile.model ? candidate.profile.model : candidate.id;
-      allowed.push({ kind, modelId, profileId: candidate.id, profile: candidate.profile, snifferMode: initialSnifferMode(candidate.profile) });
+      const decisionBar = candidate.profile.snifferDecisionBar;
+      allowed.push({
+        kind, modelId, profileId: candidate.id, profile: candidate.profile, snifferMode: initialSnifferMode(candidate.profile),
+        ...(decisionBar !== undefined ? { decisionBar } : {}),
+      });
     } catch (error) {
       if (!(error instanceof SnifferLaneRefusedError)) throw error;
       if (error.reason === 'standard_cloud') throw error;

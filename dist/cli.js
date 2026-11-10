@@ -26594,7 +26594,8 @@ function parseProfiles(value, label) {
       trust,
       ...optionalString3(profile, "baseUrl"),
       ...optionalString3(profile, "secretRef"),
-      ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {}
+      ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {},
+      ...profile.snifferDecisionBar !== undefined ? { snifferDecisionBar: profile.snifferDecisionBar } : {}
     };
     const parsedProfile = provider === "openclaw-infer" ? {
       provider,
@@ -26688,6 +26689,9 @@ function validateProfile(id, profile, daemonPorts) {
   }
   if (profile.snifferMode !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || !["auto", "decision", "full"].includes(profile.snifferMode))) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
+  }
+  if (profile.snifferDecisionBar !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || typeof profile.snifferDecisionBar !== "number" || !Number.isFinite(profile.snifferDecisionBar) || profile.snifferDecisionBar <= 0 || profile.snifferDecisionBar > 0.5)) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" snifferDecisionBar requires a local profile and a number above 0 and at most 0.5.`);
   }
   if (profile.provider === "zkapi")
     validateZkapiProfile(id, profile);
@@ -27030,7 +27034,15 @@ function pickLane(candidates) {
     try {
       const kind = assertSnifferProfileAllowed(candidate.id, candidate.profile);
       const modelId = "model" in candidate.profile && candidate.profile.model ? candidate.profile.model : candidate.id;
-      allowed.push({ kind, modelId, profileId: candidate.id, profile: candidate.profile, snifferMode: initialSnifferMode(candidate.profile) });
+      const decisionBar = candidate.profile.snifferDecisionBar;
+      allowed.push({
+        kind,
+        modelId,
+        profileId: candidate.id,
+        profile: candidate.profile,
+        snifferMode: initialSnifferMode(candidate.profile),
+        ...decisionBar !== undefined ? { decisionBar } : {}
+      });
     } catch (error) {
       if (!(error instanceof SnifferLaneRefusedError))
         throw error;
@@ -31410,7 +31422,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -31439,7 +31451,10 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
-  SNIFFER_DECISION_BARS = [[QWEN35_4B.modelId, 0.15]];
+  SNIFFER_DECISION_BARS = [
+    [QWEN35_4B.modelId, 0.15],
+    [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374]
+  ];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
