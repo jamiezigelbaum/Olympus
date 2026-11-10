@@ -133,6 +133,8 @@ describe('the setup checklist', () => {
     expect(step(checklist, 'first_items').detail).toBe('1,200 items findable');
     expect(buildSetupChecklist({ ...ALL_DONE, judge: { chosen: true, choice: 'venice', limitDollars: null } }).steps[2]!.detail).toBe('Venice, no spending limit set');
     expect(buildSetupChecklist({ ...ALL_DONE, judge: { chosen: true, choice: 'local' } }).steps[2]!.detail).toBe('On this computer, free');
+    expect(buildSetupChecklist({ ...ALL_DONE, judge: { chosen: true, choice: 'local-then-venice', limitDollars: 3 } }).steps[2]!.detail).toBe('This computer, then Venice double-checks, up to $3');
+    expect(buildSetupChecklist({ ...ALL_DONE, judge: { chosen: true, choice: 'local-then-venice', limitDollars: null } }).steps[2]!.detail).toBe('This computer, then Venice double-checks, no spending limit set');
   });
 
   test('a paired chat app without chosen chats is next, with the owner link to choose them', () => {
