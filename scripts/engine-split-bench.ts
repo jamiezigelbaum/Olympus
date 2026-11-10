@@ -23,6 +23,8 @@ import { join } from 'node:path';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, storePaths } from '../test/helpers/tier-fixtures.ts';
 
 const args = new Map<string, string>();
@@ -65,7 +67,7 @@ async function openWriter(dir: string) {
         f.stores.secure_local!.importItemCopy({
           ...copy, identity,
           columns: { ...copy.columns, provider_item_id: identity.providerItemId, local_item_id: identity.localItemId,
-            provider_conversation_id: identity.providerConversationId, title: `Note ${n}`, search_text: body },
+            provider_conversation_id: identity.providerConversationId ?? null, title: `Note ${n}`, search_text: body },
           chunks: copy.chunks.map((chunk) => ({ ...chunk, boundedText: body })),
         }, { trustTier: 'S4', syncConnectorId: 'engine-split-bench' });
         f.ledger.recordRoutedPlacement(identity, high, f.set.placementFor(high));
@@ -151,12 +153,18 @@ async function front(stores: LocalConnectorStore[], seconds: number) {
   return { request_ms: stats(latencies), has_embeddings_ms: stats(visibility), keyword_ms: stats(keyword), freeze_ms: stats(freezes), front_rss_mb: rss() };
 }
 
-function readStores(dir: string, readOnly: boolean, writerStores?: LocalConnectorStore[]): LocalConnectorStore[] {
-  if (writerStores) return writerStores;
+/**
+ * Readers for the run's copy. Each gets the run's own ledger explicitly: the
+ * copied stores' bindings still record the seed ledger's path, which exists
+ * with the same id, so a lookup by binding would read the unchanged seed.
+ */
+function readStores(dir: string, readOnly: boolean): { stores: LocalConnectorStore[]; ledger: TierLedger } {
   const paths = storePaths(dir);
-  return (['internal', 'secure_local'] as const).filter((d) => existsSync(paths[d])).map((d) => new LocalConnectorStore({
-    dbPath: paths[d], corpusId: CORPORA[d], family: 'file', trustDomain: d, readOnly,
+  const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local), readOnly });
+  const stores = (['internal', 'secure_local'] as const).filter((d) => existsSync(paths[d])).map((d) => new LocalConnectorStore({
+    dbPath: paths[d], corpusId: CORPORA[d], family: 'file', trustDomain: d, readOnly, tierLedger: ledger,
   }));
+  return { stores, ledger };
 }
 
 async function run(): Promise<void> {
@@ -200,13 +208,15 @@ async function run(): Promise<void> {
       writer = new Response(child.stdout).text().then((text) => JSON.parse(text.trim().split('\n').at(-1)!));
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000)); // let the writer open its stores first
-    stores = readStores(dir, true);
+    const readers = readStores(dir, true);
+    stores = readers.stores;
     let childRssPeak = 0;
     const sampler = childPid ? setInterval(() => { childRssPeak = Math.max(childRssPeak, rss(childPid) ?? 0); }, 1000) : undefined;
     const measured = await front(stores, seconds - 4);
     if (sampler) clearInterval(sampler);
     const result = await writer;
     for (const store of stores) store.close();
+    readers.ledger.close();
     console.log(JSON.stringify({ mode, seconds, ...measured, writer: { ...result, ...(childPid ? { writer_rss_peak_mb: childRssPeak } : {}) },
       process_rss_mb: rss() }));
   } finally {

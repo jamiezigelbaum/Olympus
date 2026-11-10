@@ -40,6 +40,10 @@ half its items pending a move (like Sparta's 645k sniffer backlog on
 
 Reproduce: `bun scripts/engine-split-bench.ts seed --items 500000`, then
 `bun scripts/engine-split-bench.ts run --mode same|thread|process`.
+The first runs let the separate readers resolve their ledger through the
+copied stores' binding, which pointed at the seed ledger; with the readers
+given the run's own ledger the Worker layout measured 8.0 s / 9.6 s
+(`hasEmbeddings` 5.7 s, keyword 2.3 s), so the conclusion stands.
 Synthetic text uses a 45-word vocabulary, so a one-word query matches
 about 1 in 15 items, more than a real query would. Children
 (attachments, chat media) were not seeded, so `hiddenChildSteps` costs
