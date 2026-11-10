@@ -189,6 +189,13 @@ export interface SnifferPassOptions {
   signal?: AbortSignal;
   /** Service-owned idle scheduler; receives the identity after capability preparation. */
   trainingReady?: (judge: string) => void;
+  /**
+   * Go easy on this computer (#922, local-pacing.ts): true while local work
+   * should trickle, so the pass makes one call and stops. Only the service
+   * passes it, and only for the built-in judge. An item a question matched
+   * (#1062) may go ahead regardless.
+   */
+  trickle?: () => boolean;
   /** Items a question matched while they wait: asked first (judge-boost.ts). Default: the worker's set. */
   boosts?: JudgeBoosts;
 }
@@ -714,7 +721,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         }
       }
       const batch = [group];
-      const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+      const stop = report.calls > 0 && options.trickle?.() === true ? 'pass_budget' : stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
       if (stop) {
         report.stoppedBy = stop;
         return;

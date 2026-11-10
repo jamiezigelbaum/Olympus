@@ -617,6 +617,8 @@ export interface EmailSourceWorkerOptions {
     };
     /** The model pickers on Privacy rules (model-choices-backend.ts). */
     modelChoices?: import('./model-choices-backend.ts').ModelChoicesBackend;
+    /** Go easy on this computer (#922, local-pacing.ts): shown under the judge choice. */
+    goEasy?: { on: () => boolean; save: (on: boolean) => { ok: true; status_message: string } };
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
@@ -1906,6 +1908,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {}),
                 ...(sourceDashboard.modelChoices ? { modelChoices: await sourceDashboard.modelChoices.status().catch(() => undefined) } : {}),
+                ...(sourceDashboard.goEasy ? { goEasy: sourceDashboard.goEasy.on() } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
@@ -2454,6 +2457,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
           try { return json(await sourceDashboard.judgeSetup.save(input.choice as JudgeChoice, input.cap_dollars)); }
           catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/engine/go-easy') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (typeof input.on !== 'boolean') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose whether to go easy on this computer.');
+          if (!sourceDashboard?.goEasy) throw new EmailSourceWorkerError(501, 'not_available', 'This setting is unavailable.');
+          try { return json(sourceDashboard.goEasy.save(input.on)); }
+          catch { return json({ ok: false, error: { code: 'go_easy_failed', message: 'The setting could not be saved. Try again.' } }, 409); }
         }
 
         if (request.method === 'POST' && (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start || url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status)) {

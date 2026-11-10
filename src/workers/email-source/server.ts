@@ -405,6 +405,7 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
+import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
@@ -2578,6 +2579,15 @@ export async function main(): Promise<void> {
   // with registerBuiltInPrivateModel before this point); without any,
   // flagged items stay pending and unflagged items are Personal at once.
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
+  // Go easy on this computer (#922): local judging and embedding trickle
+  // while the owner works; full speed when away or plugged in overnight.
+  let localWorkPending: () => boolean = () => false;
+  const localPacer = new LocalWorkPacer({
+    probe: systemIdlePowerProbe(),
+    settingPath: join(dirname(resolveClassificationLedgerPath(process.env)), 'go-easy.json'),
+    pendingLocalWork: () => localWorkPending(),
+    log: (line) => console.log(line),
+  });
   const judgeRuntimeInput = {
     engine: sovereigntyEngine,
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
@@ -5779,6 +5789,9 @@ export async function main(): Promise<void> {
         providerFor: (trustDomain) => trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider,
       });
       return couldEmbed || targets().length > 0 ? targets : undefined;
+    }, {
+      trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
+      onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -6309,6 +6322,7 @@ export async function main(): Promise<void> {
               logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
             }),
             modelChoices,
+            goEasy: { on: () => localPacer.goEasy(), save: (on: boolean) => localPacer.save(on) },
             judgeSetup: createJudgeSetup({
               spending: judgeSpending, cloud: cloudJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
@@ -7588,6 +7602,8 @@ export async function main(): Promise<void> {
         ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+        // The service applies it to the built-in judge only, never Venice or a remote judge.
+        pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved
@@ -7611,6 +7627,9 @@ export async function main(): Promise<void> {
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
+  localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
+    || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
+  localPacer.start();
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -7634,6 +7653,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopCpuSampleLog?.();
     tierSniffer?.stop();
+    localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);

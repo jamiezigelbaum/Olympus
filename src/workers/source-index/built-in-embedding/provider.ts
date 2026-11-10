@@ -160,6 +160,11 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private pictureFaults: { count: number; heldUntilMs?: number } | undefined;
   private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
 
+  /** False when documents are embedded by a configured helper on another machine. */
+  runsOnThisComputer(): boolean {
+    return this.remote === undefined;
+  }
+
   constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
     this.env = options.env ?? process.env;

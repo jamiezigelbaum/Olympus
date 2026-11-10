@@ -282,6 +282,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/models/first-run-privacy' },
   { method: 'POST', path: '/dashboard/models/judge' },
   { method: 'POST', path: '/dashboard/engine/computer-use' },
+  { method: 'POST', path: '/dashboard/engine/go-easy' },
   { method: 'POST', path: '/dashboard/engine/update' },
   { method: 'POST', path: '/dashboard/engine/update/status' },
   { method: 'POST', path: '/dashboard/settings/proposal/apply' },

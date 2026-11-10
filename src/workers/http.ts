@@ -693,7 +693,7 @@ function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request)
     || isDashboardSelfUpdateRoute(request)
     || isDashboardPrivacyItemRoute(request)
-    || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
+    || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/engine/go-easy', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
 function isDashboardSelfUpdateRoute(request: Request): boolean {
