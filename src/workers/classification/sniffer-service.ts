@@ -153,6 +153,12 @@ export interface TierSnifferServiceOptions {
   maxCallsPerDay?: number;
   /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
   shouldYield?: () => boolean;
+  /**
+   * Go easy on this computer (#922, local-pacing.ts). Applies to the built-in
+   * judge only: while `trickle()` is true a pass makes one call and the next
+   * scheduled pass waits `trickleGapMs`. Cloud and remote judges ignore it.
+   */
+  pacing?: { trickle(): boolean; readonly trickleGapMs: number };
   /** True while the private pool's breaker for the sniffer's model is open (it rests after failures). */
   breakerOpen?: () => boolean;
   /** The model's install state when it is not available (content-free, e.g. `failed`), for the waiting reason. */
@@ -337,6 +343,8 @@ export class TierSnifferService {
   private fairTurn = false;
   /** Scheduled passes wait until this time while the model is not answering (0: no wait). */
   private notAnsweringUntilMs = 0;
+  /** Going easy (#922): a scheduled pass waits until this time while the pacing says trickle. */
+  private pacedUntilMs = 0;
   private notAnsweringPasses = 0;
   private overrunReported = false;
   /** When the running pass was aborted for overrunning (0: not aborted). */
@@ -390,6 +398,7 @@ export class TierSnifferService {
   /** A pass the timer or a wake asked for: held back while the model is not answering. */
   private async scheduledRun(): Promise<TierSnifferTick> {
     if (this.notAnsweringUntilMs > this.clockMs()) return { state: 'skipped_running' };
+    if (this.pacedUntilMs > this.clockMs() && this.trickle()) return { state: 'skipped_running' };
     return this.runOnce();
   }
 
@@ -782,6 +791,8 @@ export class TierSnifferService {
       const backlog = this.backlog();
       if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
     }
+    // Going easy: the pass made its one call; the next scheduled one waits.
+    if (tick.state === 'ran' && tick.report.calls > 0 && this.trickle()) this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
     if (this.stopped) this.closeLedgers();
     else if (this.timer && tick.state === 'ran' && !this.yieldNow()
       && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures' && tick.report.stoppedBy !== 'cloud_stopped'
@@ -793,6 +804,16 @@ export class TierSnifferService {
 
   private clockMs(): number {
     return (this.options.now?.() ?? new Date()).getTime();
+  }
+
+  /** Local work goes easy while the owner uses this computer (#922); never for a cloud or remote judge. */
+  private trickle(): boolean {
+    if (!this.options.pacing || !isBuiltInLane(this.options.lane)) return false;
+    try {
+      return this.options.pacing.trickle();
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1222,6 +1243,7 @@ export class TierSnifferService {
       concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
+      ...(this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {}),
       signal,
     });
     phase('pass');

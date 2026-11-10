@@ -91,6 +91,8 @@ export interface DashboardPageOptions {
   agentConnectHost?: AgentConnectHost;
   /** The saved Private-answer mode, for Privacy settings: its id and its label. */
   answerMode?: { id: string; label: string };
+  /** Go easy on this computer (#922): whether local sorting trickles while the owner works. */
+  goEasy?: boolean;
   /** The Outside help card's facts, for that page only, with the control session. */
   outsideHelp?: DashboardOutsideHelpStatus | undefined;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
@@ -725,6 +727,7 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
     <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? '' : ' disabled'}><legend class="judgelegend">${escapeHtml(S.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ''}${stopped}
     <div class="judgeopts">${local}${venice}</div>
+    ${options?.goEasy === undefined ? '' : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? ' checked' : ''}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`}
     ${cloud || status.stop === 'storage' ? '' : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
     ${confirm}${reply}
     <p class="pnote">Estimates for the ${items.toLocaleString('en-US')} items found so far. Recommended: ${estimate.recommended === 'venice' ? 'Venice for this archive size, if you choose to send it to the cloud' : 'the free judge on this computer'}. Cloud stays off until you choose and approve it.</p>

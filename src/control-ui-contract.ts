@@ -133,6 +133,8 @@ export type OlympusDashboardControlParams =
   | { action: 'disconnect_source'; source_id: string; acknowledge: true }
   | { action: 'delete_source_data'; source_id: string; acknowledge: true }
   | { action: 'set_computer_use'; choice: 'everyday' | 'server' }
+  /** Go easy on this computer (#922): local sorting trickles while the owner works. */
+  | { action: 'set_go_easy'; on: boolean }
   | {
       action: 'start_oauth';
       source: OlympusDashboardOAuthSource;
