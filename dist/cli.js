@@ -19228,7 +19228,37 @@ function blockScalarAccepted(match) {
     return true;
   return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+function isRecoveryCodeEntry(entry) {
+  const code = RECOVERY_CODE_VALUE.exec(entry.trim().replace(LIST_MARKER, "").replace(/^[*_]{0,2}["'\x60]?/, ""))?.[0];
+  if (!code || !/[0-9]/.test(code))
+    return false;
+  if (code.replace(/[^A-Za-z0-9]/g, "").length < 6)
+    return false;
+  return code.split(/[- ]/).every((group) => !(/^[a-z]+$/.test(group) && /[g-z]/.test(group)) && !/^(.)\1+$/.test(group));
+}
+function lineHasRecoveryCode(line) {
+  return line.split(ENTRY_BREAK).some(isRecoveryCodeEntry);
+}
+function recoveryCodeAccepted(match) {
+  if (lineHasRecoveryCode(match.groups?.rest ?? ""))
+    return true;
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const lines = input.slice(end, end + RECOVERY_CODE_LIST_WINDOW).split(/\r?\n|\r/, RECOVERY_CODE_LIST_LINES + 1).slice(1);
+  let started = false;
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (started)
+        break;
+      continue;
+    }
+    started = true;
+    if (lineHasRecoveryCode(line))
+      return true;
+  }
+  return false;
+}
+var SECRETS_FLOOR_VERSION = "2026-11-10.recovery-codes", PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, RECOVERY_CODE_LABEL, RECOVERY_CODE_LIST_WINDOW = 600, RECOVERY_CODE_LIST_LINES = 12, RECOVERY_CODE_VALUE, LIST_MARKER, ENTRY_BREAK, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   init_esm();
   PROSE_WORDS = new Set([
@@ -19440,6 +19470,10 @@ var init_secret_patterns = __esm(() => {
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
   AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  RECOVERY_CODE_VALUE = /^(?:\d{3,5}(?: \d{3,5}){1,3}|[A-Za-z0-9]{2,40}(?:-[A-Za-z0-9]{2,40}){0,7})(?=$|[\s,;.)\]"'\x60*_])/;
+  LIST_MARKER = /^[ \t]*(?:[-*•]|\d{1,2}[.)])[ \t]+/;
+  ENTRY_BREAK = /[,;]|[ \t]{2,}/;
   LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
   SHARED_SECRET_PATTERNS = [
     {
@@ -19559,6 +19593,13 @@ var init_secret_patterns = __esm(() => {
       pattern: AUTHORIZATION_HEADER,
       confidence: 0.9,
       accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "credential_assignment",
+      label: "recovery_code",
+      pattern: RECOVERY_CODE_LABEL,
+      confidence: 0.85,
+      accept: recoveryCodeAccepted
     },
     {
       findingType: "api_secret_token",
@@ -64701,6 +64742,176 @@ var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-secrets-floor-sweep.ts
+async function sweepSecretsFloor(options) {
+  const report = { scanned: 0, secrets: 0, failed: 0, complete: true };
+  const { set } = options;
+  const ledger = set.ledger;
+  const state = readState7(ledger.readMeta(SWEEP_META_KEY3));
+  if (state.done === SECRETS_FLOOR_VERSION)
+    return report;
+  const progress = state.pending?.version === SECRETS_FLOOR_VERSION ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const keep = state.done ? { done: state.done } : {};
+  const attempt = async (record) => {
+    await options.turn?.();
+    report.scanned += 1;
+    let outcome;
+    try {
+      outcome = await applyFloor(set, record);
+    } catch {
+      outcome = "failed";
+    }
+    if (outcome === "secrets")
+      report.secrets += 1;
+    else if (outcome === "failed") {
+      report.failed += 1;
+      if (held.length < MAX_HELD_ITEMS2)
+        held.push(identityOf7(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    for (const identity2 of held.splice(0)) {
+      const record = ledger.getCurrent(identity2);
+      if (record?.routed)
+        await attempt(record);
+    }
+    if (held.length === 0 && !overflow)
+      writeState3(ledger, { done: SECRETS_FLOOR_VERSION });
+    else {
+      report.complete = false;
+      writeState3(ledger, { ...keep, pending: overflow ? { version: SECRETS_FLOOR_VERSION, held: [] } : { version: SECRETS_FLOOR_VERSION, held, retry: true } });
+    }
+    return report;
+  }
+  const limit = Math.max(1, options.limit ?? DEFAULT_SECRETS_FLOOR_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...progress?.after ? { after: progress.after } : {}, limit });
+  for (const record of rows)
+    await attempt(record);
+  if (rows.length < limit) {
+    if (held.length === 0 && !overflow)
+      writeState3(ledger, { done: SECRETS_FLOOR_VERSION });
+    else {
+      report.complete = false;
+      writeState3(ledger, { ...keep, pending: overflow ? { version: SECRETS_FLOOR_VERSION, held: [] } : { version: SECRETS_FLOOR_VERSION, held, retry: true } });
+    }
+  } else {
+    report.complete = false;
+    writeState3(ledger, {
+      ...keep,
+      pending: { version: SECRETS_FLOOR_VERSION, after: identityOf7(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
+  }
+  return report;
+}
+async function applyFloor(set, record) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "clear";
+  const identity2 = identityOf7(record);
+  if (set.ledger.getOverride(identity2))
+    return "clear";
+  const copies = set.ledger.copies(identity2);
+  if (copies.length === 0)
+    return "clear";
+  const current2 = copies.filter((copy) => copy.state === "current");
+  const serving = copyServingLayer(current2, "content");
+  const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+  const exported = (domain ? set.store(domain)?.exportItemCopy(identity2) : undefined) ?? storedCopyOf(set, identity2, copies);
+  if (!exported)
+    return "failed";
+  const signals = storedSignals(exported);
+  const names = [signals.title, signals.path, signals.sender, ...signals.folderKeys ?? []].filter((value) => typeof value === "string" && value.trim() !== "");
+  const nameKinds = new Set(names.length > 0 ? detectSecretFindingKinds(names.join(`
+`)) : []);
+  if (names.some(hasCredentialUrl))
+    nameKinds.add("credential_assignment");
+  const text2 = exported.chunks.map((chunk) => chunk.boundedText).join("");
+  const textKinds = new Set;
+  if (text2.trim()) {
+    if (secretScanReusable(text2))
+      await scanSecretsAhead(text2);
+    for (const kind of detectSecretFindingKinds(text2))
+      textKinds.add(kind);
+    if (hasCredentialUrl(text2))
+      textKinds.add("credential_assignment");
+  }
+  if (nameKinds.size === 0 && textKinds.size === 0)
+    return "clear";
+  const latest = set.ledger.getCurrent(identity2);
+  if (!latest?.routed || latest.contentTier === "secrets" || latest.metadataTier === "secrets")
+    return "clear";
+  const findingKinds = [...new Set([...nameKinds, ...textKinds])].sort();
+  const decision = {
+    metadataTier: nameKinds.size > 0 ? "secrets" : latest.metadataTier,
+    contentTier: "secrets",
+    decidedBy: "secret_detector",
+    reasons: [
+      ...nameKinds.size > 0 ? [...nameKinds].sort().map((kind) => `metadata:secret:${kind}`) : latest.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...[...textKinds].sort().map((kind) => `content:secret:${kind}`)
+    ],
+    state: "current",
+    contentRead: latest.contentRead || textKinds.size > 0,
+    metadataPending: false,
+    contentPending: false,
+    metadataForced: latest.metadataForced,
+    metadataFlagged: latest.metadataFlagged,
+    engineVersion: latest.engineVersion,
+    mapRevision: latest.mapRevision,
+    snifferId: UNDECIDED_TIER_SNIFFER.id
+  };
+  return settleRoutedSecrets(set, identity2, decision, exported, { ...text2 ? { text: text2 } : {}, findingKinds }) ? "secrets" : "failed";
+}
+function readState7(raw) {
+  if (!raw)
+    return {};
+  try {
+    const parsed = JSON.parse(raw);
+    const pending = parsed.pending;
+    return {
+      ...typeof parsed.done === "string" ? { done: parsed.done } : {},
+      ...pending && typeof pending.version === "string" ? {
+        pending: {
+          version: pending.version,
+          ...isIdentity2(pending.after) ? { after: pending.after } : {},
+          held: Array.isArray(pending.held) ? pending.held.filter(isIdentity2) : [],
+          ...pending.retry === true ? { retry: true } : {},
+          ...pending.overflow === true ? { overflow: true } : {}
+        }
+      } : {}
+    };
+  } catch {
+    return {};
+  }
+}
+function isIdentity2(value) {
+  const candidate = value;
+  return typeof candidate === "object" && candidate !== null && typeof candidate.provider === "string" && typeof candidate.accountScope === "string" && typeof candidate.providerItemId === "string";
+}
+function writeState3(ledger, state) {
+  ledger.writeMeta(SWEEP_META_KEY3, JSON.stringify(state));
+}
+function identityOf7(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var DEFAULT_SECRETS_FLOOR_SWEEP_ROWS = 200, SWEEP_META_KEY3 = "secrets_floor_sweep", MAX_HELD_ITEMS2 = 200;
+var init_tier_secrets_floor_sweep = __esm(() => {
+  init_secret_patterns();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_stored_names();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 import { createHash as createHash41 } from "node:crypto";
 import { existsSync as existsSync48 } from "node:fs";
@@ -65108,6 +65319,9 @@ class TieredStoreSet {
     } catch {}
     try {
       await rehomePrivateTierRows({ set: this });
+    } catch {}
+    try {
+      await sweepSecretsFloor({ set: this, turn: ingestionTurn });
     } catch {}
   }
   assertLedgerGovernsLegs() {
@@ -66033,6 +66247,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  init_tier_secrets_floor_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
   TIER_KEY_TRUST_DOMAIN = {
@@ -108447,7 +108662,7 @@ function defaultZkapiStatePath(home2 = homedir30()) {
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
 }
-function readState7(path) {
+function readState8(path) {
   if (!existsSync69(path))
     return;
   const parsed = JSON.parse(readFileSync58(path, "utf8"));
@@ -108457,14 +108672,14 @@ function readState7(path) {
   return parsed;
 }
 function zkapiUsageToday(path, now) {
-  const state = readState7(path);
+  const state = readState8(path);
   return state && state.day === utcDay(now) ? { count: state.count, reservedMicroUsd: state.reservedMicroUsd } : { count: 0, reservedMicroUsd: 0 };
 }
 function zkapiLastSession(path) {
-  return readState7(path)?.lastSession;
+  return readState8(path)?.lastSession;
 }
 function zkapiOutstandingFences(path) {
-  return readState7(path)?.fences ?? {};
+  return readState8(path)?.fences ?? {};
 }
 function zkapiUnresolvedSession(path, scope) {
   const fences = zkapiOutstandingFences(path);
@@ -108504,7 +108719,7 @@ function updateState(path, now, mutate) {
   mkdirSync44(dirname75(path), { recursive: true, mode: 448 });
   return withFileLeaseSync(path, (lease) => {
     const day = utcDay(now);
-    const current2 = readState7(path);
+    const current2 = readState8(path);
     const base = current2 && current2.day === day ? current2 : {
       version: 1,
       day,
@@ -108791,7 +109006,7 @@ function recordedGroupState(group, recordedBootId) {
 function zkapiConsultInFlightOnDisk(statePath) {
   let state;
   try {
-    state = readState7(statePath);
+    state = readState8(statePath);
   } catch {
     return;
   }
@@ -108826,7 +109041,7 @@ function supervisorAlive(running) {
   return supervisor.instance.mechanism !== current2.mechanism || supervisor.instance.startTime === current2.startTime;
 }
 async function recoverStrandedGroups(statePath, now) {
-  const running = readState7(statePath)?.running;
+  const running = readState8(statePath)?.running;
   if (!running)
     return "clear";
   if (supervisorAlive(running))
@@ -109206,7 +109421,7 @@ async function zkapiConsultReadiness(options) {
   let fences = [];
   let stranded;
   try {
-    const state = readState7(statePath);
+    const state = readState8(statePath);
     usage = zkapiUsageToday(statePath, now);
     lastSession = zkapiLastSession(statePath);
     fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));

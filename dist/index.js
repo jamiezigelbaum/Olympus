@@ -17846,7 +17846,7 @@ var init_fts = __esm(() => {
 });
 
 // src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
   PROSE_WORDS = new Set([
     "above",
@@ -18038,6 +18038,7 @@ var init_secret_patterns = __esm(() => {
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
   LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
   LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
 });
 
@@ -19555,6 +19556,17 @@ var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-secrets-floor-sweep.ts
+var init_tier_secrets_floor_sweep = __esm(() => {
+  init_secret_patterns();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_stored_names();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
@@ -19576,6 +19588,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  init_tier_secrets_floor_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 

@@ -8323,7 +8323,37 @@ function blockScalarAccepted(match) {
     return true;
   return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+function isRecoveryCodeEntry(entry) {
+  const code = RECOVERY_CODE_VALUE.exec(entry.trim().replace(LIST_MARKER, "").replace(/^[*_]{0,2}["'\x60]?/, ""))?.[0];
+  if (!code || !/[0-9]/.test(code))
+    return false;
+  if (code.replace(/[^A-Za-z0-9]/g, "").length < 6)
+    return false;
+  return code.split(/[- ]/).every((group) => !(/^[a-z]+$/.test(group) && /[g-z]/.test(group)) && !/^(.)\1+$/.test(group));
+}
+function lineHasRecoveryCode(line) {
+  return line.split(ENTRY_BREAK).some(isRecoveryCodeEntry);
+}
+function recoveryCodeAccepted(match) {
+  if (lineHasRecoveryCode(match.groups?.rest ?? ""))
+    return true;
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const lines = input.slice(end, end + RECOVERY_CODE_LIST_WINDOW).split(/\r?\n|\r/, RECOVERY_CODE_LIST_LINES + 1).slice(1);
+  let started = false;
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (started)
+        break;
+      continue;
+    }
+    started = true;
+    if (lineHasRecoveryCode(line))
+      return true;
+  }
+  return false;
+}
+var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, RECOVERY_CODE_LABEL, RECOVERY_CODE_LIST_WINDOW = 600, RECOVERY_CODE_LIST_LINES = 12, RECOVERY_CODE_VALUE, LIST_MARKER, ENTRY_BREAK, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   init_esm();
   PROSE_WORDS = new Set([
@@ -8535,6 +8565,10 @@ var init_secret_patterns = __esm(() => {
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
   AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  RECOVERY_CODE_VALUE = /^(?:\d{3,5}(?: \d{3,5}){1,3}|[A-Za-z0-9]{2,40}(?:-[A-Za-z0-9]{2,40}){0,7})(?=$|[\s,;.)\]"'\x60*_])/;
+  LIST_MARKER = /^[ \t]*(?:[-*•]|\d{1,2}[.)])[ \t]+/;
+  ENTRY_BREAK = /[,;]|[ \t]{2,}/;
   LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
   SHARED_SECRET_PATTERNS = [
     {
@@ -8654,6 +8688,13 @@ var init_secret_patterns = __esm(() => {
       pattern: AUTHORIZATION_HEADER,
       confidence: 0.9,
       accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "credential_assignment",
+      label: "recovery_code",
+      pattern: RECOVERY_CODE_LABEL,
+      confidence: 0.85,
+      accept: recoveryCodeAccepted
     },
     {
       findingType: "api_secret_token",
@@ -36437,6 +36478,17 @@ var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-secrets-floor-sweep.ts
+var init_tier_secrets_floor_sweep = __esm(() => {
+  init_secret_patterns();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_stored_names();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
@@ -36458,6 +36510,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
+  init_tier_secrets_floor_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
