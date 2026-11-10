@@ -182,6 +182,7 @@ import {
   DASHBOARD_TOOLS_CALL_PATH,
   dashboardHtmlRoutePage,
   dashboardLegacyRedirect,
+  dashboardConnectorRedirect,
   dashboardOutsideHelpRedirect,
   dashboardReadToken,
   renderComputerHostPage,
@@ -1492,7 +1493,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // A locked reader: names, never an open token (no opener).
             return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url, request)));
           }
-          if (page === 'connector') return html(renderDashboardLocalPage('connector', { url, options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) } }));
+          if (page === 'connector') {
+            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url), 'Cache-Control': 'no-store' } });
+          }
           if (page === 'agents') {
             return html(renderDashboardLocalPage('agents', {
               url,
