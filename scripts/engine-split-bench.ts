@@ -21,8 +21,8 @@
 // not the previous one has finished, so every layout is offered the same
 // load; a request's time runs from its scheduled arrival. Every layout
 // measures the same window (2 s after the writer starts, for --seconds - 4).
-// A request the pool refuses as busy, or one shed because it arrived after
-// the window or with 8 already waiting, is counted, not timed.
+// A request the pool refuses as busy, or one shed because 8 earlier requests
+// were still unfinished when it arrived, is counted, not timed.
 //
 // The seed has children (every --child-every'th item is an attachment of the
 // item before it) and a current vector on every chunk, so the child rule and
@@ -188,7 +188,11 @@ async function front(stores: LocalConnectorStore[], seconds: number, reads: 'her
   };
   const started = performance.now();
   const ends = started + seconds * 1000;
-  const inFlight = new Set<Promise<void>>();
+  // Every admitted request, from its arrival until it finishes. A request
+  // is in the system at a moment when it arrived before it and had not
+  // finished by it, whether it was still waiting for the thread (an arrival
+  // that passed while the thread was blocked) or running.
+  const admitted: Array<{ end?: number; done: Promise<void> }> = [];
   let offered = 0;
   let shed = 0;
   for (let q = 0; started + q * everyMs < ends; q++) {
@@ -196,13 +200,16 @@ async function front(stores: LocalConnectorStore[], seconds: number, reads: 'her
     // A request arrives and waits for the thread, even when it is already late.
     await new Promise((resolve) => setTimeout(resolve, Math.max(0, arrival - performance.now())));
     offered++;
-    // A request that arrives after the window, or while MAX_IN_FLIGHT are
-    // waiting, is shed and counted: the run stays bounded in time.
-    if (performance.now() >= ends || inFlight.size >= MAX_IN_FLIGHT) { shed++; continue; }
-    const running: Promise<void> = request(q, arrival).finally(() => inFlight.delete(running));
-    inFlight.add(running);
+    // Admission is decided as of the request's arrival, the same in every
+    // mode: with MAX_IN_FLIGHT already in the system then, it is shed and
+    // counted, so the run stays bounded in time.
+    const waiting = admitted.filter((entry) => entry.end === undefined || entry.end > arrival).length;
+    if (waiting >= MAX_IN_FLIGHT) { shed++; continue; }
+    const entry: { end?: number; done: Promise<void> } = { done: Promise.resolve() };
+    admitted.push(entry);
+    entry.done = request(q, arrival).finally(() => { entry.end = performance.now(); });
   }
-  await Promise.all(inFlight);
+  await Promise.all(admitted.map((entry) => entry.done));
   clearInterval(beat);
   return { offered, shed, busy, request_ms: stats(latencies), vector_lane_check_ms: stats(visibility), keyword_ms: stats(keyword),
     freeze_ms: stats(freezes), front_rss_mb: rss() };

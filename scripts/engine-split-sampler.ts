@@ -143,6 +143,20 @@ export async function runSampler(options: SamplerOptions): Promise<void> {
   let previous: { at: number; checking: number } | undefined;
   for (let interval = 0; options.intervals === undefined || interval < options.intervals; interval++) {
     const started = clock.now();
+    // The heartbeat runs for the whole interval, alongside the dashboard and
+    // status reads, so a freeze those reads cause is in its max.
+    const beats: number[] = [];
+    let beatFailures = 0;
+    const heartbeat = (async () => {
+      while (clock.now() - started < intervalMs) {
+        const beat = await timedGet(`${apiBase}/health`, false);
+        beats.push(beat.ms);
+        if (!beat.ok) beatFailures++;
+        const wait = Math.min(heartbeatMs - beat.ms, intervalMs - (clock.now() - started));
+        if (wait > 0) await clock.sleep(wait);
+      }
+    })();
+
     const dashboard: number[] = [];
     let dashboardFailures = 0;
     for (let n = 0; n < dashboardReads; n++) {
@@ -158,16 +172,7 @@ export async function runSampler(options: SamplerOptions): Promise<void> {
       ? Math.round(((previous.checking - checking) * 60_000 / (statusAt - previous.at)) * 10) / 10
       : null;
     if (checking !== undefined) previous = { at: statusAt, checking };
-
-    const beats: number[] = [];
-    let beatFailures = 0;
-    while (clock.now() - started < intervalMs) {
-      const beat = await timedGet(`${apiBase}/health`, false);
-      beats.push(beat.ms);
-      if (!beat.ok) beatFailures++;
-      const wait = Math.min(heartbeatMs - beat.ms, intervalMs - (clock.now() - started));
-      if (wait > 0) await clock.sleep(wait);
-    }
+    await heartbeat;
 
     const found = pids();
     options.emit({

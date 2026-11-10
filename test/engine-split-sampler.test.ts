@@ -14,6 +14,34 @@ const TOKEN = 'sampler-test-token-0123456789';
 let server: ReturnType<typeof Bun.serve> | undefined;
 afterEach(() => { server?.stop(true); server = undefined; });
 
+/**
+ * A fetch that counts requests still in flight. The heartbeat runs alongside
+ * the reads, so the fake clock may only move while nothing is in flight, or
+ * the move would land inside a request's measured time.
+ */
+function countingFetch(): { fetchImpl: typeof fetch; inFlight: () => number } {
+  let inFlight = 0;
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    inFlight += 1;
+    try {
+      const response = await fetch(input, init);
+      const body = await response.text();
+      return new Response(body, { status: response.status });
+    } finally {
+      inFlight -= 1;
+    }
+  }) as typeof fetch;
+  return { fetchImpl, inFlight: () => inFlight };
+}
+
+/** Moves the fake clock from timer to timer whenever the sampler is only sleeping. */
+async function drive(clock: ReturnType<typeof createTestClock>, done: () => boolean, inFlight: () => number): Promise<void> {
+  while (!done()) {
+    await waitFor(() => done() || (inFlight() === 0 && clock.pendingTimers() > 0));
+    if (!done()) await clock.advanceToNext();
+  }
+}
+
 describe('engine split sampler', () => {
   test('reports dashboard reads, the longest heartbeat, the judge backlog and RSS, read-only', async () => {
     const clock = createTestClock();
@@ -45,9 +73,11 @@ describe('engine split sampler', () => {
     });
     const lines: Array<Record<string, any>> = [];
     let finished = false;
+    const counted = countingFetch();
     const run = runSampler({
       apiBase: `http://127.0.0.1:${server.port}/v1`,
       authToken: TOKEN,
+      fetchImpl: counted.fetchImpl,
       clock,
       intervalMs: 60_000,
       heartbeatMs: 1_000,
@@ -57,10 +87,7 @@ describe('engine split sampler', () => {
       rssMb: (pid) => (pid === 101 ? 640 : 210),
       emit: (line) => lines.push(line),
     }).finally(() => { finished = true; });
-    // The sampler is sequential: a pending timer means it is sleeping, never mid-request.
-    while (!finished) {
-      if (!(await clock.advanceToNext())) await waitFor(() => finished || clock.pendingTimers() > 0);
-    }
+    await drive(clock, () => finished, counted.inFlight);
     await run;
 
     expect(lines).toHaveLength(2);
@@ -86,8 +113,10 @@ describe('engine split sampler', () => {
     server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response('no', { status: 503 }) });
     const lines: Array<Record<string, any>> = [];
     let finished = false;
+    const counted = countingFetch();
     const run = runSampler({
       apiBase: `http://127.0.0.1:${server.port}/v1`,
+      fetchImpl: counted.fetchImpl,
       clock,
       intervalMs: 5_000,
       heartbeatMs: 1_000,
@@ -95,14 +124,63 @@ describe('engine split sampler', () => {
       intervals: 1,
       emit: (line) => lines.push(line),
     }).finally(() => { finished = true; });
-    while (!finished) {
-      if (!(await clock.advanceToNext())) await waitFor(() => finished || clock.pendingTimers() > 0);
-    }
+    await drive(clock, () => finished, counted.inFlight);
     await run;
     expect(lines[0]!.dashboard_read_ms).toEqual({ n: 0, failures: 2 });
     expect(lines[0]!.heartbeat_ms.failures).toBe(lines[0]!.heartbeat_ms.n);
     expect(lines[0]!.judge).toEqual({ error: 'HTTP 503' });
     expect(lines[0]!.rss_mb).toEqual({ worker: null, background: null });
+  });
+
+  test('a freeze during a dashboard read shows in the heartbeat max', async () => {
+    const clock = createTestClock();
+    // The worker freezes while it builds the dashboard: a heartbeat sent
+    // meanwhile is answered only when the freeze ends, 3 s later.
+    let releaseFreeze!: () => void;
+    const freezeOver = new Promise<void>((resolve) => { releaseFreeze = resolve; });
+    let heartbeatDuringRead!: () => void;
+    const heartbeatArrived = new Promise<void>((resolve) => { heartbeatDuringRead = resolve; });
+    let dashboardDone = false;
+    server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === '/dashboard.json') {
+          await heartbeatArrived;
+          clock.set(clock.now() + 3_000);
+          dashboardDone = true;
+          releaseFreeze();
+          return Response.json({ ok: true });
+        }
+        if (path === '/v1/health') {
+          // The heartbeat sent with the read waits out the same freeze.
+          if (!dashboardDone) {
+            heartbeatDuringRead();
+            await freezeOver;
+          }
+          return Response.json({ status: 'ok' });
+        }
+        return Response.json({});
+      },
+    });
+    const lines: Array<Record<string, any>> = [];
+    let finished = false;
+    const counted = countingFetch();
+    const run = runSampler({
+      apiBase: `http://127.0.0.1:${server.port}/v1`,
+      fetchImpl: counted.fetchImpl,
+      clock,
+      intervalMs: 10_000,
+      heartbeatMs: 1_000,
+      dashboardReads: 1,
+      intervals: 1,
+      emit: (line) => lines.push(line),
+    }).finally(() => { finished = true; });
+    await drive(clock, () => finished, counted.inFlight);
+    await run;
+    expect(lines[0]!.dashboard_read_ms.max).toBe(3_000);
+    expect(lines[0]!.heartbeat_ms.max).toBe(3_000);
   });
 
   test('finds the worker and background by command line and the one role entry', () => {
