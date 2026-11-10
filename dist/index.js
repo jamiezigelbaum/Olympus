@@ -6699,7 +6699,6 @@ function isExecutableFile(path) {
   }
 }
 var init_openclaw_executable = () => {};
-
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
@@ -18289,6 +18288,14 @@ var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTRO
 var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
 });
+
+// src/workers/connector-store/off-thread-reads.ts
+var queues, releases;
+var init_off_thread_reads = __esm(() => {
+  queues = new Map;
+  releases = new Map;
+});
+
 // src/core/store-identity.ts
 var init_store_identity = __esm(() => {
   init_archive_formats();
@@ -18781,6 +18788,7 @@ var init_local_index = __esm(() => {
   init_keyword_languages();
   init_keyword_expansion();
   init_control_path_headroom();
+  init_off_thread_reads();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();

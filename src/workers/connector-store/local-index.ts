@@ -6,7 +6,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { offThreadReadsAvailable, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -1907,6 +1907,22 @@ export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
  * concepts (a term with its synonyms is one concept) and, per row (by local
  * item id), how many of them the item's name or text contains.
  */
+/** Keyword-search options (searchItemsDetailed). */
+export interface ConnectorStoreKeywordFtsOptions {
+  prefix?: boolean;
+  contentOnly?: boolean;
+  locate?: boolean;
+  relaxed?: boolean;
+  privatePrecision?: boolean;
+}
+
+/** A keyword search's rows, whether more may match, and each row's concept coverage. */
+export interface ConnectorStoreKeywordSearch {
+  rows: ConnectorStoreSearchRow[];
+  saturated: boolean;
+  concepts: ConnectorStoreConceptCoverage;
+}
+
 export interface ConnectorStoreConceptCoverage {
   total: number;
   matched: ReadonlyMap<string, number>;
@@ -2883,6 +2899,10 @@ export class LocalConnectorStore {
       this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
+      // The read pool's connections to this file go with the store, and so
+      // do its waiting queries.
+      this.closedForPoolReads = true;
+      if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     }
   }
@@ -11941,11 +11961,97 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     // locate: false is the metadata-only mode: a text match is reported as
     // such, and no chunk text is read to place it.
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
-  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
+    ftsOptions: ConnectorStoreKeywordFtsOptions = {},
+  ): ConnectorStoreKeywordSearch {
+    return this.readHere(this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions));
+  }
+
+  /**
+   * searchItemsDetailed with its queries read on the read pool
+   * (off-thread-reads.ts), for the Ask and answer lanes (#1079): the same
+   * queries and the same tier filter, so the same rows, without holding this
+   * thread for the seconds a keyword search takes on a large store. This
+   * thread still builds every query and filters what comes back by the
+   * current tier ledger and the child-visibility rule. Each query is its own
+   * pool job, so stores take turns on the pool between queries.
+   *
+   * At `deadlineAtMs` a query still waiting or running on the pool is given
+   * up and this rejects with OffThreadReadBusyError, which the router reports
+   * as a lane timeout. It never falls back to reading on this thread: that
+   * fallback is the freeze this exists to end. A thread that cannot start
+   * right now makes the lane busy too. Only a store the pool never reads (an
+   * in-memory store, a runtime without Bun's Worker) is searched here.
+   */
+  async searchItemsDetailedOffThread(
+    query: string,
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+    ftsOptions: ConnectorStoreKeywordFtsOptions = {},
+    pool: { deadlineAtMs?: number } = {},
+  ): Promise<ConnectorStoreKeywordSearch> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
+    const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
+    let step = steps.next();
+    while (!step.done) {
+      // A store closed while its search was reading: the pool's connections
+      // to it are released, and no later read may open one again.
+      if (this.closedForPoolReads) throw new OffThreadReadBusyError();
+      step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
+    }
+    return step.value;
+  }
+
+  /**
+   * Search rows that this store still serves, by the current tier ledger and
+   * child visibility: the same filter the search applied, applied again.
+   * A keyword lane's reads yield to the event loop (they run on the read
+   * pool), and a tier move or a parent being hidden can land between the
+   * search's own filter and the moment the lane emits its hits. The adapter
+   * calls this after its last read, so the filter at emit time decides
+   * (#1079). A row with a chunk or a content match is checked at the content
+   * layer, as the search did.
+   */
+  stillVisibleSearchRows<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): T[] {
+    return this.tierVisibleRows(
+      rows,
+      (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...(row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}),
+      }),
+      (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
+    );
+  }
+
+  private closedForPoolReads = false;
+
+  /** Drives a read generator on this store's own connection. */
+  private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
+    let step = steps.next();
+    while (!step.done) {
+      const read = step.value;
+      const statement = this.db.query(read.sql);
+      step = steps.next(read.mode === 'all' ? statement.all(...(read.params as SQLQueryBindings[])) : statement.get(...(read.params as SQLQueryBindings[])));
+    }
+    return step.value;
+  }
+
+  // The keyword search as the reads it needs: each query is yielded and its
+  // rows come back, so one body serves this thread and the read pool. The
+  // tier filter is not a read: it runs here, on this thread, against the
+  // current ledger, whichever connection returned the rows.
+  private *searchItemsSteps(
+    query: string,
+    maxResults: number,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+    ftsOptions: ConnectorStoreKeywordFtsOptions,
+  ): Generator<StoreRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? this.privateRelaxedFtsQuery(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
+    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
@@ -11953,7 +12059,7 @@ export class LocalConnectorStore {
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const rows = this.db.query(`
+    const rows = (yield { mode: 'all', sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -11979,13 +12085,13 @@ export class LocalConnectorStore {
       GROUP BY i.item_pk
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
-    `).all(
+    `, params: [
       terms,
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
       ...selectedFtsScope.params,
       fetchLimit,
-    ) as ItemRow[];
+    ] }) as ItemRow[];
     // Minimum signal: for a multi-concept query, a candidate matching a
     // single common concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
@@ -12006,22 +12112,33 @@ export class LocalConnectorStore {
     if (minimumSignal && rows.length > 0) {
       const pks = rows.map((row) => row.item_pk);
       const placeholders = pks.map(() => '?').join(', ');
+      // On the read pool each read is its own transaction, so a pk the FTS
+      // read returned may name another item by the time a follow-up read
+      // runs (ingestion writes in between), or the same item at a newer
+      // version. A hit counts only for the item and version the row was read
+      // as; on one connection they always agree.
+      const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
+      const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
+        const row = itemAt.get(hit.item_pk);
+        return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
+      };
       for (const [groupIndex, group] of groups.entries()) {
-        const hits = this.db.query(`
-          SELECT DISTINCT connector_store_fts.item_pk
+        const hits = ((yield { mode: 'all', sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
           FROM connector_store_fts
           JOIN items i ON i.item_pk = connector_store_fts.item_pk
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
+        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+          .filter(sameItem);
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
           matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
         }
       }
       const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
+      const weights = rows.every(enough) ? undefined : yield* this.conceptWeightsSteps(groups, exact);
       // One unique literal topic word can identify a record when a question
       // combines neighbouring records (#710). The shared stopwords exclude
       // scaffolding such as "my"; synonyms alone cannot earn this exception.
@@ -12031,12 +12148,13 @@ export class LocalConnectorStore {
       const uniqueTerms = weights && weights.population >= 10
         ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
         : [];
-      const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (this.db.query(`
-        SELECT DISTINCT connector_store_fts.item_pk
+      const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
+        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
         FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
         WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
           ${selectedFtsScope.sql}
-      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>)
+      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+        .filter(sameItem)
         .map(row => row.item_pk));
       selected = rows.filter((row) => {
         if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
@@ -12067,23 +12185,32 @@ export class LocalConnectorStore {
     );
     const spanTerms = queryTermsForSpan(query);
     const kept = selected.slice(0, limit);
+    const located: ConnectorStoreSearchRow[] = [];
+    const locatedRows: ItemRow[] = [];
+    for (const row of kept) {
+      const base = searchRowFromItemRow(row);
+      if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
+        located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true as const });
+        locatedRows.push(row);
+        continue;
+      }
+      const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+      // The chunk no longer belongs to this item as it was read (on the read
+      // pool, ingestion can replace an item's chunks between reads, and a
+      // chunk pk can be reused by another item): the row is dropped, as if
+      // it had not matched. Another item's chunk is never attached to it.
+      if (!chunk) continue;
+      located.push({ ...base, chunk });
+      locatedRows.push(row);
+    }
     return {
-      rows: kept.map((row) => {
-        const base = searchRowFromItemRow(row);
-        if (ftsOptions.locate === false) {
-          return row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true as const };
-        }
-        const chunk = row.chunk_pk === null || row.chunk_pk === undefined
-          ? undefined
-          : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
-        return chunk ? { ...base, chunk } : base;
-      }),
+      rows: located,
       saturated: rows.length >= fetchLimit || selected.length > limit,
       // How many of the query's concepts each row matched (in its name or its
       // text). A single-concept query has nothing to count: every row matched it.
       concepts: {
         total: groups.length,
-        matched: new Map(kept.map((row) => [
+        matched: new Map(locatedRows.map((row) => [
           row.local_item_id,
           minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
         ])),
@@ -12091,7 +12218,7 @@ export class LocalConnectorStore {
     };
   }
 
-  private privateRelaxedFtsQuery(query: string): string {
+  private *privateRelaxedFtsQuerySteps(query: string): Generator<StoreRead, string, unknown> {
     const terms = relaxedLocalFtsTerms(query);
     if (terms.length <= 2) return terms.join(' OR ');
     // A relaxed match can create a waiting question and a panel job. Require
@@ -12107,14 +12234,14 @@ export class LocalConnectorStore {
         alternatives.push(`(${terms[i]} AND ${terms[j]})`);
       }
     }
-    const population = this.db.query(
-      'SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20',
-    ).all();
+    const population = (yield {
+      mode: 'all', sql: 'SELECT item_pk FROM items WHERE tombstoned = 0 LIMIT 20', params: [],
+    }) as unknown[];
     if (population.length === 20) {
       for (const term of terms) {
-        const rows = this.db.query(
-          'SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21',
-        ).all(term) as Array<{ item_pk: number }>;
+        const rows = (yield {
+          mode: 'all', sql: 'SELECT item_pk FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT 21', params: [term],
+        }) as Array<{ item_pk: number }>;
         if (rows.length > 0 && rows.length <= 20 && new Set(rows.map(row => row.item_pk)).size === 1) {
           alternatives.push(term);
         }
@@ -12129,14 +12256,20 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
-  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number; counts: number[]; population: number } {
-    const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
-    const counts = groups.map((group) => {
-      const { count } = this.db.query(
-        'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
-      ).get(sourceIndexFtsGroupQuery(group, exact)) as { count: number };
-      return count;
-    });
+  private *conceptWeightsSteps(
+    groups: ReadonlyArray<readonly string[]>,
+    exact: ReadonlyMap<string, unknown>,
+  ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
+    const items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
+    const counts: number[] = [];
+    for (const group of groups) {
+      const { count } = (yield {
+        mode: 'get',
+        sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+        params: [sourceIndexFtsGroupQuery(group, exact)],
+      }) as { count: number };
+      counts.push(count);
+    }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
   }
@@ -12178,22 +12311,36 @@ export class LocalConnectorStore {
       'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
     ).all(row.item_pk, row.chunk_index) as Array<{ bounded_text: string }>;
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+  }
 
-    const chunkChars = row.bounded_text.length;
-    const { charStart, charEnd } = queryTerms?.length
-      ? firstTermSpan(row.bounded_text, queryTerms)
-      : { charStart: 0, charEnd: chunkChars };
-    return {
-      chunkId: String(chunkPk),
-      chunkIndex: row.chunk_index,
-      contentHash: row.content_hash,
-      charStart,
-      charEnd,
-      itemCharStart: itemOffset + charStart,
-      itemCharEnd: itemOffset + charEnd,
-      chunkChars,
-      lane,
-    };
+  /**
+   * The keyword lane's chunk locate, checked against the item the FTS read
+   * returned: one statement reads the chunk and the chunks before it, and
+   * only while the chunk still belongs to that item at that version. On the
+   * read pool the FTS read and this one are separate transactions, so the
+   * chunk may by then be gone or reused by another item; then this returns
+   * undefined and the caller drops the row. On one connection it is the
+   * same locate as chunkMatchForChunkPk.
+   */
+  private *keywordChunkMatchSteps(
+    item: Pick<ItemRow, 'item_pk' | 'local_item_id' | 'source_version'>,
+    chunkPk: number,
+    queryTerms: readonly string[],
+  ): Generator<StoreRead, ConnectorStoreChunkMatch | undefined, unknown> {
+    const rows = (yield {
+      mode: 'all',
+      sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
+        ORDER BY c.chunk_index`,
+      params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk],
+    }) as Array<{ chunk_pk: number; chunk_index: number; content_hash: string; bounded_text: string }>;
+    const row = rows.at(-1);
+    if (!row || row.chunk_pk !== chunkPk) return undefined;
+    const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, 'keyword', queryTerms);
   }
 
   // Recency lane: newest live items regardless of query match, same
@@ -12738,13 +12885,17 @@ export class LocalConnectorStore {
    * status() with its whole-store counts read on the second thread
    * (off-thread-reads.ts): the same queries, so the same counts, without
    * holding this thread for the seconds they take on a large store (#870).
-   * Where that thread cannot read this store, it is status() itself.
+   * Where the pool never reads this store (in memory, no Bun Worker), it is
+   * status() itself; a pool that is full for now is waited for.
    */
   async statusOffThread(
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<ConnectorStoreStatus> {
-    if (!offThreadReadsAvailable(this.dbPath)) return this.status(scope, options);
+    // A pool that is full for now (threads still stopping after a missed
+    // deadline) is waited for: only a store the pool never reads is counted
+    // on this thread.
+    if (!offThreadReadsSupported(this.dbPath)) return this.status(scope, options);
     return withOffThreadSnapshot(this.dbPath, async (read) => {
       const steps = this.statusSteps(scope, options);
       let step = steps.next();
@@ -13355,9 +13506,10 @@ export function createConnectorStoreCorpusAdapter(
       }
     }
 
-    if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) {
-      const keywordLane = relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
-        connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters), options.localKeywordFallback);
+    if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
+      const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+        await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
+        options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
       const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
@@ -13422,7 +13574,7 @@ export function createConnectorStoreCorpusAdapter(
         matchCount: keywordLane.matchCount,
         rawExposed: false,
       };
-    }
+    })();
 
     return hybridConnectorStoreSearch(
       store,
@@ -13524,13 +13676,12 @@ export function createConnectorStoreCorpusAdapter(
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
-    const keywordLane = relaxEmptyLocalKeywordLane(
+    const readKeywordLane = await relaxEmptyLocalKeywordLane(
       store, request.query, maxResults, options.accountScope, filters,
-      connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions),
-      options.localKeywordFallback, ftsOptions,
+      await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs),
+      options.localKeywordFallback, ftsOptions, request.deadlineAtMs,
     );
-    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
-    let semanticOnly = 0;
+    const semanticRows: ConnectorStoreSearchRow[] = [];
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
     // it would have matched is unknown, and the response says so.
@@ -13549,12 +13700,16 @@ export function createConnectorStoreCorpusAdapter(
         );
         if (lane.skippedReason !== undefined) incomplete = true;
         for (const row of lane.rows) {
-          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
-          rows.push(row);
-          semanticOnly += 1;
+          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
+          semanticRows.push(row);
         }
       }
     }
+    // Checked again after the last read, right before the hits and counts go out.
+    const keywordLane = revalidateKeywordLane(store, readKeywordLane);
+    const visibleSemanticRows = store.stillVisibleSearchRows(semanticRows);
+    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
+    const semanticOnly = visibleSemanticRows.length;
     return {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
@@ -13699,9 +13854,9 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
-  let keywordLane = connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false });
+  let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size
-    ? withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}))
+    ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
     : undefined;
   const vectorLane = await store.vectorSearchLane(
     request.query,
@@ -13711,7 +13866,7 @@ async function hybridConnectorStoreSearch(
     filters,
     request.deadlineAtMs,
   );
-  const scoredVectorRows = vectorLane.rows;
+  let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
   // hits stand on their own lexical merit (live calibration 2026-07-25:
@@ -13720,7 +13875,7 @@ async function hybridConnectorStoreSearch(
   // questions the bar exists for).
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  const vectorRows = gateArmed
+  let vectorRows = gateArmed
     ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
@@ -13735,7 +13890,11 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
-  keywordLane = relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback);
+  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
+  keywordLane = revalidateKeywordLane(store, keywordLane);
+  scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
+  vectorRows = store.stillVisibleSearchRows(vectorRows);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
@@ -13885,25 +14044,32 @@ function normalizeSemanticRelevanceBar(value: number | undefined): number | unde
 // Both queries probe to MAX_SEARCH_RESULTS whatever the lane limit, so the
 // same rows also count the corpus's lexical match set for coverage breadth
 // ("6 files match"). A probe that fills its ceiling reports a lower bound.
-function connectorStoreKeywordLaneRows(
+//
+// The FTS queries run on the read pool (searchItemsDetailedOffThread, #1079),
+// so an Ask's keyword lanes do not hold the worker's thread.
+type ConnectorStoreKeywordLane = {
+  rows: ConnectorStoreSearchRow[];
+  matchCount: SourceIndexCorpusMatchCount;
+  matchedItemIds: ReadonlySet<string>;
+  completeItemIds: ReadonlySet<string>;
+  allRows: ConnectorStoreSearchRow[];
+};
+
+async function connectorStoreKeywordLaneRows(
   store: LocalConnectorStore,
   query: string,
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
-): {
-  rows: ConnectorStoreSearchRow[];
-  matchCount: SourceIndexCorpusMatchCount;
-  matchedItemIds: ReadonlySet<string>;
-  completeItemIds: ReadonlySet<string>;
-  allRows: ConnectorStoreSearchRow[];
-} {
-  const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
+  deadlineAtMs?: number,
+): Promise<ConnectorStoreKeywordLane> {
+  const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
+  const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
   const content = rows.every(connectorStoreRowHasContent)
     ? { rows: [], saturated: false, concepts: plain.concepts }
-    : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+    : await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true }, pool);
   const contentRows = content.rows;
   // Rows that match every concept of the question, in their name or text.
   const complete = new Set<string>();
@@ -13927,8 +14093,8 @@ function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : withKeywordExpansionDisabled(
-    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions),
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : await withKeywordExpansionDisabled(
+    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
   );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
   const allRows = baseline
@@ -13950,19 +14116,43 @@ function connectorStoreKeywordLaneRows(
   };
 }
 
+/**
+ * A keyword lane with every row this store no longer serves taken out, and
+ * its counts recounted (stillVisibleSearchRows). Unchanged when every row is
+ * still served.
+ */
+function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreKeywordLane): ConnectorStoreKeywordLane {
+  const allRows = store.stillVisibleSearchRows(lane.allRows);
+  if (allRows.length === lane.allRows.length) return lane;
+  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+  return {
+    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
+    allRows,
+    matchedItemIds: served,
+    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    matchCount: {
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      saturated: lane.matchCount.saturated,
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+    },
+  };
+}
+
 /** One bounded OR retry after the strict lane is empty, with identical SQL/tier scope. */
-function relaxEmptyLocalKeywordLane(
+async function relaxEmptyLocalKeywordLane(
   store: LocalConnectorStore,
   query: string,
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  strict: ReturnType<typeof connectorStoreKeywordLaneRows>,
+  strict: ConnectorStoreKeywordLane,
   enabled: boolean | 'private_search' | undefined,
   ftsOptions: { prefix?: boolean; locate?: boolean } = {},
-): ReturnType<typeof connectorStoreKeywordLaneRows> {
+  deadlineAtMs?: number,
+): Promise<ConnectorStoreKeywordLane> {
   if (!enabled || strict.rows.length > 0) return strict;
-  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' });
+  const relaxed = await connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' }, deadlineAtMs);
   // OR matches are ranked, but never claim every concept of the question matched.
   return { ...relaxed, completeItemIds: new Set() };
 }
@@ -15136,6 +15326,31 @@ export function chunkText(text: string, maxChunkChars: number): string[] {
     chunks.push(trimmed.slice(offset, offset + maxChunkChars));
   }
   return chunks;
+}
+
+/** A chunk locator from its row and the UTF-16 length of the item's chunks before it (chunkMatchForChunkPk). */
+function chunkMatchFromRows(
+  chunkPk: number,
+  row: { chunk_index: number; content_hash: string; bounded_text: string },
+  itemOffset: number,
+  lane: 'keyword' | 'semantic',
+  queryTerms?: readonly string[],
+): ConnectorStoreChunkMatch {
+  const chunkChars = row.bounded_text.length;
+  const { charStart, charEnd } = queryTerms?.length
+    ? firstTermSpan(row.bounded_text, queryTerms)
+    : { charStart: 0, charEnd: chunkChars };
+  return {
+    chunkId: String(chunkPk),
+    chunkIndex: row.chunk_index,
+    contentHash: row.content_hash,
+    charStart,
+    charEnd,
+    itemCharStart: itemOffset + charStart,
+    itemCharEnd: itemOffset + charEnd,
+    chunkChars,
+    lane,
+  };
 }
 
 /**
