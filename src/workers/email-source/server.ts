@@ -552,7 +552,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -6529,7 +6529,10 @@ export async function main(): Promise<void> {
       dbPath: appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env)),
       // The per-item override (`olympus tier set <item> private`) on exactly the recorded item:
       // its locator must still name the same provider, item and conversation, or nothing is written.
-      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem(locator, 'private', expected),
+      // In the split the background owns the tier ledgers and writes the override.
+      setItemPrivate: engineFront
+        ? frontSetItemPrivate(engineFront.client)
+        : async ({ locator, ...expected }) => runTierSetOnRecordedItem(locator, 'private', expected),
     });
   }
   const connectionActive = (connectionId: string): boolean => {
@@ -7675,6 +7678,10 @@ export async function main(): Promise<void> {
           if (!sourceScheduler) return { outcome: 'scheduler_disabled' };
           startApprovedSourceRun(sourceScheduler, source);
           return { outcome: 'ingestion_started' };
+        },
+        tier_set_recorded: async ({ locator, expected }) => {
+          const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
+          return runTierSetOnRecordedItem(locator, 'private', expected);
         },
         capture_stop: async ({ source }) => {
           await captureOwnership.stopForUnpair(source);

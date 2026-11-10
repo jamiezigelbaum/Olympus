@@ -73,3 +73,17 @@ export function frontCaptureStop(client: Pick<EngineCommandClient, 'send'>): (so
     if (receipt.state !== 'done') throw new Error(receipt.error ?? `The background did not confirm the ${source} capture stopped.`);
   };
 }
+
+/**
+ * "Make Private" from the front's apps-received panel. The background owns the
+ * tier ledgers, so the override goes there and runs the same recorded-item
+ * check (`runTierSetOnRecordedItem`); a refusal or no answer throws, and the
+ * panel marks nothing.
+ */
+export function frontSetItemPrivate(client: Pick<EngineCommandClient, 'send'>): (item: { locator: string; provider: string; providerItemId: string; providerConversationId?: string }) => Promise<Record<string, unknown>> {
+  return async ({ locator, ...expected }) => {
+    const receipt = await client.send({ kind: 'tier_set_recorded', locator, expected }, { timeoutMs: 30_000 });
+    if (receipt.state !== 'done') throw new Error(receipt.error ?? 'The background did not record the override.');
+    return (receipt.result ?? {}) as Record<string, unknown>;
+  };
+}

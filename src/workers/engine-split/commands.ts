@@ -91,11 +91,20 @@ export type EngineCommand =
   | { kind: 'start_approved'; source: string }
   | { kind: 'owner_busy'; resource: string }
   | { kind: 'owner_idle'; resource: string }
+  /** "Make Private" from the apps-received panel: the recorded item's override, written by the background. */
+  | { kind: 'tier_set_recorded'; locator: string; expected: EngineRecordedItem }
   /** Stop a messaging capture before Disconnect or Unpair tears down its grant; done means stopped. */
   | { kind: 'capture_stop'; source: 'telegram' | 'whatsapp' }
   | { kind: 'judge_boost'; identities: EngineItemIdentity[] };
 
 export type EngineCommandKind = EngineCommand['kind'];
+
+/** The item a correction was recorded for; the background checks the locator still names it. */
+export interface EngineRecordedItem {
+  provider: string;
+  providerItemId: string;
+  providerConversationId?: string;
+}
 
 export interface EngineCommandEnvelope {
   id: string;
@@ -231,6 +240,20 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       if (typeof source !== 'string' || !SOURCE.test(source)) fail(`${kind} needs a source.`);
       if (kind === 'start_approved') return { id, command: { kind, source: source as string } };
       return { id, command: { kind, source: source as string, manual: command!.manual === true } };
+    }
+    case 'tier_set_recorded': {
+      const locator = boundedString(command!.locator, 2048);
+      const expected = asRecord(command!.expected);
+      const provider = boundedString(expected?.provider, 64);
+      const providerItemId = boundedString(expected?.providerItemId);
+      const conversation = expected?.providerConversationId;
+      if (!locator || !provider || !providerItemId || (conversation !== undefined && !boundedString(conversation))) {
+        fail('tier_set_recorded needs a locator and the recorded provider and item.');
+      }
+      return { id, command: { kind, locator: locator!, expected: {
+        provider: provider!, providerItemId: providerItemId!,
+        ...(typeof conversation === 'string' ? { providerConversationId: conversation } : {}),
+      } } };
     }
     case 'capture_stop': {
       const source = command!.source;

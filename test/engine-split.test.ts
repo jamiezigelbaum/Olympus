@@ -24,7 +24,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -445,6 +445,28 @@ describe('owner actions the background runs, forwarded from the front', () => {
     void waitForProcessExit(4243, { now: clock.now, sleep: clock.sleep, alive: () => true, timeoutMs: 60_000 }).then((value) => { gaveUp = value; });
     await clock.advance(61_000);
     expect(gaveUp).toBe(false);
+  });
+});
+
+describe('Make Private from the front', () => {
+  test('the recorded item goes to the background with its identity; a refusal marks nothing', async () => {
+    const seen: EngineCommand[] = [];
+    let refuse = false;
+    const bg = background({ tier_set_recorded: (command) => {
+      seen.push(command);
+      if (refuse) throw new Error('That locator no longer names the item it was recorded for, so nothing was changed.');
+      return { set: 'private' };
+    } });
+    const clock = createTestClock();
+    const setPrivate = frontSetItemPrivate(new EngineCommandClient({ fetch: bg.fetch, authToken: TOKEN, sleep: clock.sleep, now: clock.now }));
+    expect(await setPrivate({ locator: 'telegram:chat-1:m7', provider: 'telegram', providerItemId: 'm7', providerConversationId: 'chat-1' })).toEqual({ set: 'private' });
+    expect(seen).toEqual([{ kind: 'tier_set_recorded', locator: 'telegram:chat-1:m7', expected: { provider: 'telegram', providerItemId: 'm7', providerConversationId: 'chat-1' } }]);
+    refuse = true;
+    await expect(setPrivate({ locator: 'telegram:chat-1:m8', provider: 'telegram', providerItemId: 'm8' })).rejects.toThrow('no longer names');
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0060', command: { kind: 'tier_set_recorded', locator: 'x', expected: { provider: 'telegram' } } })).toThrow('recorded provider and item');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/setItemPrivate: engineFront\s*\?\s*frontSetItemPrivate\(engineFront\.client\)/);
+    expect(server).toMatch(/tier_set_recorded: async \(\{ locator, expected \}\) => \{[\s\S]{0,200}?runTierSetOnRecordedItem\(locator, 'private', expected\)/);
   });
 });
 
