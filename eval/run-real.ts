@@ -26,6 +26,8 @@
 // Set OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true to include model-planned
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
+import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
+import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -188,6 +190,9 @@ async function main(): Promise<void> {
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
   const queryPlanner = queryPlannerEnabled ? createAnalystQueryPlanner(model) : undefined;
+  // Off unless OLYMPUS_SOURCE_RERANKER=built-in names a reranker model
+  // directory, so one corpus can be measured with and without it (issue #921).
+  const reranker = builtInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const traces: PrecisionTrace[] = [];
@@ -200,6 +205,7 @@ async function main(): Promise<void> {
         question: question.question,
         lanes,
         ...(queryPlanner ? { queryPlanner } : {}),
+        ...(reranker ? { reranker } : {}),
         maxResults,
         // Keep local-model prompts bounded for an eval gate. Truncation is
         // reported as a coverage gap; raise this only for targeted diagnosis.
@@ -249,6 +255,7 @@ async function main(): Promise<void> {
       writeEvalReport(reportPath, datasetPath, partial, traces, {
         ...reportConfig,
         retrieval,
+        reranker: reranker?.id ?? 'off',
       }, { partial: true });
     },
   });
@@ -256,6 +263,7 @@ async function main(): Promise<void> {
   writeEvalReport(reportPath, datasetPath, report, traces, {
     ...reportConfig,
     retrieval,
+    reranker: reranker?.id ?? 'off',
   }, { partial: false });
 
   console.log(JSON.stringify(report, null, 2));
@@ -405,6 +413,7 @@ export function buildEvalPack(input: {
   question: string;
   lanes: (question: string) => AnalystAnswerLanes;
   queryPlanner?: AnalystQueryPlanner;
+  reranker?: EvidenceReranker;
   maxResults: number;
   maxCharsPerCandidate: number;
 }): Promise<EvidencePackBuildDetail> {
@@ -412,6 +421,7 @@ export function buildEvalPack(input: {
   return buildEvidencePackDetailed({
     question: input.question,
     ...(input.queryPlanner ? { queryPlanner: input.queryPlanner } : {}),
+    ...(input.reranker ? { reranker: input.reranker } : {}),
     maxResults: input.maxResults,
     maxCharsPerCandidate: input.maxCharsPerCandidate,
     searchContext: {
@@ -921,6 +931,7 @@ function writeEvalReport(
     maxResults: number;
     maxCharsPerCandidate: number;
     retrieval?: EvalReportRetrieval;
+    reranker?: string;
   },
   options: { partial: boolean },
 ): void {
@@ -937,6 +948,7 @@ function writeEvalReport(
       maxResults: config.maxResults,
       maxCharsPerCandidate: config.maxCharsPerCandidate,
       ...(config.retrieval ? { retrieval: config.retrieval } : {}),
+      ...(config.reranker ? { reranker: config.reranker } : {}),
       report,
       precision: {
         traces,

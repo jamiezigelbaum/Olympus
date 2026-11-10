@@ -6,6 +6,7 @@
 // typed Private-part outcomes, a metadata-only local probe and one fixed
 // sentence on a match.
 
+import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -714,6 +715,8 @@ describe('probePrivateMatch: metadata only, the request\'s own selectors', () =>
         sql.push(statement);
         return query(statement);
       };
+      // The keyword search reads on the read pool (#1079): its statements are seen there.
+      setReadPoolObserverForTests((_, read) => sql.push(read.sql));
       const adapter = createConnectorStoreCorpusAdapter({ store: connectorStore, retrievalMode: 'keyword' });
       const lanes = (overrides: Partial<AnalystAnswerLanes> = {}) => () => ({
         registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' })]),
@@ -724,6 +727,7 @@ describe('probePrivateMatch: metadata only, the request\'s own selectors', () =>
       }) as unknown as AnalystAnswerLanes;
       await run({ connectorStore, sql, lanes, contentReads: () => reads, adapter });
     } finally {
+      setReadPoolObserverForTests();
       connectorStore.close();
     }
   }

@@ -6693,7 +6693,6 @@ function isExecutableFile(path) {
   }
 }
 var init_openclaw_executable = () => {};
-
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
@@ -18283,6 +18282,14 @@ var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTRO
 var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
 });
+
+// src/workers/connector-store/off-thread-reads.ts
+var queues, releases;
+var init_off_thread_reads = __esm(() => {
+  queues = new Map;
+  releases = new Map;
+});
+
 // src/core/store-identity.ts
 var init_store_identity = __esm(() => {
   init_archive_formats();
@@ -18775,6 +18782,7 @@ var init_local_index = __esm(() => {
   init_keyword_languages();
   init_keyword_expansion();
   init_control_path_headroom();
+  init_off_thread_reads();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -19943,6 +19951,9 @@ var init_analyst_openclaw_infer = __esm(() => {
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
+// src/core/evidence-reranker.ts
+var init_evidence_reranker = () => {};
+
 // src/core/parent-label.ts
 var init_parent_label = __esm(() => {
   init_types();
@@ -19952,6 +19963,7 @@ var init_parent_label = __esm(() => {
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
   init_router();
@@ -27120,6 +27132,19 @@ init_operation_caller();
 init_source_corpus_registry();
 init_source_watch();
 init_worker_auth();
+
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  const one = pendingItems === 1;
+  if (audience === "local") {
+    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
+  }
+  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+
+// src/core/email.ts
 var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
 var MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
 var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
@@ -27901,6 +27926,7 @@ function parseSourceIndexSearchResult(value, context) {
     throw new OperationError("email_error", "source index locator policy requires at least one released locator.");
   }
   const secretLocations = parseSecretLocations(value.secret_locations);
+  const privacyNote = typeof audit.pending_privacy_items === "number" ? privacyBacklogCoverageNote(audit.pending_privacy_items, "local") : undefined;
   const searchedCorpora = Array.isArray(audit.searched_corpora) ? audit.searched_corpora.filter((corpus2) => typeof corpus2 === "string") : undefined;
   return {
     kind: "source_index_search",
@@ -27908,6 +27934,7 @@ function parseSourceIndexSearchResult(value, context) {
     retrieval_source: "local_index",
     hits: value.hits,
     ...secretLocations ? { secret_locations: secretLocations } : {},
+    ...privacyNote ? { coverage_notes: [privacyNote] } : {},
     audit: {
       ...searchedCorpora ? { searched_corpora: searchedCorpora } : {},
       request_id: requiredString3(audit.request_id, "audit.request_id"),

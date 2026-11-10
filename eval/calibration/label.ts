@@ -34,8 +34,19 @@ const flag = (name: string) => {
 };
 const dir = flag('--dir') ?? CALIBRATION_DIR_DEFAULT;
 const importancePass = argv.includes('--importance');
+const sample = readSample(dir);
+/** A whole-item sample (sample-whole.ts): the whole item is shown, and Private carries its importance. */
+const wholePass = !importancePass && (sample.recipe as { kind?: string } | undefined)?.kind === 'whole-item';
 /** A choice on the page: what is saved, what it reads, its key, and the button style it borrows. */
-const CHOICES = importancePass
+const CHOICES = wholePass
+  ? [
+      { label: 'personal', name: 'Personal', key: 'P', style: 'personal' },
+      { label: 'private_important', name: 'Private: important', key: 'I', style: 'private' },
+      { label: 'private_minor', name: 'Private: minor', key: 'M', style: 'private' },
+      { label: 'secret', name: 'Secret', key: 'X', style: 'skip' },
+      { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
+    ]
+  : importancePass
   ? [
       { label: 'important', name: 'Important', key: 'I', style: 'private' },
       { label: 'minor', name: 'Minor', key: 'M', style: 'personal' },
@@ -48,8 +59,23 @@ const CHOICES = importancePass
       { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
       { label: 'skip', name: 'Skip', key: 'S', style: 'skip' },
     ];
-const HEADING = importancePass ? 'Olympus calibration: how much does this Private item matter?' : 'Olympus calibration: Personal or Private?';
-const RULE = importancePass
+/** Whole-item pass: where the sensitive part of a Private or Secret item is, asked after the label. */
+const WHERE = [
+  { where: 'excerpt', name: 'In the highlighted part', key: 'E' },
+  { where: 'outside', name: 'Only outside it', key: 'O' },
+  { where: 'attachment', name: 'In an attachment', key: 'A' },
+  { where: 'names', name: 'In the name or sender', key: 'T' },
+];
+const HEADING = wholePass ? 'Olympus calibration: the whole item' : importancePass ? 'Olympus calibration: how much does this Private item matter?' : 'Olympus calibration: Personal or Private?';
+const RULE = wholePass
+  ? `<details class="rule"><summary>How to label</summary>
+<p><b>Personal</b>: everything that is not Private, including articles, guides and work on sensitive topics.</p>
+<p><b>Private</b>: a real person's own information (records, results, statements, bills, tax and bank papers, contracts, filled-in forms, identity documents, intimate or family matters).
+<b>Important</b> must stay Private (a full lab report, a tax return); <b>minor</b> is Private but a rare slip would be acceptable (a meal receipt).</p>
+<p><b>Secret</b>: passwords, keys, recovery codes, card or account numbers that unlock something.</p>
+<p>Label the <b>whole item</b>: all of its text, its attachments and its name. The highlighted part is what the private judge reads.
+For Private or Secret, then say where the sensitive part is.</p></details>`
+  : importancePass
   ? `<details class="rule" open><summary>What counts as Important</summary>
 <p><b>Important</b>: the things that must stay Private, such as a full blood lab report, full tax returns or a complete bank statement.</p>
 <p><b>Minor</b>: Private, but a rare slip would be acceptable, such as a meal receipt, an Uber receipt or a casual question to a doctor.</p>
@@ -60,13 +86,12 @@ tax and bank papers, contracts and legal papers about them, filled-in forms, ide
 <p><b>Personal</b>: everything else, including books, articles, guides, courses and program rules on sensitive topics
 (health, money, law, psychology), work, plans, notes and hobbies.</p>
 <p>Judge the file as it is. Nothing here changes Olympus; labels only measure it.</p></details>`;
-const sample = readSample(dir);
 const ownerLabels = readLabels(dir);
 // A corrected item stays listed, so a slip of the P key can be undone.
 const items = importancePass
   ? sample.items.filter((item) => ownerLabels.labels[item.id]?.label === 'private' || ownerLabels.labels[item.id]?.correctedInImportancePass)
   : sample.items;
-const labels: { labels: Record<string, { label: string; at: string }> } = importancePass ? readImportance(dir) : ownerLabels;
+const labels: { labels: Record<string, { label: string; at: string; importance?: string; where?: string }> } = importancePass ? readImportance(dir) : ownerLabels;
 const save = () => (importancePass ? writeImportance(dir, labels as CalibrationImportance) : writeLabels(dir, labels as CalibrationLabels));
 /** Importance pass: P turns the item's owner label to Personal and clears its tag; any other answer undoes that. */
 function applyCorrection(id: string, label: string | null | undefined): void {
@@ -80,9 +105,35 @@ function applyCorrection(id: string, label: string | null | undefined): void {
   writeLabels(dir, ownerLabels);
 }
 /** What the page shows as answered: a corrected item has no tag, so its label stands in. */
-const pageLabels = () => (importancePass
+const pageLabels = () => (wholePass
+  ? Object.fromEntries(Object.entries(labels.labels).map(([id, entry]) => [id, { ...entry, label: wholeChoiceOf(entry as WholeEntry) }]))
+  : importancePass
   ? { ...labels.labels, ...Object.fromEntries(items.flatMap((item) => (ownerLabels.labels[item.id]?.correctedInImportancePass ? [[item.id, ownerLabels.labels[item.id]]] : []))) }
   : labels.labels);
+type WholeEntry = CalibrationLabels['labels'][string];
+/** The page's choice for a stored whole-item label, and back. */
+function wholeChoiceOf(entry: WholeEntry): string {
+  return entry.label === 'private' ? `private_${entry.importance ?? 'minor'}` : entry.label;
+}
+function wholeEntryOf(choice: string, before: WholeEntry | undefined): WholeEntry {
+  const at = new Date().toISOString();
+  const keepWhere = before?.where && (choice.startsWith('private_') || choice === 'secret') ? { where: before.where } : {};
+  if (choice.startsWith('private_')) return { label: 'private', importance: choice.slice('private_'.length) as 'important' | 'minor', at, ...keepWhere };
+  return { label: choice as WholeEntry['label'], at, ...keepWhere };
+}
+/** Everything the owner sees of one whole item. Sent one item at a time: long documents stay whole. */
+function wholeView(item: (typeof items)[number]) {
+  const detail = item.whole!;
+  return {
+    text: item.text,
+    truncatedChars: detail.truncatedChars,
+    judgeSees: item.judgeSees,
+    judgeReadsAll: detail.judgeReadsAll,
+    long: item.judgeSees === undefined ? undefined : longMessageView(item.text, item.judgeSees, item.text.length),
+    extraction: detail.extraction,
+    children: detail.children.map((child) => ({ name: child.name, mimeType: child.mimeType, text: child.text, truncatedChars: child.truncatedChars, extraction: child.extraction })),
+  };
+}
 // A fixed --token keeps the link working when the labeler is restarted.
 const token = flag('--token') ?? randomBytes(16).toString('hex');
 const byId = new Map(items.map((item) => [item.id, item]));
@@ -115,17 +166,36 @@ const server = Bun.serve({
           source: item.source,
           judgeSees: item.judgeSees,
           context: item.context,
-          long: item.judgeSees === undefined ? undefined : longMessageView(item.text, item.judgeSees, EXCERPT_CHARS),
+          long: wholePass || item.judgeSees === undefined ? undefined : longMessageView(item.text, item.judgeSees, EXCERPT_CHARS),
+          whole: wholePass ? true : undefined,
+          extraction: item.whole?.extraction?.outcome,
+          attachments: item.whole?.children.length,
         })),
         labels: pageLabels(),
       }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (request.method === 'GET' && route === '/whole' && wholePass) {
+      const item = byId.get(url.searchParams.get('id') ?? '');
+      if (!item?.whole) return new Response('Unknown item', { status: 400 });
+      return Response.json(wholeView(item), { headers: { 'cache-control': 'no-store' } });
+    }
+    if (request.method === 'POST' && route === '/where' && wholePass) {
+      const body = await request.json() as { id?: string; where?: string };
+      const entry = body.id ? labels.labels[body.id] as WholeEntry | undefined : undefined;
+      if (!entry || !(entry.label === 'private' || entry.label === 'secret')) return new Response('Label it Private or Secret first', { status: 400 });
+      if (!WHERE.some((choice) => choice.where === body.where)) return new Response('Unknown answer', { status: 400 });
+      labels.labels[body.id!] = { ...entry, where: body.where as NonNullable<WholeEntry['where']> };
+      save();
+      return Response.json({ ok: true });
     }
     if (request.method === 'POST' && route === '/label') {
       const body = await request.json() as { id?: string; label?: string | null };
       if (!body.id || !byId.has(body.id)) return new Response('Unknown item', { status: 400 });
       if (body.label === null) delete labels.labels[body.id];
       else if (CHOICES.some((choice) => choice.label === body.label)) {
-        labels.labels[body.id] = { label: body.label!, at: new Date().toISOString() };
+        labels.labels[body.id] = wholePass
+          ? wholeEntryOf(body.label!, labels.labels[body.id] as WholeEntry | undefined)
+          : { label: body.label!, at: new Date().toISOString() };
       } else return new Response('Unknown label', { status: 400 });
       if (importancePass) applyCorrection(body.id, body.label);
       save();
@@ -203,6 +273,8 @@ ${RULE}
 const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 let items = [], labels = {}, index = 0;
 const CHOICES = ${JSON.stringify(CHOICES)};
+const WHERE = ${JSON.stringify(WHERE)};
+const wholeCache = {};
 const NAMES = Object.fromEntries(CHOICES.map((c) => [c.label, c.name]));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
@@ -224,6 +296,7 @@ function render() {
     return;
   }
   const it = items[index];
+  if (it.whole) return renderWhole(view, it);
   const chosen = labels[it.id]?.label;
   const judged = it.judgeSees !== undefined;
   view.innerHTML = '<div class="card">' + (judged ?
@@ -250,6 +323,62 @@ function render() {
   document.getElementById('nextOpen').onclick = nextUnlabeled;
   if (!judged) document.getElementById('reveal').onclick = reveal;
 }
+const needsWhere = (label) => label === 'secret' || String(label || '').startsWith('private_');
+function renderWhole(view, it) {
+  const detail = wholeCache[it.id];
+  if (!detail) {
+    view.innerHTML = '<div class="card"><div class="meta">Loading the whole item…</div></div>';
+    fetch(base + 'whole?id=' + encodeURIComponent(it.id), { cache: 'no-store' }).then((r) => r.json()).then((d) => {
+      wholeCache[it.id] = d;
+      if (items[index] === it) render();
+    }).catch(() => stopLabeling());
+    return;
+  }
+  const entry = labels[it.id];
+  const chosen = entry?.label;
+  const failed = detail.extraction && detail.extraction.outcome === 'failed';
+  const readNote = (x) => !x ? '' : x.outcome === 'failed' ? 'Olympus could not read its text (' + esc(x.status) + (x.errorKind ? ', ' + esc(x.errorKind) : '') + ')'
+    : x.outcome === 'ocr' ? 'Text read from a scan or picture (OCR)' : x.outcome === 'transcript' ? 'Text transcribed from audio' : x.outcome === 'pending' ? 'Not read yet' : '';
+  const body = detail.long ? longBlock(detail.long)
+    : '<div class="meta long-note">' + (detail.judgeSees === undefined ? 'The private judge is not asked about this text.' : 'The private judge reads all of this text.') + '</div>' +
+      '<pre>' + esc(detail.text || '(no text)') + '</pre>';
+  view.innerHTML = '<div class="card">' +
+    '<div class="name">' + esc(it.name) + '</div>' +
+    '<div class="meta">' + esc(it.folder || '(top level)') + ' · ' + esc(it.source || '') + '</div>' +
+    '<div class="meta">' + fmtSize(it.sizeBytes) + ' · ' + esc((it.modifiedAt || '').slice(0, 10)) + ' · item ' + (index + 1) + ' of ' + items.length +
+      (detail.children.length ? ' · ' + detail.children.length + ' attachment' + (detail.children.length === 1 ? '' : 's') : '') + '</div>' +
+    (readNote(detail.extraction) ? '<div class="long-badge"' + (failed ? ' style="background:#c00;color:#fff"' : '') + '>' + readNote(detail.extraction) + '</div>' : '') +
+    (chosen ? '<div class="current">Labeled: <b>' + NAMES[chosen] + '</b>' + (entry.where ? ' · ' + esc(WHERE.find((w) => w.where === entry.where)?.name || '') : '') + '</div>' : '') +
+    body +
+    (detail.truncatedChars ? '<div class="meta">' + detail.truncatedChars.toLocaleString() + ' more characters are not shown.</div>' : '') +
+    (detail.judgeSees !== undefined ? '<details class="rule"><summary>Exactly what the private judge reads</summary><pre>' + esc(detail.judgeSees) + '</pre></details>' : '') +
+    detail.children.map((c) => '<div class="context" style="opacity:1"><div class="context-tag">Attachment · ' + esc(c.name) + ' · ' + esc(c.mimeType) +
+      (readNote(c.extraction) ? ' · ' + readNote(c.extraction) : '') + '</div><pre>' + esc(c.text || '(no text)') + '</pre>' +
+      (c.truncatedChars ? '<div class="meta">' + c.truncatedChars.toLocaleString() + ' more characters are not shown.</div>' : '') + '</div>').join('') +
+    '<div class="buttons">' +
+      CHOICES.map((c) => '<button class="label ' + c.style + (chosen === c.label ? ' chosen' : '') + '" data-label="' + c.label + '">' + c.name + '<kbd>' + c.key + '</kbd></button>').join('') +
+    '</div>' +
+    (needsWhere(chosen) ? '<div class="meta long-note">Where is the sensitive part?</div><div class="buttons">' +
+      WHERE.map((w) => '<button class="' + (entry.where === w.where ? 'chosen' : '') + '" data-where="' + w.where + '">' + w.name + '<kbd>' + w.key + '</kbd></button>').join('') + '</div>' : '') +
+    '<div class="nav"><button id="prev">← Previous</button><button id="next">Next →</button><button id="nextOpen">Next unlabeled<kbd>N</kbd></button></div></div>';
+  for (const b of view.querySelectorAll('button[data-label]')) b.onclick = () => choose(b.dataset.label);
+  for (const b of view.querySelectorAll('button[data-where]')) b.onclick = () => chooseWhere(b.dataset.where);
+  document.getElementById('prev').onclick = () => { index = Math.max(0, index - 1); render(); };
+  document.getElementById('next').onclick = () => { index = Math.min(items.length, index + 1); render(); };
+  document.getElementById('nextOpen').onclick = nextUnlabeled;
+}
+function chooseWhere(where) {
+  const it = items[index];
+  if (!labels[it.id] || !needsWhere(labels[it.id].label)) return;
+  labels[it.id] = { ...labels[it.id], where };
+  nextUnlabeled();
+  saving = saving.then(async () => {
+    try {
+      const res = await fetch(base + 'where', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: it.id, where }) });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch { stopLabeling(); }
+  });
+}
 function longBlock(long) {
   const note = long.located ? 'Highlighted: what the judge reads. Dimmed: what it does not. Label the whole message.' :
     'The judge reads only part of this, but those parts could not be marked. Label the whole message.';
@@ -275,8 +404,9 @@ let saving = Promise.resolve();
 function choose(label) {
   const it = items[index];
   const before = labels[it.id];
-  labels[it.id] = { label, at: new Date().toISOString() };
-  nextUnlabeled();
+  labels[it.id] = { label, at: new Date().toISOString(), ...(before && before.where && needsWhere(label) ? { where: before.where } : {}) };
+  // A whole item labeled Private or Secret stays up for the where question.
+  if (it.whole && needsWhere(label)) render(); else nextUnlabeled();
   saving = saving.then(async () => {
     try {
       const res = await fetch(base + 'label', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: it.id, label }) });
@@ -306,7 +436,10 @@ document.addEventListener('keydown', (e) => {
   if (stopped || e.metaKey || e.ctrlKey || e.altKey || index >= items.length) return;
   const k = e.key.toLowerCase();
   const map = Object.fromEntries(CHOICES.map((c) => [c.key.toLowerCase(), c.label]));
-  if (map[k]) { e.preventDefault(); choose(map[k]); }
+  const it = items[index];
+  const where = it.whole && needsWhere(labels[it.id]?.label) ? WHERE.find((w) => w.key.toLowerCase() === k) : undefined;
+  if (where) { e.preventDefault(); chooseWhere(where.where); }
+  else if (map[k]) { e.preventDefault(); choose(map[k]); }
   else if (k === 'n') nextUnlabeled();
   else if (k === 'f') reveal();
   else if (e.key === 'ArrowLeft') { index = Math.max(0, index - 1); render(); }
