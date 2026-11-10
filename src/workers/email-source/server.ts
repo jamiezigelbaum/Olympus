@@ -106,6 +106,7 @@ import {
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
 import {
+  dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
@@ -7325,6 +7326,9 @@ export async function main(): Promise<void> {
         requireOwnerSocket: !!socketPath,
         // Any marker, verified or not, refuses approval (fails closed).
         isRelayed: carriesRelayMarker,
+        // Approving from a browser off the owner socket needs the owner's
+        // dashboard session, checked with the same keys that sign it (#1186).
+        ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,

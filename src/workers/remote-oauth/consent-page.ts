@@ -174,6 +174,10 @@ ${TERMS_ASSENT}
 
 export interface LoopbackConsentPageInput {
   platform?: NodeJS.Platform;
+  /** Where the form posts (handler.ts approvalAction); `/connect/authorize` when absent. */
+  action?: string;
+  /** The last Connect came without the owner's dashboard session: say how to open it. */
+  ownerNeeded?: boolean;
   requestId: string;
   csrf: string;
   clientName: string;
@@ -193,12 +197,21 @@ export interface LoopbackConsentPageInput {
 
 /**
  * Relay mode's approval: one click on the owner's own Mac. The wording says
- * exactly what the client gets, and what it never gets.
+ * exactly what the client gets, and what it never gets. Where there is no
+ * owner socket the click also needs the owner's dashboard session in this
+ * browser (#1186); without one the page says how to open the dashboard.
  */
 export function renderLoopbackConsentPage(input: LoopbackConsentPageInput): { body: string; headers: Record<string, string> } {
   const nonce = randomBytes(16).toString('base64');
   const name = escapeHtml(input.clientName);
   const computer = (input.platform ?? process.platform) === 'linux' ? 'computer' : 'Mac';
+  const ownerNeeded = input.ownerNeeded
+    ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
+<p>${computer === 'Mac'
+      ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.'
+      : 'Run <code>olympus dashboard</code> and open its link here.'} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
+`
+    : '';
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -228,10 +241,10 @@ ${input.chatgpt
     : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="/connect/authorize">
+<form method="post" action="${escapeHtml(input.action ?? '/connect/authorize')}">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
-${TERMS_ASSENT}
+${ownerNeeded}${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
