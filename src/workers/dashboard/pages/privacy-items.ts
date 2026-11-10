@@ -268,7 +268,8 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
 
   function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
   function find(id) { for (var i = 0; i < items.length; i += 1) if (items[i].item_id === id) return items[i]; return null; }
-  function shown(item) { var change = changes[item.item_id]; return change ? change.chosen : item.tier; }
+  // The owner's latest choice wins over the recorded label while it waits for the next pass.
+  function shown(item) { var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
   function changedByYou(item) { return !!changes[item.item_id] || item.owner_set === true; }
   function logo(item, small) {
     var tile = config.logos[item.source];

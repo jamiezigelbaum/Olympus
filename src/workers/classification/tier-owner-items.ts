@@ -61,6 +61,11 @@ export interface OwnerTierItem {
   decided_by: string | null;
   /** The owner set this item by hand, and it is held there. */
   owner_set: boolean;
+  /**
+   * The owner's choice, when it is not yet the recorded label (a lowering
+   * waits for the next pass): what the owner last chose, so a page shows it.
+   */
+  owner_choice?: string;
   /** The judge's stored reason code (its category and confidence), where the judge decided it. */
   judge_reason: string | null;
   decided_at: string | null;
@@ -184,11 +189,13 @@ interface ItemState {
 
 /**
  * Whether the item's names are, or are about to be, above Personal: decided
- * so, moving there, or set so by the owner. Nothing recorded counts as above.
+ * so, moving there, set so by the owner, or still awaiting their verdict.
+ * Nothing recorded counts as above.
  */
 function namesAbovePersonal(state: ItemState): boolean {
   const { record } = state;
-  if (!record) return true;
+  // Names still awaiting their verdict are held Private, as everywhere else (createReleaseTierCheck).
+  if (!record || record.metadataPending) return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier]
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
@@ -421,6 +428,8 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     ...(record?.state === 'moving' && record.targetContentTier ? { moving_to: tierDisplayName(record.targetContentTier) } : {}),
     decided_by: record?.decidedBy ?? null,
     owner_set: state.ownerSet,
+    ...(state.ownerTier && (!record || (record.contentTier !== state.ownerTier && record.targetContentTier !== state.ownerTier))
+      ? { owner_choice: tierDisplayName(state.ownerTier) } : {}),
     judge_reason: judgeReason(record),
     decided_at: record?.decidedAt ?? null,
   };

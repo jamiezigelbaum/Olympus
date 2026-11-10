@@ -20,7 +20,7 @@ const URL_ITEMS = new URL('http://127.0.0.1:8010/dashboard?privacy-items');
 interface Item {
   item_id: string; source: string; family: string; title: string | null; sender: string | null; location: string | null;
   tier: string | null; names_tier: string | null; decided_by: string | null; owner_set: boolean; judge_reason: string | null;
-  decided_at: string | null; preview?: string | null;
+  decided_at: string | null; preview?: string | null; owner_choice?: string;
 }
 
 const invoice = (): Item => ({
@@ -190,6 +190,14 @@ describe('the filters', () => {
 });
 
 describe('changing one item', () => {
+  test('a Personal choice waiting for its pass shows after a reload, and Private can still be chosen', async () => {
+    // Recorded Private, the owner chose Personal, and the page was reloaded before the pass.
+    const p = await page([{ ...invoice(), owner_set: true, owner_choice: 'Personal' }]);
+    await p.click('[data-pi-item="oti_inv"]');
+    await p.click('[data-pi-choose="Private"]');
+    expect(p.sets()).toEqual([{ item_id: 'oti_inv', tier: 'private' }]);
+  });
+
   test('raising to Private asks nothing and changes it at once', async () => {
     const p = await page([appointment()]);
     await p.click('[data-pi-item="oti_appt"]');

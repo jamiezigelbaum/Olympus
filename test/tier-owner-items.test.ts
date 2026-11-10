@@ -275,6 +275,20 @@ describe('finding an item', () => {
     expect(ownerItems().find({ query: 'orchard-plan', personalNamesOnly: true }).items).toEqual([]);
     expect(ownerItems().find({ query: 'orchard-plan' }).items).toHaveLength(1);
   });
+
+  test('for an agent, an item whose names still await their verdict is left out', async () => {
+    const install = await judged();
+    const current = install.lane.ledger.getCurrent(bankIdentity)!;
+    // The names are re-asked: pending, recorded at the default tier until answered.
+    install.lane.ledger.recordRoutedPlacement(bankIdentity, {
+      metadataTier: 'private', contentTier: current.contentTier, decidedBy: 'sniffer', reasons: [], state: 'pending',
+      contentRead: true, metadataPending: true, contentPending: false, metadataForced: false, metadataFlagged: true,
+      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: 'test',
+    }, { copies: [], embedHold: false }, { staleCopiesGone: true });
+    expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ metadataPending: true, metadataTier: 'private' });
+    expect(ownerItems().find({ query: 'bank', personalNamesOnly: true }).items).toEqual([]);
+    expect(ownerItems().find({ query: 'bank' }).items).toHaveLength(1);
+  });
 });
 
 describe('one item, Private -> Personal -> Private', () => {
@@ -290,10 +304,13 @@ describe('one item, Private -> Personal -> Private', () => {
 
     // The owner, on the dashboard: Personal. It applies at the next pass and then serves.
     expect(ownerItems().set({ itemId, choice: 'personal', allowLower: true })).toMatchObject({ ok: true, changed: 'set', applies: 'next_pass' });
+    // Until that pass, a reload still shows what the owner chose.
+    expect(bankItem()).toMatchObject({ tier: 'Private', owner_choice: 'Personal', owner_set: true });
     await install.service.runOnce();
     expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private', decidedBy: 'override' });
     expect(await search(install, 'loan terms')).toContain(LOAN_TEXT);
     expect(bankItem()).toMatchObject({ tier: 'Personal', decided_by: 'override', owner_set: true });
+    expect(bankItem().owner_choice).toBeUndefined();
 
     // A re-judge leaves the owner's word alone, whatever the judge would say now.
     ownerWords = 'Anything about money is private.';
