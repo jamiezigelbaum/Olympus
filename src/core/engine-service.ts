@@ -8,6 +8,7 @@ import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayo
 import { processInstanceIdentity } from './file-lease.ts';
 import { resolveLinuxEngineLayout, preflightLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
 import { workerFetch } from './worker-transport.ts';
+import { isReleaseVersion, newerVersion } from './update-check.ts';
 /**
  * The standalone Olympus engine on macOS: a LaunchAgent by default, or an
  * optional LaunchDaemon running as the same account. Both run
@@ -30,7 +31,7 @@ import { workerFetch } from './worker-transport.ts';
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import {
@@ -389,6 +390,8 @@ export interface EngineServiceOptions {
   quietWaitMs?: number;
   /** Test-only dependency injection for crash-boundary lifecycle proof. Never populated from env or CLI. */
   lifecycleCheckpoint?: (name: EngineLifecycleCheckpoint) => void;
+  /** Test seams for putting back a helper an interrupted install-helper left aside. */
+  helperRecovery?: HelperRecoveryDeps;
 }
 export type EngineLifecycleCheckpoint =
   | 'linger_receipt_published' | 'linger_enabled' | 'receipt_published' | 'journal_published' | 'staging_identity_published'
@@ -541,6 +544,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
     ...(options.bunBin ? { bunBin: options.bunBin } : {}),
     ...(options.cwd ? { cwd: options.cwd } : {}),
   });
+  if (!options.dryRun) recoverInterruptedHelperSwap(paths, options.helperRecovery);
   const helperPath = installedEngineHelper(paths);
   const program: EngineProgram = helperPath ? { ...baseProgram, helperPath } : baseProgram;
   // A daemon plist is immutable across builds, including its owner and group.
@@ -1259,6 +1263,7 @@ export function startEngine(options: EngineServiceOptions = {}): { ok: true; act
     if (status.status === 0 && parseLaunchctlPrint(status.stdout).state === 'running') return { ok: true, action: 'already_running' };
     throw new OperationError('config_error', 'Olympus server mode is not running. Turn it off and on again in Keys to let your Mac repair it.');
   }
+  recoverInterruptedHelperSwap(paths, options.helperRecovery);
   mustSucceed(exec('launchctl', ['enable', target]), 'enable the engine agent');
   if (launchctlLoaded(exec, target)) return { ok: true, action: 'already_running' };
   bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, false);
@@ -1316,6 +1321,7 @@ async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin
   preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, 'The previous app');
   assertFile(join(paths.previousAppDir, 'dist', 'cli.js'), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
+  if (paths.engineManager === 'daemon') assertServerModeCanRunPrevious(paths.previousAppDir);
   const bunBin = options.bunBin ?? installed.runtimePath;
 
   swapAppDirectories(paths);
@@ -1383,6 +1389,31 @@ async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin
   };
 }
 
+/** The first release whose host reads its build from the installed app when server mode starts it. */
+const SERVER_MODE_MIN_ROLLBACK_VERSION = '1.3.2';
+
+/**
+ * Server mode's daemon sets no OLYMPUS_ENGINE_BUILD, and a host from before
+ * 1.3.2 reads its build only from that variable, so it would fail the health
+ * check and the rollback would undo itself (#768). Refuse before changing
+ * anything, and say how to get there. An unreadable version counts as too old.
+ */
+function assertServerModeCanRunPrevious(previousAppDir: string): void {
+  let version: string | undefined;
+  try {
+    const manifest = JSON.parse(readFileSync(join(previousAppDir, 'package.json'), 'utf8')) as { version?: unknown };
+    if (typeof manifest.version === 'string' && isReleaseVersion(manifest.version)) version = manifest.version;
+  } catch {
+    version = undefined;
+  }
+  if (version && !newerVersion(SERVER_MODE_MIN_ROLLBACK_VERSION, version)) return;
+  throw new OperationError(
+    'config_error',
+    `The previous Olympus (${version ?? 'an unknown version'}) is older than ${SERVER_MODE_MIN_ROLLBACK_VERSION} and cannot run in server mode, so nothing was changed. Turn server mode off in Keys, then roll back again.`,
+    'Turn off “Keep Olympus running when no one is logged in” in Keys, then run olympus engine rollback.',
+  );
+}
+
 /**
  * Exchange app/ and app.previous/ with three renames, undone in reverse if
  * one fails, so app/ is never missing for longer than one rename and never lost.
@@ -1403,6 +1434,73 @@ function swapAppDirectories(paths: EnginePaths): void {
     renameSync(parking, paths.appDir);
     throw error;
   }
+}
+
+/** install-helper stages in `<app support>/.helper-<pid>-XXXXXX`; the old app waits there as previous.app. */
+export const ENGINE_HELPER_STAGING_PREFIX = '.helper-';
+export const ENGINE_HELPER_ASIDE_NAME = 'previous.app';
+
+export interface HelperRecoveryDeps {
+  /** Whether the install-helper that owns a staging folder is still running; defaults to signal 0. */
+  pidAlive?: (pid: number) => boolean;
+  rename?: (from: string, to: string) => void;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Finish what an install-helper stopped part way through left (#693). When it
+ * stopped after moving the installed helper aside but before the new one was
+ * renamed in, there is no helper and the old one waits in a staging folder:
+ * put it back. Staging folders of runs that are over are removed. A folder
+ * whose install-helper is still running is left alone, so two runs at once do
+ * not undo each other. Run it before anything reads or starts the helper.
+ */
+export function recoverInterruptedHelperSwap(paths: EnginePaths, deps: HelperRecoveryDeps = {}): 'restored' | 'cleaned' | 'none' {
+  const target = paths.helperAppPath;
+  if (!target) return 'none';
+  let names: string[];
+  try {
+    names = readdirSync(paths.appSupportDir).filter(name => name.startsWith(ENGINE_HELPER_STAGING_PREFIX));
+  } catch {
+    return 'none';
+  }
+  const alive = deps.pidAlive ?? processAlive;
+  const rename = deps.rename ?? renameSync;
+  const exists = (path: string): boolean => {
+    try { lstatSync(path); return true; } catch { return false; }
+  };
+  const over = names.filter(name => {
+    const pid = Number(/^\.helper-(\d+)-/.exec(name)?.[1]);
+    // A folder from before the pid was in its name, or from this process, belongs to a run that is over.
+    return !(Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid && alive(pid));
+  });
+  if (over.length === 0) return 'none';
+  let result: 'restored' | 'cleaned' = 'cleaned';
+  if (!exists(target)) {
+    const aside = over
+      .map(name => join(paths.appSupportDir, name, ENGINE_HELPER_ASIDE_NAME))
+      .filter(path => { try { const stat = lstatSync(path); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; } })
+      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+    if (aside) {
+      try {
+        rename(aside, target);
+        result = 'restored';
+      } catch (error) {
+        // Another process recovering the same folder won the race: the helper is back.
+        if (!exists(target)) throw error;
+      }
+    }
+  }
+  for (const name of over) rmSync(join(paths.appSupportDir, name), { recursive: true, force: true });
+  return result;
 }
 
 /**

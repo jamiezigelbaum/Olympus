@@ -174,8 +174,8 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
           obs.archiveId = status.archives.find((archive) => archive.name === fx.fileName)?.id;
         }
         obs.stores = host.readStores(formatSpec(fx.format), obs.archiveId, fx.token);
-        if (obs.settled && args.drainS !== undefined) obs.drain = await drainWait(host, driver, fx, args.drainS * 1_000);
-        if (args.search) obs.search = await searchFor(host, fx);
+        if (obs.settled && args.drainS !== undefined) obs.drain = await drainWait(host, driver, fx, args.drainS * 1_000, (args.settleS ?? ARCHIVE_BOUNDS.settleS) * 1_000);
+        if (args.search) obs.search = obs.drain?.drained ? await searchAfterDrain(host, fx) : await searchFor(host, fx);
       } finally {
         if (watch) {
           const seen = watch.stop();
@@ -319,12 +319,34 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
   } catch (error) {
     return { ok: false, isError: true, evidence: [], error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160) };
   }
-  const record = (answer.structured && typeof answer.structured === 'object' ? answer.structured : {}) as { evidence?: unknown };
+  const record = (answer.structured && typeof answer.structured === 'object' ? answer.structured : {}) as { evidence?: unknown; notes?: unknown };
+  const stillChecking = Array.isArray(record.notes)
+    && record.notes.some((note) => typeof note === 'string' && note.startsWith('Olympus is still checking '));
   const evidence = (Array.isArray(record.evidence) ? record.evidence : []).map((entry: any) => ({
     source: typeof entry?.source === 'string' ? entry.source : '',
     hasToken: [entry?.excerpt, entry?.title].some((field) => typeof field === 'string' && field.includes(fx.token)),
   }));
-  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(answer.error ? { error: answer.error } : {}) };
+  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(stillChecking ? { stillChecking } : {}), ...(answer.error ? { error: answer.error } : {}) };
+}
+
+/** How long a search right after the drain may wait while the engine says it is still checking items. */
+const AFTER_DRAIN_CHECKING_BOUND_MS = 120_000;
+
+/**
+ * The search once an archive has drained (nothing waits for the private model): its items can
+ * still be on their way out of Private (a judged item's queued move), and the engine then says
+ * it is still checking (#1054). Asked again every ten seconds while it says so, within a bound;
+ * an empty result that does not say so is judged at once.
+ */
+export async function searchAfterDrain(host: ArchiveHost, fx: LegFixture): Promise<SearchView> {
+  const started = host.now();
+  for (;;) {
+    const search = await searchFor(host, fx);
+    const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
+    if (cited || !search.stillChecking || host.now() - started >= AFTER_DRAIN_CHECKING_BOUND_MS) return search;
+    host.say('search: the engine is still checking items for privacy; asking again in 10 s');
+    await host.sleep(10_000);
+  }
 }
 
 /**
@@ -346,7 +368,7 @@ export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundM
 }
 
 /** Waits until the archive has no message waiting for the private model, or the bound; reads the dashboard row after. */
-async function drainWait(host: ArchiveHost, driver: JourneyDriver, fx: LegFixture, boundMs: number): Promise<DrainView> {
+async function drainWait(host: ArchiveHost, driver: JourneyDriver, fx: LegFixture, boundMs: number, rowBoundMs: number): Promise<DrainView> {
   const started = host.now();
   const last: DrainView['last'] = {};
   let privateModel: string | undefined;
@@ -368,22 +390,45 @@ async function drainWait(host: ArchiveHost, driver: JourneyDriver, fx: LegFixtur
     await host.sleep(10_000);
   }
   const ms = host.now() - started;
-  let row: RowView | undefined;
-  try {
-    await driver.go('/dashboard');
-    row = await rowNow(host, driver, fx.fileName, 30_000);
-  } catch { /* the row stays unread; the check says so */ }
-  host.say(`drain: ${drained ? 'done' : 'NOT done'} after ${Math.round(ms / 1000)} s (${last.waiting ?? '?'} waiting)`);
-  return { drained, ms, boundMs, last, ...(privateModel ? { privateModel } : {}), ...(row ? { row } : {}) };
+  const read = await rowAfterDrain(host, driver, fx.fileName, rowBoundMs);
+  host.say(`drain: ${drained ? 'done' : 'NOT done'} after ${Math.round(ms / 1000)} s (${last.waiting ?? '?'} waiting)${read.problem ? `; row: ${read.problem}` : ''}`);
+  return { drained, ms, boundMs, last, ...(privateModel ? { privateModel } : {}), ...(read.row ? { row: read.row } : {}), ...(read.problem ? { rowProblem: read.problem } : {}) };
+}
+
+/** The least a second navigation gets to find the row, even when the first used up the bound. */
+export const ROW_RETRY_MIN_MS = 30_000;
+
+/**
+ * The dashboard row after a drain, read within the import's own settle bound (a busy machine redraws slowly: #647). The navigation
+ * is tried a second time when it threw or the row was still missing, and the row reads as missing only after that. `problem` says
+ * which part failed on each try (the navigation, or the row at the bound), and is set when a retry was needed even if it then worked.
+ */
+export async function rowAfterDrain(host: ArchiveHost, driver: JourneyDriver, fileName: string, boundMs: number): Promise<{ row?: RowView; problem?: string }> {
+  const deadline = host.now() + boundMs;
+  const problems: string[] = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const tryStarted = host.now();
+    try {
+      await driver.go('/dashboard');
+    } catch (error) {
+      problems.push(`navigation ${attempt} to the dashboard threw: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`);
+      continue;
+    }
+    const waitMs = attempt === 1 ? Math.max(0, deadline - host.now()) : Math.max(ROW_RETRY_MIN_MS, deadline - host.now());
+    const row = await rowNow(host, driver, fileName, waitMs);
+    if (row) return { row, ...(problems.length ? { problem: `${problems.join('; ')}; read after navigation ${attempt}` } : {}) };
+    problems.push(`after navigation ${attempt} the row was still missing at ${Math.round((host.now() - tryStarted) / 1000)} s`);
+  }
+  return { problem: problems.join('; ') };
 }
 
 /** The wait after the private model is back on: the held messages of an archive already imported. */
-export async function drainStage(host: ArchiveHost, args: { role: FixtureRole; format: string; seed: string; os: string; search?: boolean; boundS?: number }): Promise<ImportObservation> {
+export async function drainStage(host: ArchiveHost, args: { role: FixtureRole; format: string; seed: string; os: string; search?: boolean; boundS?: number; /** The row read after the drain; the import's settle bound by default. */ rowS?: number }): Promise<ImportObservation> {
   const fx = legFixture(args.role, args.seed, args.format);
   const obs: ImportObservation = { ok: false, role: fx.role, format: fx.format, fileName: fx.fileName, token: fx.token, via: 'request', traces: [], settled: true, settleMs: 0, stores: [] };
   try {
     await host.withBrowser(async (session) => {
-      obs.drain = await drainWait(host, session.driver, fx, (args.boundS ?? drainBoundS(args.os)) * 1_000);
+      obs.drain = await drainWait(host, session.driver, fx, (args.boundS ?? drainBoundS(args.os)) * 1_000, (args.rowS ?? ARCHIVE_BOUNDS.settleS) * 1_000);
       obs.row = obs.drain.row;
       const status = await statusNow(host, fx.token, 30_000);
       if (status) {
@@ -391,7 +436,7 @@ export async function drainStage(host: ArchiveHost, args: { role: FixtureRole; f
         obs.archiveId = status.archives.find((archive) => archive.name === fx.fileName)?.id;
       }
       obs.stores = host.readStores(formatSpec(fx.format), obs.archiveId, fx.token);
-      if (args.search) obs.search = await searchFor(host, fx);
+      if (args.search) obs.search = obs.drain.drained ? await searchAfterDrain(host, fx) : await searchFor(host, fx);
     });
     obs.ok = true;
   } catch (error) {

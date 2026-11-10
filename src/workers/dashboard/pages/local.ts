@@ -10,7 +10,8 @@ import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
  *   any source whose own app registration is needed). The panel's Connect
  *   and Change models open this page at the right sheet.
  * - Agents (`?agents`): remote access and connected agents.
- * - Build a connector (`?connector`): the prompt for a coding agent.
+ * - Build a connector (`?connector`): now a dialog on Sources; the address
+ *   redirects to `?connect#build-connector`, which opens it (#1087).
  *
  * Anonymous model settings live here in Models (outside-help.ts). Each page holds the
  * "Open dashboard controls" gate while the controls are locked, so a page
@@ -82,6 +83,11 @@ export interface DashboardPageOptions {
   /** Remote agent connections and remote access, for Agents. */
   agents?: DashboardAgentsView;
   systemReport?: string;
+  /** Settings: settings an agent proposed for the owner to apply (#1050), and what the last Apply did. */
+  settingsProposal?: {
+    current: import('../../../core/settings-proposal.ts').SettingsProposal | undefined;
+    lastApplied: import('../../settings-proposal-holder.ts').SettingsProposalApplyResult | undefined;
+  };
   /** Settings: the built-in models on this computer, and an update when one is out. */
   settings?: {
     models?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
@@ -121,16 +127,15 @@ export interface DashboardWaitingQuestion {
   failureReason?: string;
 }
 
-const CONNECTOR_SHEET_ID = 'connector-sheet';
-const CONNECTOR_SHEET_HEADING = 'Build a connector with your agent';
+/** The Build a connector dialog's id on Sources; `?connector` lands on `?connect#build-connector`. */
+export const CONNECTOR_DIALOG_ID = 'build-connector';
+const CONNECTOR_DIALOG_HEADING = 'Build a connector with your agent';
 // The playbook the prompt names is a contributor guide: it is deliberately
 // outside the published package, so an install alone cannot satisfy the
-// prompt's own first clause. The sheet says that here rather than letting the
+// prompt's own first clause. The dialog says that here rather than letting the
 // agent go looking for a file the managed plugin root does not contain.
-const CONNECTOR_SHEET_INTRO = 'Copy this prompt, replace the source name, and paste it into your coding '
-  + 'agent. The connector playbook it names lives in an Olympus source checkout, not in the installed '
-  + 'package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any '
-  + 'built-in.';
+const CONNECTOR_DIALOG_INTRO = 'For a source Olympus doesn\'t have yet. Copy this to your coding agent and '
+  + 'replace <SOURCE>. The connector guide is in an Olympus source checkout; CONTRIBUTING.md says how to get one.';
 
 /** The prompt the owner pastes into their own coding tool. */
 export const CONNECTOR_PROMPT = [
@@ -353,15 +358,16 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>'
     + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">`
     + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`)
-    + '<p class="pnote">Sources you\'ve already connected aren\'t listed.</p></div>'
+    + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>`
     + panels + '</dialog>';
   const body = [
     lockedGate(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml(dashboardLocalPageHref('connector', token))}">Build a connector</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER}</span></div>`,
     rows.map((entry) => entry.dialogs).join(''),
     sheet,
+    connectorDialog(),
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: 'Sources',
@@ -398,6 +404,9 @@ const SOURCES_CSS = `
 .srctile[hidden] { display: none; }
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
+.linkbtn { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
+#build-connector > .pnote { margin: 12px 0 0; }
+#build-connector .promptbox { margin: 12px 0 0; word-break: normal; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
 `;
 
@@ -421,19 +430,23 @@ export function renderDashboardAgentsPage(options?: DashboardPageOptions): strin
   return localShell({ crumb: W.agents.title, tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS], options });
 }
 
-/** Build a connector: the prompt, open. Nothing on it calls a control route. */
-export function renderDashboardConnectorPage(options?: DashboardPageOptions): string {
-  const body = [
-    `<div class="sect">${escapeHtml(CONNECTOR_SHEET_HEADING)}</div>`,
-    connectorSheet({
-      id: CONNECTOR_SHEET_ID,
-      heading: W.connector.line,
-      intro: CONNECTOR_SHEET_INTRO,
-      promptText: CONNECTOR_PROMPT,
-      copyButtonLabel: 'Copy prompt',
-    }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"'),
-  ].join('\n');
-  return localShell({ crumb: W.connector.title, tab: 'sources', meta: '', body, styles: [], options });
+const CONNECTOR_OPENER = `<button class="linkbtn" type="button" data-dialog-open="${CONNECTOR_DIALOG_ID}">Build a connector</button>`;
+
+/**
+ * Build a connector (#1087, owner 2026-11-10, mockup 9): a dialog over
+ * Sources with the prompt and Copy prompt. ✕, Close, Esc or a click outside
+ * closes it; `?connector` opens Sources with it open. Nothing in it calls a
+ * control route.
+ */
+function connectorDialog(): string {
+  const id = CONNECTOR_DIALOG_ID;
+  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">`
+    + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`
+    + `<p class="pnote">${escapeHtml(CONNECTOR_DIALOG_INTRO)}</p>`
+    + `<div class="promptbox" id="${id}-prompt">${escapeHtml(CONNECTOR_PROMPT)}</div>`
+    + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>`
+    + '<button class="btn" type="button" data-dialog-close>Close</button>'
+    + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
 }
 
 /**
@@ -639,11 +652,48 @@ export function renderDashboardSettingsPage(options?: DashboardPageOptions): str
     + '</section>';
   const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
     + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref('help', token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
-  const body = lockedGate(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
+  const proposal = renderSettingsProposal(options?.settingsProposal);
+  const body = lockedGate(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
   return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS], options });
 }
 
+/**
+ * Settings an agent proposed (`olympus settings propose`, #1050): every
+ * change with its current and proposed value, applied only by the owner's
+ * click. After Apply, what was and was not saved, for a short while.
+ */
+function renderSettingsProposal(state: DashboardPageOptions['settingsProposal']): string {
+  const proposal = state?.current;
+  if (proposal) {
+    const who = proposal.from ? escapeHtml(proposal.from) : 'An agent on this computer';
+    // Turning on Venice judging sends every item, Private ones included, to
+    // the cloud: say so on the card, as the Privacy judge dialog does.
+    const judge = proposal.input.privacy_judge;
+    const veniceJudge = judge?.choice === 'venice' ? `$${judge.spending_limit_dollars}` : undefined;
+    const rows = proposal.rows.map(row => `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${escapeHtml(row.current)}</td><td><b>${escapeHtml(row.proposed)}</b></td></tr>`).join('');
+    const form = (kind: 'apply' | 'discard', label: string, primary: boolean) =>
+      `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml(proposal.id)}"><button type="submit" class="btn${primary ? ' primary' : ''}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
+    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>`
+      + `<p>${who} proposed ${proposal.rows.length === 1 ? 'this change' : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? 'it' : 'them'}.</p>`
+      + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows}</tbody></table>`
+      + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : '')
+      + `<div class="pickbar">${form('apply', 'Apply all', true)}${form('discard', 'Discard', false)}</div></section>`;
+  }
+  const applied = state?.lastApplied;
+  if (!applied) return '';
+  const rows = applied.rows.map(row => `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${escapeHtml(row.proposed)}</td><td>${row.applied ? 'Applied' : `Not applied: ${escapeHtml(row.message ?? 'not saved')}`}</td></tr>`).join('');
+  return `<section class="propcard" aria-label="Applied settings" id="proposed-settings"><h3 class="sect">${applied.ok ? 'Settings applied' : 'Some settings were not applied'}</h3>`
+    + `<table class="proptable"><tbody>${rows}</tbody></table></section>`;
+}
+
 const SETTINGS_CSS = `
+.propcard { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 24px; }
+.propcard .sect { margin-top: 0; }
+.proptable { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.proptable th, .proptable td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+.proptable thead th { border-top: 0; color: var(--t2); font-weight: 500; }
+.propnote { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.propcard .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
