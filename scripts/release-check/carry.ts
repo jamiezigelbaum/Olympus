@@ -16,6 +16,8 @@ export function loadCarryBase(path: string, candidateSha: string | undefined): R
   if (base.harness?.relation !== 'same-commit' || !base.candidate.sha) throw new Error('--carry-from needs a report whose harness was its candidate\'s own commit');
   if (base.candidate.sha === candidateSha) throw new Error('--carry-from names a run of this same commit; run it again in full instead');
   if (base.selfTest) throw new Error('--carry-from names a self-test, whose results are planted failures');
+  // A run with the engine split on tested another configuration; it lends nothing to a run with the switch off (Codex on #1289).
+  if (base.settings?.engineSplit) throw new Error('--carry-from names a run with the engine split on; its results say nothing about a run with it off');
   if (base.machines.length !== 1 || base.machines[0]!.upgrade) throw new Error('--carry-from needs a plain run on one machine (not an upgrade run)');
   const machine = base.machines[0]!;
   if (![...machine.checks, ...machine.agents].some((item) => item.leg)) throw new Error('--carry-from names a report that does not say which leg made each result; run in full once');
