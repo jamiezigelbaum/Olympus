@@ -49,7 +49,11 @@ export const ENGINE_FORWARDED_ROUTES = {
   delete_source_data: ['/dashboard/delete-source-data', '/v1/cli/data-delete'],
   tier_override: ['/v1/cli/tier'],
   storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
-  capture: ['/dashboard/messaging/start', '/dashboard/messaging/respond', '/dashboard/messaging/cancel', '/dashboard/messaging/scope'],
+  // Pairing state lives with the background's capture service: every pairing route goes there.
+  capture: [
+    '/dashboard/messaging/start', '/dashboard/messaging/status', '/dashboard/messaging/respond',
+    '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
+  ],
   embed_chunks: ['/v1/source/index/embed'],
   // The background runs source watches' passes and owns their store.
   source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
@@ -87,6 +91,8 @@ export type EngineCommand =
   | { kind: 'start_approved'; source: string }
   | { kind: 'owner_busy'; resource: string }
   | { kind: 'owner_idle'; resource: string }
+  /** Stop a messaging capture before Disconnect or Unpair tears down its grant; done means stopped. */
+  | { kind: 'capture_stop'; source: 'telegram' | 'whatsapp' }
   | { kind: 'judge_boost'; identities: EngineItemIdentity[] };
 
 export type EngineCommandKind = EngineCommand['kind'];
@@ -225,6 +231,11 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       if (typeof source !== 'string' || !SOURCE.test(source)) fail(`${kind} needs a source.`);
       if (kind === 'start_approved') return { id, command: { kind, source: source as string } };
       return { id, command: { kind, source: source as string, manual: command!.manual === true } };
+    }
+    case 'capture_stop': {
+      const source = command!.source;
+      if (source !== 'telegram' && source !== 'whatsapp') fail('capture_stop needs telegram or whatsapp.');
+      return { id, command: { kind, source: source as 'telegram' | 'whatsapp' } };
     }
     case 'owner_busy':
     case 'owner_idle': {

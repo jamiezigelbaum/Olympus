@@ -24,7 +24,9 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
+import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
 import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
@@ -338,7 +340,7 @@ describe('owner actions the background runs, forwarded from the front', () => {
     expect(sent.map((command) => command.kind)).toEqual(['tier_override', 'storage_registry', 'capture', 'embed_chunks']);
     // Not a forwarded route, or not a POST: the front's own handler serves it.
     expect(routes(new Request('http://127.0.0.1/v1/cli/tier'))).toBeUndefined();
-    expect(routes(post('/dashboard/messaging/status', {}))).toBeUndefined();
+    expect(routes(post('/dashboard/connect', {}))).toBeUndefined();
     // The background's failure and its absence read as such.
     const failing = createEngineFrontRoutes({ client: { send: async () => ({ id: 'c', state: 'failed', instance_id: 'b', error: 'no' }) }, gate: createFrontGate(), restartFront: () => {} });
     expect((await failing(post('/v1/cli/pairing-account', {})))!.status).toBe(502);
@@ -443,6 +445,34 @@ describe('owner actions the background runs, forwarded from the front', () => {
     void waitForProcessExit(4243, { now: clock.now, sleep: clock.sleep, alive: () => true, timeoutMs: 60_000 }).then((value) => { gaveUp = value; });
     await clock.advance(61_000);
     expect(gaveUp).toBe(false);
+  });
+});
+
+describe('messaging capture across the split', () => {
+  test('Unpair and Disconnect stop the background capture and wait for its answer', async () => {
+    const stopped: string[] = [];
+    let fail = false;
+    const bg = background({ capture_stop: async ({ source }) => { if (fail) throw new Error('helper did not exit'); stopped.push(source); return { stopped: source }; } });
+    const clock = createTestClock();
+    const client = new EngineCommandClient({ fetch: bg.fetch, authToken: TOKEN, sleep: clock.sleep, now: clock.now });
+    const stop = frontCaptureStop(client);
+    await stop('telegram');
+    expect(stopped).toEqual(['telegram']);
+    // A stop the background could not confirm keeps the caller from tearing the grant down.
+    fail = true;
+    await expect(stop('whatsapp')).rejects.toThrow('helper did not exit');
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0050', command: { kind: 'capture_stop', source: 'signal' } })).toThrow('telegram or whatsapp');
+    // The front's route wiring uses it: the front's own supervisors are empty.
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/const stopMessagingCapture = engineFront\s*\?\s*frontCaptureStop\(engineFront\.client\)/);
+    expect(server).toMatch(/capture_stop: async \(\{ source \}\) => \{\s*await captureOwnership\.stopForUnpair\(source\);/);
+  });
+
+  test('pairing status and chats go to the background that holds the pairing', () => {
+    expect([...ENGINE_FORWARDED_ROUTES.capture].sort()).toEqual([
+      '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/respond',
+      '/dashboard/messaging/scope', '/dashboard/messaging/start', '/dashboard/messaging/status',
+    ]);
   });
 });
 

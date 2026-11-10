@@ -552,7 +552,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -2676,9 +2676,12 @@ export async function main(): Promise<void> {
     liveness: Object.fromEntries(captureEntries().map(([source, capture]) => [source, capture.liveness?.()])),
     failures: captureFailures,
   });
-  const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
-    await captureOwnership.stopForUnpair(source);
-  };
+  // In the split the background runs capture; the front's supervisors are
+  // empty. Disconnect and Unpair tear credentials down only after the
+  // background says the capture stopped.
+  const stopMessagingCapture = engineFront
+    ? frontCaptureStop(engineFront.client)
+    : async (source: 'telegram' | 'whatsapp') => { await captureOwnership.stopForUnpair(source); };
 
   const fileSourceScopeAuthority = connectedHandleRegistryPath
     ? new FileSourceScopeAuthority({
@@ -7672,6 +7675,10 @@ export async function main(): Promise<void> {
           if (!sourceScheduler) return { outcome: 'scheduler_disabled' };
           startApprovedSourceRun(sourceScheduler, source);
           return { outcome: 'ingestion_started' };
+        },
+        capture_stop: async ({ source }) => {
+          await captureOwnership.stopForUnpair(source);
+          return { stopped: source };
         },
         owner_busy: ({ resource }) => {
           remoteOwnerBusyUntil.set(resource, Date.now() + 10 * 60_000);

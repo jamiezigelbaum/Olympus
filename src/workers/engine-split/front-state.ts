@@ -10,6 +10,7 @@
 import type { ArchiveImportDashboard, ArchivePrivateModelState } from '../archive-import/dashboard.ts';
 import type { TierClassificationBacklog } from '../classification/sniffer-service.ts';
 import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
+import type { EngineCommandClient } from './client.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
 type Snapshot = () => EngineStatusRead | undefined;
@@ -57,5 +58,18 @@ export function frontArchiveViews(local: ArchiveViews, snapshot: Snapshot): Arch
     cardViews: () => (archive()?.cards as ReturnType<ArchiveViews['cardViews']> | undefined) ?? local.cardViews(),
     sourceImports: () => (archive()?.source_imports as ReturnType<ArchiveViews['sourceImports']> | undefined) ?? local.sourceImports(),
     archiveSources: () => (archive()?.sources as ReturnType<ArchiveViews['archiveSources']> | undefined) ?? local.archiveSources(),
+  };
+}
+
+/**
+ * Stop a messaging capture from the front. The background runs capture, so
+ * the stop goes there and the caller (Disconnect, Unpair) goes on to remove
+ * the grant only once the background answers that the capture stopped; any
+ * other outcome throws, and the route keeps the credentials.
+ */
+export function frontCaptureStop(client: Pick<EngineCommandClient, 'send'>): (source: 'telegram' | 'whatsapp') => Promise<void> {
+  return async (source) => {
+    const receipt = await client.send({ kind: 'capture_stop', source }, { timeoutMs: 30_000 });
+    if (receipt.state !== 'done') throw new Error(receipt.error ?? `The background did not confirm the ${source} capture stopped.`);
   };
 }
