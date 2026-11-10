@@ -105,6 +105,9 @@ describe('statistics', () => {
     expect(effectiveSampleSize([1, 3])).toBeCloseTo(1.6, 9);
     expect(mcnemarExact(0, 5)).toBeCloseTo(0.0625, 9);
     expect(mcnemarExact(3, 3)).toBe(1);
+    expect(mcnemarExact(550, 550)).toBe(1);
+    expect(mcnemarExact(600, 700)).toBeGreaterThan(0);
+    expect(mcnemarExact(600, 700)).toBeLessThan(0.01);
   });
 
   test('both directions, injections apart, weighted rates', () => {

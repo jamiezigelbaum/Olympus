@@ -111,7 +111,9 @@ export function drawStratified<T extends PopulationUnit>(
   const byCell = new Map<string, T[]>();
   for (const unit of units) {
     const key = cellKey(unit.area, unit.stratum);
-    byCell.set(key, [...(byCell.get(key) ?? []), unit]);
+    const cell = byCell.get(key);
+    if (cell) cell.push(unit);
+    else byCell.set(key, [unit]);
   }
   const populations = new Map([...byCell.entries()].map(([key, members]) => [key, { area: members[0]!.area, stratum: members[0]!.stratum, population: members.length }]));
   const allocation = allocate(populations, total, privateShare, minPerCell);
@@ -424,12 +426,15 @@ export function mcnemarExact(b: number, c: number): number {
   const n = b + c;
   if (n === 0) return 1;
   const k = Math.min(b, c);
-  let tail = 0;
-  let term = 2 ** -n; // C(n,0) / 2^n
+  // Sum C(n,i) / 2^n for i <= k in log space: 2^-n underflows past n ~ 1074.
+  const logTerms: number[] = [];
+  let logTerm = -n * Math.LN2; // log(C(n,0) / 2^n)
   for (let i = 0; i <= k; i += 1) {
-    tail += term;
-    term = (term * (n - i)) / (i + 1);
+    logTerms.push(logTerm);
+    logTerm += Math.log(n - i) - Math.log(i + 1);
   }
+  const top = logTerms.reduce((max, value) => Math.max(max, value), -Infinity);
+  const tail = Math.exp(top) * logTerms.reduce((sum, value) => sum + Math.exp(value - top), 0);
   return Math.min(1, 2 * tail);
 }
 
