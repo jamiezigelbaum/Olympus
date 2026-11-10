@@ -41986,9 +41986,10 @@ var init_first_run_privacy_gate = __esm(() => {
 
 // src/core/app-release-capture.ts
 import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-var storage3, JOB_QUESTION_TTL_MS, jobQuestions;
+var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
   storage3 = new AsyncLocalStorage7;
+  completedPrivateAnswers = new Set;
   JOB_QUESTION_TTL_MS = 30 * 60000;
   jobQuestions = new Map;
 });
@@ -42327,6 +42328,7 @@ var init_remote_result = __esm(() => {
 // src/core/waiting-private-questions.ts
 var WAITING_QUESTION_LIMITS;
 var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
   init_sqlite_migrations();
   init_olympus_layout();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -44122,16 +44124,6 @@ var init_pairing_session_paths = __esm(() => {
   init_source_registry();
 });
 
-// src/core/cli-via-worker.ts
-var init_cli_via_worker = __esm(() => {
-  init_config();
-  init_data_owner_lock();
-  init_olympus_layout();
-  init_operation_error();
-  init_worker_auth();
-  init_worker_transport();
-});
-
 // src/core/native-process-service.ts
 var init_native_process_service = () => {};
 
@@ -44161,22 +44153,6 @@ var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
-});
-
-// src/core/app-release-log.ts
-var DAY_MS2;
-var init_app_release_log = __esm(() => {
-  init_olympus_layout();
-  init_sqlite_migrations();
-  DAY_MS2 = 24 * 60 * 60000;
-});
-
-// src/workers/apps-received.ts
-var init_apps_received = __esm(() => {
-  init_app_release_capture();
-  init_app_release_log();
-  init_operation_error();
-  init_remote_result();
 });
 
 // src/workers/remote-oauth/consent-page.ts
@@ -50938,6 +50914,14 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// src/core/app-release-log.ts
+var DAY_MS2;
+var init_app_release_log = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  DAY_MS2 = 24 * 60 * 60000;
+});
+
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
@@ -51432,19 +51416,6 @@ var init_tier_cli = __esm(() => {
     "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
     "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
   };
-});
-
-// src/workers/cli-operations.ts
-var init_cli_operations = __esm(() => {
-  init_cli_via_worker();
-  init_config();
-  init_data_owner_lock();
-  init_olympus_layout();
-  init_operation_error();
-  init_source_storage();
-  init_data_lifecycle();
-  init_tier_cli();
-  init_source_ingestion_ledger();
 });
 
 // src/core/consult-gate.ts
@@ -69944,8 +69915,15 @@ init_source_registry();
 init_data_owner_lock();
 init_pairing_session_paths();
 
+// src/core/cli-via-worker.ts
+init_config();
+init_data_owner_lock();
+init_olympus_layout();
+init_operation_error();
+init_worker_auth();
+init_worker_transport();
+
 // src/core/pairing-placement.ts
-init_cli_via_worker();
 init_olympus_layout();
 init_source_placement();
 init_source_registry();
@@ -70330,7 +70308,6 @@ init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
 init_source_failure();
-init_apps_received();
 init_google_own_app();
 init_sovereignty();
 init_first_run_privacy();
@@ -71243,9 +71220,19 @@ var CHAT_TITLE_STOPWORDS = new Set([
 // src/workers/email-source/index.ts
 init_this_computer();
 init_data_lifecycle();
-init_cli_via_worker();
 init_remote_access();
-init_cli_operations();
+
+// src/workers/cli-operations.ts
+init_config();
+init_data_owner_lock();
+init_olympus_layout();
+init_operation_error();
+init_source_storage();
+init_data_lifecycle();
+init_tier_cli();
+init_source_ingestion_ledger();
+
+// src/workers/email-source/index.ts
 init_corpora();
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],

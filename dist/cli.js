@@ -43149,8 +43149,8 @@ function openAppReleaseLog(dbPath, options = {}) {
         return;
       const id = `apr_${randomBytes8(12).toString("base64url")}`;
       db.transaction(() => {
-        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0);
+        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionId ?? null);
         const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
@@ -43210,6 +43210,9 @@ function openAppReleaseLog(dbPath, options = {}) {
     markMadePrivate(requestId, position) {
       db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
     },
+    markAnsweredPrivately(privateQuestionId) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionId).changes;
+    },
     forgetCorpora(corpusIds, dryRun) {
       if (corpusIds.length === 0)
         return 0;
@@ -43248,8 +43251,10 @@ function migrations() {
           question TEXT NOT NULL,
           held_back INTEGER NOT NULL DEFAULT 0,
           answered_privately INTEGER NOT NULL DEFAULT 0,
-          withheld INTEGER NOT NULL DEFAULT 0
+          withheld INTEGER NOT NULL DEFAULT 0,
+          private_question_id TEXT
         );
+        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
         CREATE INDEX app_release_requests_at ON app_release_requests (at);
         CREATE TABLE app_release_items (
           request_id TEXT NOT NULL,
@@ -51431,6 +51436,169 @@ var init_remote_oauth_store = __esm(() => {
   UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
 });
 
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+function createReleaseCapture() {
+  return { heldBack: 0 };
+}
+function runWithReleaseCapture(capture, fn) {
+  return storage.run(capture, fn);
+}
+function noteReleasedItems(items, heldBack = 0, withheld = false) {
+  const capture = storage.getStore();
+  if (!capture)
+    return;
+  capture.items = items.map((item) => ({ ...item }));
+  capture.heldBack = Math.max(0, Math.floor(Number.isFinite(heldBack) ? heldBack : 0));
+  capture.withheld = withheld;
+}
+function boundedString(value, max2) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max2) : undefined;
+}
+function releasedTierOf(trustDomain) {
+  if (trustDomain === "public_safe")
+    return "public";
+  if (trustDomain === "internal")
+    return "personal";
+  return "private";
+}
+function releasedItemFromEvidence(evidence, source, title) {
+  const shownTitle = boundedString(title, TITLE_MAX);
+  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
+  const provider = boundedString(evidence.provider, ID_MAX);
+  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
+  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
+  const locator = boundedString(evidence.uri, ID_MAX);
+  return {
+    source: boundedString(source, 80) ?? "Other source",
+    ...shownTitle ? { title: shownTitle } : {},
+    tier: releasedTierOf(evidence.trust_domain),
+    ...corpusId ? { corpusId } : {},
+    ...provider ? { provider } : {},
+    ...providerItemId ? { providerItemId } : {},
+    ...providerConversationId ? { providerConversationId } : {},
+    ...locator ? { locator } : {}
+  };
+}
+function appConnectionOf(caller) {
+  if (!caller || caller.surface === "cli")
+    return;
+  const display = boundedString(caller.displayName, 80);
+  const id = boundedString(caller.connectionId, 128);
+  if (caller.surface === "remote") {
+    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
+    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
+  }
+  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
+}
+function setPrivateAnswerCompletionHook(next) {
+  completionHook = next;
+}
+function notePrivateAnswerCompleted(privateQuestionId) {
+  try {
+    if (typeof privateQuestionId !== "string" || !privateQuestionId)
+      return;
+    completedPrivateAnswers.add(privateQuestionId);
+    while (completedPrivateAnswers.size > COMPLETED_MAX)
+      completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
+    completionHook?.(privateQuestionId);
+  } catch {}
+}
+function notePrivateQuestion(privateQuestionId) {
+  const capture = storage.getStore();
+  if (capture && typeof privateQuestionId === "string" && privateQuestionId)
+    capture.privateQuestionId = privateQuestionId;
+}
+function setAppReleaseRecorder(next) {
+  recorder = next;
+}
+function recordAppRequest(input) {
+  try {
+    const write = recorder ?? input.fallback;
+    if (!write)
+      return;
+    const connection = appConnectionOf(input.caller);
+    const question = boundedString(input.question, 2000);
+    if (!connection || !question || input.capture.items === undefined)
+      return;
+    const withheld = input.withheldAfter === true || input.capture.withheld === true;
+    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
+    write({
+      at: (input.now ?? Date.now)(),
+      connection,
+      question,
+      items: withheld ? [] : input.capture.items,
+      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
+      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
+      withheld,
+      ...privateQuestionId ? { privateQuestionId } : {}
+    });
+  } catch {}
+}
+function rememberJobQuestion(jobId, question, now = Date.now()) {
+  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
+    return;
+  for (const [key2, entry] of jobQuestions)
+    if (entry.expires <= now)
+      jobQuestions.delete(key2);
+  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
+  while (jobQuestions.size > JOB_QUESTIONS_MAX)
+    jobQuestions.delete(jobQuestions.keys().next().value);
+}
+function jobQuestion(jobId, now = Date.now()) {
+  if (typeof jobId !== "string")
+    return;
+  const entry = jobQuestions.get(jobId);
+  if (!entry || entry.expires <= now)
+    return;
+  return entry.question;
+}
+function forgetJobQuestions() {
+  jobQuestions.clear();
+  completedPrivateAnswers.clear();
+}
+function sourceAnswerQuestion(name, args, status, jobId) {
+  if (name === "source_answer") {
+    const question = typeof args.question === "string" ? args.question : undefined;
+    if (status === "working")
+      rememberJobQuestion(jobId, question);
+    return question;
+  }
+  if (name === "source_answer_result")
+    return jobQuestion(args.job_id);
+  return;
+}
+function recordRemoteOperation(input) {
+  const { operation, args, output } = input;
+  if (operation !== "source_answer" && operation !== "source_answer_result")
+    return;
+  const question = sourceAnswerQuestion(operation, args, output.status, output.job_id);
+  if (output.kind !== "source_answer" || output.status !== "answered" && output.status !== "withheld")
+    return;
+  recordAppRequest({
+    caller: input.caller,
+    question,
+    capture: input.privateQuestionId ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
+    privateQuestionId: input.privateQuestionId
+  });
+}
+var storage, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage = new AsyncLocalStorage3;
+  PROVIDER_APP_NAMES = {
+    openai: "ChatGPT",
+    anthropic: "Claude",
+    xai: "Grok",
+    meta: "Meta AI"
+  };
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
+
 // src/core/waiting-private-questions.ts
 var exports_waiting_private_questions = {};
 __export(exports_waiting_private_questions, {
@@ -51709,10 +51877,13 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           return false;
         }
       }
-      return db.transaction(() => {
+      const saved = db.transaction(() => {
         const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, result.status === "failed" ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
         return changed;
       }).immediate();
+      if (saved && result.status === "answered")
+        notePrivateAnswerCompleted(ref.id);
+      return saved;
     },
     retry(ref, reason = "answer_failed") {
       const safeReason = WAITING_QUESTION_RETRY_REASONS.includes(reason) ? reason : "answer_failed";
@@ -51941,6 +52112,7 @@ function hardenPrivatePath2(dbPath) {
 }
 var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
   init_sqlite_migrations();
   init_olympus_layout();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -66637,17 +66809,17 @@ function namesOnlyCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage3;
+  localInferenceGuards ??= new AsyncLocalStorage4;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage3;
+  localInferencePriority ??= new AsyncLocalStorage4;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage3;
+  localInferencePriority ??= new AsyncLocalStorage4;
   return localInferencePriority.run("maintenance", work);
 }
 function createAnswerActivity(onBusy, options = {}) {
@@ -67123,7 +67295,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3) {
   if (!request.localOnly)
     return;
@@ -67878,7 +68050,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage4;
+  analystAbortSignalStorage = new AsyncLocalStorage5;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -68509,7 +68681,7 @@ var init_parent_label = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 import { randomUUID as randomUUID16 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
@@ -68535,10 +68707,10 @@ function createSourceAnswerTrace(now = () => new Date) {
   };
 }
 function runWithSourceAnswerTrace(trace, run) {
-  return Promise.resolve(storage.run(trace, run));
+  return Promise.resolve(storage2.run(trace, run));
 }
 function currentSourceAnswerTrace() {
-  return storage.getStore();
+  return storage2.getStore();
 }
 function recordSourceAnswerPhaseTimings(timings) {
   const trace = currentSourceAnswerTrace();
@@ -68768,9 +68940,9 @@ function sanitizeErrorClass(value) {
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-var storage, CONTENT_FREE_ERROR_CLASSES;
+var storage2, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage5;
+  storage2 = new AsyncLocalStorage6;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -69674,18 +69846,18 @@ var init_evidence_pack = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 function createReleaseManifestSink() {
   return { manifests: [] };
 }
 function runWithReleaseManifestSink(sink, fn) {
-  return storage2.run(sink, fn);
+  return storage3.run(sink, fn);
 }
 function currentReleaseManifestSink() {
-  return storage2.getStore();
+  return storage3.getStore();
 }
 function recordReleaseManifest(manifest) {
-  storage2.getStore()?.manifests.push({
+  storage3.getStore()?.manifests.push({
     inputs: manifest.inputs.map((input) => ({ ...input })),
     constraints: { ...manifest.constraints }
   });
@@ -69735,9 +69907,9 @@ function withheldSourceAnswer(reason) {
   withheldAnswers.add(result);
   return result;
 }
-var storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var storage3, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
-  storage2 = new AsyncLocalStorage6;
+  storage3 = new AsyncLocalStorage7;
   withheldAnswers = new WeakSet;
 });
 
@@ -104225,6 +104397,805 @@ var init_operation_exposure = __esm(() => {
   init_public_surface();
 });
 
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems) {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  return `Olympus is still checking ${pendingItems} new item${pendingItems === 1 ? "" : "s"} for privacy before ${pendingItems === 1 ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+
+// src/core/remote-result.ts
+function providerSourceLabel(provider) {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
+}
+function sourceLabel3(provider, family) {
+  if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
+    return PROVIDER_LABELS[provider];
+  if (typeof family === "string" && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family))
+    return FAMILY_LABELS[family];
+  return OTHER_SOURCE_LABEL;
+}
+function oneOf(value, allowed) {
+  return typeof value === "string" && allowed.includes(value) ? value : undefined;
+}
+function withheldParams(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
+}
+function remoteDeclaredParams(operation, declared) {
+  const withheld = withheldParams(operation);
+  return declared.filter((name) => !withheld.includes(name));
+}
+function remoteToolDescription(operation, description) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
+}
+function remoteToolSchema(operation, schema) {
+  const withheld = withheldParams(operation);
+  if (withheld.length === 0)
+    return schema;
+  const properties = asRecord11(schema.properties) ?? {};
+  const required3 = Array.isArray(schema.required) ? schema.required : [];
+  return {
+    ...schema,
+    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
+    required: required3.filter((name) => typeof name === "string" && !withheld.includes(name))
+  };
+}
+function remoteWithheldParam(operation, args) {
+  const withheld = withheldParams(operation);
+  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
+}
+function remoteOperationOutput(operation, raw, options = {}) {
+  const pending = pendingOutput(raw);
+  switch (operation) {
+    case "source_answer":
+      return pending ?? sourceAnswerOutput(raw, options);
+    case "ask_anonymously":
+      return pending ?? anonymousAnswerOutput(raw);
+    case "source_answer_result":
+      return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
+    case "source_index_status":
+      return sourceIndexStatusOutput(raw);
+    default:
+      throw new OperationError("invalid_request", `No remote output for operation ${operation}.`);
+  }
+}
+function isAnonymousAnswerResult(raw) {
+  const record = asRecord11(raw);
+  return record !== undefined && typeof record.ok === "boolean" && typeof record.answer !== "string";
+}
+function pendingOutput(raw) {
+  const record = asRecord11(raw);
+  if (record?.status !== "working")
+    return;
+  if (typeof record.job_id !== "string" || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
+    throw new OperationError("source_index_error", "unexpected pending shape");
+  }
+  return {
+    status: "working",
+    job_id: record.job_id,
+    elapsed_ms: wholeNumber(record.elapsed_ms),
+    next_tool: "source_answer_result",
+    message: REMOTE_PENDING_MESSAGE
+  };
+}
+function sourceAnswerOutput(raw, options) {
+  const record = asRecord11(raw);
+  if (!record || typeof record.answer !== "string" || !Array.isArray(record.evidence)) {
+    throw new OperationError("source_index_error", "unexpected answer shape");
+  }
+  const evidence = record.evidence.map(asRecord11).filter((entry) => entry !== undefined);
+  let dropped = new Set;
+  if (options.releaseCheck) {
+    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
+    if ("withhold" in recheck)
+      return withheldAnswer(recheck.withhold, evidence.length);
+    dropped = recheck.dropped;
+  }
+  if (isSecretLike(record.answer))
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, "multiline");
+  if (answer.secret)
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const citations = [];
+  const released = [];
+  evidence.forEach((entry, index) => {
+    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
+      return;
+    const citation = citationOutput(entry);
+    citations.push(citation);
+    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
+  });
+  noteReleasedItems(released);
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  const coverageSuffix = privacyCoverage ? `
+
+Coverage notes:
+- ${privacyCoverage}` : "";
+  return {
+    kind: "source_answer",
+    status: "answered",
+    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
+    citations
+  };
+}
+function withRemotePrivateNote(output, answerId, secretMatch = false) {
+  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
+}
+function remotePrivateNote(answerId, secretMatch = false) {
+  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
+  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
+}
+function withheldAnswer(message2, heldBack = 0) {
+  noteReleasedItems([], heldBack, true);
+  return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
+}
+function recheckRelease(evidence, manifests, check) {
+  if (manifests.length === 0) {
+    console.error("[olympus:remote] release_manifest_missing");
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  const inputs = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, manifest })));
+  let verdicts;
+  let postureNow;
+  try {
+    verdicts = check.inputs(inputs.map(({ input }) => input));
+    if (verdicts.length !== inputs.length)
+      throw new Error("release check returned the wrong number of verdicts");
+    postureNow = check.secureDerivativeDefault();
+  } catch (error) {
+    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error)}`);
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  if (verdicts.some((verdict) => verdict.tier === "secret"))
+    return { withhold: REMOTE_ANSWER_CHANGED };
+  if (verdicts.some((verdict) => verdict.tier === "unknown"))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  if (verdicts.some((verdict) => verdict.hiddenByParent === true))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  for (const [index, { input, manifest }] of inputs.entries()) {
+    const verdict = verdicts[index];
+    if (input.dependency === "parent_label" && verdict.gone)
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow))
+      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
+  }
+  const dropped = new Set;
+  for (const [index, entry] of evidence.entries()) {
+    const matches = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
+    if (matches.length === 0) {
+      console.error("[olympus:remote] release_manifest_incomplete");
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    }
+    if (matches.some((verdict) => verdict.gone))
+      dropped.add(index);
+  }
+  return { dropped };
+}
+function citesInput(entry, input) {
+  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
+}
+function citationOutput(entry) {
+  const title = scannedText(entry.title, MAX_TITLE, "line");
+  const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
+  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
+  const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
+  return {
+    label: sourceLabel3(entry.provider, entry.family),
+    ...composed.text && !composed.secret ? { title: composed.text } : {},
+    ...date ? { date } : {}
+  };
+}
+function anonymousAnswerOutput(raw) {
+  const record = asRecord11(raw);
+  if (!record || typeof record.ok !== "boolean") {
+    throw new OperationError("email_error", "unexpected anonymous answer shape");
+  }
+  if (record.ok) {
+    if (typeof record.reply !== "string")
+      throw new OperationError("email_error", "unexpected anonymous answer shape");
+    const reply = scannedText(record.reply, MAX_ANSWER, "multiline");
+    const sent2 = keptText(record.sent, MAX_SENT, "multiline");
+    const route = keptText(record.route, MAX_ROUTE, "line");
+    const note = keptText(record.note, MAX_MESSAGE, "line");
+    const model = typeof record.model === "string" && MODEL_ID.test(record.model) && !isSecretLike(record.model) ? record.model : undefined;
+    const cleanup = oneOf(record.cleanup, CLEANUPS);
+    return {
+      kind: "anonymous_answer",
+      status: "answered",
+      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
+      level: record.level === "strict" ? "strict" : "standard",
+      rewritten: record.rewritten === true,
+      remembered: record.remembered === true,
+      network_identity: oneOf(record.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
+      ...cleanup ? { cleanup } : {},
+      ...model ? { model } : {},
+      ...route ? { route } : {},
+      ...sent2 ? { sent: sent2 } : {},
+      ...note ? { note } : {},
+      ...typeof record.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
+    };
+  }
+  if (record.code === "needs_choice") {
+    const options = asRecord11(record.options);
+    return {
+      kind: "anonymous_answer",
+      status: "needs_choice",
+      message: REMOTE_NEEDS_CHOICE_MESSAGE,
+      options: {
+        suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
+        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
+        custom_instruction: options?.customInstruction === true
+      }
+    };
+  }
+  const sent = keptText(record.sent, MAX_SENT, "multiline");
+  const outcome = oneOf(record.outcome, OUTCOMES);
+  const daemonCode = oneOf(record.daemonCode, REMOTE_DAEMON_CODES);
+  return {
+    kind: "anonymous_answer",
+    status: "refused",
+    code: oneOf(record.code, REMOTE_REFUSAL_CODES) ?? "refused",
+    message: keptText(record.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
+    ...outcome ? { outcome } : {},
+    ...daemonCode ? { daemon_code: daemonCode } : {},
+    ...sent ? { sent } : {}
+  };
+}
+function sourceIndexStatusOutput(raw) {
+  const record = asRecord11(raw);
+  if (!record || record.kind !== "source_index_status" || !Array.isArray(record.corpora)) {
+    throw new OperationError("source_index_error", "unexpected status shape");
+  }
+  const generatedAt = iso(record.generated_at);
+  const corpora = [];
+  for (const value of record.corpora) {
+    if (corpora.length >= MAX_CORPORA)
+      break;
+    const corpus = asRecord11(value);
+    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
+      continue;
+    const retrieval = asRecord11(corpus.retrieval);
+    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
+    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
+    const refresh = asRecord11(corpus.last_refresh);
+    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
+    const completedAt = iso(refresh?.completed_at);
+    const counts = asRecord11(corpus.counts);
+    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
+    corpora.push({
+      corpus_id: corpus.corpus_id,
+      label: sourceLabel3(corpus.provider, corpus.family),
+      ...trustDomain ? { trust_domain: trustDomain } : {},
+      configured: corpus.configured === true,
+      ...mode && state ? { retrieval: { mode, state } } : {},
+      ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
+      ...counts ? {
+        counts: {
+          indexed_items: wholeNumber(counts.indexed_items),
+          chunks: wholeNumber(counts.chunks),
+          embedded_chunks: wholeNumber(counts.embedded_chunks)
+        }
+      } : {}
+    });
+  }
+  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
+}
+function remoteRetryAfterSeconds(body) {
+  if (!body || typeof body !== "object")
+    return;
+  const value = body.retry_after_seconds;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 86400 ? value : undefined;
+}
+function remoteErrorCode(error) {
+  if (error instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error.code))
+    return error.code;
+  return "internal_error";
+}
+function remoteErrorOutput(error, options = {}) {
+  const code = remoteErrorCode(error);
+  if (code === "invalid_params" && options.declaredParams && error instanceof OperationError) {
+    const param = namedParam(error.message, options.declaredParams);
+    if (param)
+      return { error: code, message: invalidParamMessage(param), param };
+  }
+  const retryAfter = RETRY_AFTER_SECONDS[code];
+  if (retryAfter !== undefined)
+    return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
+  if (!REFERENCED_ERROR_CODES.has(code))
+    return { error: code, message: REMOTE_ERROR_TEXT[code] };
+  const ref = mintErrorRef();
+  const errorClass2 = error instanceof Error ? error.name : typeof error;
+  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)}`);
+  return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
+}
+function remoteSurfaceErrorOutput(code) {
+  return { error: code, message: REMOTE_ERROR_TEXT[code] };
+}
+function remoteWithheldParamOutput(param) {
+  if (!PARAM_NAME.test(param))
+    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
+  return {
+    error: "invalid_params",
+    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
+    param
+  };
+}
+function invalidParamMessage(param) {
+  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
+}
+function namedParam(message2, declared) {
+  let best;
+  for (const name of declared) {
+    if (!PARAM_NAME.test(name))
+      continue;
+    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message2);
+    if (match && (!best || match.index < best.at))
+      best = { name, at: match.index };
+  }
+  return best?.name;
+}
+function mintErrorRef() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function remoteOutputSchema(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
+}
+function isSecretLike(text3) {
+  return secretLabelsInText(text3).length > 0;
+}
+function scannedText(value, max2, mode) {
+  if (typeof value !== "string")
+    return { secret: false };
+  if (isSecretLike(value))
+    return { secret: true };
+  const normalized = mode === "line" ? value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value.replace(UNSAFE_CHARS, "");
+  if (isSecretLike(normalized))
+    return { secret: true };
+  const emitted = mode === "line" ? normalized.slice(0, max2).trim() : normalized.slice(0, max2);
+  if (isSecretLike(emitted))
+    return { secret: true };
+  return emitted ? { text: emitted, secret: false } : { secret: false };
+}
+function keptText(value, max2, mode) {
+  const scanned = scannedText(value, max2, mode);
+  const text3 = mode === "multiline" ? scanned.text?.trim() : scanned.text;
+  return text3 && !scanned.secret ? text3 : undefined;
+}
+function wholeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+function iso(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
+}
+function dateOnly(value) {
+  return iso(value)?.slice(0, 10);
+}
+function asRecord11(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var init_remote_result = __esm(() => {
+  init_app_release_capture();
+  init_operation_error();
+  init_opsec();
+  init_parent_label();
+  init_release_manifest();
+  init_secret_location_note();
+  MAX_ANSWER = 64 * 1024;
+  MAX_SENT = 16 * 1024;
+  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+  PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
+  PROVIDER_LABELS = {
+    gmail: "Gmail",
+    google_drive: "Google Drive",
+    "google-drive": "Google Drive",
+    google_calendar: "Google Calendar",
+    dropbox: "Dropbox",
+    x: "X bookmarks",
+    readwise: "Readwise",
+    telegram: "Telegram",
+    whatsapp: "WhatsApp",
+    whatsapp_personal: "WhatsApp",
+    whatsapp_business: "WhatsApp",
+    apple_messages: "Apple Messages",
+    signal: "Signal",
+    reflect: "Reflect",
+    roam: "Roam",
+    evernote: "Evernote",
+    local_files: "Files on this computer"
+  };
+  FAMILY_LABELS = {
+    email: "Mail",
+    file: "Files",
+    chat: "Messages",
+    note: "Notes",
+    x: "X bookmarks",
+    readwise: "Readwise"
+  };
+  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+    ...Object.values(PROVIDER_LABELS),
+    ...Object.values(FAMILY_LABELS),
+    OTHER_SOURCE_LABEL
+  ])].sort());
+  REMOTE_REFUSAL_CODES = Object.freeze([
+    "refused",
+    "anonymous_answers_off",
+    "cancelled",
+    "gate_refused",
+    "internal_error",
+    "invalid_params",
+    "model_same_provider",
+    "question_empty",
+    "question_too_long",
+    "route_not_configured",
+    "secret_detected",
+    "settings_invalid",
+    "settings_stale",
+    "writer_declined",
+    "writer_failed",
+    "invalid_question",
+    "busy",
+    "acknowledgements_incomplete",
+    "funding_date_missing",
+    "funding_date_invalid",
+    "note_expired",
+    "daemon_api_key_missing",
+    "daemon_not_found",
+    "tor_not_found",
+    "unresolved_session",
+    "unresolved_session_other_wallet",
+    "no_unresolved_session",
+    "stranded_processes",
+    "daemon_already_running",
+    "tor_port_busy",
+    "tor_bootstrap_failed",
+    "daemon_start_failed",
+    "daemon_version_unsupported",
+    "daemon_supervisor_unsupported",
+    "relay_mismatch",
+    "key_reuse_on",
+    "key_reuse_unverified",
+    "daemon_keyless",
+    "daemon_identity_failed",
+    "daemon_api_key_rejected",
+    "session_process_exited",
+    "confinement_self_test_failed",
+    "confinement_unavailable",
+    "policy_unavailable",
+    "model_unavailable",
+    "daily_cap_reached",
+    "spend_cap_reached",
+    "state_unavailable",
+    "timeout",
+    "aborted",
+    "redirect_refused",
+    "response_too_large",
+    "invalid_response",
+    "daemon_error",
+    "transport_failed",
+    "teardown_incomplete",
+    "authorization_refused",
+    "session_spent"
+  ].filter((code, index, all) => all.indexOf(code) === index));
+  REMOTE_DAEMON_CODES = Object.freeze([
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied",
+    "unrecognized"
+  ]);
+  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+  REMOTE_WITHHELD_PARAMS = {
+    source_index_status: [
+      "conversation_id",
+      "include_sender_aggregation",
+      "max_senders",
+      "include_readiness_ledger",
+      "include_ingestion_ledger",
+      "include_items",
+      "max_items",
+      "query"
+    ]
+  };
+  REMOTE_DESCRIPTIONS = {
+    source_index_status: [
+      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+    ].join(" ")
+  };
+  REMOTE_ERROR_TEXT = {
+    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    unsupported_filter: "That filter is not supported here.",
+    config_error: "Olympus on the computer needs setup before it can answer.",
+    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+    argus_error: "Olympus's private analyst could not answer. Try again later.",
+    email_not_configured: "Olympus on the computer needs setup before it can answer.",
+    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+    email_error: "Olympus could not complete this request.",
+    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_error: "Olympus could not complete this request.",
+    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+    internal_error: "Olympus could not complete this request.",
+    unknown_operation: "Olympus has no operation with that name here.",
+    operation_unavailable: "That operation is not enabled on this Olympus install.",
+    unauthorized: "A connection token is required.",
+    invalid_token: "The connection token is not valid or has been revoked.",
+    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+    not_found: "There is nothing at this path.",
+    method_not_allowed: "That HTTP method is not allowed here.",
+    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+    payload_too_large: "The request body is too large.",
+    olympus_offline: "Olympus is off; try again later."
+  };
+  RETRY_AFTER_SECONDS = {
+    source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS
+  };
+  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+  REFERENCED_ERROR_CODES = new Set([
+    "internal_error",
+    "email_error",
+    "source_index_error",
+    "argus_error",
+    "config_error"
+  ]);
+  PENDING_SCHEMA = {
+    type: "object",
+    description: "Still working: call source_answer_result with job_id, again while it says working.",
+    additionalProperties: false,
+    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+    properties: {
+      status: { const: "working" },
+      job_id: { type: "string", pattern: JOB_ID.source },
+      elapsed_ms: { type: "integer", minimum: 0 },
+      next_tool: { const: "source_answer_result" },
+      message: { type: "string" }
+    }
+  };
+  CITATION_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["label"],
+    properties: {
+      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+      title: { type: "string", maxLength: MAX_TITLE },
+      date: { type: "string", format: "date" }
+    }
+  };
+  SOURCE_ANSWER_SCHEMA = {
+    type: "object",
+    description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "answer", "citations"],
+    properties: {
+      kind: { const: "source_answer" },
+      status: { enum: ["answered", "withheld"] },
+      answer: { type: "string", maxLength: MAX_ANSWER },
+      citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
+      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+    }
+  };
+  ANONYMOUS_ANSWERED_SCHEMA = {
+    type: "object",
+    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "answered" },
+      reply: { type: "string", maxLength: MAX_ANSWER },
+      level: { enum: ["strict", "standard"] },
+      rewritten: { type: "boolean" },
+      remembered: { type: "boolean" },
+      network_identity: { enum: [...NETWORK_IDENTITIES] },
+      cleanup: { enum: [...CLEANUPS] },
+      model: { type: "string", pattern: MODEL_ID.source },
+      route: { type: "string", maxLength: MAX_ROUTE },
+      sent: { type: "string", maxLength: MAX_SENT },
+      note: { type: "string", maxLength: MAX_MESSAGE },
+      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+    }
+  };
+  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+    type: "object",
+    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+    additionalProperties: false,
+    required: ["kind", "status", "message", "options"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "needs_choice" },
+      message: { type: "string" },
+      options: {
+        type: "object",
+        additionalProperties: false,
+        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+        properties: {
+          suggested_level: { enum: ["strict", "standard"] },
+          suggested_cleanup: { enum: [...CLEANUPS] },
+          custom_instruction: { type: "boolean" }
+        }
+      }
+    }
+  };
+  ANONYMOUS_REFUSED_SCHEMA = {
+    type: "object",
+    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+    additionalProperties: false,
+    required: ["kind", "status", "code", "message"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "refused" },
+      code: { enum: [...REMOTE_REFUSAL_CODES] },
+      message: { type: "string", maxLength: MAX_MESSAGE },
+      outcome: { enum: [...OUTCOMES] },
+      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+      sent: { type: "string", maxLength: MAX_SENT }
+    }
+  };
+  SOURCE_INDEX_STATUS_SCHEMA = {
+    type: "object",
+    description: "Per-corpus status and counts.",
+    additionalProperties: false,
+    required: ["kind", "corpora"],
+    properties: {
+      kind: { const: "source_index_status" },
+      generated_at: { type: "string", format: "date-time" },
+      corpora: {
+        type: "array",
+        maxItems: MAX_CORPORA,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["corpus_id", "label", "configured"],
+          properties: {
+            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+            trust_domain: { enum: [...TRUST_DOMAINS] },
+            configured: { type: "boolean" },
+            retrieval: {
+              type: "object",
+              additionalProperties: false,
+              required: ["mode", "state"],
+              properties: {
+                mode: { enum: [...RETRIEVAL_MODES] },
+                state: { enum: [...RETRIEVAL_STATES] }
+              }
+            },
+            last_refresh: {
+              type: "object",
+              additionalProperties: false,
+              required: ["status"],
+              properties: {
+                status: { enum: [...REFRESH_STATUSES] },
+                completed_at: { type: "string", format: "date-time" }
+              }
+            },
+            counts: {
+              type: "object",
+              additionalProperties: false,
+              required: ["indexed_items", "chunks", "embedded_chunks"],
+              properties: {
+                indexed_items: { type: "integer", minimum: 0 },
+                chunks: { type: "integer", minimum: 0 },
+                embedded_chunks: { type: "integer", minimum: 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  REMOTE_ERROR_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["error", "message"],
+    properties: {
+      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+      message: { type: "string", description: "A fixed sentence for this code." },
+      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+      retry_after_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: 86400,
+        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+      }
+    }
+  };
+  REMOTE_OUTPUT_SCHEMAS = {
+    source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
+    source_answer_result: {
+      oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
+    },
+    ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
+    source_index_status: SOURCE_INDEX_STATUS_SCHEMA
+  };
+});
+
+// src/core/app-release-agent.ts
+function releasedItemsOfAnswer(result) {
+  return (Array.isArray(result.evidence) ? result.evidence : []).filter((entry) => entry !== null && typeof entry === "object").slice(0, 48).map((entry) => releasedItemFromEvidence(entry, (typeof entry.provider === "string" ? providerSourceLabel(entry.provider) : undefined) ?? (typeof entry.family === "string" ? FAMILY_SOURCE[entry.family] : undefined) ?? "Other source", typeof entry.title === "string" ? entry.title : undefined));
+}
+async function recordLocalAgentAnswer(input) {
+  try {
+    const { caller } = input;
+    if (caller?.surface !== "mcp" && caller?.surface !== "native")
+      return;
+    if (!input.result || typeof input.result !== "object")
+      return;
+    const result = input.result;
+    const question = sourceAnswerQuestion(input.operation, input.args, result.status, result.job_id);
+    if (typeof result.answer !== "string")
+      return;
+    const withheld = isWithheldSourceAnswer(result);
+    const records = [];
+    recordAppRequest({
+      caller,
+      question,
+      capture: { items: withheld ? [] : releasedItemsOfAnswer(result), heldBack: 0, withheld },
+      fallback: (record) => records.push(record)
+    });
+    if (records.length === 0)
+      return;
+    if (input.write) {
+      for (const record of records)
+        input.write(record);
+      return;
+    }
+    const { openAppReleaseLog: openAppReleaseLog2, appReleaseLogDbPath: appReleaseLogDbPath2 } = await Promise.resolve().then(() => (init_app_release_log(), exports_app_release_log));
+    const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
+    const log = openAppReleaseLog2(appReleaseLogDbPath2(resolveRemoteConnectionsDbPath2(process.env)));
+    try {
+      for (const record of records)
+        log.record(record);
+    } finally {
+      log.close();
+    }
+  } catch {}
+}
+var FAMILY_SOURCE;
+var init_app_release_agent = __esm(() => {
+  init_app_release_capture();
+  init_release_manifest();
+  init_remote_result();
+  FAMILY_SOURCE = { email: "Mail", file: "Files", chat: "Messages", note: "Notes" };
+});
+
 // src/core/first-run-privacy.ts
 import { existsSync as existsSync68, readFileSync as readFileSync52 } from "node:fs";
 import { dirname as dirname71, join as join94 } from "node:path";
@@ -105103,17 +106074,17 @@ async function prepareWorkerStart(input, worker) {
   };
 }
 function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord11(contextConfig);
-  const plugins = asRecord11(root?.plugins);
-  const entries = asRecord11(plugins?.entries);
-  const olympus = asRecord11(entries?.olympus);
+  const root = asRecord12(contextConfig);
+  const plugins = asRecord12(root?.plugins);
+  const entries = asRecord12(plugins?.entries);
+  const olympus = asRecord12(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
 function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord11(asRecord11(pluginConfig)?.sourceIndex);
+  const sourceIndex = asRecord12(asRecord12(pluginConfig)?.sourceIndex);
   const unsupported = [
     "corpusRegistry",
     "corpora",
@@ -105285,7 +106256,7 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key2];
   }
 }
-function asRecord11(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.", WORKER_ENDPOINT_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.", WORKER_SOCKET_RETAINED_MESSAGE = "Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.", SERVICE_ID = "olympus-worker", SERVICE_LABEL = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR";
@@ -117952,14 +118923,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord12(await response.json());
-    const readiness = asRecord12(body.credential_readiness);
-    const policy = asRecord12(readiness.policy);
+    const body = asRecord13(await response.json());
+    const readiness = asRecord13(body.credential_readiness);
+    const policy = asRecord13(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord12(entry);
+      const profile = asRecord13(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -118013,8 +118984,8 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord12(await response.json());
-  const bridge = asRecord12(health.desktop_bridge);
+  const health = asRecord13(await response.json());
+  const bridge = asRecord13(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === "linux" && ["port_in_use", "unavailable"].includes(String(bridge.state))) {
     return {
       name,
@@ -118075,7 +119046,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -118084,7 +119055,7 @@ async function sourceIndexStatusCheck(deps) {
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   const migration = approvedTierMigrationInProgress(status.tier_migration, deps.now?.() ?? new Date, tierMigrationStoppedGraceDays(deps.env ?? process.env));
   for (const entry of corpora) {
-    const corpus = asRecord12(entry);
+    const corpus = asRecord13(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true)
       continue;
@@ -118100,15 +119071,15 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord12(corpus.counts);
-    const embeddingParity = asRecord12(corpus.embedding_parity);
+    const counts = asRecord13(corpus.counts);
+    const embeddingParity = asRecord13(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount2(embeddingParity.chunks) : asCount2(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount2(embeddingParity.embedded_chunks) : asCount2(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
       const items = typeof counts.indexed_items === "number" ? `, ${asCount2(counts.indexed_items)} items indexed` : "";
-      const backlog = asRecord12(embeddingParity.backlog_estimate);
+      const backlog = asRecord13(embeddingParity.backlog_estimate);
       const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount2(backlog.missing_chunks) > 0 ? `, ${asCount2(backlog.missing_chunks)} chunks waiting ≈ ${asCount2(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
       summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})${backlogEstimate}` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
@@ -118152,7 +119123,7 @@ function tierMigrationStoppedGraceDays(env) {
   return Number.isFinite(value2) && value2 >= 0 ? value2 : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
 }
 function approvedTierMigrationInProgress(value2, now, graceDays) {
-  const migration = asRecord12(value2);
+  const migration = asRecord13(value2);
   if (migration.in_progress !== true)
     return;
   const state = typeof migration.state === "string" ? migration.state : "";
@@ -118163,7 +119134,7 @@ function approvedTierMigrationInProgress(value2, now, graceDays) {
     return;
   const destinations = new Map;
   for (const entry of Array.isArray(migration.destinations) ? migration.destinations : []) {
-    const destination = asRecord12(entry);
+    const destination = asRecord13(entry);
     if (typeof destination.corpus_id === "string")
       destinations.set(destination.corpus_id, asCount2(destination.chunks_to_embed));
   }
@@ -118214,7 +119185,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -118259,7 +119230,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -118271,8 +119242,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord12(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord12(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord13(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord13(corpus?.counts);
     const actionable = asCount2(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -118329,7 +119300,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value2) {
-  const record2 = asRecord12(value2);
+  const record2 = asRecord13(value2);
   if (!("actionable_queued" in record2) || !("actionable_retryable_due" in record2))
     return;
   return {
@@ -118342,7 +119313,7 @@ function contentExtractionThroughputSignal(value2) {
 function degradedCredentialDetails(record2, options = {}) {
   const credentials = Array.isArray(record2.degraded_credentials) ? record2.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord12(entry);
+    const credential = asRecord13(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -118394,7 +119365,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -118422,7 +119393,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord12(entry);
+    const source = asRecord13(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -118431,14 +119402,14 @@ async function sourceSchedulerStatusCheck(deps) {
     if (source.stale_sync_anomaly === true)
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
-    if (tasks.some((taskEntry) => asRecord12(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
+    if (tasks.some((taskEntry) => asRecord13(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
       problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
     }
-    if (tasks.some((taskEntry) => asRecord12(taskEntry).degraded_reason === "embedding_items_failed")) {
+    if (tasks.some((taskEntry) => asRecord13(taskEntry).degraded_reason === "embedding_items_failed")) {
       problems.push(`${sourceId} has items whose embedding failed; they are skipped (keyword search still finds them) and the rest keep embedding`);
     }
     for (const taskEntry of tasks) {
-      const task = asRecord12(taskEntry);
+      const task = asRecord13(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount2(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -118574,7 +119545,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord12(await response.json());
+    return asRecord13(await response.json());
   } catch {
     return;
   }
@@ -118584,7 +119555,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord12(await response.json());
+    const status = asRecord13(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -118593,7 +119564,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord12(status.ingestion_ledger);
+  const ledger = asRecord13(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -118629,9 +119600,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord12(await response.json());
+    const status = asRecord13(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord12(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord13(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -118778,7 +119749,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord12(corpus.last_refresh);
+  const lastRefresh = asRecord13(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -118793,13 +119764,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord12(corpus.last_refresh);
+  const lastRefresh = asRecord13(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord12(corpus.last_sync);
+  const lastSync = asRecord13(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord12(corpus.counts);
+  const counts = asRecord13(corpus.counts);
   return asCount2(counts.items_indexed) > 0 || asCount2(counts.messages_indexed) > 0 || asCount2(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -118836,7 +119807,7 @@ function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync15(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord12(value2) {
+function asRecord13(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : {};
 }
 function asCount2(value2) {
@@ -119618,6 +120589,7 @@ async function revalidateStdioSourceAnswer(ctx, result) {
 var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, ARCHIVE_IMPORT_PARAMS, operations;
 var init_operations = __esm(() => {
   init_release_manifest();
+  init_app_release_agent();
   init_doctor();
   init_ocr_readiness();
   init_email();
@@ -119855,7 +120827,9 @@ var init_operations = __esm(() => {
         });
         const jobs = ctx.sourceAnswerJobs;
         const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
-        return revalidateStdioSourceAnswer(ctx, result);
+        const released = await revalidateStdioSourceAnswer(ctx, result);
+        await recordLocalAgentAnswer({ caller: ctx.caller, operation: "source_answer", args: params, result: released });
+        return released;
       }
     },
     {
@@ -119876,7 +120850,9 @@ var init_operations = __esm(() => {
         if (!jobs)
           throw sourceAnswerJobNotFound();
         const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
-        return revalidateStdioSourceAnswer(ctx, result);
+        const released = await revalidateStdioSourceAnswer(ctx, result);
+        await recordLocalAgentAnswer({ caller: ctx.caller, operation: "source_answer_result", args: params, result: released });
+        return released;
       }
     },
     {
@@ -120404,7 +121380,7 @@ function validateTierRulesFile(options = {}) {
   };
 }
 function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord13(raw);
+  const root = asRecord14(raw);
   if (!root)
     throw new OperationError("config_error", `${label} must be a JSON object.`);
   if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
@@ -120429,7 +121405,7 @@ function parseOwnerTierRules(raw, label = "tier rules") {
   });
 }
 function parseOwnerTierRule(raw, label = "tier rule") {
-  const record2 = asRecord13(raw);
+  const record2 = asRecord14(raw);
   if (!record2)
     throw new OperationError("config_error", `${label} must be an object.`);
   const unknownKeys = Object.keys(record2).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
@@ -120459,7 +121435,7 @@ function parseOwnerTierRule(raw, label = "tier rule") {
   return { id, ...source ? { source } : {}, match, tier, strength };
 }
 function parseMatch(raw, label) {
-  const record2 = asRecord13(raw);
+  const record2 = asRecord14(raw);
   if (!record2)
     throw new OperationError("config_error", `${label} must be an object.`);
   const keys = Object.keys(record2);
@@ -120553,7 +121529,7 @@ function tightenPermissions(path) {
 function tierRulesRemedy(path) {
   return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
 }
-function asRecord13(value2) {
+function asRecord14(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 }
 var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
@@ -120593,7 +121569,7 @@ function readPrivacyProfile(options = {}) {
   } catch {
     throw new OperationError("config_error", `The privacy profile at ${path} is not valid JSON.`);
   }
-  const record2 = asRecord14(raw);
+  const record2 = asRecord15(raw);
   if (!record2 || record2.schemaVersion !== PRIVACY_PROFILE_SCHEMA_VERSION) {
     throw new OperationError("config_error", `The privacy profile at ${path} must have schemaVersion ${PRIVACY_PROFILE_SCHEMA_VERSION}.`);
   }
@@ -120613,7 +121589,7 @@ function privacyOwnerContext(options = {}) {
   }
 }
 function parsePrivacyProfileInput(raw) {
-  const record2 = asRecord14(raw);
+  const record2 = asRecord15(raw);
   if (!record2)
     throw invalid3("The privacy settings must be an object.");
   const unknownKeys = Object.keys(record2).filter((key2) => key2 !== "description" && key2 !== "rules");
@@ -120651,7 +121627,7 @@ function parsePrivacyProfileInput(raw) {
   return out;
 }
 function parsePrivacyRule(raw) {
-  const record2 = asRecord14(raw);
+  const record2 = asRecord15(raw);
   if (!record2)
     throw invalid3("Each rule must be an object.");
   const unknownKeys = Object.keys(record2).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
@@ -120737,7 +121713,7 @@ function writePrivacyProfile(update, options = {}) {
 function invalid3(message2) {
   return new OperationError("invalid_params", message2);
 }
-function asRecord14(value2) {
+function asRecord15(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 }
 var PRIVACY_PROFILE_SCHEMA_VERSION = 1, OLYMPUS_PRIVACY_PROFILE_ENV = "OLYMPUS_PRIVACY_PROFILE_PATH", PRIVACY_DESCRIPTION_MAX_CHARS = 2000, PRIVACY_RULES_MAX = 100, PRIVACY_DISPLAY_MAX_CHARS = 200, PRIVACY_KEY_MAX_CHARS = 1024, PRIVACY_RULE_ID_PREFIX = "privacy-", PRIVACY_RULE_KINDS, RULE_SOURCES;
@@ -123735,6 +124711,19 @@ var init_tier_migration_cli = __esm(() => {
 });
 
 // src/workers/classification/tier-cli.ts
+var exports_tier_cli = {};
+__export(exports_tier_cli, {
+  tierCommandRewritesStores: () => tierCommandRewritesStores,
+  tierCommandOpensStores: () => tierCommandOpensStores,
+  runTierSetOnRecordedItem: () => runTierSetOnRecordedItem,
+  runTierSet: () => runTierSet,
+  runTierRules: () => runTierRules,
+  runTierExplain: () => runTierExplain,
+  runTierCommand: () => runTierCommand,
+  runTierClassifier: () => runTierClassifier,
+  locateTierItem: () => locateTierItem,
+  TIER_CLI_USAGE: () => TIER_CLI_USAGE
+});
 import { Database as Database24 } from "bun:sqlite";
 import { existsSync as existsSync83 } from "node:fs";
 function tierCommandOpensStores(args) {
@@ -123878,7 +124867,10 @@ function orphanedOverride(ledger, identity2) {
   const { providerConversationId: _conversation, ...withoutConversation } = identity2;
   return ledger.getOverride(withoutConversation);
 }
-function runTierSet(args, context2 = {}) {
+function runTierSetOnRecordedItem(locator, word, expected, context2 = {}) {
+  return runTierSet([locator, word], context2, expected);
+}
+function runTierSet(args, context2 = {}, expected) {
   const [locator, word] = args;
   if (!locator || !word || args.length > 2) {
     throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier set"]}`);
@@ -123897,6 +124889,12 @@ function runTierSet(args, context2 = {}) {
     override = { kind: "tier", tier };
   }
   const items = locateTierItem(locator, context2);
+  if (expected) {
+    const identity2 = items[0].identity;
+    if (identity2.provider !== expected.provider || identity2.providerItemId !== expected.providerItemId || (identity2.providerConversationId ?? undefined) !== (expected.providerConversationId ?? undefined)) {
+      throw new OperationError("invalid_params", "That locator no longer names the item it was recorded for, so nothing was changed.");
+    }
+  }
   const results = items.map((item) => withLedgerAt(item.ledgerPath, context2.now, (ledger) => {
     if (override === "clear") {
       const cleared = ledger.clearOverride(item.identity);
@@ -140029,7 +141027,7 @@ var require_discriminator = __commonJS((exports) => {
     error: error2,
     code(cxt) {
       const { gen, data: data2, schema, parentSchema, it } = cxt;
-      const { oneOf } = parentSchema;
+      const { oneOf: oneOf2 } = parentSchema;
       if (!it.opts.discriminator) {
         throw new Error("discriminator: requires discriminator option");
       }
@@ -140038,7 +141036,7 @@ var require_discriminator = __commonJS((exports) => {
         throw new Error("discriminator: requires propertyName");
       if (schema.mapping)
         throw new Error("discriminator: mapping is not supported");
-      if (!oneOf)
+      if (!oneOf2)
         throw new Error("discriminator: requires oneOf keyword");
       const valid = gen.let("valid", false);
       const tag = gen.const("tag", (0, codegen_1._)`${data2}${(0, codegen_1.getProperty)(tagName)}`);
@@ -140066,8 +141064,8 @@ var require_discriminator = __commonJS((exports) => {
         const oneOfMapping = {};
         const topRequired = hasRequired(parentSchema);
         let tagRequired = true;
-        for (let i2 = 0;i2 < oneOf.length; i2++) {
-          let sch = oneOf[i2];
+        for (let i2 = 0;i2 < oneOf2.length; i2++) {
+          let sch = oneOf2[i2];
           if ((sch === null || sch === undefined ? undefined : sch.$ref) && !(0, util_1.schemaHasRulesButRef)(sch, it.self.RULES)) {
             const ref = sch.$ref;
             sch = compile_1.resolveRef.call(it.self, it.schemaEnv.root, it.baseId, ref);
@@ -141120,146 +142118,6 @@ var init_server3 = __esm(() => {
   };
 });
 
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-function createReleaseCapture() {
-  return { heldBack: 0 };
-}
-function runWithReleaseCapture(capture, fn) {
-  return storage3.run(capture, fn);
-}
-function noteReleasedItems(items, heldBack = 0, withheld = false) {
-  const capture = storage3.getStore();
-  if (!capture)
-    return;
-  capture.items = items.map((item) => ({ ...item }));
-  capture.heldBack = Math.max(0, Math.floor(Number.isFinite(heldBack) ? heldBack : 0));
-  capture.withheld = withheld;
-}
-function boundedString(value2, max2) {
-  if (typeof value2 !== "string")
-    return;
-  const trimmed2 = value2.trim();
-  return trimmed2 ? trimmed2.slice(0, max2) : undefined;
-}
-function releasedTierOf(trustDomain) {
-  if (trustDomain === "public_safe")
-    return "public";
-  if (trustDomain === "internal")
-    return "personal";
-  return "private";
-}
-function releasedItemFromEvidence(evidence, source, title) {
-  const shownTitle = boundedString(title, TITLE_MAX);
-  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
-  const provider = boundedString(evidence.provider, ID_MAX);
-  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
-  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
-  const locator = boundedString(evidence.uri, ID_MAX);
-  return {
-    source: boundedString(source, 80) ?? "Other source",
-    ...shownTitle ? { title: shownTitle } : {},
-    tier: releasedTierOf(evidence.trust_domain),
-    ...corpusId ? { corpusId } : {},
-    ...provider ? { provider } : {},
-    ...providerItemId ? { providerItemId } : {},
-    ...providerConversationId ? { providerConversationId } : {},
-    ...locator ? { locator } : {}
-  };
-}
-function appConnectionOf(caller) {
-  if (!caller || caller.surface === "cli")
-    return;
-  const display = boundedString(caller.displayName, 80);
-  const id = boundedString(caller.connectionId, 128);
-  if (caller.surface === "remote") {
-    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
-    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
-  }
-  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
-}
-function setAppReleaseRecorder(next) {
-  recorder = next;
-}
-function recordAppRequest(input) {
-  try {
-    if (!recorder)
-      return;
-    const connection = appConnectionOf(input.caller);
-    const question = boundedString(input.question, 2000);
-    if (!connection || !question || input.capture.items === undefined)
-      return;
-    const withheld = input.withheldAfter === true || input.capture.withheld === true;
-    recorder({
-      at: (input.now ?? Date.now)(),
-      connection,
-      question,
-      items: withheld ? [] : input.capture.items,
-      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
-      answeredPrivately: input.answeredPrivately === true,
-      withheld
-    });
-  } catch {}
-}
-function rememberJobQuestion(jobId, question, now = Date.now()) {
-  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
-    return;
-  for (const [key2, entry] of jobQuestions)
-    if (entry.expires <= now)
-      jobQuestions.delete(key2);
-  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
-  while (jobQuestions.size > JOB_QUESTIONS_MAX)
-    jobQuestions.delete(jobQuestions.keys().next().value);
-}
-function jobQuestion(jobId, now = Date.now()) {
-  if (typeof jobId !== "string")
-    return;
-  const entry = jobQuestions.get(jobId);
-  if (!entry || entry.expires <= now)
-    return;
-  return entry.question;
-}
-function forgetJobQuestions() {
-  jobQuestions.clear();
-}
-function sourceAnswerQuestion(name, args, status, jobId) {
-  if (name === "source_answer") {
-    const question = typeof args.question === "string" ? args.question : undefined;
-    if (status === "working")
-      rememberJobQuestion(jobId, question);
-    return question;
-  }
-  if (name === "source_answer_result")
-    return jobQuestion(args.job_id);
-  return;
-}
-function recordRemoteOperation(input) {
-  const { operation, args, output } = input;
-  if (operation !== "source_answer" && operation !== "source_answer_result")
-    return;
-  const question = sourceAnswerQuestion(operation, args, output.status, output.job_id);
-  if (output.kind !== "source_answer" || output.status !== "answered" && output.status !== "withheld")
-    return;
-  recordAppRequest({
-    caller: input.caller,
-    question,
-    capture: input.answeredPrivately ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
-    answeredPrivately: input.answeredPrivately
-  });
-}
-var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
-var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage7;
-  PROVIDER_APP_NAMES = {
-    openai: "ChatGPT",
-    anthropic: "Claude",
-    xai: "Grok",
-    meta: "Meta AI"
-  };
-  JOB_QUESTION_TTL_MS = 30 * 60000;
-  jobQuestions = new Map;
-});
-
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 class ReadBuffer {
   append(chunk) {
@@ -141354,756 +142212,6 @@ class StdioServerTransport {
 }
 var init_stdio2 = __esm(() => {
   init_stdio();
-});
-
-// src/core/privacy-backlog-coverage.ts
-function privacyBacklogCoverageNote(pendingItems) {
-  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
-    return;
-  return `Olympus is still checking ${pendingItems} new item${pendingItems === 1 ? "" : "s"} for privacy before ${pendingItems === 1 ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
-}
-
-// src/core/remote-result.ts
-function providerSourceLabel(provider) {
-  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
-}
-function sourceLabel3(provider, family) {
-  if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
-    return PROVIDER_LABELS[provider];
-  if (typeof family === "string" && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family))
-    return FAMILY_LABELS[family];
-  return OTHER_SOURCE_LABEL;
-}
-function oneOf(value2, allowed) {
-  return typeof value2 === "string" && allowed.includes(value2) ? value2 : undefined;
-}
-function withheldParams(operation) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
-}
-function remoteDeclaredParams(operation, declared) {
-  const withheld = withheldParams(operation);
-  return declared.filter((name) => !withheld.includes(name));
-}
-function remoteToolDescription(operation, description) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
-}
-function remoteToolSchema(operation, schema) {
-  const withheld = withheldParams(operation);
-  if (withheld.length === 0)
-    return schema;
-  const properties = asRecord15(schema.properties) ?? {};
-  const required4 = Array.isArray(schema.required) ? schema.required : [];
-  return {
-    ...schema,
-    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
-    required: required4.filter((name) => typeof name === "string" && !withheld.includes(name))
-  };
-}
-function remoteWithheldParam(operation, args) {
-  const withheld = withheldParams(operation);
-  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
-}
-function remoteOperationOutput(operation, raw, options = {}) {
-  const pending = pendingOutput(raw);
-  switch (operation) {
-    case "source_answer":
-      return pending ?? sourceAnswerOutput(raw, options);
-    case "ask_anonymously":
-      return pending ?? anonymousAnswerOutput(raw);
-    case "source_answer_result":
-      return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
-    case "source_index_status":
-      return sourceIndexStatusOutput(raw);
-    default:
-      throw new OperationError("invalid_request", `No remote output for operation ${operation}.`);
-  }
-}
-function isAnonymousAnswerResult(raw) {
-  const record4 = asRecord15(raw);
-  return record4 !== undefined && typeof record4.ok === "boolean" && typeof record4.answer !== "string";
-}
-function pendingOutput(raw) {
-  const record4 = asRecord15(raw);
-  if (record4?.status !== "working")
-    return;
-  if (typeof record4.job_id !== "string" || !JOB_ID.test(record4.job_id) || isSecretLike(record4.job_id)) {
-    throw new OperationError("source_index_error", "unexpected pending shape");
-  }
-  return {
-    status: "working",
-    job_id: record4.job_id,
-    elapsed_ms: wholeNumber(record4.elapsed_ms),
-    next_tool: "source_answer_result",
-    message: REMOTE_PENDING_MESSAGE
-  };
-}
-function sourceAnswerOutput(raw, options) {
-  const record4 = asRecord15(raw);
-  if (!record4 || typeof record4.answer !== "string" || !Array.isArray(record4.evidence)) {
-    throw new OperationError("source_index_error", "unexpected answer shape");
-  }
-  const evidence = record4.evidence.map(asRecord15).filter((entry) => entry !== undefined);
-  let dropped = new Set;
-  if (options.releaseCheck) {
-    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
-    if ("withhold" in recheck)
-      return withheldAnswer(recheck.withhold, evidence.length);
-    dropped = recheck.dropped;
-  }
-  if (isSecretLike(record4.answer))
-    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const answer = scannedText(withoutSecretLocationCoverageNotes(record4.answer), MAX_ANSWER, "multiline");
-  if (answer.secret)
-    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const citations = [];
-  const released = [];
-  evidence.forEach((entry, index) => {
-    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
-      return;
-    const citation = citationOutput(entry);
-    citations.push(citation);
-    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
-  });
-  noteReleasedItems(released);
-  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
-  const coverageSuffix = privacyCoverage ? `
-
-Coverage notes:
-- ${privacyCoverage}` : "";
-  return {
-    kind: "source_answer",
-    status: "answered",
-    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
-    citations
-  };
-}
-function withRemotePrivateNote(output, answerId, secretMatch = false) {
-  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
-}
-function remotePrivateNote(answerId, secretMatch = false) {
-  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
-  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
-}
-function withheldAnswer(message2, heldBack = 0) {
-  noteReleasedItems([], heldBack, true);
-  return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
-}
-function recheckRelease(evidence, manifests, check) {
-  if (manifests.length === 0) {
-    console.error("[olympus:remote] release_manifest_missing");
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  }
-  const inputs = manifests.flatMap((manifest2) => manifest2.inputs.map((input) => ({ input, manifest: manifest2 })));
-  let verdicts;
-  let postureNow;
-  try {
-    verdicts = check.inputs(inputs.map(({ input }) => input));
-    if (verdicts.length !== inputs.length)
-      throw new Error("release check returned the wrong number of verdicts");
-    postureNow = check.secureDerivativeDefault();
-  } catch (error2) {
-    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error2)}`);
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  }
-  if (verdicts.some((verdict) => verdict.tier === "secret"))
-    return { withhold: REMOTE_ANSWER_CHANGED };
-  if (verdicts.some((verdict) => verdict.tier === "unknown"))
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  if (verdicts.some((verdict) => verdict.hiddenByParent === true))
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  for (const [index, { input, manifest: manifest2 }] of inputs.entries()) {
-    const verdict = verdicts[index];
-    if (input.dependency === "parent_label" && verdict.gone)
-      return { withhold: REMOTE_ANSWER_UNVERIFIED };
-    if (!privateInputReleaseAllowed(input, verdict, manifest2.constraints, postureNow))
-      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
-  }
-  const dropped = new Set;
-  for (const [index, entry] of evidence.entries()) {
-    const matches2 = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
-    if (matches2.length === 0) {
-      console.error("[olympus:remote] release_manifest_incomplete");
-      return { withhold: REMOTE_ANSWER_UNVERIFIED };
-    }
-    if (matches2.some((verdict) => verdict.gone))
-      dropped.add(index);
-  }
-  return { dropped };
-}
-function citesInput(entry, input) {
-  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
-}
-function citationOutput(entry) {
-  const title = scannedText(entry.title, MAX_TITLE, "line");
-  const date5 = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
-  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
-  const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
-  return {
-    label: sourceLabel3(entry.provider, entry.family),
-    ...composed.text && !composed.secret ? { title: composed.text } : {},
-    ...date5 ? { date: date5 } : {}
-  };
-}
-function anonymousAnswerOutput(raw) {
-  const record4 = asRecord15(raw);
-  if (!record4 || typeof record4.ok !== "boolean") {
-    throw new OperationError("email_error", "unexpected anonymous answer shape");
-  }
-  if (record4.ok) {
-    if (typeof record4.reply !== "string")
-      throw new OperationError("email_error", "unexpected anonymous answer shape");
-    const reply = scannedText(record4.reply, MAX_ANSWER, "multiline");
-    const sent2 = keptText(record4.sent, MAX_SENT, "multiline");
-    const route = keptText(record4.route, MAX_ROUTE, "line");
-    const note = keptText(record4.note, MAX_MESSAGE, "line");
-    const model = typeof record4.model === "string" && MODEL_ID.test(record4.model) && !isSecretLike(record4.model) ? record4.model : undefined;
-    const cleanup = oneOf(record4.cleanup, CLEANUPS);
-    return {
-      kind: "anonymous_answer",
-      status: "answered",
-      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
-      level: record4.level === "strict" ? "strict" : "standard",
-      rewritten: record4.rewritten === true,
-      remembered: record4.remembered === true,
-      network_identity: oneOf(record4.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
-      ...cleanup ? { cleanup } : {},
-      ...model ? { model } : {},
-      ...route ? { route } : {},
-      ...sent2 ? { sent: sent2 } : {},
-      ...note ? { note } : {},
-      ...typeof record4.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
-    };
-  }
-  if (record4.code === "needs_choice") {
-    const options = asRecord15(record4.options);
-    return {
-      kind: "anonymous_answer",
-      status: "needs_choice",
-      message: REMOTE_NEEDS_CHOICE_MESSAGE,
-      options: {
-        suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
-        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
-        custom_instruction: options?.customInstruction === true
-      }
-    };
-  }
-  const sent = keptText(record4.sent, MAX_SENT, "multiline");
-  const outcome = oneOf(record4.outcome, OUTCOMES);
-  const daemonCode = oneOf(record4.daemonCode, REMOTE_DAEMON_CODES);
-  return {
-    kind: "anonymous_answer",
-    status: "refused",
-    code: oneOf(record4.code, REMOTE_REFUSAL_CODES) ?? "refused",
-    message: keptText(record4.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
-    ...outcome ? { outcome } : {},
-    ...daemonCode ? { daemon_code: daemonCode } : {},
-    ...sent ? { sent } : {}
-  };
-}
-function sourceIndexStatusOutput(raw) {
-  const record4 = asRecord15(raw);
-  if (!record4 || record4.kind !== "source_index_status" || !Array.isArray(record4.corpora)) {
-    throw new OperationError("source_index_error", "unexpected status shape");
-  }
-  const generatedAt = iso(record4.generated_at);
-  const corpora = [];
-  for (const value2 of record4.corpora) {
-    if (corpora.length >= MAX_CORPORA)
-      break;
-    const corpus = asRecord15(value2);
-    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
-      continue;
-    const retrieval = asRecord15(corpus.retrieval);
-    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
-    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
-    const refresh = asRecord15(corpus.last_refresh);
-    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
-    const completedAt = iso(refresh?.completed_at);
-    const counts = asRecord15(corpus.counts);
-    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
-    corpora.push({
-      corpus_id: corpus.corpus_id,
-      label: sourceLabel3(corpus.provider, corpus.family),
-      ...trustDomain ? { trust_domain: trustDomain } : {},
-      configured: corpus.configured === true,
-      ...mode && state ? { retrieval: { mode, state } } : {},
-      ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
-      ...counts ? {
-        counts: {
-          indexed_items: wholeNumber(counts.indexed_items),
-          chunks: wholeNumber(counts.chunks),
-          embedded_chunks: wholeNumber(counts.embedded_chunks)
-        }
-      } : {}
-    });
-  }
-  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
-}
-function remoteRetryAfterSeconds(body) {
-  if (!body || typeof body !== "object")
-    return;
-  const value2 = body.retry_after_seconds;
-  return typeof value2 === "number" && Number.isInteger(value2) && value2 >= 1 && value2 <= 86400 ? value2 : undefined;
-}
-function remoteErrorCode(error2) {
-  if (error2 instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error2.code))
-    return error2.code;
-  return "internal_error";
-}
-function remoteErrorOutput(error2, options = {}) {
-  const code = remoteErrorCode(error2);
-  if (code === "invalid_params" && options.declaredParams && error2 instanceof OperationError) {
-    const param = namedParam(error2.message, options.declaredParams);
-    if (param)
-      return { error: code, message: invalidParamMessage(param), param };
-  }
-  const retryAfter = RETRY_AFTER_SECONDS[code];
-  if (retryAfter !== undefined)
-    return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
-  if (!REFERENCED_ERROR_CODES.has(code))
-    return { error: code, message: REMOTE_ERROR_TEXT[code] };
-  const ref = mintErrorRef();
-  const errorClass2 = error2 instanceof Error ? error2.name : typeof error2;
-  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error2)}`);
-  return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
-}
-function remoteSurfaceErrorOutput(code) {
-  return { error: code, message: REMOTE_ERROR_TEXT[code] };
-}
-function remoteWithheldParamOutput(param) {
-  if (!PARAM_NAME.test(param))
-    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
-  return {
-    error: "invalid_params",
-    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
-    param
-  };
-}
-function invalidParamMessage(param) {
-  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
-}
-function namedParam(message2, declared) {
-  let best;
-  for (const name of declared) {
-    if (!PARAM_NAME.test(name))
-      continue;
-    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message2);
-    if (match && (!best || match.index < best.at))
-      best = { name, at: match.index };
-  }
-  return best?.name;
-}
-function mintErrorRef() {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-function remoteOutputSchema(operation) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
-}
-function isSecretLike(text3) {
-  return secretLabelsInText(text3).length > 0;
-}
-function scannedText(value2, max2, mode) {
-  if (typeof value2 !== "string")
-    return { secret: false };
-  if (isSecretLike(value2))
-    return { secret: true };
-  const normalized2 = mode === "line" ? value2.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value2.replace(UNSAFE_CHARS, "");
-  if (isSecretLike(normalized2))
-    return { secret: true };
-  const emitted = mode === "line" ? normalized2.slice(0, max2).trim() : normalized2.slice(0, max2);
-  if (isSecretLike(emitted))
-    return { secret: true };
-  return emitted ? { text: emitted, secret: false } : { secret: false };
-}
-function keptText(value2, max2, mode) {
-  const scanned = scannedText(value2, max2, mode);
-  const text3 = mode === "multiline" ? scanned.text?.trim() : scanned.text;
-  return text3 && !scanned.secret ? text3 : undefined;
-}
-function wholeNumber(value2) {
-  return typeof value2 === "number" && Number.isFinite(value2) ? Math.max(0, Math.round(value2)) : 0;
-}
-function iso(value2) {
-  if (typeof value2 !== "string")
-    return;
-  const at = Date.parse(value2);
-  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
-}
-function dateOnly(value2) {
-  return iso(value2)?.slice(0, 10);
-}
-function asRecord15(value2) {
-  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
-}
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
-var init_remote_result = __esm(() => {
-  init_app_release_capture();
-  init_operation_error();
-  init_opsec();
-  init_parent_label();
-  init_release_manifest();
-  init_secret_location_note();
-  MAX_ANSWER = 64 * 1024;
-  MAX_SENT = 16 * 1024;
-  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
-  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
-  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
-  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
-  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
-  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
-  PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
-  PROVIDER_LABELS = {
-    gmail: "Gmail",
-    google_drive: "Google Drive",
-    "google-drive": "Google Drive",
-    google_calendar: "Google Calendar",
-    dropbox: "Dropbox",
-    x: "X bookmarks",
-    readwise: "Readwise",
-    telegram: "Telegram",
-    whatsapp: "WhatsApp",
-    whatsapp_personal: "WhatsApp",
-    whatsapp_business: "WhatsApp",
-    apple_messages: "Apple Messages",
-    signal: "Signal",
-    reflect: "Reflect",
-    roam: "Roam",
-    evernote: "Evernote",
-    local_files: "Files on this computer"
-  };
-  FAMILY_LABELS = {
-    email: "Mail",
-    file: "Files",
-    chat: "Messages",
-    note: "Notes",
-    x: "X bookmarks",
-    readwise: "Readwise"
-  };
-  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
-    ...Object.values(PROVIDER_LABELS),
-    ...Object.values(FAMILY_LABELS),
-    OTHER_SOURCE_LABEL
-  ])].sort());
-  REMOTE_REFUSAL_CODES = Object.freeze([
-    "refused",
-    "anonymous_answers_off",
-    "cancelled",
-    "gate_refused",
-    "internal_error",
-    "invalid_params",
-    "model_same_provider",
-    "question_empty",
-    "question_too_long",
-    "route_not_configured",
-    "secret_detected",
-    "settings_invalid",
-    "settings_stale",
-    "writer_declined",
-    "writer_failed",
-    "invalid_question",
-    "busy",
-    "acknowledgements_incomplete",
-    "funding_date_missing",
-    "funding_date_invalid",
-    "note_expired",
-    "daemon_api_key_missing",
-    "daemon_not_found",
-    "tor_not_found",
-    "unresolved_session",
-    "unresolved_session_other_wallet",
-    "no_unresolved_session",
-    "stranded_processes",
-    "daemon_already_running",
-    "tor_port_busy",
-    "tor_bootstrap_failed",
-    "daemon_start_failed",
-    "daemon_version_unsupported",
-    "daemon_supervisor_unsupported",
-    "relay_mismatch",
-    "key_reuse_on",
-    "key_reuse_unverified",
-    "daemon_keyless",
-    "daemon_identity_failed",
-    "daemon_api_key_rejected",
-    "session_process_exited",
-    "confinement_self_test_failed",
-    "confinement_unavailable",
-    "policy_unavailable",
-    "model_unavailable",
-    "daily_cap_reached",
-    "spend_cap_reached",
-    "state_unavailable",
-    "timeout",
-    "aborted",
-    "redirect_refused",
-    "response_too_large",
-    "invalid_response",
-    "daemon_error",
-    "transport_failed",
-    "teardown_incomplete",
-    "authorization_refused",
-    "session_spent"
-  ].filter((code, index, all) => all.indexOf(code) === index));
-  REMOTE_DAEMON_CODES = Object.freeze([
-    "busy",
-    "request_cancelled",
-    "funding_required",
-    "model_budget_unavailable",
-    "model_policy_unavailable",
-    "invalid_model",
-    "anonymous_access_failed",
-    "upstream_error",
-    "invalid_upstream_response",
-    "withdrawal_pending",
-    "wallet_conflict",
-    "invalid_request_error",
-    "invalid_body",
-    "testnet_password_required",
-    "invalid_api_key",
-    "local_connection_required",
-    "browser_origin_denied",
-    "unrecognized"
-  ]);
-  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
-  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
-  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
-  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
-  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
-  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
-  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
-  REMOTE_WITHHELD_PARAMS = {
-    source_index_status: [
-      "conversation_id",
-      "include_sender_aggregation",
-      "max_senders",
-      "include_readiness_ledger",
-      "include_ingestion_ledger",
-      "include_items",
-      "max_items",
-      "query"
-    ]
-  };
-  REMOTE_DESCRIPTIONS = {
-    source_index_status: [
-      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
-      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
-      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
-    ].join(" ")
-  };
-  REMOTE_ERROR_TEXT = {
-    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
-    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
-    unsupported_filter: "That filter is not supported here.",
-    config_error: "Olympus on the computer needs setup before it can answer.",
-    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
-    argus_error: "Olympus's private analyst could not answer. Try again later.",
-    email_not_configured: "Olympus on the computer needs setup before it can answer.",
-    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
-    email_error: "Olympus could not complete this request.",
-    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
-    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
-    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
-    source_index_error: "Olympus could not complete this request.",
-    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
-    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
-    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
-    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
-    internal_error: "Olympus could not complete this request.",
-    unknown_operation: "Olympus has no operation with that name here.",
-    operation_unavailable: "That operation is not enabled on this Olympus install.",
-    unauthorized: "A connection token is required.",
-    invalid_token: "The connection token is not valid or has been revoked.",
-    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
-    not_found: "There is nothing at this path.",
-    method_not_allowed: "That HTTP method is not allowed here.",
-    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
-    payload_too_large: "The request body is too large.",
-    olympus_offline: "Olympus is off; try again later."
-  };
-  RETRY_AFTER_SECONDS = {
-    source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS
-  };
-  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
-  REFERENCED_ERROR_CODES = new Set([
-    "internal_error",
-    "email_error",
-    "source_index_error",
-    "argus_error",
-    "config_error"
-  ]);
-  PENDING_SCHEMA = {
-    type: "object",
-    description: "Still working: call source_answer_result with job_id, again while it says working.",
-    additionalProperties: false,
-    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
-    properties: {
-      status: { const: "working" },
-      job_id: { type: "string", pattern: JOB_ID.source },
-      elapsed_ms: { type: "integer", minimum: 0 },
-      next_tool: { const: "source_answer_result" },
-      message: { type: "string" }
-    }
-  };
-  CITATION_SCHEMA = {
-    type: "object",
-    additionalProperties: false,
-    required: ["label"],
-    properties: {
-      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-      title: { type: "string", maxLength: MAX_TITLE },
-      date: { type: "string", format: "date" }
-    }
-  };
-  SOURCE_ANSWER_SCHEMA = {
-    type: "object",
-    description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
-    additionalProperties: false,
-    required: ["kind", "status", "answer", "citations"],
-    properties: {
-      kind: { const: "source_answer" },
-      status: { enum: ["answered", "withheld"] },
-      answer: { type: "string", maxLength: MAX_ANSWER },
-      citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
-    }
-  };
-  ANONYMOUS_ANSWERED_SCHEMA = {
-    type: "object",
-    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
-    additionalProperties: false,
-    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "answered" },
-      reply: { type: "string", maxLength: MAX_ANSWER },
-      level: { enum: ["strict", "standard"] },
-      rewritten: { type: "boolean" },
-      remembered: { type: "boolean" },
-      network_identity: { enum: [...NETWORK_IDENTITIES] },
-      cleanup: { enum: [...CLEANUPS] },
-      model: { type: "string", pattern: MODEL_ID.source },
-      route: { type: "string", maxLength: MAX_ROUTE },
-      sent: { type: "string", maxLength: MAX_SENT },
-      note: { type: "string", maxLength: MAX_MESSAGE },
-      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
-    }
-  };
-  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
-    type: "object",
-    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
-    additionalProperties: false,
-    required: ["kind", "status", "message", "options"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "needs_choice" },
-      message: { type: "string" },
-      options: {
-        type: "object",
-        additionalProperties: false,
-        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
-        properties: {
-          suggested_level: { enum: ["strict", "standard"] },
-          suggested_cleanup: { enum: [...CLEANUPS] },
-          custom_instruction: { type: "boolean" }
-        }
-      }
-    }
-  };
-  ANONYMOUS_REFUSED_SCHEMA = {
-    type: "object",
-    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
-    additionalProperties: false,
-    required: ["kind", "status", "code", "message"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "refused" },
-      code: { enum: [...REMOTE_REFUSAL_CODES] },
-      message: { type: "string", maxLength: MAX_MESSAGE },
-      outcome: { enum: [...OUTCOMES] },
-      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
-      sent: { type: "string", maxLength: MAX_SENT }
-    }
-  };
-  SOURCE_INDEX_STATUS_SCHEMA = {
-    type: "object",
-    description: "Per-corpus status and counts.",
-    additionalProperties: false,
-    required: ["kind", "corpora"],
-    properties: {
-      kind: { const: "source_index_status" },
-      generated_at: { type: "string", format: "date-time" },
-      corpora: {
-        type: "array",
-        maxItems: MAX_CORPORA,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["corpus_id", "label", "configured"],
-          properties: {
-            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
-            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-            trust_domain: { enum: [...TRUST_DOMAINS] },
-            configured: { type: "boolean" },
-            retrieval: {
-              type: "object",
-              additionalProperties: false,
-              required: ["mode", "state"],
-              properties: {
-                mode: { enum: [...RETRIEVAL_MODES] },
-                state: { enum: [...RETRIEVAL_STATES] }
-              }
-            },
-            last_refresh: {
-              type: "object",
-              additionalProperties: false,
-              required: ["status"],
-              properties: {
-                status: { enum: [...REFRESH_STATUSES] },
-                completed_at: { type: "string", format: "date-time" }
-              }
-            },
-            counts: {
-              type: "object",
-              additionalProperties: false,
-              required: ["indexed_items", "chunks", "embedded_chunks"],
-              properties: {
-                indexed_items: { type: "integer", minimum: 0 },
-                chunks: { type: "integer", minimum: 0 },
-                embedded_chunks: { type: "integer", minimum: 0 }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-  REMOTE_ERROR_SCHEMA = {
-    type: "object",
-    additionalProperties: false,
-    required: ["error", "message"],
-    properties: {
-      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
-      message: { type: "string", description: "A fixed sentence for this code." },
-      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
-      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
-      retry_after_seconds: {
-        type: "integer",
-        minimum: 1,
-        maximum: 86400,
-        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
-      }
-    }
-  };
-  REMOTE_OUTPUT_SCHEMAS = {
-    source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
-    source_answer_result: {
-      oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
-    },
-    ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
-    source_index_status: SOURCE_INDEX_STATUS_SCHEMA
-  };
 });
 
 // src/core/source-answer-jobs.ts
@@ -142784,7 +142892,7 @@ async function handleRemoteCallTool(request, makeOperationContext) {
     const approved = release();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     const output = privatePart ? release() : approved;
-    recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, answeredPrivately: privateMayAnswer });
+    recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestionId: privateMayAnswer ? privatePart?.answerId : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
     return { content: text3(remoteErrorOutput(error2, { declaredParams })), isError: true };
@@ -148907,112 +149015,6 @@ var init_openai_compatible_client = __esm(() => {
   init_local_model_policy();
   init_model_transport();
   init_vlm();
-});
-
-// src/workers/apps-received.ts
-var exports_apps_received = {};
-__export(exports_apps_received, {
-  recordAgentAnswer: () => recordAgentAnswer,
-  createAppsReceived: () => createAppsReceived
-});
-function recordAgentAnswer(question, callerWire, result) {
-  try {
-    const caller = toCaller(callerWire);
-    const record6 = result && typeof result === "object" ? result : {};
-    const items = (Array.isArray(record6.evidence) ? record6.evidence : []).filter((entry) => entry !== null && typeof entry === "object").slice(0, 48).map((entry) => releasedItemFromEvidence(entry, (typeof entry.provider === "string" ? providerSourceLabel(entry.provider) : undefined) ?? (typeof entry.family === "string" ? FAMILY_SOURCE[entry.family] : undefined) ?? "Other source", typeof entry.title === "string" ? entry.title : undefined));
-    const capture = { items, heldBack: 0 };
-    recordAppRequest({ caller, question, capture });
-  } catch {}
-}
-function toCaller(wire) {
-  return {
-    surface: wire.surface,
-    ...wire.connection_id ? { connectionId: wire.connection_id } : {},
-    ...wire.display_name ? { displayName: wire.display_name } : {},
-    ...wire.provider ? { provider: wire.provider } : {}
-  };
-}
-function createAppsReceived(options) {
-  let store;
-  const open5 = () => {
-    store ??= openAppReleaseLog(options.dbPath, options.now ? { now: options.now } : {});
-    return store;
-  };
-  setAppReleaseRecorder((record6) => {
-    try {
-      open5().record(record6);
-    } catch (error2) {
-      console.error(`[olympus:apps-received] record_failed ${error2 instanceof Error ? error2.name : "error"}`);
-    }
-  });
-  const ok = (body = {}) => ({ status: 200, body: { ok: true, ...body } });
-  const refuse3 = (status, code, message2) => ({ status, body: { ok: false, error: { code, message: message2 } } });
-  return {
-    async handle(body) {
-      const action = body.action;
-      try {
-        switch (action) {
-          case "list":
-            return ok({ retentionDays: open5().retentionDays(), requests: open5().list() });
-          case "retention": {
-            const days = body.days;
-            if (!isAppReleaseRetentionDays(days))
-              return refuse3(400, "invalid_params", "Choose 7, 30 or 90 days, or don't keep.");
-            open5().setRetentionDays(days);
-            if (days === 0)
-              forgetJobQuestions();
-            return ok({ retentionDays: days });
-          }
-          case "clear": {
-            const removed = open5().clear();
-            forgetJobQuestions();
-            return ok({ removed });
-          }
-          case "make_private": {
-            const id = typeof body.request === "string" ? body.request : "";
-            const position = typeof body.item === "number" && Number.isInteger(body.item) ? body.item : -1;
-            const item = id && position >= 0 ? open5().item(id, position) : undefined;
-            if (!item)
-              return refuse3(404, "not_found", "That item is no longer in the list.");
-            if (item.madePrivate)
-              return ok({ madePrivate: true });
-            const locators = [item.locator, item.providerItemId].filter((value2) => typeof value2 === "string" && value2 !== "");
-            if (locators.length === 0)
-              return refuse3(409, "item_unknown", "Olympus cannot find this item on this computer any more.");
-            let lastError;
-            for (const locator of locators) {
-              try {
-                await options.setItemPrivate(locator);
-                open5().markMadePrivate(id, position);
-                return ok({ madePrivate: true });
-              } catch (error2) {
-                lastError = error2;
-              }
-            }
-            const message2 = lastError instanceof OperationError ? lastError.message : "Olympus could not change this item.";
-            return refuse3(409, "item_unchanged", message2);
-          }
-          default:
-            return refuse3(400, "invalid_params", "Unknown action.");
-        }
-      } catch {
-        return refuse3(503, "unavailable", "The list of what AI apps received could not be read. Try again in a moment.");
-      }
-    },
-    close() {
-      setAppReleaseRecorder(undefined);
-      store?.close();
-      store = undefined;
-    }
-  };
-}
-var FAMILY_SOURCE;
-var init_apps_received = __esm(() => {
-  init_app_release_capture();
-  init_app_release_log();
-  init_operation_error();
-  init_remote_result();
-  FAMILY_SOURCE = { email: "Mail", file: "Files", chat: "Messages", note: "Notes" };
 });
 
 // src/workers/email-source/dashboard-messaging.ts
@@ -165527,7 +165529,7 @@ var POST_PATH2 = "/dashboard/apps-received", APPS_RECEIVED_CSS = `
   .ar .armake { justify-self: start; }
 }
 `;
-var init_apps_received2 = __esm(() => {
+var init_apps_received = __esm(() => {
   init_components();
   init_host_page();
   init_outside_help();
@@ -165604,7 +165606,7 @@ var init_dashboard = __esm(() => {
   init_host_page();
   init_local();
   init_private_answers();
-  init_apps_received2();
+  init_apps_received();
   init_host_page();
   init_vocabulary();
   DASHBOARD_LEGACY_QUERY_PARAMS = ["source", "background", "sensitivity", "setup", "privacy", "embedding-ledger"];
@@ -166944,16 +166946,6 @@ var init_chat_scope_filter = __esm(() => {
 });
 
 // src/workers/cli-operations.ts
-var exports_cli_operations = {};
-__export(exports_cli_operations, {
-  tierForCli: () => tierForCli,
-  settingsForCli: () => settingsForCli,
-  pairingPlacementForCli: () => pairingPlacementForCli,
-  pairingAccountForCli: () => pairingAccountForCli,
-  ingestionStatusForCli: () => ingestionStatusForCli,
-  exportForCli: () => exportForCli,
-  cliDataRootMismatch: () => cliDataRootMismatch
-});
 import { isAbsolute as isAbsolute37 } from "node:path";
 function cliDataRootMismatch(body, context2) {
   const owned = canonicalDataRoot(lifecycleDataRoot(context2));
@@ -171188,8 +171180,6 @@ function createEmailSourceWorker(options = {}) {
               for (const manifest2 of manifests.manifests)
                 recordReleaseManifest(manifest2);
               assertNoRawEmailFields(result);
-              if (caller && caller.surface !== "remote")
-                recordAgentAnswer(sourceAnswerRequest.question, caller, result);
               let releaseTicket;
               if (caller?.surface !== "remote") {
                 pruneReleaseTickets();
@@ -175707,7 +175697,6 @@ function mostPrivateTrustDomain(domains) {
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
   init_source_failure();
-  init_apps_received();
   init_google_own_app();
   init_sovereignty();
   init_first_run_privacy();
@@ -204392,7 +204381,6 @@ function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
     caller: ctx.caller,
     question,
     capture: { ...capture, heldBack: Math.max(capture.heldBack, privateCount) },
-    answeredPrivately: privateCount > 0,
     withheldAfter
   });
 }
@@ -204579,7 +204567,9 @@ function recordWaiting(ticket, question, detail, options) {
   if (!ticket)
     return;
   try {
-    return options.waitingQuestions?.()?.record(ticket, { question, surface: "chatgpt", state: "waiting", detail });
+    const ref = options.waitingQuestions?.()?.record(ticket, { question, surface: "chatgpt", state: "waiting", detail });
+    notePrivateQuestion(ref?.id);
+    return ref;
   } catch {
     console.warn("[chatgpt] waiting private question not recorded reason=store_unavailable");
     return;
@@ -214495,7 +214485,7 @@ async function runSearch(args, options, authorized, context3, signal) {
       caller: context3.caller,
       question,
       capture: note === undefined ? capture : { ...capture, heldBack: Math.max(1, capture.heldBack) },
-      answeredPrivately: note !== undefined,
+      privateQuestionId: note !== undefined ? privateCall?.answerId : undefined,
       withheldAfter
     });
   }
@@ -215778,6 +215768,99 @@ var init_handler = __esm(() => {
   LOOPBACK_HOSTNAMES4 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
+// src/workers/apps-received.ts
+var exports_apps_received = {};
+__export(exports_apps_received, {
+  createAppsReceived: () => createAppsReceived,
+  APPS_RECEIVED_ITEM_GONE: () => APPS_RECEIVED_ITEM_GONE
+});
+function createAppsReceived(options) {
+  let store;
+  const open7 = () => {
+    store ??= openAppReleaseLog(options.dbPath, options.now ? { now: options.now } : {});
+    return store;
+  };
+  setAppReleaseRecorder((record8) => {
+    try {
+      open7().record(record8);
+    } catch (error2) {
+      console.error(`[olympus:apps-received] record_failed ${error2 instanceof Error ? error2.name : "error"}`);
+    }
+  });
+  setPrivateAnswerCompletionHook((privateQuestionId) => {
+    try {
+      open7().markAnsweredPrivately(privateQuestionId);
+    } catch (error2) {
+      console.error(`[olympus:apps-received] mark_failed ${error2 instanceof Error ? error2.name : "error"}`);
+    }
+  });
+  const ok = (body = {}) => ({ status: 200, body: { ok: true, ...body } });
+  const refuse3 = (status, code, message2) => ({ status, body: { ok: false, error: { code, message: message2 } } });
+  return {
+    async handle(body) {
+      const action = body.action;
+      try {
+        switch (action) {
+          case "list":
+            return ok({ retentionDays: open7().retentionDays(), requests: open7().list() });
+          case "retention": {
+            const days = body.days;
+            if (!isAppReleaseRetentionDays(days))
+              return refuse3(400, "invalid_params", "Choose 7, 30 or 90 days, or don't keep.");
+            open7().setRetentionDays(days);
+            if (days === 0)
+              forgetJobQuestions();
+            return ok({ retentionDays: days });
+          }
+          case "clear": {
+            const removed = open7().clear();
+            forgetJobQuestions();
+            return ok({ removed });
+          }
+          case "make_private": {
+            const id = typeof body.request === "string" ? body.request : "";
+            const position = typeof body.item === "number" && Number.isInteger(body.item) ? body.item : -1;
+            const item = id && position >= 0 ? open7().item(id, position) : undefined;
+            if (!item)
+              return refuse3(404, "not_found", "That item is no longer in the list.");
+            if (item.madePrivate)
+              return ok({ madePrivate: true });
+            if (!item.locator || !item.provider || !item.providerItemId)
+              return refuse3(409, "item_gone", APPS_RECEIVED_ITEM_GONE);
+            try {
+              await options.setItemPrivate({
+                locator: item.locator,
+                provider: item.provider,
+                providerItemId: item.providerItemId,
+                ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
+              });
+            } catch {
+              return refuse3(409, "item_gone", APPS_RECEIVED_ITEM_GONE);
+            }
+            open7().markMadePrivate(id, position);
+            return ok({ madePrivate: true });
+          }
+          default:
+            return refuse3(400, "invalid_params", "Unknown action.");
+        }
+      } catch {
+        return refuse3(503, "unavailable", "The list of what AI apps received could not be read. Try again in a moment.");
+      }
+    },
+    close() {
+      setAppReleaseRecorder(undefined);
+      setPrivateAnswerCompletionHook(undefined);
+      store?.close();
+      store = undefined;
+    }
+  };
+}
+var APPS_RECEIVED_ITEM_GONE = "Olympus can't find this item on this computer any more, so nothing was changed.";
+var init_apps_received2 = __esm(() => {
+  init_app_release_capture();
+  init_app_release_log();
+});
+
 // src/workers/chatgpt/private-answer-crypto.ts
 function toBase64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
@@ -216667,6 +216750,9 @@ class PrivateAnswerJobs {
         usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity)
       };
       this.finish(analysis, "done");
+      for (const job of analysis.jobs)
+        if (job.waiting)
+          notePrivateAnswerCompleted(job.waiting.id);
     } catch (error2) {
       if (!timedOut)
         this.finish(analysis, "failed", error2 instanceof AnalysisStop ? error2.reason : "error");
@@ -217103,6 +217189,7 @@ var AnalysisStop, defaultLog = (line2) => {
 }, IDENTITY_FIELDS, SOURCE_ITEM_FIELDS;
 var init_private_answer_jobs = __esm(() => {
   init_remote_result();
+  init_app_release_capture();
   init_private_answer();
   init_private_answer_contract();
   init_private_answer_crypto();
@@ -217970,7 +218057,7 @@ async function callTool(request, name, options) {
     const approved = release2();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     const output = privatePart ? release2() : approved;
-    recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, answeredPrivately: privateMayAnswer });
+    recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestionId: privateMayAnswer ? privatePart?.answerId : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {
     return operationErrorResponse(error2, declaredParams);
@@ -224016,12 +224103,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   dashboardAgentStore = remoteConnections;
   const { openWaitingPrivateQuestionStore: openWaitingPrivateQuestionStore2, waitingPrivateQuestionsDbPath: waitingPrivateQuestionsDbPath2 } = await Promise.resolve().then(() => (init_waiting_private_questions(), exports_waiting_private_questions));
   {
-    const { createAppsReceived: createAppsReceived2 } = await Promise.resolve().then(() => (init_apps_received(), exports_apps_received));
+    const { createAppsReceived: createAppsReceived2 } = await Promise.resolve().then(() => (init_apps_received2(), exports_apps_received));
     const { appReleaseLogDbPath: appReleaseLogDbPath2 } = await Promise.resolve().then(() => (init_app_release_log(), exports_app_release_log));
-    const { tierForCli: tierForCli2 } = await Promise.resolve().then(() => (init_cli_operations(), exports_cli_operations));
+    const { runTierSetOnRecordedItem: runTierSetOnRecordedItem2 } = await Promise.resolve().then(() => (init_tier_cli(), exports_tier_cli));
     appsReceived = createAppsReceived2({
       dbPath: appReleaseLogDbPath2(resolveRemoteConnectionsDbPath2(process.env)),
-      setItemPrivate: (locator) => tierForCli2({ args: ["set", locator, "private"] })
+      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem2(locator, "private", expected)
     });
   }
   const connectionActive = (connectionId) => {
