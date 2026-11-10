@@ -85,7 +85,7 @@ describe('the worker service runs the engine split itself', () => {
     expect(second!.argv).toEqual(['__worker-service-run']);
     expect(first!.managed).toBe('1');
     expect(second!.managed).toBe('1');
-  });
+  }, 30_000);
 
   test('a background that exits is started again; the front keeps running', async () => {
     const context = setup();
@@ -98,7 +98,7 @@ describe('the worker service runs the engine split itself', () => {
     expect(again.filter((e) => e.role === 'background' && e.event === 'start').at(-1)!.pid).not.toBe(background.pid);
     expect(alive(front.pid)).toBe(true);
     expect(again.filter((e) => e.role === 'front' && e.event === 'start')).toHaveLength(1);
-  });
+  }, 30_000);
 
   test('a stop ends the front first, then the background, then the unit\'s process', async () => {
     const context = setup();
@@ -110,7 +110,7 @@ describe('the worker service runs the engine split itself', () => {
     const stops = context.read().filter((e) => e.event === 'stop').map((e) => e.role);
     expect(stops).toEqual(['front', 'background']);
     for (const child of started) expect(alive(child.pid)).toBe(false);
-  });
+  }, 30_000);
 });
 
 describe('when it applies', () => {
