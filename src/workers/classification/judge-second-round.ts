@@ -22,7 +22,7 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -166,6 +166,33 @@ export function secondRoundJudge<T extends SnifferModel>(local: T, venice: Analy
 }
 
 interface SweepState { v: 1; cursors: Record<string, TierLedgerIdentity | 'done'> }
+
+/**
+ * Source delete (src/core/source-forget-registry.ts): a sweep position names
+ * an item (account scope, conversation, item id), so the deleted source's
+ * entries go: its tier ledgers' paths, and anything inside its account folder.
+ */
+export function forgetSecondRoundCursors(
+  statePath: string,
+  source: { ledgerPaths: readonly string[]; accountFolder?: string | undefined },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(statePath)) return 0;
+  let state: SweepState;
+  try { state = JSON.parse(readFileSync(statePath, 'utf8')) as SweepState; } catch { return 0; }
+  if (state?.v !== 1 || !state.cursors || typeof state.cursors !== 'object') return 0;
+  const ledgers = new Set(source.ledgerPaths);
+  const folder = source.accountFolder;
+  const theirs = (path: string) => ledgers.has(path) || (folder !== undefined && path.startsWith(`${folder}${sep}`));
+  const cursors: SweepState['cursors'] = {};
+  let forgotten = 0;
+  for (const [path, cursor] of Object.entries(state.cursors)) {
+    if (theirs(path)) forgotten += 1;
+    else cursors[path] = cursor;
+  }
+  if (forgotten > 0 && options.dryRun !== true) writePrivateFileAtomicSync(statePath, `${JSON.stringify({ v: 1, cursors })}\n`);
+  return forgotten;
+}
 
 /**
  * Re-opens, a bounded page per set per tick, the items the local judge held

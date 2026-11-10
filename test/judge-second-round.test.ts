@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
-import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, observedJudge, secondRoundJudge, OBSERVED_MIN_CALLS, OBSERVED_MIN_VERDICTS } from '../src/workers/classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, forgetSecondRoundCursors, observedJudge, secondRoundJudge, OBSERVED_MIN_CALLS, OBSERVED_MIN_VERDICTS } from '../src/workers/classification/judge-second-round.ts';
 import { createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { JudgeCloudStopped, JudgeSpending, judgeArchiveEstimate, judgeDefaultCapDollars, SECOND_ROUND_HELD_ASSUMPTION } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
@@ -349,4 +349,29 @@ test('the confirmation states the limit the owner typed, not the saved one (#113
     dispose(); browser.close();
     for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }
   }
+});
+
+test('deleting a source forgets its sweep positions and keeps the others', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'judge-second-forget-')); cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const statePath = join(dir, 'judge-second-round.json');
+  const deleted = join(dir, 'accounts', 'gmail', '1');
+  const kept = join(dir, 'accounts', 'telegram', '1');
+  const legacyLedger = join(dir, 'legacy', 'gmail.tier-ledger.sqlite');
+  const cursor = { account_scope: 'acct', conversation_key: 'chat-with-someone', item_id: 'msg-1' };
+  Bun.write(statePath, JSON.stringify({ v: 1, cursors: {
+    [join(deleted, 'tier.ledger')]: cursor,
+    [join(deleted, 'other.ledger')]: 'done',
+    [legacyLedger]: cursor,
+    [join(kept, 'tier.ledger')]: { ...cursor, conversation_key: 'another-chat' },
+  } }));
+  const source = { ledgerPaths: [legacyLedger], accountFolder: deleted };
+  expect(forgetSecondRoundCursors(statePath, source, { dryRun: true })).toBe(3);
+  expect(readFileSync(statePath, 'utf8')).toContain('chat-with-someone');
+  expect(forgetSecondRoundCursors(statePath, source)).toBe(3);
+  const after = readFileSync(statePath, 'utf8');
+  expect(after).not.toContain('chat-with-someone');
+  expect(JSON.parse(after)).toEqual({ v: 1, cursors: { [join(kept, 'tier.ledger')]: { ...cursor, conversation_key: 'another-chat' } } });
+  expect(forgetSecondRoundCursors(statePath, source)).toBe(0);
+  expect(forgetSecondRoundCursors(statePath, { ledgerPaths: [] })).toBe(0);
+  expect(forgetSecondRoundCursors(join(dir, 'missing.json'), source)).toBe(0);
 });

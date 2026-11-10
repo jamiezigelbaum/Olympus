@@ -15877,6 +15877,14 @@ var init_tier_rejudge = __esm(() => {
   };
 });
 
+// src/workers/classification/judge-second-round.ts
+var init_judge_second_round = __esm(() => {
+  init_atomic_file();
+  init_classification_ledger();
+  init_tier_rejudge();
+  init_sniffer();
+});
+
 // src/core/model-transport.ts
 function isModelEndpointRedirectError(error) {
   return error instanceof ModelEndpointRedirectError;
@@ -51449,6 +51457,7 @@ var init_source_forget_registry = __esm(() => {
   init_job_names();
   init_spool();
   init_olympus_layout();
+  init_judge_second_round();
   init_source_placement();
   init_olympus_layout();
   init_live_control2();
@@ -69780,18 +69789,12 @@ import { dirname as dirname40, isAbsolute as isAbsolute14 } from "node:path";
 init_classification_ledger();
 init_built_in_sniffer();
 init_judge_spending();
-
-// src/workers/classification/judge-second-round.ts
-init_atomic_file();
-init_classification_ledger();
-init_tier_rejudge();
-init_sniffer();
-
-// src/workers/classification/judge-setup.ts
+init_judge_second_round();
 init_venice_models();
 
 // src/workers/email-source/server.ts
 init_judge_spending();
+init_judge_second_round();
 
 // src/workers/classification/judge-pacing.ts
 init_sniffer();

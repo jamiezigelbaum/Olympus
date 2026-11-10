@@ -37,7 +37,8 @@ import {
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
-import { accountExtractionSpoolRoot, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
+import { accountExtractionSpoolRoot, accountFolder, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
+import { forgetSecondRoundCursors, judgeSecondRoundStatePath } from '../workers/classification/judge-second-round.ts';
 import { placedAccount } from './source-placement.ts';
 import { xBookmarksApiUsageDbPath } from './olympus-layout.ts';
 import { forgetXBookmarksSyncState } from '../workers/x-bookmarks/live-control.ts';
@@ -75,6 +76,8 @@ export interface ForgetContext {
    * source gets new ids, so the old claims could never be retired again.
    */
   tierLedgerIds?: readonly string[] | undefined;
+  /** The paths of the source's tier ledgers: positions kept by ledger path (the Venice double-check's) go with them. */
+  tierLedgerPaths?: readonly string[] | undefined;
   /**
    * Tier ledgers that exist but whose id could not be read. Their claims stay
    * (nothing is guessed) and the extraction step says so in its report.
@@ -324,6 +327,18 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const path = tierMigrationStatePath(context.env);
       return line(path, 'migration batch selectors', forgetTierMigrationSelectors(path, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The Venice double-check's sweep positions name items (account scope, conversation, item id).
+    id: 'judge-second-round-cursors',
+    file: 'judge-second-round.json',
+    modules: [],
+    forget(account, context, { dryRun }) {
+      const path = judgeSecondRoundStatePath(context.env);
+      const placed = placedAccount(account.source_id, context.env, account.slot);
+      const folder = placed.layout === 'folder' ? accountFolder(placed, context.env) : undefined;
+      return line(path, 'sweep positions', forgetSecondRoundCursors(path, { ledgerPaths: context.tierLedgerPaths ?? [], accountFolder: folder }, { dryRun }));
     },
   },
   {
