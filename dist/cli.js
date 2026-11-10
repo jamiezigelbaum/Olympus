@@ -176724,6 +176724,7 @@ class LocalWorkPacer {
   assertion;
   stopped = false;
   lastPace;
+  localWorkAtMs = Number.NEGATIVE_INFINITY;
   constructor(options) {
     this.options = options;
     this.setting = options.settingPath ? readGoEasySetting(options.settingPath) : undefined;
@@ -176773,6 +176774,11 @@ class LocalWorkPacer {
   trickle() {
     return this.pace() === "trickle";
   }
+  noteLocalWork() {
+    this.localWorkAtMs = this.nowMs();
+    if (!this.assertion)
+      this.updateAssertion();
+  }
   refresh() {
     if (this.reading$)
       return this.reading$;
@@ -176813,6 +176819,7 @@ class LocalWorkPacer {
     } catch {
       pending = false;
     }
+    pending ||= this.nowMs() - this.localWorkAtMs < GO_EASY_LOCAL_WORK_RECENT_MS;
     const hold = !this.stopped && pending && this.reading?.power === "ac" && this.reading.lidOpen !== false;
     if (hold && !this.assertion) {
       try {
@@ -176857,7 +176864,7 @@ function spawnCaffeinate() {
   child2.unref();
   return child2;
 }
-var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_REFRESH_MS = 30000, GO_EASY_NIGHT, GO_EASY_TRICKLE_GAP_MS = 20000, GO_EASY_TRICKLE_EMBED_ITEMS = 1, defaultExec3 = (command, args) => new Promise((resolve29) => {
+var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_REFRESH_MS = 30000, GO_EASY_NIGHT, GO_EASY_LOCAL_WORK_RECENT_MS, GO_EASY_TRICKLE_GAP_MS = 20000, GO_EASY_TRICKLE_EMBED_ITEMS = 1, defaultExec3 = (command, args) => new Promise((resolve29) => {
   try {
     execFile4(command, [...args], { timeout: 3000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error2, stdout) => {
       resolve29(error2 ? undefined : stdout);
@@ -176870,6 +176877,7 @@ var init_local_pacing = __esm(() => {
   init_atomic_file();
   GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
   GO_EASY_NIGHT = { fromHour: 22, toHour: 7 };
+  GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
 });
 
 // src/workers/source-scheduler.ts
@@ -177965,7 +177973,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -177973,7 +177981,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress) {
   const maxItems = embeddingSweepMaxItems();
   const tricklingTarget = (target) => {
     try {
@@ -178006,6 +178014,11 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           })
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
+          if (result.some((run2) => run2.chunksEmbedded > 0)) {
+            try {
+              onProgress?.(target);
+            } catch {}
+          }
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run2) => run2.busy === true && run2.deferredReason === undefined && outage !== undefined ? { ...run2, deferredReason: outage } : run2));
           continue;
@@ -222662,7 +222675,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         providerFor: (trustDomain) => trustDomain === "secure_local" ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider
       });
       return couldEmbed || targets().length > 0 ? targets : undefined;
-    }, { trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle() });
+    }, {
+      trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
+      onProgress: (target) => {
+        if (embedsOnThisComputer(target.provider))
+          localPacer.noteLocalWork();
+      }
+    });
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
       decisions,

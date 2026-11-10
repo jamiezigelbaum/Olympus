@@ -58,6 +58,13 @@ export const GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60_000;
 export const GO_EASY_REFRESH_MS = 30_000;
 /** Overnight, on AC power: local hours [from, to). */
 export const GO_EASY_NIGHT = { fromHour: 22, toHour: 7 } as const;
+/**
+ * Local work that ran this recently still counts as waiting, for the power
+ * assertion: a missing-vector backlog found after a restart is not in the
+ * in-memory queue, and counting it in the store on every read is the kind
+ * of synchronous scan that froze the worker (#1079).
+ */
+export const GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60_000;
 /** While trickling: the pause between one local judge call and the next. */
 export const GO_EASY_TRICKLE_GAP_MS = 20_000;
 /** While trickling: items per store per embedding sweep (a sweep runs about once a minute). */
@@ -226,6 +233,7 @@ export class LocalWorkPacer {
   private assertion: PowerAssertionChild | undefined;
   private stopped = false;
   private lastPace: LocalPace | undefined;
+  private localWorkAtMs = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly options: LocalWorkPacerOptions) {
     this.setting = options.settingPath ? readGoEasySetting(options.settingPath) : undefined;
@@ -284,6 +292,12 @@ export class LocalWorkPacer {
     return this.pace() === 'trickle';
   }
 
+  /** Local work just made progress (an embedding sweep embedded on this computer): hold the assertion for a while. */
+  noteLocalWork(): void {
+    this.localWorkAtMs = this.nowMs();
+    if (!this.assertion) this.updateAssertion();
+  }
+
   /** Reads the probe once (single flight), then updates the power assertion. */
   refresh(): Promise<void> {
     if (this.reading$) return this.reading$;
@@ -315,6 +329,7 @@ export class LocalWorkPacer {
     if ((this.options.platform ?? process.platform) !== 'darwin') return;
     let pending = false;
     try { pending = this.options.pendingLocalWork?.() === true; } catch { pending = false; }
+    pending ||= this.nowMs() - this.localWorkAtMs < GO_EASY_LOCAL_WORK_RECENT_MS;
     const hold = !this.stopped && pending && this.reading?.power === 'ac' && this.reading.lidOpen !== false;
     if (hold && !this.assertion) {
       try {

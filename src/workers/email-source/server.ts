@@ -5688,7 +5688,10 @@ export async function main(): Promise<void> {
         providerFor: (trustDomain) => trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider,
       });
       return couldEmbed || targets().length > 0 ? targets : undefined;
-    }, { trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle() });
+    }, {
+      trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
+      onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
+    });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);

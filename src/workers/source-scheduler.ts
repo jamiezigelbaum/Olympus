@@ -1906,6 +1906,8 @@ export function withEmbeddingSweep(
      * continue soon. A cloud or remote embedder is never asked.
      */
     trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean;
+    /** Called after a target embedded at least one chunk (the power assertion, local-pacing.ts). */
+    onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
   } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source, sourceIndex) => {
@@ -1913,7 +1915,7 @@ export function withEmbeddingSweep(
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -1931,6 +1933,7 @@ function embeddingSweepTask(
   deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS,
   sourceIndex = 0,
   trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean,
+  onProgress?: (target: ConnectorStoreEmbeddingTarget) => void,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
@@ -1971,6 +1974,9 @@ function embeddingSweepTask(
           // The abandoned call of an earlier overrun still holds the store's
           // lease, so this pass answers busy: the store's outage stands until
           // an embedding pass answers (embedPendingChunks clears it then).
+          if (result.some((run) => run.chunksEmbedded > 0)) {
+            try { onProgress?.(target); } catch { /* best effort */ }
+          }
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));

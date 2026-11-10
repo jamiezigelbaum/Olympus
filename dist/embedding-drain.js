@@ -71489,6 +71489,7 @@ init_atomic_file();
 var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
 var GO_EASY_REFRESH_MS = 30000;
 var GO_EASY_NIGHT = { fromHour: 22, toHour: 7 };
+var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
 var GO_EASY_TRICKLE_GAP_MS = 20000;
 function readGoEasySetting(path) {
   try {
@@ -71513,6 +71514,7 @@ class LocalWorkPacer {
   assertion;
   stopped = false;
   lastPace;
+  localWorkAtMs = Number.NEGATIVE_INFINITY;
   constructor(options) {
     this.options = options;
     this.setting = options.settingPath ? readGoEasySetting(options.settingPath) : undefined;
@@ -71562,6 +71564,11 @@ class LocalWorkPacer {
   trickle() {
     return this.pace() === "trickle";
   }
+  noteLocalWork() {
+    this.localWorkAtMs = this.nowMs();
+    if (!this.assertion)
+      this.updateAssertion();
+  }
   refresh() {
     if (this.reading$)
       return this.reading$;
@@ -71602,6 +71609,7 @@ class LocalWorkPacer {
     } catch {
       pending = false;
     }
+    pending ||= this.nowMs() - this.localWorkAtMs < GO_EASY_LOCAL_WORK_RECENT_MS;
     const hold = !this.stopped && pending && this.reading?.power === "ac" && this.reading.lidOpen !== false;
     if (hold && !this.assertion) {
       try {

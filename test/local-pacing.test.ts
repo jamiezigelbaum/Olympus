@@ -22,6 +22,7 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
+  GO_EASY_LOCAL_WORK_RECENT_MS,
   GO_EASY_REFRESH_MS,
   embedsOnThisComputer,
   LocalWorkPacer,
@@ -167,6 +168,24 @@ test('a Mac on AC with its lid open holds a power assertion only while local wor
   // Never on Linux.
   const linux = await pacerAt(AFTERNOON, { idleSeconds: 1, power: 'ac', lidOpen: true }, { platform: 'linux', pendingLocalWork: () => true, spawnAssertion });
   expect(linux.pacer.holdingAssertion()).toBe(false);
+});
+
+test('embedding a backlog the queue does not list still holds the power assertion, until it goes quiet', async () => {
+  // After a restart, missing vectors are found by the sweep, not the in-memory queue (#1126 review).
+  let spawned = 0;
+  let killed = 0;
+  const spawnAssertion = () => { spawned += 1; return { kill() { killed += 1; }, once() { return undefined; } }; };
+  const { clock, pacer } = await pacerAt(AFTERNOON, { idleSeconds: 1, power: 'ac', lidOpen: true }, { platform: 'darwin', pendingLocalWork: () => false, spawnAssertion });
+  expect(pacer.holdingAssertion()).toBe(false);
+  pacer.noteLocalWork();
+  expect(pacer.holdingAssertion()).toBe(true);
+  await clock.advance(GO_EASY_LOCAL_WORK_RECENT_MS - 1);
+  await pacer.refresh();
+  expect(pacer.holdingAssertion()).toBe(true);
+  await clock.advance(1);
+  await pacer.refresh();
+  expect(pacer.holdingAssertion()).toBe(false);
+  expect([spawned, killed]).toEqual([1, 1]);
 });
 
 test('probe parsers read macOS and Linux output, and unknowns stay unknown', async () => {
@@ -322,11 +341,13 @@ test('local embedding embeds one item a pass while trickling, and drains at full
   };
   store.queueEmbedding(items.map(item => item.identity.localItemId), provider);
   let trickle = true;
+  const progress: SourceEmbeddingProvider[] = [];
   const [swept] = withEmbeddingSweep([{ sourceId: 'fixture.files', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }],
-    () => () => [{ store, provider }], { trickle: () => trickle });
+    () => () => [{ store, provider }], { trickle: () => trickle, onProgress: target => { progress.push(target.provider); } });
   const sweep = swept!.tasks.find(task => task.kind === 'embed')!;
   const slow = await sweep.run();
   expect(slow.counts).toMatchObject({ chunks_embedded: 1, items_queued: 4 });
+  expect(progress).toEqual([provider]);
   expect(slow.continueSoon).toBeUndefined();
   trickle = false;
   const full = await sweep.run();
