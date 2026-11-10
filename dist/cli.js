@@ -23351,13 +23351,17 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25, contentTier) {
+  recentDecisions(limit = 25, contentTier, before) {
     const capped = Math.max(1, Math.min(limit, 200));
-    const rows = contentTier === undefined ? this.db.query(`
-      SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(capped) : this.db.query(`
-      SELECT * FROM tier_items WHERE content_tier = ? ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(contentTier, capped);
+    const where = [
+      ...contentTier === undefined ? [] : ["content_tier = ?"],
+      ...before === undefined ? [] : ["decided_at < ?"]
+    ];
+    const params = [...contentTier === undefined ? [] : [contentTier], ...before === undefined ? [] : [before], capped];
+    const rows = this.db.query(`
+      SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(...params);
     return rows.map(recordFromRow);
   }
   listClearedOverrideRows(limit = 100) {
@@ -144589,7 +144593,10 @@ function findOwnerTierItems(input, context2 = {}) {
   if (input.filter !== undefined && (!input.recent || !["personal", "private", "changed"].includes(input.filter))) {
     throw new OperationError("invalid_params", "filter is personal, private or changed, with the recently sorted items.");
   }
-  const rows = input.recent ? recentRows(limit * 3, context2, input.filter) : searchRows(query, limit * 3, context2);
+  if (input.before !== undefined && (!input.recent || input.filter === "changed" || Number.isNaN(Date.parse(input.before)))) {
+    throw new OperationError("invalid_params", "before is a time, with the recently sorted items.");
+  }
+  const rows = input.recent ? recentRows(limit * 3, context2, input.filter, input.before) : searchRows(query, limit * 3, context2);
   const items = [];
   for (const row of rows) {
     if (items.length >= limit)
@@ -144658,12 +144665,12 @@ function searchRows(query, limit, context2) {
   }
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
-function recentRows(limit, context2, filter) {
+function recentRows(limit, context2, filter, before) {
   const decided = new Map;
   for (const ledger of knownTierLedgers(context2)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context2.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record: record4 }) => record4).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined), ledger.boundLedgerId);
+      records = withLedgerAt(ledger.path, context2.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record: record4 }) => record4).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before), ledger.boundLedgerId);
     } catch {}
     for (const record4 of records) {
       const key2 = tierLedgerIdentityKey(identityOfRecord2(record4));
@@ -144980,8 +144987,34 @@ function createJudgeCheck(options) {
       ...done && compared.length > 0 ? { range: wilsonInterval(agreed, compared.length) } : {}
     };
   };
-  const sample = (seen) => {
-    const pool = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL }).items.filter((item) => judged(item) && !seen.has(item.item_id));
+  const sample = (seenOrder) => {
+    const seen = new Set(seenOrder);
+    const unseen = [];
+    const askedBefore = new Map;
+    let before;
+    for (let page2 = 0;page2 < JUDGE_CHECK_MAX_PAGES && unseen.length < JUDGE_CHECK_POOL; page2 += 1) {
+      const found = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL, ...before ? { before } : {} }).items;
+      for (const item of found) {
+        if (!judged(item))
+          continue;
+        if (seen.has(item.item_id))
+          askedBefore.set(item.item_id, item);
+        else if (!unseen.some((kept) => kept.item_id === item.item_id))
+          unseen.push(item);
+      }
+      const last = found.at(-1)?.decided_at ?? undefined;
+      if (!last || last === before)
+        break;
+      before = last;
+    }
+    const pool = [...unseen];
+    for (const id of seenOrder) {
+      if (pool.length >= JUDGE_CHECK_ROUND_SIZE)
+        break;
+      const again = askedBefore.get(id);
+      if (again)
+        pool.push(again);
+    }
     const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
     const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
     const rest = byDoubt.slice(doubtful.length);
@@ -145004,10 +145037,11 @@ function createJudgeCheck(options) {
         write(state);
         return viewOf(state);
       }
-      const seen = [...state.seen ?? [], ...state.round?.items.map((item) => item.item_id) ?? []].slice(-JUDGE_CHECK_SEEN_MAX);
+      const latest = state.round?.items.map((item) => item.item_id) ?? [];
+      const seen = [...(state.seen ?? []).filter((id) => !latest.includes(id)), ...latest].slice(-JUDGE_CHECK_SEEN_MAX);
       const next = {
         v: 1,
-        round: { started_at: (options.now?.() ?? new Date).toISOString(), items: sample(new Set(seen)) },
+        round: { started_at: (options.now?.() ?? new Date).toISOString(), items: sample(seen) },
         put_away: false,
         seen
       };
@@ -145049,7 +145083,7 @@ function createJudgeCheck(options) {
     }
   };
 }
-var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_PATH_ENV = "OLYMPUS_JUDGE_CHECK_PATH", JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
+var JUDGE_CHECK_ROUND_SIZE = 10, JUDGE_CHECK_RANDOM_PICKS = 3, JUDGE_CHECK_POOL = 50, JUDGE_CHECK_MAX_PAGES = 20, JUDGE_CHECK_PATH_ENV = "OLYMPUS_JUDGE_CHECK_PATH", JUDGE_CHECK_SEEN_MAX = 500, JudgeCheckError;
 var init_judge_check = __esm(() => {
   init_atomic_file();
   init_owner_config_read();
@@ -165805,15 +165839,22 @@ function privacyItemsClientScript(input) {
     showToast(tier === 'Personal' ? C.toastPersonal : C.toastPrivate, id);
   }
 
+  // Undo acts on the item id it was given, whether or not the item is still
+  // in the list on screen (a search or a filter may have moved it out).
   async function undo(id) {
     var item = find(id);
-    if (!item) return;
     delete statusFor[id];
     var response = await post(config.paths.set, { item_id: id, tier: 'judge' });
-    if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
+    if (!response.ok || response.result.ok === false) {
+      if (item) statusFor[id] = response.message; else setMessage(response.message, true);
+      render();
+      return;
+    }
     delete changes[id];
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
-    merge(response.result.item, item);
+    if (item) merge(response.result.item, item);
+    // Listed under Changed by you, it is no longer changed by you.
+    if (!query && filter === 'changed') items = items.filter(function (listed) { return listed.item_id !== id; });
     render();
     showToast(C.toastJudge, null);
   }

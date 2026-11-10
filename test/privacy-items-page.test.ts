@@ -258,6 +258,26 @@ describe('changing one item', () => {
     expect(p.$('[data-pi-choose="Personal"]')!.getAttribute('aria-checked')).toBe('true');
   });
 
+  test('the confirmation\'s Undo works after a search or a filter has moved the item out of the list', async () => {
+    const p = await page([invoice(), appointment()]);
+    await p.click('[data-pi-item="oti_appt"]');
+    await p.click('[data-pi-choose="Private"]');
+    expect(p.text('[data-pi-filter="changed"]')).toBe(`${C.changedByYou}1`);
+    // The Personal filter no longer lists it: it is Private now.
+    await p.click('[data-pi-filter="personal"]');
+    expect(p.$('[data-pi-item="oti_appt"]')).toBeNull();
+    expect(p.$('[data-pi-toast]')!.hasAttribute('hidden')).toBe(false);
+    await p.click('[data-pi-toast-undo]');
+    expect(p.sets()).toEqual([{ item_id: 'oti_appt', tier: 'private' }, { item_id: 'oti_appt', tier: 'judge' }]);
+    expect(p.text('[data-pi-toast-text]')).toBe(C.toastJudge);
+    expect(p.text('[data-pi-filter="changed"]')).toBe(`${C.changedByYou}0`);
+    // Back on the full list, the item has the judge's label again.
+    await p.click('[data-pi-filter=""]');
+    await p.click('[data-pi-item="oti_appt"]');
+    expect(p.$('[data-pi-choose="Personal"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(p.$('[data-pi-undo]')).toBeNull();
+  });
+
   test('a refusal is shown on the item and nothing is marked changed', async () => {
     const p = await page([invoice()], { refuse: true });
     await p.click('[data-pi-item="oti_inv"]');

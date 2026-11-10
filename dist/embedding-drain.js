@@ -14168,13 +14168,17 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25, contentTier) {
+  recentDecisions(limit = 25, contentTier, before) {
     const capped = Math.max(1, Math.min(limit, 200));
-    const rows = contentTier === undefined ? this.db.query(`
-      SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(capped) : this.db.query(`
-      SELECT * FROM tier_items WHERE content_tier = ? ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(contentTier, capped);
+    const where = [
+      ...contentTier === undefined ? [] : ["content_tier = ?"],
+      ...before === undefined ? [] : ["decided_at < ?"]
+    ];
+    const params = [...contentTier === undefined ? [] : [contentTier], ...before === undefined ? [] : [before], capped];
+    const rows = this.db.query(`
+      SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(...params);
     return rows.map(recordFromRow);
   }
   listClearedOverrideRows(limit = 100) {

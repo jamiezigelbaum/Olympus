@@ -241,6 +241,11 @@ describe('finding an item', () => {
     expect(titles('private')).toEqual(['bank letter.pdf']);
     expect(titles('personal')).toEqual(['orchard-plan.pdf']);
     expect(titles('changed')).toEqual([]);
+    // Paging further back: only items decided before the given time.
+    const [newest, older] = ownerItems().find({ recent: true }).items;
+    expect(ownerItems().find({ recent: true, before: newest!.decided_at! }).items.map((found) => found.item_id))
+      .toEqual(older && older.decided_at! < newest!.decided_at! ? [older.item_id] : []);
+    expect(() => ownerItems().find({ recent: true, before: 'not a time' })).toThrow('before');
     expect(() => ownerItems().find({ query: 'bank', filter: 'private' })).toThrow('filter');
     ownerItems().set({ itemId: bankItem().item_id, choice: 'personal', allowLower: true });
     expect(titles('changed')).toEqual(['bank letter.pdf']);

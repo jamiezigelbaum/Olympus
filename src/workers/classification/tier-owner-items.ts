@@ -82,6 +82,8 @@ export interface OwnerTierItemFindInput {
    * owner changed by hand (the dashboard's filters).
    */
   filter?: OwnerTierItemFilter;
+  /** With `recent`: only items decided before this time (an item's `decided_at`), to page further back. */
+  before?: string;
   limit?: number;
   /**
    * For an agent: leave out every item whose names are not Personal or less
@@ -195,7 +197,10 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
   if (input.filter !== undefined && (!input.recent || !['personal', 'private', 'changed'].includes(input.filter))) {
     throw new OperationError('invalid_params', 'filter is personal, private or changed, with the recently sorted items.');
   }
-  const rows = input.recent ? recentRows(limit * 3, context, input.filter) : searchRows(query, limit * 3, context);
+  if (input.before !== undefined && (!input.recent || input.filter === 'changed' || Number.isNaN(Date.parse(input.before)))) {
+    throw new OperationError('invalid_params', 'before is a time, with the recently sorted items.');
+  }
+  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before) : searchRows(query, limit * 3, context);
   const items: OwnerTierItem[] = [];
   for (const row of rows) {
     if (items.length >= limit) break;
@@ -264,7 +269,7 @@ function searchRows(query: string, limit: number, context: TierCliContext): Stor
 }
 
 /** The items the ledgers decided most recently, newest first, as their stores keep them; with a filter, only those. */
-function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter): StoredItemRow[] {
+function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string): StoredItemRow[] {
   const decided = new Map<string, TierLedgerRecord>();
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
@@ -272,7 +277,7 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
       records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
         ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
           .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
-        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined), ledger.boundLedgerId);
+        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before), ledger.boundLedgerId);
     } catch {
       // A ledger that cannot be read lists nothing.
     }

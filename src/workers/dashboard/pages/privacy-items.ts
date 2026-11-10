@@ -410,15 +410,22 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     showToast(tier === 'Personal' ? C.toastPersonal : C.toastPrivate, id);
   }
 
+  // Undo acts on the item id it was given, whether or not the item is still
+  // in the list on screen (a search or a filter may have moved it out).
   async function undo(id) {
     var item = find(id);
-    if (!item) return;
     delete statusFor[id];
     var response = await post(config.paths.set, { item_id: id, tier: 'judge' });
-    if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
+    if (!response.ok || response.result.ok === false) {
+      if (item) statusFor[id] = response.message; else setMessage(response.message, true);
+      render();
+      return;
+    }
     delete changes[id];
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
-    merge(response.result.item, item);
+    if (item) merge(response.result.item, item);
+    // Listed under Changed by you, it is no longer changed by you.
+    if (!query && filter === 'changed') items = items.filter(function (listed) { return listed.item_id !== id; });
     render();
     showToast(C.toastJudge, null);
   }

@@ -2602,17 +2602,20 @@ export class TierLedger {
   /**
    * The most recently decided items, newest first (the dashboard's "recently
    * sorted" list, tier-owner-items.ts), optionally only those with one
-   * content tier (its Personal and Private filters). Content-free: ledger rows only.
+   * content tier (its Personal and Private filters), and only those decided
+   * before a time (paging further back). Content-free: ledger rows only.
    */
-  recentDecisions(limit = 25, contentTier?: TierKey): TierLedgerRecord[] {
+  recentDecisions(limit = 25, contentTier?: TierKey, before?: string): TierLedgerRecord[] {
     const capped = Math.max(1, Math.min(limit, 200));
-    const rows = (contentTier === undefined
-      ? this.db.query(`
-      SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(capped)
-      : this.db.query(`
-      SELECT * FROM tier_items WHERE content_tier = ? ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(contentTier, capped)) as TierItemRow[];
+    const where = [
+      ...(contentTier === undefined ? [] : ['content_tier = ?']),
+      ...(before === undefined ? [] : ['decided_at < ?']),
+    ];
+    const params = [...(contentTier === undefined ? [] : [contentTier]), ...(before === undefined ? [] : [before]), capped];
+    const rows = this.db.query(`
+      SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(...params) as TierItemRow[];
     return rows.map(recordFromRow);
   }
 

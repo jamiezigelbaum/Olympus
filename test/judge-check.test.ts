@@ -146,6 +146,50 @@ describe('a round', () => {
   });
 });
 
+describe('many rounds', () => {
+  test('page further back for items no round asked about, then ask again about the oldest asked', () => {
+    // 200 judged items, each decided a minute apart; the engine pages by `before`, 50 at a time.
+    const start = Date.UTC(2026, 9, 1);
+    const items = Array.from({ length: 200 }, (_, index) => item(index + 1, {
+      decided_at: new Date(start + (200 - index) * 60_000).toISOString(),
+    }));
+    const finds: Array<string | undefined> = [];
+    const engine: OwnerTierItems = {
+      find(input) {
+        finds.push(input.before);
+        const older = input.before ? items.filter((candidate) => candidate.decided_at! < input.before!) : items;
+        return { items: older.slice(0, input.limit ?? 20) };
+      },
+      set: () => ({ ok: true, item: items[0]!, changed: 'set', applies: 'now', results: [] }),
+    };
+    let seed = 3;
+    const check = createJudgeCheck({
+      items: engine,
+      get: (id) => items.find((candidate) => candidate.item_id === id),
+      path: join(root, 'judge-check.json'),
+      random: () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; },
+    });
+    const round = () => {
+      let view = check.start();
+      const asked: string[] = [];
+      while (view.current) {
+        asked.push(view.current.item_id);
+        view = check.answer(view.current.item_id, 'not_sure');
+      }
+      return asked;
+    };
+    const rounds = Array.from({ length: 22 }, round);
+    // Every round is full, and the first twenty never repeat an item.
+    for (const asked of rounds) expect(asked).toHaveLength(JUDGE_CHECK_ROUND_SIZE);
+    expect(new Set(rounds.slice(0, 20).flat()).size).toBe(200);
+    // It paged past the first 50.
+    expect(finds.some((before) => before !== undefined)).toBe(true);
+    // With nothing new left, it asks again about the items asked longest ago, not the latest.
+    expect(new Set(rounds[20])).toEqual(new Set(rounds[0]));
+    expect(new Set(rounds[21])).toEqual(new Set(rounds[1]));
+  });
+});
+
 describe('the numbers', () => {
   test('the Wilson range for 9 of 10 is about 60% to 98%, and narrows with more answers', () => {
     const ten = wilsonInterval(9, 10);

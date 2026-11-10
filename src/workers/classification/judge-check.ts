@@ -21,6 +21,8 @@ export const JUDGE_CHECK_ROUND_SIZE = 10;
 export const JUDGE_CHECK_RANDOM_PICKS = 3;
 /** How many recently sorted items a round is drawn from. */
 export const JUDGE_CHECK_POOL = 50;
+/** How far back a new round pages for items no round has asked about yet. */
+export const JUDGE_CHECK_MAX_PAGES = 20;
 export const JUDGE_CHECK_PATH_ENV = 'OLYMPUS_JUDGE_CHECK_PATH';
 
 export type JudgeLabel = 'Personal' | 'Private';
@@ -200,9 +202,31 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     };
   };
 
-  const sample = (seen: ReadonlySet<string>): StoredRoundItem[] => {
-    const pool = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL }).items
-      .filter((item) => judged(item) && !seen.has(item.item_id)) as Array<OwnerTierItem & { tier: JudgeLabel }>;
+  const sample = (seenOrder: readonly string[]): StoredRoundItem[] => {
+    const seen = new Set(seenOrder);
+    // Page back through the recently sorted items until the pool holds enough
+    // items no round has asked about, or the items run out.
+    const unseen: Array<OwnerTierItem & { tier: JudgeLabel }> = [];
+    const askedBefore = new Map<string, OwnerTierItem & { tier: JudgeLabel }>();
+    let before: string | undefined;
+    for (let page = 0; page < JUDGE_CHECK_MAX_PAGES && unseen.length < JUDGE_CHECK_POOL; page += 1) {
+      const found = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL, ...(before ? { before } : {}) }).items;
+      for (const item of found) {
+        if (!judged(item)) continue;
+        if (seen.has(item.item_id)) askedBefore.set(item.item_id, item);
+        else if (!unseen.some((kept) => kept.item_id === item.item_id)) unseen.push(item);
+      }
+      const last = found.at(-1)?.decided_at ?? undefined;
+      if (!last || last === before) break;
+      before = last;
+    }
+    // Nothing new left: ask again about the items asked longest ago.
+    const pool = [...unseen];
+    for (const id of seenOrder) {
+      if (pool.length >= JUDGE_CHECK_ROUND_SIZE) break;
+      const again = askedBefore.get(id);
+      if (again) pool.push(again);
+    }
     const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
     const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
     const rest = byDoubt.slice(doubtful.length);
@@ -227,10 +251,12 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
         write(state);
         return viewOf(state);
       }
-      const seen = [...(state.seen ?? []), ...(state.round?.items.map((item) => item.item_id) ?? [])].slice(-JUDGE_CHECK_SEEN_MAX);
+      // Oldest asked first; an item asked again moves to the end.
+      const latest = state.round?.items.map((item) => item.item_id) ?? [];
+      const seen = [...(state.seen ?? []).filter((id) => !latest.includes(id)), ...latest].slice(-JUDGE_CHECK_SEEN_MAX);
       const next: StoredJudgeCheck = {
         v: 1,
-        round: { started_at: (options.now?.() ?? new Date()).toISOString(), items: sample(new Set(seen)) },
+        round: { started_at: (options.now?.() ?? new Date()).toISOString(), items: sample(seen) },
         put_away: false,
         seen,
       };
