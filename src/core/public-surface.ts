@@ -197,6 +197,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'data backup',
   'data restore',
   'data delete',
+  'data restore',
   'tier set',
   'tier explain',
   'tier rules',

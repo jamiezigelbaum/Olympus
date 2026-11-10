@@ -14740,18 +14740,23 @@ function connectedMailSourceAccountGeneration(registry, pinnedHandle) {
 }
 function readMailSourceScopeApproval(input) {
   const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
-  if (!account)
-    return pendingSnapshot2("not-connected", undefined, "not_connected");
   const read = readState2(input.statePath);
+  const carried = read.kind === "valid" ? read.state.carried_owner_rules?.always_private_senders : undefined;
+  const pending = (revision, reason) => ({
+    ...pendingSnapshot2(revision, account?.generation, reason),
+    ...carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}
+  });
+  if (!account)
+    return pending("not-connected", "not_connected");
   if (read.kind === "missing")
-    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
+    return pending(`missing:${account.generation}`, "missing");
   if (read.kind === "malformed")
-    return pendingSnapshot2(`malformed:${read.digest}`, account.generation, "malformed");
+    return pending(`malformed:${read.digest}`, "malformed");
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
   if (!approval)
-    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
+    return pending(`missing:${account.generation}`, "missing");
   if (approval.account_generation !== account.generation) {
-    return pendingSnapshot2(`stale:${approval.revision}:${account.generation}`, account.generation, "account_changed");
+    return pending(`stale:${approval.revision}:${account.generation}`, "account_changed");
   }
   return {
     sourceId: MAIL_SOURCE_SCOPE_ID,
@@ -14941,10 +14946,19 @@ function readState2(path) {
     const approvals = record.approvals.map(parseApproval2);
     if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length)
       throw new Error("duplicate");
-    return { kind: "valid", state: { version: 1, approvals } };
+    const carried = record.carried_owner_rules === undefined ? undefined : parseCarriedOwnerRules(record.carried_owner_rules);
+    return { kind: "valid", state: { version: 1, approvals, ...carried ? { carried_owner_rules: carried } : {} } };
   } catch {
     return { kind: "malformed", digest };
   }
+}
+function parseCarriedOwnerRules(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("carried");
+  const record = value;
+  if (record.source_id !== MAIL_SOURCE_SCOPE_ID)
+    throw new Error("carried");
+  return { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: normalizeSenders(record.always_private_senders, "always Private") };
 }
 function parseApproval2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -51350,6 +51364,8 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  init_mail_source_scope();
+  init_source_account_binding();
   backgroundTrashRemovals = new Set;
 });
 

@@ -23963,6 +23963,8 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  init_mail_source_scope();
+  init_source_account_binding();
   backgroundTrashRemovals = new Set;
 });
 

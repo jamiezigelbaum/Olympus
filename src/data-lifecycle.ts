@@ -99,6 +99,14 @@ import { closeSqliteStore } from './core/sqlite-store.ts';
 import { isMediaCachePath, mediaCacheDir, mediaHolderName, releaseMediaCacheFile } from './core/media-cache.ts';
 import { storeHolderAtPath, type StoreHolder } from './core/store-identity.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
+import { defaultMailSourceScopeStatePath, mailOwnerRulesForExport } from './core/mail-source-scope.ts';
+import {
+  ACCOUNT_BOUND_SOURCE_IDS,
+  readSourceAccountBindings,
+  sourceAccountBindingsPath,
+  type AccountBoundSourceId,
+  type SourceAccountBindings,
+} from './core/source-account-binding.ts';
 
 export interface LifecyclePathContext {
   homeDir?: string;
@@ -159,8 +167,12 @@ export interface DataExportArtifact {
    */
   storeIndex?: number;
   sidecar?: 'tier_ledger' | 'tier_sniffer' | 'secret_locations';
-  /** `owner_rules`: which owner file this is. */
-  ownerFile?: 'tier_rules' | 'ingestion_exclusions';
+  /**
+   * `owner_rules`: which owner file this is. `mail_always_private` is the mail
+   * picker's "always Private" senders on their own, without the approval
+   * (bound to this computer's grant) that holds them.
+   */
+  ownerFile?: 'tier_rules' | 'ingestion_exclusions' | 'mail_always_private';
   bytes: number;
   sha256: string;
   sqlite?: {
@@ -169,6 +181,23 @@ export interface DataExportArtifact {
     expectedStoreId: string;
     schemaVersion: number;
   };
+}
+
+/**
+ * One account in an export's manifest (version 3, additive): where its files
+ * were, and which provider account its items came from. The provider account
+ * is the opaque id the account guard compares (core/provider-account-identity.ts),
+ * never a credential: a restore writes it back so the owner signing in again
+ * to the same account is recognized, and another account is still caught.
+ */
+export interface DataExportAccountRecord {
+  source_id: string;
+  slot: string;
+  layout: string;
+  /** The source registry's record of the account the history belongs to. */
+  provider_account_hash?: string;
+  /** The account binding (core/source-account-binding.ts): the account the stores were filled from. */
+  account_binding?: { provider_account_id?: string; previous_account_folders?: string[] };
 }
 
 export interface DataExportVerificationResult {
@@ -457,7 +486,23 @@ export function exportOlympusData(options: {
         artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile });
       }
     }
+    // The mail picker's "always Private" senders are owner rules too (they feed
+    // the classifier as the owner's force-Private rules), kept in the mail
+    // scope approval. The approval is bound to this computer's Gmail grant, so
+    // only the owner's list travels, exactly as they set it.
+    const mailRules = mailOwnerRulesForExport(defaultMailSourceScopeStatePath(handleRegistryPathFor(options)));
+    if (mailRules) {
+      const destinationPath = join(configRoot, 'mail-always-private.json');
+      writePrivateFileAtomicSync(destinationPath, JSON.stringify(mailRules, null, 2));
+      files.push(destinationPath);
+      artifacts.push({ ...fileArtifact(destination, destinationPath, 'olympus.config', 'owner_rules'), ownerFile: 'mail_always_private' });
+    }
   }
+  // Which account each source's items came from, read once. A bindings file
+  // that cannot be read names none: the restore then asks again at sign-in,
+  // as an install without bindings always has.
+  const bindingsRead = readSourceAccountBindings(sourceAccountBindingsPath(handleRegistryPathFor(options)));
+  const bindings = bindingsRead.kind === 'ok' ? bindingsRead.bindings : undefined;
   // The manifest is the export's commit record, so it is published LAST and
   // atomically. A manifest that reaches the disk before the data it describes
   // is what turns "export, then delete" into silent loss: the owner reads a
@@ -468,7 +513,7 @@ export function exportOlympusData(options: {
     exported_at: new Date().toISOString(),
     source_ids: selected.map((source) => source.sourceId),
     // Where each account's files were (additive: a verifier of this version ignores it).
-    accounts: selected.map((source) => ({ source_id: source.sourceId, slot: source.slot, layout: source.files.account.layout })),
+    accounts: selected.map((source) => exportAccountRecord(source, bindings)),
     secrets_excluded: true,
     files,
     skipped,
@@ -938,6 +983,32 @@ function forgetSharedRows(
     tierLedgerIds: ledgers.ids,
     unreadableTierLedgers: ledgers.unreadable,
   }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
+}
+
+/** The account's manifest record: where its files were and which provider account they came from. Never a credential. */
+function exportAccountRecord(source: LifecycleAccount, bindings: SourceAccountBindings | undefined): DataExportAccountRecord {
+  const hash = source.entry?.state === 'active' ? source.entry.provider_account_hash : undefined;
+  const bound = (ACCOUNT_BOUND_SOURCE_IDS as readonly string[]).includes(source.sourceId)
+    ? bindings?.sources[source.sourceId as AccountBoundSourceId]
+    : undefined;
+  const binding = bound
+    ? {
+        ...(bound.provider_account_id ? { provider_account_id: bound.provider_account_id } : {}),
+        ...(bound.previous_account_folders?.length ? { previous_account_folders: [...bound.previous_account_folders] } : {}),
+      }
+    : undefined;
+  return {
+    source_id: source.sourceId,
+    slot: source.slot,
+    layout: source.files.account.layout,
+    ...(hash ? { provider_account_hash: hash } : {}),
+    ...(binding && Object.keys(binding).length > 0 ? { account_binding: binding } : {}),
+  };
+}
+
+/** The connected-handle registry this context works from; the account bindings sit beside it. */
+export function lifecycleHandleRegistryPath(context: LifecyclePathContext = {}): string {
+  return handleRegistryPathFor(context);
 }
 
 function handleRegistryPathFor(context: LifecyclePathContext): string {
@@ -1881,7 +1952,7 @@ export function exportDurabilityBoundary(destination: string): string {
  * reached the disk is still gone after a power loss, so the export's
  * directories are made durable before anything is written into them.
  */
-function makeDurableDirectory(path: string, boundary: string): void {
+export function makeDurableDirectory(path: string, boundary: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   let current = resolve(path);
   for (;;) {

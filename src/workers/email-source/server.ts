@@ -520,7 +520,7 @@ import { compareProviderAccounts, dropboxOwnRootFolderIds, dropboxOwnsOneOfFolde
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
-import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
+import { MAIL_SCOPE_WINDOW_LABELS, defaultMailScopeSelection, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
 import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
 import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';
@@ -5803,7 +5803,11 @@ export async function main(): Promise<void> {
       scope_revision: snapshot.revision,
       // Approved mail always reads something (at least the window's metadata).
       ingestion_enabled: snapshot.status === 'approved',
-      mail_scope: mailScopeDraftView(snapshot.mailScope),
+      // No approved scope yet: the picker opens with the owner's "always
+      // Private" senders a restore carried back, as they set them.
+      mail_scope: mailScopeDraftView(snapshot.mailScope ?? (snapshot.carriedAlwaysPrivateSenders
+        ? { ...defaultMailScopeSelection(), alwaysPrivateSenders: snapshot.carriedAlwaysPrivateSenders }
+        : undefined)),
       ...(snapshot.mailScope?.contentAfter ? { content_after: snapshot.mailScope.contentAfter } : {}),
       ...(snapshot.reason === 'malformed'
         ? { error: 'Saved mail scope is unreadable. Review and save the scope again.' }

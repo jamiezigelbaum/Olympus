@@ -13,13 +13,16 @@
  * them, and judgments travel in the tier ledgers beside them, so an install
  * running the same models neither embeds nor judges again.
  */
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  exportDurabilityBoundary,
   lifecycleAccountFiles,
   lifecycleEnv,
+  lifecycleHandleRegistryPath,
   lifecycleStoreLayouts,
+  makeDurableDirectory,
   verifyOlympusDataExport,
   type DataExportArtifact,
   type LifecyclePathContext,
@@ -35,6 +38,19 @@ import {
 import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import { Database } from 'bun:sqlite';
+import { closeSqliteStore } from './core/sqlite-store.ts';
+import {
+  ACCOUNT_BOUND_SOURCE_IDS,
+  readSourceAccountBindings,
+  sourceAccountBindingsPath,
+  SourceAccountBindingsUnreadableError,
+  updateSourceAccountBinding,
+  type AccountBoundSourceId,
+} from './core/source-account-binding.ts';
+import { compareProviderAccounts, mergeProviderAccountIds } from './core/provider-account-identity.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './core/source-registry.ts';
+import { placeOwnedAccount, recordProviderAccount } from './core/source-storage.ts';
+import { carryMailOwnerRules, defaultMailSourceScopeStatePath, normalizeSenders } from './core/mail-source-scope.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from './workers/connector-store/local-index.ts';
 import { TierLedger } from './workers/classification/tier-ledger.ts';
 import { TIER_LEDGER_FILE_SUFFIX } from './workers/classification/tier-ledger-path.ts';
@@ -48,6 +64,8 @@ export interface DataRestorePlanEntry {
   kind: 'store' | 'judgments' | 'owner_settings';
   /** An owner settings file this computer already has: kept beside the restored one. */
   keptAs?: string;
+  /** Merged into the file at `to` rather than copied over it (the mail picker's "always Private" senders). */
+  merge?: 'mail_always_private';
 }
 
 export interface DataRestoreResult {
@@ -65,7 +83,19 @@ export interface DataRestoreResult {
 interface ManifestShape {
   version: number;
   source_ids?: unknown;
+  /** Version 3: each account's layout and, when known, which provider account its items came from. */
+  accounts?: unknown;
   artifacts: DataExportArtifact[];
+}
+
+/** Which provider account a restored source's items came from, as the backup records it. */
+interface RestoredAccountIdentity {
+  sourceId: string;
+  /** The source registry's history account (provider_account_hash). */
+  historyAccount?: string;
+  /** The account binding's account, for a source bound to one provider account. */
+  boundAccount?: string;
+  previousAccountFolders?: string[];
 }
 
 export function restoreOlympusData(options: { input: string; dryRun?: boolean } & LifecyclePathContext): DataRestoreResult {
@@ -134,6 +164,15 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         notes.push(`Left out ${from}: an index from before Olympus 1.0, which this install doesn't open.`);
         break;
       case 'owner_rules': {
+        if (artifact.ownerFile === 'mail_always_private') {
+          // Not a file of its own here: the senders go into the mail scope
+          // file, beside an approval this computer may already hold.
+          const to = defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath(context));
+          // Checked before anything is written: a list the picker would refuse is refused here.
+          normalizeSenders((JSON.parse(readFileSync(join(input, from), 'utf8')) as { always_private_senders?: unknown }).always_private_senders, 'always Private');
+          plan.push({ from, to, sourceId: 'olympus.config', kind: 'owner_settings', merge: 'mail_always_private' });
+          break;
+        }
         const to = artifact.ownerFile === 'tier_rules' ? resolveTierRulesPath({ env })
           : artifact.ownerFile === 'ingestion_exclusions' ? resolveSourceIngestionExclusionsPath(env)
             : undefined;
@@ -196,11 +235,30 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
     );
   }
   for (const entry of plan) {
-    if (entry.kind === 'owner_settings' && existsSync(entry.to)) entry.keptAs = `${entry.to}.before-restore`;
+    if (entry.kind === 'owner_settings' && !entry.merge && existsSync(entry.to)) entry.keptAs = `${entry.to}.before-restore`;
   }
 
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === 'store').map((entry) => entry.sourceId))];
+  // Which account each source's items came from, so signing in again to that
+  // same account is recognized by the account guard and another account is
+  // still caught. Checked against what this computer records before anything
+  // is written; written once the files are in place.
+  const identities = restoredAccountIdentities(manifest, sourceIds);
+  const bindingsPath = sourceAccountBindingsPath(lifecycleHandleRegistryPath(context));
+  checkRestoredIdentities(identities, bindingsPath, env);
+  if (identities.length > 0) {
+    notes.push(`Restored which account the items of ${identities.map((identity) => identity.sourceId).join(', ')} came from: sign in to that same account to carry on syncing.`);
+  }
   if (!options.dryRun) {
+    // A new account entry is placed before its files arrive, as at any first
+    // connect, and must place them where the plan put them.
+    for (const identity of identities) {
+      if (!identity.historyAccount) continue;
+      const layout = placeOwnedAccount({ sourceId: identity.sourceId, slot: DEFAULT_ACCOUNT_SLOT }, env);
+      if (layout !== lifecycleAccountFiles(identity.sourceId, context).account.layout || !samePaths(storesOf(identity.sourceId), lifecycleAccountFiles(identity.sourceId, context).stores)) {
+        throw new OperationError('invalid_params', `This install places ${identity.sourceId} somewhere other than the restore planned, so nothing was restored.`);
+      }
+    }
     // A bound store records where its ledger was on the computer that made
     // the backup. That path is only a hint (the ledger's identity binds), but
     // on this computer the ledger may sit under another name, so the hint is
@@ -209,11 +267,21 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
       .filter((entry) => entry.kind === 'judgments' && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX))
       .map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join(input, entry.from)) }));
     for (const entry of plan) {
+      if (entry.merge === 'mail_always_private') {
+        const carried = JSON.parse(readFileSync(join(input, entry.from), 'utf8')) as { always_private_senders?: unknown };
+        if (carryMailOwnerRules(entry.to, carried.always_private_senders) === 'kept_approval') {
+          notes.push('Kept the mail scope this computer already approved; the backup\'s "always Private" senders were not added to it.');
+        }
+        continue;
+      }
       if (entry.keptAs) copyPrivate(entry.to, entry.keptAs);
       const prepare = entry.kind === 'store'
         ? (staged: string) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to)
         : undefined;
       copyPrivate(join(input, entry.from), entry.to, prepare);
+    }
+    for (const sourceId of writeRestoredIdentities(identities, bindingsPath, env)) {
+      notes.push(`${sourceId}'s history came to name another account while restoring, so its account is asked again at sign-in.`);
     }
   }
   return {
@@ -228,9 +296,118 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
   };
 }
 
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+
+/**
+ * The provider accounts a version 3 manifest records for the restored
+ * sources. An older backup records none: its sources restore as before, and
+ * their account is asked again at sign-in.
+ */
+function restoredAccountIdentities(manifest: ManifestShape, sourceIds: readonly string[]): RestoredAccountIdentity[] {
+  if (manifest.version < 3 || !Array.isArray(manifest.accounts)) return [];
+  const identities: RestoredAccountIdentity[] = [];
+  for (const raw of manifest.accounts) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    const sourceId = record.source_id;
+    if (typeof sourceId !== 'string' || !sourceIds.includes(sourceId) || record.slot !== DEFAULT_ACCOUNT_SLOT) continue;
+    const text = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    const historyAccount = text(record.provider_account_hash);
+    const binding = record.account_binding && typeof record.account_binding === 'object' && !Array.isArray(record.account_binding)
+      ? record.account_binding as Record<string, unknown>
+      : undefined;
+    const bound = accountBoundSourceIdForSource(sourceId);
+    const boundAccount = bound ? text(binding?.provider_account_id) : undefined;
+    const folders = bound && Array.isArray(binding?.previous_account_folders)
+      ? binding.previous_account_folders.filter((id): id is string => typeof id === 'string')
+      : [];
+    if (!historyAccount && !boundAccount && folders.length === 0) continue;
+    identities.push({
+      sourceId,
+      ...(historyAccount ? { historyAccount } : {}),
+      ...(boundAccount ? { boundAccount } : {}),
+      ...(folders.length > 0 ? { previousAccountFolders: folders } : {}),
+    });
+  }
+  return identities;
+}
+
+function accountBoundSourceIdForSource(sourceId: string): AccountBoundSourceId | undefined {
+  return (ACCOUNT_BOUND_SOURCE_IDS as readonly string[]).includes(sourceId) ? sourceId as AccountBoundSourceId : undefined;
+}
+
+/**
+ * Refuses, before anything is written, a restore whose items came from another
+ * account than the one this computer already records for the source: one
+ * source never holds two accounts.
+ */
+function checkRestoredIdentities(identities: readonly RestoredAccountIdentity[], bindingsPath: string, env: Record<string, string | undefined>): void {
+  if (identities.length === 0) return;
+  const conflict = (sourceId: string): OperationError => new OperationError(
+    'invalid_params',
+    `This computer is already connected to another account for ${sourceId} than the one this backup's items came from, so nothing was restored.`,
+    `Disconnect ${sourceId} and delete its data with olympus data delete --source ${sourceId}, then restore.`,
+  );
+  const read = readSourceAccountBindings(bindingsPath);
+  if (identities.some((identity) => identity.boundAccount || identity.previousAccountFolders) && read.kind === 'malformed') {
+    throw new SourceAccountBindingsUnreadableError(bindingsPath);
+  }
+  const registry = readSourceRegistry(env);
+  for (const identity of identities) {
+    const bound = accountBoundSourceIdForSource(identity.sourceId);
+    const current = bound && read.kind === 'ok' ? read.bindings.sources[bound] : undefined;
+    if (current?.purge_required) throw conflict(identity.sourceId);
+    if (identity.boundAccount && current?.provider_account_id
+      && compareProviderAccounts(current.provider_account_id, identity.boundAccount) !== 'same') throw conflict(identity.sourceId);
+    const entry = findRegistryAccount(registry, identity.sourceId, DEFAULT_ACCOUNT_SLOT);
+    if (entry && entry.state !== 'active') throw conflict(identity.sourceId);
+    if (identity.historyAccount && entry?.provider_account_hash
+      && compareProviderAccounts(entry.provider_account_hash, identity.historyAccount) !== 'same') throw conflict(identity.sourceId);
+  }
+}
+
+/**
+ * Write back which account the restored items came from: the source's binding
+ * and its history's account. Returns the sources whose history another writer
+ * named differently in between (checked before, so only a race): left as it is.
+ */
+function writeRestoredIdentities(identities: readonly RestoredAccountIdentity[], bindingsPath: string, env: Record<string, string | undefined>): string[] {
+  const unrecorded: string[] = [];
+  const now = new Date().toISOString();
+  for (const identity of identities) {
+    const bound = accountBoundSourceIdForSource(identity.sourceId);
+    if (bound && (identity.boundAccount || identity.previousAccountFolders)) {
+      updateSourceAccountBinding(bindingsPath, bound, (current) => ({
+        ...current,
+        ...(identity.boundAccount
+          ? {
+              provider_account_id: current?.provider_account_id
+                ? mergeProviderAccountIds(current.provider_account_id, identity.boundAccount)
+                : identity.boundAccount,
+              bound_at: current?.bound_at ?? now,
+            }
+          : {}),
+        ...(identity.previousAccountFolders
+          ? { previous_account_folders: [...new Set([...(current?.previous_account_folders ?? []), ...identity.previousAccountFolders])].slice(0, 5) }
+          : {}),
+      }));
+    }
+    if (identity.historyAccount) {
+      const recorded = recordProviderAccount({ sourceId: identity.sourceId, slot: DEFAULT_ACCOUNT_SLOT }, identity.historyAccount, env);
+      if (recorded === 'different' || recorded === 'unproven') unrecorded.push(identity.sourceId);
+    }
+  }
+  return unrecorded;
+}
+
 /** Copy owner-only and durably: a temporary file beside the target, then rename. */
 function copyPrivate(from: string, to: string, prepare?: (staged: string) => void): void {
-  mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
+  // Every directory level the restore creates is flushed, as an export's are:
+  // a file renamed into a directory whose own entry never reached the disk is
+  // still gone after a power loss.
+  makeDurableDirectory(dirname(to), exportDurabilityBoundary(dirname(to)));
   const staging = `${to}.${randomUUID()}.restoring`;
   try {
     copyFileSync(from, staging);
@@ -269,12 +446,13 @@ function sourceSettingsTarget(artifact: DataExportArtifact, context: LifecyclePa
 function storeIsTierBound(path: string): boolean {
   const db = new Database(path, { readonly: true });
   try {
+    db.exec('PRAGMA busy_timeout = 10000;');
     const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
     if (!table) return false;
     const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
     return Boolean(row?.cursor);
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 
@@ -283,6 +461,7 @@ function repointLedgerHint(storePath: string, ledgerFor: (ledgerId: string) => s
   if (!storeIsTierBound(storePath)) return;
   const db = new Database(storePath, { readwrite: true, create: false });
   try {
+    db.exec('PRAGMA busy_timeout = 10000;');
     const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string };
     const binding = JSON.parse(row.cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
     if (typeof binding.ledgerId !== 'string') return;
@@ -291,6 +470,6 @@ function repointLedgerHint(storePath: string, ledgerFor: (ledgerId: string) => s
     db.query('UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?')
       .run(JSON.stringify({ ...binding, ledgerPath }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
