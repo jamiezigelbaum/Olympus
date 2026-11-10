@@ -578,8 +578,10 @@ describe('SourceAnswerJobRegistry', () => {
   });
 
   test('the remote threshold is configurable and stays below the 240 s hosted limit', () => {
-    expect(sourceAnswerJobLimitsFromEnv({}, 'remote')).toEqual({ handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS, resultWaitMs: 60_000 });
-    expect(SOURCE_ANSWER_HANDOFF_DEFAULT_MS).toBe(200_000);
+    // By default a call and each result wait end before a 60 s client limit
+    // (the MCP SDK's default request timeout), so the client sees the job id.
+    expect(sourceAnswerJobLimitsFromEnv({}, 'remote')).toEqual({ handoffMs: 45_000, resultWaitMs: 45_000 });
+    expect(SOURCE_ANSWER_HANDOFF_DEFAULT_MS).toBe(45_000);
     expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '120000' }, 'remote').handoffMs).toBe(120_000);
     expect(sourceAnswerJobLimitsFromEnv({ OLYMPUS_SOURCE_ANSWER_HANDOFF_MS: '999999' }, 'remote').handoffMs).toBe(SOURCE_ANSWER_HANDOFF_MAX_MS);
     expect(SOURCE_ANSWER_HANDOFF_MAX_MS).toBeLessThan(240_000);
