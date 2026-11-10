@@ -43,7 +43,9 @@ import {
   verifyConnectorStoreCorpusIntegrity,
 } from '../src/workers/connector-store/index.ts';
 import { TIER_MOVE_CONNECTOR_ID } from '../src/workers/connector-store/tier-move.ts';
+import { setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { ControlPathHeadroom } from '../src/workers/control-path-headroom.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import type {
   SourceEmbeddingInput,
   SourceEmbeddingProvider,
@@ -3481,11 +3483,15 @@ describe('createConnectorStoreCorpusAdapter hybrid retrieval', () => {
       ...corpusRequest(store, 'retro lancedb'),
       deadlineAtMs: Date.now() - 1,
     };
-    const response = await createConnectorStoreCorpusAdapter({
+    // The keyword queries run on the read pool, which gives up a query past
+    // the lane's deadline (#1079). Its clock is set an hour back here, so only
+    // the vector scan sees this deadline as spent.
+    setReadPoolClockForTests(createTestClock(Date.now() - 3_600_000));
+    const response = await Promise.resolve(createConnectorStoreCorpusAdapter({
       store,
       embeddingProvider: provider,
       retrievalMode: 'hybrid',
-    })(request);
+    })(request)).finally(() => setReadPoolClockForTests());
 
     expect(response.hits.map((hit) => hit.sourceItem.providerItemId)).toContain(RETRO.id);
     expect(response.laneAudits).toContainEqual(expect.objectContaining({
