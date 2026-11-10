@@ -360,6 +360,22 @@ describe('the computer\'s /dashboard', () => {
     }
   });
 
+  test('the cookie alone gets the content-free shell, but ?connector still redirects first so its #build-connector survives (#1187 review)', async () => {
+    const f = fixture();
+    try {
+      const session = await controlSession(f.fetch);
+      const shell = await f.fetch(new Request('http://worker.test/dashboard', { headers: { Cookie: session.cookie } }));
+      expect(shell.status).toBe(200);
+      expect(shell.headers.get('X-Olympus-Dashboard-Shell')).toBe('1');
+      expect(await shell.text()).not.toContain(session.csrf);
+      const connector = await f.fetch(new Request('http://worker.test/dashboard?connector', { headers: { Cookie: session.cookie } }));
+      expect(connector.status).toBe(302);
+      expect(connector.headers.get('Location')).toBe('/dashboard?connect#build-connector');
+    } finally {
+      f.close();
+    }
+  });
+
   test('every older page\'s address redirects to /dashboard, keeping a dash_ reader\'s token', async () => {
     const f = fixture();
     try {

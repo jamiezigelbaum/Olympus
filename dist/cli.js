@@ -183229,6 +183229,9 @@ function createEmailSourceWorker(options = {}) {
           if (page2 === "outside_help_moved") {
             return new Response(null, { status: 302, headers: { Location: dashboardOutsideHelpRedirect(url2), "Cache-Control": "no-store" } });
           }
+          if (page2 === "connector") {
+            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url2), "Cache-Control": "no-store" } });
+          }
           if (request.headers.has(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)) {
             return new Response(DASHBOARD_UNLOCK_SHELL_HTML, {
               status: 200,
@@ -183262,9 +183265,6 @@ function createEmailSourceWorker(options = {}) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "The dashboard panel is not configured.");
             }
             return json2(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url2, request)));
-          }
-          if (page2 === "connector") {
-            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url2), "Cache-Control": "no-store" } });
           }
           if (page2 === "agents") {
             return html2(renderDashboardLocalPage("agents", {

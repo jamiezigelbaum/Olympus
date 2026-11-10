@@ -1662,6 +1662,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (page === 'outside_help_moved') {
             return new Response(null, { status: 302, headers: { Location: dashboardOutsideHelpRedirect(url), 'Cache-Control': 'no-store' } });
           }
+          // Before the shell: its fetch would follow this redirect and lose the #fragment.
+          if (page === 'connector') {
+            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url), 'Cache-Control': 'no-store' } });
+          }
           // The cookie without this browser's stored proof (#1187, workers/http.ts): the
           // content-free shell, under the policy of the page it will write into its window.
           if (request.headers.has(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)) {
@@ -1698,9 +1702,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             // A locked reader: names, never an open token (no opener).
             return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url, request)));
-          }
-          if (page === 'connector') {
-            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url), 'Cache-Control': 'no-store' } });
           }
           if (page === 'agents') {
             return html(renderDashboardLocalPage('agents', {
