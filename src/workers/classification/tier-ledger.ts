@@ -4583,12 +4583,23 @@ interface EffectiveRow {
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
 /** The rule that made a row a re-judge candidate (`rejudgeCandidatePage`). */
-export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'owner_words' | 'judge_model' | 'names_prompt' | 'content_prompt';
+export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'owner_words' | 'judge_model' | 'names_prompt' | 'content_prompt' | 'retired_prompt';
+
+/**
+ * The built-in prompt versions #995 shipped (without and with owner words).
+ * On Jamie's labels that wording let confident Personal answers through on
+ * items he marked importantly Private (#1244), so an item it settled
+ * Personal is judged once more under the next built-in prompt: a one-time
+ * exception to the 2026-11-07 rule that built-in wording alone leaves settled
+ * decisions in place. Private and Secrets decisions are never reopened by it,
+ * and its questions queue behind every other question.
+ */
+export const RETIRED_SNIFFER_PROMPT_VERSIONS: readonly string[] = Object.freeze(['p-b1bcbbfd93eb', 'p-8ba2d5840a74']);
 
 /** The ID format emitted by snifferId/snifferPromptVersions, not arbitrary custom sniffer IDs. */
-function snifferInputs(id: string | undefined): { lane: string; owner: string; model: string } | undefined {
-  const match = id?.match(/^([^:]+):p-[a-f0-9]{12}(\.o[a-f0-9]{8})?\.m([a-f0-9]{16})$/);
-  return match ? { lane: match[1]!, owner: match[2] ?? '', model: match[3]! } : undefined;
+function snifferInputs(id: string | undefined): { lane: string; prompt: string; owner: string; model: string } | undefined {
+  const match = id?.match(/^([^:]+):(p-[a-f0-9]{12})(\.o[a-f0-9]{8})?\.m([a-f0-9]{16})$/);
+  return match ? { lane: match[1]!, prompt: match[2]!, owner: match[3] ?? '', model: match[4]! } : undefined;
 }
 
 /** Refine only prompt candidates, within the same bounded scan and before spending its candidate budget. */
@@ -4625,6 +4636,10 @@ function settledSnifferRejudgeCause(row: TierItemRow, cause: TierRejudgeCause, i
   if (inputs.some(input => input && (input.lane !== current.lane || input.model !== current.model))) return 'judge_model';
   // Missing/legacy identities retain their original cause and eligibility.
   if (!inputs.length || inputs.some(input => !input)) return cause;
+  // Settled Personal under a retired built-in prompt: judged once more (#1244).
+  if ((row.content_tier === 'public' || row.content_tier === 'private') && row.metadata_tier !== 'secure'
+    && !RETIRED_SNIFFER_PROMPT_VERSIONS.includes(current.prompt)
+    && inputs.some(input => RETIRED_SNIFFER_PROMPT_VERSIONS.includes(input!.prompt))) return 'retired_prompt';
   return 'builtin_prompt_skipped';
 }
 

@@ -1829,7 +1829,7 @@ export class TierSnifferService {
         + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''})`
         + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
         + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}`
-        + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}`
+        + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt} retired_prompt=${total.causeRetiredPrompt}`
         + `; builtin_prompt_skipped=${total.builtinPromptSkipped}; owner_recheck=${total.rechecked}.`,
       );
     }

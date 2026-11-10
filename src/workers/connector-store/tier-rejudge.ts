@@ -116,6 +116,8 @@ export interface TierRejudgeReport {
   causeJudgeModel: number;
   causeNamesPrompt: number;
   causeContentPrompt: number;
+  /** Settled Personal under a retired built-in prompt (#1244), judged once more at the lowest priority. */
+  causeRetiredPrompt: number;
   /** Settled items in the scanned window whose only stale input is built-in wording. */
   builtinPromptSkipped: number;
   /** Items the owner asked to check again (`olympus tier recheck`) that this pass re-judged. */
@@ -131,6 +133,7 @@ const CAUSE_FIELD: Record<TierRejudgeCause, keyof TierRejudgeReport> = {
   judge_model: 'causeJudgeModel',
   names_prompt: 'causeNamesPrompt',
   content_prompt: 'causeContentPrompt',
+  retired_prompt: 'causeRetiredPrompt',
 };
 
 export interface TierRejudgeOptions {
@@ -151,7 +154,7 @@ export function emptyTierRejudgeReport(): TierRejudgeReport {
   return {
     heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0,
     causeHeld: 0, causeRetiredPrior: 0, causeMissingQuestion: 0, causeClassifier: 0, causeOwnerWords: 0, causeJudgeModel: 0,
-    causeNamesPrompt: 0, causeContentPrompt: 0, builtinPromptSkipped: 0, rechecked: 0,
+    causeNamesPrompt: 0, causeContentPrompt: 0, causeRetiredPrompt: 0, builtinPromptSkipped: 0, rechecked: 0,
   };
 }
 
@@ -257,6 +260,7 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord,
         report,
         key,
         autoMoves: options.autoMoves === true,
+        ...(cause === 'retired_prompt' ? { lowestPriority: true } : {}),
       });
     } catch {
       // The item keeps its recorded decision; a later pass tries again.
@@ -305,6 +309,8 @@ export function rejudgeStoredContent(
      * may come out lower. The owner's rules decide first.
      */
     recheck?: { rules: readonly OwnerTierRule[] };
+    /** Queue its questions behind every other question (the one-time #1244 sweep). */
+    lowestPriority?: boolean;
   },
 ): void {
   const { report, key, autoMoves } = options;
@@ -345,7 +351,7 @@ export function rejudgeStoredContent(
   const counting: TierSniffer | undefined = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
-      const verdict = options.sniffer!.judge(request);
+      const verdict = options.sniffer!.judge(options.lowestPriority ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
       if (verdict.verdict === 'undecided' && verdict.queued !== true) questionNotQueued = true;
       return verdict;
     },
