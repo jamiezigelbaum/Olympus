@@ -44,6 +44,41 @@ test('calls wait while the reported request window is spent, then resume at its 
   expect(sent).toBe(3);
 });
 
+test('a stale reply arriving late does not forget calls sent after a newer report', async () => {
+  const clock = createTestClock();
+  const pacer = new JudgeRateLimitPacer(clock);
+  const reset = String(clock.now() + 60_000);
+  const replies: Array<(remaining: number) => void> = [];
+  const model = judge(pacer, () => new Promise<Response>(resolve => {
+    replies.push(remaining => resolve(ok({ 'x-ratelimit-remaining-requests': String(remaining), 'x-ratelimit-reset-requests': reset })));
+  }));
+  const a = model.complete(request);
+  const b = model.complete(request);
+  await flushMicrotasks();
+  expect(replies.length).toBe(2);
+  // B's reply comes first: one call left in the window.
+  replies[1]!(1);
+  await b;
+  const c = model.complete(request);
+  await flushMicrotasks();
+  expect(replies.length).toBe(3);
+  // The window is now spent by C. A's older reply (5 left) must not reopen it.
+  replies[0]!(5);
+  await a;
+  const d = model.complete(request);
+  await flushMicrotasks();
+  expect(replies.length).toBe(3);
+  replies[2]!(0);
+  await c;
+  await flushMicrotasks();
+  expect(replies.length).toBe(3);
+  await clock.advance(60_000);
+  await flushMicrotasks();
+  expect(replies.length).toBe(4);
+  replies[3]!(10);
+  await d;
+});
+
 test('a 429 waits for the reset and retries the same item instead of failing it', async () => {
   const clock = createTestClock();
   const pacer = new JudgeRateLimitPacer(clock);

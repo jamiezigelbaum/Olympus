@@ -144210,7 +144210,8 @@ class JudgeRateLimitPacer {
   clock;
   remaining;
   resetAt = 0;
-  sentSinceReport = 0;
+  lastSeq = 0;
+  reportSeq = 0;
   blockedUntil = 0;
   calls = new AsyncLocalStorage7;
   constructor(clock2 = realClock) {
@@ -144223,36 +144224,35 @@ class JudgeRateLimitPacer {
         await this.clock.sleep(Math.min(MAX_WAIT_MS, this.blockedUntil - now), signal);
         continue;
       }
-      if (this.remaining !== undefined && this.resetAt > now && this.remaining - this.sentSinceReport <= 0) {
+      if (this.remaining !== undefined && this.resetAt > now && this.remaining - (this.lastSeq - this.reportSeq) <= 0) {
         await this.clock.sleep(Math.min(MAX_WAIT_MS, this.resetAt - now), signal);
         continue;
       }
-      if (this.resetAt <= now) {
+      if (this.resetAt <= now)
         this.remaining = undefined;
-        this.sentSinceReport = 0;
-      }
-      this.sentSinceReport += 1;
-      return;
+      this.lastSeq += 1;
+      return this.lastSeq;
     }
   }
-  observeHeaders(response) {
+  observeHeaders(response, seq) {
     const remaining = header(response, "x-ratelimit-remaining-requests");
     const resetAt = header(response, "x-ratelimit-reset-requests");
-    if (remaining === undefined || resetAt === undefined || resetAt <= this.clock.now())
+    const now = this.clock.now();
+    if (remaining === undefined || resetAt === undefined || resetAt <= now)
       return;
-    if (resetAt > this.resetAt || this.remaining === undefined) {
-      this.resetAt = resetAt;
-      this.remaining = remaining;
-    } else
-      this.remaining = Math.min(this.remaining, remaining);
-    this.sentSinceReport = 0;
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now)
+      return;
+    this.remaining = remaining;
+    this.resetAt = resetAt;
+    this.reportSeq = seq;
   }
   fetch(fetchImpl) {
     return async (url2, init) => {
       const response = await fetchImpl(url2, init);
-      this.observeHeaders(response);
+      const call = this.calls.getStore();
+      if (call)
+        this.observeHeaders(response, call.seq);
       if (response.status === 429) {
-        const call = this.calls.getStore();
         const now = this.clock.now();
         const reset = header(response, "x-ratelimit-reset-requests");
         const retryAfter = header(response, "retry-after");
@@ -144273,8 +144273,7 @@ class JudgeRateLimitPacer {
     return {
       complete: async (request) => {
         for (let attempt = 0;; attempt++) {
-          await this.acquire(request.signal);
-          const call = { limited: false };
+          const call = { seq: await this.acquire(request.signal), limited: false };
           try {
             return await this.calls.run(call, () => model.complete(request));
           } catch (error2) {

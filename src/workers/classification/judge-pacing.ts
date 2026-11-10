@@ -53,47 +53,57 @@ function header(response: Response, name: string): number | undefined {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+interface PacedCall { seq: number; limited: boolean; retryAt?: number }
+
 export class JudgeRateLimitPacer {
   private remaining: number | undefined;
   private resetAt = 0;
-  private sentSinceReport = 0;
+  /** Calls are numbered at dispatch; a report covers calls up to the one whose reply carried it. */
+  private lastSeq = 0;
+  private reportSeq = 0;
   private blockedUntil = 0;
-  private readonly calls = new AsyncLocalStorage<{ limited: boolean; retryAt?: number }>();
+  private readonly calls = new AsyncLocalStorage<PacedCall>();
 
   constructor(private readonly clock: JudgePacerClock = realClock) {}
 
-  /** Wait until the reported window has room, then count this call against it. */
-  private async acquire(signal?: AbortSignal): Promise<void> {
+  /** Wait until the reported window has room, then number this call against it. */
+  private async acquire(signal?: AbortSignal): Promise<number> {
     for (;;) {
       const now = this.clock.now();
       if (this.blockedUntil > now) { await this.clock.sleep(Math.min(MAX_WAIT_MS, this.blockedUntil - now), signal); continue; }
-      if (this.remaining !== undefined && this.resetAt > now && this.remaining - this.sentSinceReport <= 0) {
+      // Calls dispatched after the report's own call are not in its count yet.
+      if (this.remaining !== undefined && this.resetAt > now && this.remaining - (this.lastSeq - this.reportSeq) <= 0) {
         await this.clock.sleep(Math.min(MAX_WAIT_MS, this.resetAt - now), signal);
         continue;
       }
-      if (this.resetAt <= now) { this.remaining = undefined; this.sentSinceReport = 0; }
-      this.sentSinceReport += 1;
-      return;
+      if (this.resetAt <= now) this.remaining = undefined;
+      this.lastSeq += 1;
+      return this.lastSeq;
     }
   }
 
-  private observeHeaders(response: Response): void {
+  private observeHeaders(response: Response, seq: number): void {
     const remaining = header(response, 'x-ratelimit-remaining-requests');
     const resetAt = header(response, 'x-ratelimit-reset-requests');
-    if (remaining === undefined || resetAt === undefined || resetAt <= this.clock.now()) return;
-    // Replies race; within one window the lowest count is the latest.
-    if (resetAt > this.resetAt || this.remaining === undefined) { this.resetAt = resetAt; this.remaining = remaining; }
-    else this.remaining = Math.min(this.remaining, remaining);
-    this.sentSinceReport = 0;
+    const now = this.clock.now();
+    if (remaining === undefined || resetAt === undefined || resetAt <= now) return;
+    // Replies race. A reply to an older call than the current report's is
+    // stale and would forget calls sent since, unless that report has expired
+    // (then any report beats none, and an older number only counts more calls).
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) return;
+    this.remaining = remaining;
+    this.resetAt = resetAt;
+    this.reportSeq = seq;
   }
 
   /** Reads the limit headers and marks a 429 for the call that made it. Returns the response untouched. */
   fetch(fetchImpl: OpenAIAnalystFetch): OpenAIAnalystFetch {
     return async (url, init) => {
       const response = await fetchImpl(url, init);
-      this.observeHeaders(response);
+      const call = this.calls.getStore();
+      // Only paced calls carry a dispatch number to place their report.
+      if (call) this.observeHeaders(response, call.seq);
       if (response.status === 429) {
-        const call = this.calls.getStore();
         const now = this.clock.now();
         const reset = header(response, 'x-ratelimit-reset-requests');
         const retryAfter = header(response, 'retry-after');
@@ -112,8 +122,7 @@ export class JudgeRateLimitPacer {
     return {
       complete: async (request) => {
         for (let attempt = 0; ; attempt++) {
-          await this.acquire(request.signal);
-          const call: { limited: boolean; retryAt?: number } = { limited: false };
+          const call: PacedCall = { seq: await this.acquire(request.signal), limited: false };
           try {
             return await this.calls.run(call, () => model.complete(request));
           } catch (error) {
