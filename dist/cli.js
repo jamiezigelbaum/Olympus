@@ -43746,7 +43746,7 @@ var init_local_index = __esm(() => {
       }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
     closedForPoolReads = false;
-    conceptCountMemo = new Map;
+    conceptCountMemo;
     readHere(steps) {
       let step = steps.next();
       while (!step.done) {
@@ -43932,7 +43932,7 @@ var init_local_index = __esm(() => {
       return alternatives.join(" OR ");
     }
     *conceptWeightsSteps(groups, exact) {
-      const memo = this.conceptCountMemo;
+      const memo = this.conceptCountMemo ??= new Map;
       const remembered = (key2) => {
         const entry = memo.get(key2);
         return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;

@@ -12937,7 +12937,9 @@ export class LocalConnectorStore {
   }
 
   private closedForPoolReads = false;
-  private readonly conceptCountMemo = new Map<string, { count: number; at: number }>();
+  // Created on first use: a field initializer that constructs an object
+  // keeps this class in bundles that never use it (dist/index.js).
+  private conceptCountMemo?: Map<string, { count: number; at: number }>;
 
   /** Drives a read generator on this store's own connection. */
   private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
@@ -13205,7 +13207,7 @@ export class LocalConnectorStore {
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
   ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
-    const memo = this.conceptCountMemo;
+    const memo = this.conceptCountMemo ??= new Map();
     const remembered = (key: string): number | undefined => {
       const entry = memo.get(key);
       return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
