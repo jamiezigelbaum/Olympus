@@ -119,10 +119,13 @@ export function applyOwnerOverrides(options: {
  * what the owner's current rules ask for. A rule added while the override
  * stood skipped the item (tier-rules-sweep.ts leaves overridden items alone
  * and still counts itself done), so it is applied here, in the same write;
- * rules only raise. A label rule cannot be checked from what a store keeps, so
- * none is assumed to match: the provider account's label rules are made
- * pending again, and the next label sweep asks the provider whether the item
- * carries the label and raises it if so. A raise hides first and a
+ * rules only raise. A label rule cannot be checked from what a store keeps:
+ * wherever a raising label rule could apply to the item, it keeps the
+ * protection it has now, up to that rule's tier, so it is never exposed before
+ * the provider has answered; and the provider account's label rules are made
+ * pending again, so the next label sweep asks the provider which stored items
+ * carry each label (#1176 tracks lowering one the provider says does not). A
+ * raise hides first and a
  * lowering stays where it is until its move lands, as for any decision a
  * listing records. The write re-checks, in its own transaction, that no
  * override was set again and the generation is still the one read. An item
@@ -146,10 +149,12 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   const stored = exported ? storedSignals(exported) : {};
   const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
   // Label rules for this item's source: whether the item carries the label is not known here,
-  // so the provider is asked again (below) rather than a match assumed.
+  // so it keeps the protection it has now (up to the rule's tier) and the provider is asked again (below).
   const labelRules = raising.filter((rule) => rule.match.kind === 'label'
     && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
-  const ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
+  const heldNow = maxTier(record.metadataTier, record.contentTier);
+  let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
+  for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
   const metadataTier = maxTier(before.metadataTier, ruleTier);
   const contentTier = maxTier(before.contentTier, metadataTier);
   const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
@@ -158,7 +163,7 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     // The rules' reason codes exactly as a listing states them.
     const classified = classifyItemTiers(
       {
-        signals: stored,
+        signals: { ...stored, ...(labelRules.length > 0 ? { labels: labelRules.map((rule) => rule.match.value) } : {}) },
         provider: record.provider,
         subject: identity,
       },
@@ -322,4 +327,8 @@ function identityOf(record: TierLedgerRecord): TierLedgerIdentity {
     providerItemId: record.providerItemId,
     ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
   };
+}
+
+function minTier(a: TierKey, b: TierKey): TierKey {
+  return tierRank(a) <= tierRank(b) ? a : b;
 }
