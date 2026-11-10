@@ -22,12 +22,13 @@ import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { isPendingPrivacyPolicy, readComputerUseState } from '../../src/core/first-run-privacy.ts';
 import { validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+import { ENGINE_ROLE_ENV } from '../../src/core/engine-split.ts';
 // Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
 import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.json' with { type: 'json' };
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
@@ -86,6 +87,8 @@ export interface AgentConfig {
     agent: { text: string; facts: string[]; citedTitle: string };
     ask: { text: string; facts: string[]; citedTitle: string };
   };
+  /** `run.ts --engine-split`: prepare-source turns `worker.engineSplit` on in the engine's config before its restart. */
+  engineSplit?: boolean;
 }
 
 const WORKDIR = join(homedir(), 'rc');
@@ -380,10 +383,53 @@ async function prepareSource(): Promise<never> {
     if (added.code !== 0) emit({ ok: false, step: 'tier-rules', detail: `could not add rule ${rule.id}` });
   }
   say('tier rules pinned');
+  if (config.engineSplit) {
+    try { turnOnEngineSplit(join(p.configDir, 'engine.json')); } catch (error) {
+      emit({ ok: false, step: 'engine-split', detail: error instanceof Error ? error.message : String(error) });
+    }
+    say('worker.engineSplit turned on in engine.json');
+  }
   const restart = olympus(['engine', 'restart'], { timeoutMs: 180_000 });
   if (restart.code !== 0) emit({ ok: false, step: 'engine-restart', detail: restart.stderr.slice(0, 300) });
   const readyMs = await waitForEngine(300_000);
-  emit({ ok: true, rules: config.tierRules.length, engineReadyMs: readyMs });
+  // With the switch on, the restarted engine must run as a front and a background. Linux reads the roles from /proc;
+  // macOS has no reader here, so it reports the roles as unread (null) and run.ts says so.
+  const engineSplit = config.engineSplit ? (p.os === 'linux' ? ownEngineRoles() : null) : undefined;
+  emit({ ok: true, rules: config.tierRules.length, engineReadyMs: readyMs, ...(engineSplit !== undefined ? { engineSplit } : {}) });
+}
+
+/**
+ * Turns `worker.engineSplit` on in the engine's own config file (engine.json, the file the engine host and the worker
+ * service read; core/config.ts installedEngineConfig), keeping every other setting. The engine's install and restart
+ * keep keys they did not write (engine-service.ts reconcileEngineConfig), so the switch lasts until the file changes.
+ */
+export function turnOnEngineSplit(path: string): void {
+  if (!existsSync(path)) throw new Error(`${path} does not exist; the engine is not installed the way the switch expects`);
+  const config = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error(`${path} does not hold a JSON object`);
+  const worker = config.worker && typeof config.worker === 'object' && !Array.isArray(config.worker) ? config.worker as Record<string, unknown> : {};
+  config.worker = { ...worker, engineSplit: true };
+  const temp = `${path}.rc-${process.pid}`;
+  writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temp, path);
+}
+
+/** How many of this user's processes run as each engine role (OLYMPUS_WORKER_ENGINE_ROLE), from their environments. */
+export function engineRolesIn(environs: readonly string[]): { front: number; background: number } {
+  const roles = { front: 0, background: 0 };
+  for (const environ of environs) {
+    const role = environ.split('\0').find((entry) => entry.startsWith(`${ENGINE_ROLE_ENV}=`))?.slice(ENGINE_ROLE_ENV.length + 1).trim();
+    if (role === 'front' || role === 'background') roles[role] += 1;
+  }
+  return roles;
+}
+
+function ownEngineRoles(): { front: number; background: number } {
+  const environs: string[] = [];
+  for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
+    try { environs.push(readFileSync(`/proc/${pid}/environ`, 'latin1')); } catch { /* gone, or not ours */ }
+  }
+  return engineRolesIn(environs);
 }
 
 // ---------------------------------------------------------------------------
