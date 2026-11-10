@@ -347,7 +347,7 @@ import {
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
-import { createReleaseTierCheck, createTierVisibilityGate, registerGovernedStore, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { createPendingGovernance, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
@@ -560,9 +560,9 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
-import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -2853,7 +2853,9 @@ export async function main(): Promise<void> {
   const backupService = createBackupService({
     paths: defaultBackupServicePaths(process.env),
     env: process.env,
-    exportInto: (destination) => exportOlympusData({ destination }),
+    // With the switch on the background writes it, between its own writes, so
+    // the stores and ledgers agree; this process packs it (#1224).
+    exportInto: engineFront ? frontDataExport(engineFront.client) : (destination) => exportOlympusData({ destination }),
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload(),
   });
@@ -3143,7 +3145,15 @@ export async function main(): Promise<void> {
   // Each lane's ledger, its corpora and its stores that exist now: the stores
   // let a child item be judged by its parent where the gate and the release
   // check read (tier-visibility.ts).
-  const tierScopes = (): TierVisibilityScope[] => tierLanes.map((lane) => ({
+  // Configured stores waiting for their ledger (#1224): retried on every
+  // scope read, so a ledger that appears later governs at once, whatever
+  // mount discovery reports.
+  const pendingGovernance = createPendingGovernance(
+    tierLanes,
+    (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }),
+    (line) => console.warn(line),
+  );
+  const tierScopes = (): TierVisibilityScope[] => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
@@ -3917,9 +3927,9 @@ export async function main(): Promise<void> {
   // A configured mount (Reflect, Roam, ...) whose store is ledger-backed is
   // governed by that ledger: register it, so the visibility gate and every
   // release check read its items' tiers instead of treating them as legacy.
-  const registerConfiguredTierStore = (store: LocalConnectorStore): void => {
-    registerGovernedStore(tierLanes, store, (ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line) => console.warn(line));
-  };
+  // One whose ledger does not exist yet, or cannot be opened now, waits in
+  // pendingGovernance, which every scope read retries (tierScopes).
+  const registerConfiguredTierStore = (store: LocalConnectorStore): void => pendingGovernance.add(store);
   for (const store of configuredConnectorStores) registerConfiguredTierStore(store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
@@ -6541,7 +6551,8 @@ export async function main(): Promise<void> {
             stopMessagingCapture,
             unlinkWhatsAppDevice,
             withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
-            captureRuntime: dashboardCaptureRuntime,
+            // In the split the background runs capture: the dashboard shows its snapshot (#1224).
+            captureRuntime: engineFront ? frontCaptureRuntime(dashboardCaptureRuntime, () => engineFront!.status()) : dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can
             // check it before deleting anything.
@@ -7522,6 +7533,8 @@ export async function main(): Promise<void> {
       // Only the front: the background is already restarting for the delete.
       if (!restartFrontOnly()) console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
     },
+    // People's corrections rebuilt the background's index: the front reads it now (#1224).
+    afterAnswer: (kind) => { if (kind === 'people') refreshPeople(true); },
   }) : undefined;
   const frontWorkerFetch = frontRoutes
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
@@ -7834,8 +7847,8 @@ export async function main(): Promise<void> {
           if (target === 'models') {
             if (!modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { reloaded: target, restarting: false };
             if (frontPid === undefined) return { reloaded: target, restarting: requestModelReload() };
-            void waitForProcessExit(frontPid).then(() => { requestModelReload(); });
-            return { reloaded: target, restarting: true };
+            // Fenced like a delete: no new front passes readiness against this background (a restore runs at its boot).
+            return { reloaded: target, restarting: restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(), log: (line) => console.warn(line) }) };
           }
           // A scope approval cancels the unsettled jobs it no longer covers.
           const invalidated = target === 'scope' && fileExtractionRuntime
@@ -7879,6 +7892,12 @@ export async function main(): Promise<void> {
           const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
           return runTierSetOnRecordedItem(locator, 'private', expected);
         },
+        // A backup's export. exportOlympusData is synchronous, so none of this
+        // process's writes runs between its snapshots (#1224).
+        export_data: ({ destination }) => {
+          exportOlympusData({ destination });
+          return { exported: destination };
+        },
         capture_stop: async ({ source }) => {
           await captureOwnership.stopForUnpair(source);
           return { stopped: source };
@@ -7906,6 +7925,9 @@ export async function main(): Promise<void> {
         // A create writes under an id made from the command id, so a resubmission finds it.
         source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
+        people: ({ request }) => runForwarded(request),
+        source_sync: ({ request }) => runForwarded(request),
+        data_export: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
         judge_boost: ({ identities }) => {
@@ -7952,12 +7974,7 @@ export async function main(): Promise<void> {
     restartForDelete = (request) => {
       const frontPid = deleteFromFront;
       if (frontPid === undefined) return requestModelReload(request);
-      commands.markStopping();
-      void waitForProcessExit(frontPid).then((ended) => {
-        if (!ended) console.warn('[engine-split] the front did not end within a minute of a source-data delete; restarting to delete anyway.');
-        requestModelReload(request);
-      });
-      return true;
+      return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line) => console.warn(line) });
     };
     commands.markReady();
     engineBackground = { stop: () => { status.stop(); commands.stop(); } };

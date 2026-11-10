@@ -11,6 +11,7 @@ import type { ArchiveImportDashboard, ArchivePrivateModelState } from '../archiv
 import type { TierClassificationBacklog } from '../classification/sniffer-service.ts';
 import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import type { EngineCommandClient } from './client.ts';
+import { DATA_EXPORT_WAIT_MS } from './runtime.ts';
 import { ENGINE_JUDGE_BOOST_MAX_IDS, type EngineItemIdentity } from './commands.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
@@ -82,6 +83,19 @@ export function frontArchiveViews(local: ArchiveViews, snapshot: Snapshot, chang
  * the grant only once the background answers that the capture stopped; any
  * other outcome throws, and the route keeps the credentials.
  */
+/**
+ * A backup's export with the switch on (#1224): the background writes it into
+ * `destination` (the front's staging folder), taking each snapshot between its
+ * own writes, so the stores and ledgers agree; the front then packs it. A
+ * failure or no answer throws, and the backup writes nothing.
+ */
+export function frontDataExport(client: Pick<EngineCommandClient, 'send'>): (destination: string) => Promise<void> {
+  return async (destination) => {
+    const receipt = await client.send({ kind: 'export_data', destination }, { timeoutMs: DATA_EXPORT_WAIT_MS });
+    if (receipt.state !== 'done') throw new Error(receipt.error ?? 'The background did not finish the export.');
+  };
+}
+
 export function frontCaptureStop(client: Pick<EngineCommandClient, 'send'>): (source: 'telegram' | 'whatsapp') => Promise<void> {
   return async (source) => {
     const receipt = await client.send({ kind: 'capture_stop', source }, { timeoutMs: 30_000 });
@@ -153,5 +167,21 @@ export function frontModelReload<R>(options: {
       options.restartSelf(request);
     });
     return true;
+  };
+}
+
+/**
+ * Messaging capture on the dashboard. The background runs the capture
+ * supervisors, so its snapshot says how capture stands. Without a current
+ * snapshot (none yet, or stale) the front shows only what it can read itself,
+ * the grants (`local`: its supervisors are empty, so no running state is
+ * claimed).
+ */
+export function frontCaptureRuntime<T>(local: () => Readonly<Record<string, T>>, snapshot: Snapshot): () => Readonly<Record<string, T>> {
+  return () => {
+    const captures = current(snapshot)?.snapshot.captures;
+    return captures && typeof captures === 'object' && !Array.isArray(captures)
+      ? captures as Readonly<Record<string, T>>
+      : local();
   };
 }

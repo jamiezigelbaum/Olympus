@@ -12,7 +12,7 @@ import { ENGINE_BACKGROUND_ORIGIN, ENGINE_ROLE_ENV, engineRoleFromEnv } from '..
 import { FrontStoreWriteError, forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
-import { createReleaseTierCheck, registerGovernedStore } from '../src/workers/connector-store/tier-visibility.ts';
+import { createPendingGovernance, createReleaseTierCheck, registerGovernedStore } from '../src/workers/connector-store/tier-visibility.ts';
 import { SecretLocationsIndex as SecretLocations } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
@@ -26,7 +26,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -41,6 +41,9 @@ import {
   createFrontGate,
   engineStatusSnapshotPath,
   OwnerBusyMarks,
+  restartAfterFront,
+  DATA_EXPORT_WAIT_MS,
+  SOURCE_SYNC_WAIT_MS,
   tierCommandOnlyReads,
   waitForProcessExit,
 } from '../src/workers/engine-split/runtime.ts';
@@ -347,6 +350,35 @@ describe('owner actions the background runs, forwarded from the front', () => {
       .toEqual({ kind: 'delete_source_data', request: deleting, frontPid: 42 });
   });
 
+  test('after People\'s correction is answered, the front re-reads the index the background rebuilt', async () => {
+    const order: string[] = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command) => { order.push(`sent:${command.kind}`); return sentReceipt({ status: 200, body: { ok: true } }); } },
+      gate: createFrontGate(), restartFront: () => {},
+      afterAnswer: (kind) => order.push(`reread:${kind}`),
+    });
+    const response = await routes(new Request('http://127.0.0.1/dashboard/people', { method: 'POST', body: JSON.stringify({ action: 'correct' }) }));
+    expect(response!.status).toBe(200);
+    expect(order).toEqual(['sent:people', 'reread:people']);
+    // A failed correction re-reads nothing.
+    const failing = createEngineFrontRoutes({ client: { send: async () => ({ id: 'c', state: 'failed', instance_id: 'b', error: 'no' }) }, gate: createFrontGate(), restartFront: () => {}, afterAnswer: (kind) => order.push(`reread:${kind}`) });
+    expect((await failing(new Request('http://127.0.0.1/dashboard/people', { method: 'POST', body: '{}' })))!.status).toBe(502);
+    expect(order).toHaveLength(2);
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/afterAnswer: \(kind\) => \{ if \(kind === 'people'\) refreshPeople\(true\); \}/);
+  });
+
+  test('a forwarded sync waits for its pass, as the route did in one process', async () => {
+    const waits: Array<number | undefined> = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command, options) => { waits.push(options?.timeoutMs); return sentReceipt({ status: 200, body: { ran: command.kind } }); } },
+      gate: createFrontGate(), restartFront: () => {},
+    });
+    await routes(new Request('http://127.0.0.1/v1/source/index/sync', { method: 'POST', body: '{}' }));
+    expect(waits).toEqual([SOURCE_SYNC_WAIT_MS]);
+    expect(SOURCE_SYNC_WAIT_MS).toBeGreaterThan(30 * 60_000);
+  });
+
   test('tier reads stay in the front; every tier write and the other owner actions go to the background', async () => {
     const sent: EngineCommand[] = [];
     const routes = createEngineFrontRoutes({
@@ -375,6 +407,15 @@ describe('owner actions the background runs, forwarded from the front', () => {
     for (const path of ['/dashboard/privacy/items/set', '/v1/privacy-item/raise']) {
       const response = await routes(post(path, { args: ['explain', 'm7'] }));
       expect(await response!.json(), path).toEqual({ ran: 'tier_override' });
+    }
+    // Check the judge's correction and People's corrections write background-owned data too (#1224).
+    for (const [path, kind] of [
+      ['/dashboard/privacy/judge-check', 'tier_override'], ['/dashboard/people', 'people'],
+      // A sync an agent or the CLI asks for, and X's content recovery, write the lanes' stores.
+      ['/v1/source/index/sync', 'source_sync'], ['/v1/source/index/x-bookmarks/content/recover', 'source_sync'],
+    ] as const) {
+      const response = await routes(post(path, { action: 'answer' }));
+      expect(await response!.json(), path).toEqual({ ran: kind });
     }
     expect(routes(post('/dashboard/privacy/items/find', {}))).toBeUndefined();
     expect(routes(post('/v1/privacy-item/find', {}))).toBeUndefined();
@@ -558,9 +599,38 @@ describe('a model change restarts both processes', () => {
     expect(parseEngineCommandEnvelope({ id: 'command-0081', command: { kind: 'reload', target: 'models', frontPid: 4242 } }).command).toEqual({ kind: 'reload', target: 'models', frontPid: 4242 });
     const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
     expect(server).toMatch(/const reloadModels = engineFront\s*\?\s*frontModelReload\(/);
-    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,400}?waitForProcessExit\(frontPid\)\.then\(\(\) => \{ requestModelReload\(\); \}\)/);
+    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,500}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(\)/);
+    expect(server).toMatch(/restartForDelete = [\s\S]{0,300}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(request\)/);
     // After a delete only the front restarts: the background is already on its way.
     expect(server).toMatch(/if \(!restartFrontOnly\(\)\) console\.warn/);
+  });
+});
+
+describe('a restore or model change fences readiness before the restart (#1224)', () => {
+  test('the background stops answering ready at once and restarts only after the front ends', async () => {
+    const events: string[] = [];
+    let ended!: (value: boolean) => void;
+    const scheduled = restartAfterFront({
+      frontPid: 4242,
+      markStopping: () => events.push('stopping'),
+      restart: () => { events.push('restart'); return true; },
+      waitForExit: (pid) => { events.push(`wait ${pid}`); return new Promise((resolve) => { ended = resolve; }); },
+      log: (line) => events.push(line),
+    });
+    expect(scheduled).toBe(true);
+    expect(events).toEqual(['stopping', 'wait 4242']);
+    await flushMicrotasks();
+    expect(events).toEqual(['stopping', 'wait 4242']);
+    ended(true);
+    await flushMicrotasks();
+    expect(events).toEqual(['stopping', 'wait 4242', 'restart']);
+    // A front that outlives the wait still gets the restart, and it is said.
+    const late: string[] = [];
+    restartAfterFront({ frontPid: 7, markStopping: () => late.push('stopping'), restart: () => { late.push('restart'); return true; }, waitForExit: async () => false, log: (line) => late.push(line) });
+    await flushMicrotasks();
+    expect(late[0]).toBe('stopping');
+    expect(late.at(-1)).toBe('restart');
+    expect(late).toHaveLength(3);
   });
 });
 
@@ -637,6 +707,31 @@ describe('configured mounts are governed by their ledgers', () => {
   });
 });
 
+describe('a configured store whose ledger appears later is governed then', () => {
+  test('the waiting registration is retried on every scope read, not only when discovery reports a new mount', () => {
+    const root = tempRoot();
+    const path = join(root, 'reflect.sqlite');
+    const identity = { provider: 'reflect', accountScope: 'reflect:me', providerItemId: 'note-1' };
+    const store = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.reflect.notes', family: 'note', trustDomain: 'internal' });
+    const lanes: Array<{ ledger: TierLedger; corpusIds: Set<string> }> = [];
+    const pending = createPendingGovernance(lanes, (mounted, ledger) => ({ ledger, corpusIds: new Set([mounted.corpusId]) }));
+    // Mounted before any sync: no ledger yet, so it waits.
+    pending.add(store);
+    expect(pending.waiting()).toEqual(['internal.reflect.notes']);
+    const check = createReleaseTierCheck(() => (pending.retry(), lanes), () => 'approval');
+    const input = { corpusId: 'internal.reflect.notes', ...identity, privateAtAnswer: false };
+    expect(check.inputs([input])[0]!.tier).toBe('legacy');
+    // Its first sync creates the ledger; discovery reports nothing new.
+    store.tierLedger()!.recordDecision(identity, classifyItemTiers({ signals: { title: 'note-1' }, text: 'A plain note.', subject: identity }));
+    expect(check.inputs([input])[0]!.tier).toBe('public_or_personal');
+    expect(pending.waiting()).toEqual([]);
+    store.close();
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/const tierScopes = \(\): TierVisibilityScope\[\] => \(pendingGovernance\.retry\(\), tierLanes\)/);
+    expect(server).toMatch(/const registerConfiguredTierStore = \(store: LocalConnectorStore\): void => pendingGovernance\.add\(store\);/);
+  });
+});
+
 describe('in-process callers go through the forwarding layer', () => {
   test('remote agents, the ChatGPT surface and the panel tools reach routes as the listener does', () => {
     const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
@@ -666,6 +761,45 @@ describe('Make Private from the front', () => {
     const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
     expect(server).toMatch(/setItemPrivate: engineFront\s*\?\s*frontSetItemPrivate\(engineFront\.client\)/);
     expect(server).toMatch(/tier_set_recorded: async \(\{ locator, expected \}\) => \{[\s\S]{0,200}?runTierSetOnRecordedItem\(locator, 'private', expected\)/);
+  });
+});
+
+describe('exports across the split (#1224)', () => {
+  test('the background takes the snapshots, on the writer\'s own loop; the front packs them', async () => {
+    const exported: string[] = [];
+    let fail = false;
+    const bg = background({ export_data: async ({ destination }) => { if (fail) throw new Error('disk full'); exported.push(destination); return { files: 3 }; } });
+    const clock = createTestClock();
+    const client = new EngineCommandClient({ fetch: bg.fetch, authToken: TOKEN, sleep: clock.sleep, now: clock.now });
+    const exportInto = frontDataExport(client);
+    await exportInto('/tmp/backup-staging/export');
+    expect(exported).toEqual(['/tmp/backup-staging/export']);
+    // An export the background could not finish fails the backup; nothing is packed.
+    fail = true;
+    await expect(exportInto('/tmp/backup-staging/again')).rejects.toThrow('disk full');
+    // It waits as long as an export can take.
+    const waits: Array<number | undefined> = [];
+    await frontDataExport({ send: async (_command, options) => { waits.push(options?.timeoutMs); return { id: 'c', state: 'done', instance_id: 'b', result: {} }; } })('/x');
+    expect(waits).toEqual([DATA_EXPORT_WAIT_MS]);
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0090', command: { kind: 'export_data', destination: 'relative/path' } })).toThrow('absolute');
+    expect(parseEngineCommandEnvelope({ id: 'command-0091', command: { kind: 'export_data', destination: '/abs/export' } }).command).toEqual({ kind: 'export_data', destination: '/abs/export' });
+  });
+
+  test('the CLI\'s export (and its backup) is forwarded, with the export\'s wait', async () => {
+    const sent: Array<{ kind: string; timeoutMs: number | undefined }> = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command, options) => { sent.push({ kind: command.kind, timeoutMs: options?.timeoutMs }); return { id: 'c', state: 'done', instance_id: 'b', result: { status: 200, headers: {}, body: '{}' } }; } },
+      gate: createFrontGate(), restartFront: () => {},
+    });
+    const response = await routes(new Request('http://127.0.0.1/v1/cli/data-export', { method: 'POST', body: JSON.stringify({ output: '/abs/export' }) }));
+    expect(response!.status).toBe(200);
+    expect(sent).toEqual([{ kind: 'data_export', timeoutMs: DATA_EXPORT_WAIT_MS }]);
+  });
+
+  test('scheduled and Back up now exports run in the background with the switch on, and as before with it off', () => {
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/exportInto: engineFront\s*\?\s*frontDataExport\(engineFront\.client\)\s*:\s*\(destination\) => exportOlympusData\(\{ destination \}\),/);
+    expect(server).toMatch(/export_data: \(\{ destination \}\) => \{\s*exportOlympusData\(\{ destination \}\);/);
   });
 });
 
@@ -861,6 +995,22 @@ describe('state the front shows from the snapshot', () => {
     } finally {
       front.stop();
     }
+  });
+
+  test('capture on the dashboard comes from a current snapshot; otherwise only the grants the front reads', () => {
+    const background = { 'telegram.messages': { supervisor: { state: 'running' }, scope: { chats: 3 } } };
+    const grantsOnly = { 'telegram.messages': { scope: { chats: 3 } } };
+    const snapshot = snapshotWith({ captures: background });
+    const captures = frontCaptureRuntime(() => grantsOnly, snapshot.read);
+    expect(captures()).toEqual(background);
+    // A stale snapshot claims no running capture.
+    snapshot.setStale(true);
+    expect(captures()).toEqual(grantsOnly);
+    snapshot.setStale(false);
+    snapshot.set(undefined);
+    expect(captures()).toEqual(grantsOnly);
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/captureRuntime: engineFront \? frontCaptureRuntime\(dashboardCaptureRuntime, \(\) => engineFront!\.status\(\)\) : dashboardCaptureRuntime,/);
   });
 
   test('judge backlog, unreadable counts and the archive views come from the snapshot', () => {

@@ -49,7 +49,14 @@ export const ENGINE_FORWARDED_ROUTES = {
   delete_source_data: ['/dashboard/delete-source-data', '/v1/cli/data-delete'],
   // Every per-item override: the CLI's tier set, and the one-item privacy change
   // from the dashboard and from an agent (tier-owner-items.ts). Finding items stays a read.
-  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise'],
+  // Check the judge (judge-check.ts) records the owner's answer and, where it
+  // differs, the same per-item override, so it runs with the ledgers (#1224).
+  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise', '/dashboard/privacy/judge-check'],
+  // People's corrections write the people index the background rebuilds (#1224).
+  people: ['/dashboard/people'],
+  // A sync asked for by path (an agent, the CLI) and X's content recovery run
+  // the lanes' syncs, which write their stores (#1224).
+  source_sync: ['/v1/source/index/sync', '/v1/source/index/x-bookmarks/content/recover'],
   storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
   // Pairing state lives with the background's capture service: every pairing route goes there.
   capture: [
@@ -57,6 +64,9 @@ export const ENGINE_FORWARDED_ROUTES = {
     '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
   ],
   embed_chunks: ['/v1/source/index/embed'],
+  // The CLI's export (and so its backup): the background takes the snapshots
+  // on the writer's own loop, between its writes (#1224).
+  data_export: ['/v1/cli/data-export'],
   // The background runs source watches' passes and owns their store.
   source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
   // The extraction queue's writes, under the generic path or a family's alias.
@@ -68,6 +78,98 @@ export const ENGINE_FORWARDED_ROUTES = {
   ],
 } as const;
 export type EngineForwardedKind = keyof typeof ENGINE_FORWARDED_ROUTES;
+
+/**
+ * Every other POST route the worker serves (test/engine-split-route-guard.test.ts
+ * holds the two lists to the worker's routes): in the split it runs in the
+ * front, and the reason says why that is safe. A route that writes data the
+ * background owns (stores, tier ledgers, the people index, the extraction
+ * queue, watches, capture) is forwarded instead; one that writes a file the
+ * front owns says how the background learns of it. Every key is one exact route: a prefix
+ * route's actions each have their own (write-routes.ts).
+ */
+export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
+  '/dashboard/control/launch': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/control/launch/redeem': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/control/session': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/control/session/local': 'Dashboard sign-in: sessions the front holds.',
+  '/dashboard/connect/oauth/start': 'Credential custody and the handle registry (owner files); lanes follow the registry on reload sources.',
+  '/dashboard/connect/oauth/cancel': 'Cancels a pending sign-in the front started.',
+  '/dashboard/connect/api-key': 'Credential custody and the handle registry (owner files); lanes follow the registry on reload sources.',
+  '/dashboard/connect/this-computer': 'Credential custody and the handle registry (owner files); lanes follow the registry on reload sources.',
+  '/dashboard/disconnect': 'Credential teardown, after the background confirms the capture stopped (capture_stop).',
+  '/dashboard/unpair': 'Credential teardown, after the background confirms the capture stopped (capture_stop).',
+  '/dashboard/dispositions': 'Source scope and ingestion choices (owner files); an approval sends reload scope to the background.',
+  '/dashboard/sync-now': 'The front scheduler posts sync_now; the background runs the pass.',
+  '/dashboard/embedding-priority': 'The overnight guard\'s operator override file, read by the embedding drain.',
+  '/dashboard/models/check': 'Probes a model; writes nothing.',
+  '/dashboard/models/local/discover': 'Lists local models; writes nothing.',
+  '/dashboard/models/local/test': 'Probes a local model; writes nothing.',
+  '/dashboard/models/addable': 'Lists models; writes nothing.',
+  '/dashboard/models/first-run-privacy': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/models/judge': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/models/local/save': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/models/choice': 'A settings file; a model or judge change restarts the background too (reload models).',
+  '/dashboard/settings/proposal/apply': 'Settings files; a model or judge change restarts the background too (reload models).',
+  '/dashboard/settings/proposal/discard': 'Drops a settings proposal the front holds.',
+  '/dashboard/engine/computer-use': 'A settings file read by the front\'s answer tools.',
+  '/dashboard/engine/go-easy': 'go-easy.json; the background reads it again (reload pacing).',
+  '/dashboard/engine/update': 'Updates the installed package and restarts the host.',
+  '/dashboard/engine/update/status': 'Reads the update\'s progress.',
+  '/dashboard/backup/status': 'Reads backup state.',
+  '/dashboard/backup/settings': 'Backup settings, a file the front owns.',
+  '/dashboard/backup/passphrase': 'The backup key file the front owns.',
+  '/dashboard/backup/browse': 'Lists folders; writes nothing.',
+  '/dashboard/backup/run': 'Exports read-only snapshots, checked against one generation of the background\'s writes (backup-service.ts).',
+  '/dashboard/backup/restore': 'Writes the pending-restore marker; the restore runs at the background\'s boot, after it stops answering ready.',
+  '/dashboard/tools/call': 'Panel tools run in process through the forwarding fetch.',
+  '/dashboard/archive-import/upload-start': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/upload-file': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/upload-status': 'Reads an upload\'s progress.',
+  '/dashboard/archive-import/upload-cancel': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/approve': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/decline': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/remove': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/archive-import/stop': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
+  '/dashboard/privacy/items/find': 'Reads the tier ledgers read-only.',
+  '/dashboard/agents/pairing-code': 'Remote connections and keys, in the front\'s connection store.',
+  '/dashboard/agents/keys': 'Remote connections and keys, in the front\'s connection store.',
+  '/dashboard/agents/revoke': 'Remote connections and keys, in the front\'s connection store.',
+  '/dashboard/agents/remote-access': 'Remote access settings the front serves.',
+  '/dashboard/consult': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/route': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/route/add': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/recover': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/abandon': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/tools/install': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/writer': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/writer/test': 'Outside-help settings, written by the front.',
+  '/dashboard/consult/standard': 'Outside-help settings, written by the front.',
+  '/dashboard/private-answers': 'The waiting-question queue, consumed only by the front.',
+  '/dashboard/apps-received': 'The app release log the front records; Make Private goes to the background (tier_set_recorded).',
+  '/v1/archive-import/start': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/archive-import/status': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/archive-import/remove': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
+  '/v1/consult/ask': 'Asks an outside consultant; writes nothing the background owns.',
+  '/v1/privacy-item/find': 'Reads the tier ledgers read-only; raise is forwarded (tier_override).',
+  '/v1/source/answer': 'Answers from read-only stores.',
+  '/v1/source/answer/received': 'An answer receipt, recorded where the front released it.',
+  '/v1/source/answer/release': 'Checks a release ticket the front holds.',
+  '/v1/source/credentials/recheck': 'Re-reads credential state; writes nothing.',
+  '/v1/source/export': 'Copies source files out; reads only.',
+  '/v1/source/index/dropbox/content/export-eval-shard': 'Exports an eval shard from read-only stores.',
+  '/v1/source/index/files/status': 'Reads the extraction queue.',
+  '/v1/source/index/search': 'Searches read-only stores.',
+  '/v1/source/index/status': 'Reads status.',
+  '/v1/source/scheduler/status': 'Reads the background\'s snapshot.',
+  '/v1/source/watches': 'Lists watches read-only.',
+  '/v1/cli/ingestion-status': 'Reads status.',
+  '/v1/cli/setup-status': 'Reads status.',
+  '/v1/cli/settings': 'Settings files; a model or judge change restarts the background too (reload models).',
+  '/v1/cli/settings-propose': 'Records a settings proposal the front holds.',
+};
+
+
 
 export interface EngineForwardedRequest {
   path: string;
@@ -103,7 +205,13 @@ export type EngineCommand =
   | { kind: 'tier_set_recorded'; locator: string; expected: EngineRecordedItem }
   /** Stop a messaging capture before Disconnect or Unpair tears down its grant; done means stopped. */
   | { kind: 'capture_stop'; source: 'telegram' | 'whatsapp' }
-  | { kind: 'judge_boost'; identities: EngineItemIdentity[] };
+  | { kind: 'judge_boost'; identities: EngineItemIdentity[] }
+  /**
+   * A backup's export, written by the background into the front's staging
+   * folder: the snapshots are taken between the background's writes, so the
+   * stores and ledgers agree; the front packs and encrypts them (#1224).
+   */
+  | { kind: 'export_data'; destination: string };
 
 export type EngineCommandKind = EngineCommand['kind'];
 
@@ -261,6 +369,9 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'embed_chunks':
     case 'source_watch':
     case 'extraction_queue':
+    case 'people':
+    case 'source_sync':
+    case 'data_export':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');
@@ -286,6 +397,11 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
         provider: provider!, providerItemId: providerItemId!,
         ...(typeof conversation === 'string' ? { providerConversationId: conversation } : {}),
       } } };
+    }
+    case 'export_data': {
+      const destination = boundedString(command!.destination, 4096);
+      if (!destination || !destination.startsWith('/')) fail('export_data needs an absolute destination.');
+      return { id, command: { kind, destination: destination! } };
     }
     case 'capture_stop': {
       const source = command!.source;

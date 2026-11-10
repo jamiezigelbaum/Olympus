@@ -172010,6 +172010,60 @@ var init_google_pilot_client = __esm(() => {
   ]);
 });
 
+// src/workers/email-source/write-routes.ts
+function workerRouteAllowed(method, pathname, basePath) {
+  if (pathname.startsWith("/dashboard") || pathname.startsWith("/oauth/callback/")) {
+    return isV04PublicDashboardRoute(method, pathname);
+  }
+  if (READ_METHODS.has(method))
+    return true;
+  return pathname.startsWith(`${basePath}/`) && WRITE_ROUTES.has(`${method} ${pathname.slice(basePath.length)}`);
+}
+var WORKER_POST_PATHS, WORKER_WRITE_ROUTES, READ_METHODS, WRITE_ROUTES;
+var init_write_routes = __esm(() => {
+  init_cli_via_worker();
+  init_public_surface();
+  WORKER_POST_PATHS = [
+    "/consult/ask",
+    "/archive-import/start",
+    "/archive-import/status",
+    "/archive-import/remove",
+    "/privacy-item/find",
+    "/privacy-item/raise",
+    "/source/answer",
+    "/source/answer/received",
+    "/source/answer/release",
+    "/source/export",
+    "/source/index/status",
+    "/source/credentials/recheck",
+    "/source/scheduler/status",
+    "/source/watch/create",
+    "/source/watches",
+    "/source/watch/cancel",
+    "/source/index/x-bookmarks/content/recover",
+    "/source/index/sync",
+    "/source/index/files/extract",
+    "/source/index/files/plan",
+    "/source/index/files/transcribe",
+    "/source/index/files/recycle-leases",
+    "/source/index/files/janitor-requeue",
+    "/source/index/files/extract-pdfs",
+    "/source/index/files/status",
+    "/source/index/dropbox/content/export-eval-shard",
+    "/source/index/search",
+    "/source/index/embed",
+    "/source/index/dropbox/content/extract",
+    "/source/index/dropbox/content/plan",
+    "/source/index/dropbox/content/recycle-leases",
+    "/source/index/dropbox/content/janitor-requeue",
+    "/source/index/dropbox/transcribe",
+    ...WORKER_CLI_OPERATIONS.map((operation) => `${WORKER_CLI_ROUTE_PREFIX}${operation}`)
+  ];
+  WORKER_WRITE_ROUTES = WORKER_POST_PATHS.map((path) => ({ method: "POST", path }));
+  READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+  WRITE_ROUTES = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
+});
+
 // src/core/messaging-account-move.ts
 import { readFileSync as readFileSync88 } from "node:fs";
 import { homedir as homedir42 } from "node:os";
@@ -182697,9 +182751,11 @@ function createEmailSourceWorker(options = {}) {
     async fetch(request) {
       try {
         const url2 = new URL(request.url);
-        const dashboardNamespace = url2.pathname.startsWith("/dashboard") || url2.pathname.startsWith("/oauth/callback/");
-        if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url2.pathname)) {
-          return new Response("Not Found", { status: 404 });
+        if (!workerRouteAllowed(request.method, url2.pathname, basePath)) {
+          if (url2.pathname.startsWith("/dashboard") || url2.pathname.startsWith("/oauth/callback/")) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return workerRouteNotFound();
         }
         const filesAlias = fileExtractionAliasFor(url2.pathname, basePath);
         const filesAliasTaken = filesAlias !== undefined && fileExtraction !== undefined;
@@ -184996,13 +185052,7 @@ function createEmailSourceWorker(options = {}) {
           }
           throw new EmailSourceWorkerError(501, "source_index_embedding_not_supported", `The connector store for ${corpusId} is not mounted.`);
         }
-        return json2({
-          error: {
-            code: "not_found",
-            message: "Email source worker route not found."
-          },
-          policy: { raw_email_exposed: false }
-        }, 404);
+        return workerRouteNotFound();
       } catch (error2) {
         const failedUrl = new URL(request.url);
         if (request.method === "GET" && failedUrl.pathname === "/dashboard" && dashboardHtmlRoutePage(failedUrl) === "help") {
@@ -186174,6 +186224,15 @@ function sourceSchedulerSourceIdForCorpus(corpusId) {
   if (corpusId === "secure_local.evernote.notes" || corpusId === "internal.evernote.notes")
     return "evernote.notes";
   return;
+}
+function workerRouteNotFound() {
+  return json2({
+    error: {
+      code: "not_found",
+      message: "Email source worker route not found."
+    },
+    policy: { raw_email_exposed: false }
+  }, 404);
 }
 function fileExtractionAliasFor(pathname, basePath) {
   if (!pathname.startsWith(basePath))
@@ -187583,7 +187642,7 @@ var init_email_source = __esm(() => {
   init_source_corpus_registry();
   init_selected_item_safety();
   init_venice_models();
-  init_public_surface();
+  init_write_routes();
   init_judge_check();
   init_staging();
   init_messaging_capture();
@@ -205053,6 +205112,24 @@ function registerGovernedStore(lanes, store, newLane, log = () => {}) {
   lanes.push(newLane(ledger));
   return "registered";
 }
+function createPendingGovernance(lanes, newLane, log = () => {}) {
+  const waiting = new Map;
+  const attempt = (store) => {
+    const outcome = registerGovernedStore(lanes, store, (ledger) => newLane(store, ledger), log);
+    if (outcome === "no_ledger" || outcome === "unavailable")
+      waiting.set(store.corpusId, store);
+    else
+      waiting.delete(store.corpusId);
+  };
+  return {
+    add: attempt,
+    retry() {
+      for (const store of [...waiting.values()])
+        attempt(store);
+    },
+    waiting: () => [...waiting.keys()]
+  };
+}
 var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -210032,7 +210109,10 @@ function parseEngineCommandEnvelope(value2) {
     case "capture":
     case "embed_chunks":
     case "source_watch":
-    case "extraction_queue": {
+    case "extraction_queue":
+    case "people":
+    case "source_sync":
+    case "data_export": {
       const frontPid = command2.frontPid;
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
@@ -210061,6 +210141,12 @@ function parseEngineCommandEnvelope(value2) {
         providerItemId,
         ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
       } } };
+    }
+    case "export_data": {
+      const destination = boundedString2(command2.destination, 4096);
+      if (!destination || !destination.startsWith("/"))
+        fail("export_data needs an absolute destination.");
+      return { id, command: { kind, destination } };
     }
     case "capture_stop": {
       const source = command2.source;
@@ -210249,7 +210335,9 @@ var init_commands = __esm(() => {
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_FORWARDED_ROUTES = {
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
-    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise"],
+    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
+    people: ["/dashboard/people"],
+    source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
     storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
     capture: [
       "/dashboard/messaging/start",
@@ -210260,6 +210348,7 @@ var init_commands = __esm(() => {
       "/dashboard/messaging/scope"
     ],
     embed_chunks: ["/v1/source/index/embed"],
+    data_export: ["/v1/cli/data-export"],
     source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
     extraction_queue: [
       "/v1/source/index/files/plan",
@@ -210705,7 +210794,7 @@ function createEngineFrontRoutes(input) {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
     } catch (error2) {
       return { unanswered: error2 instanceof Error ? error2.message : "The background engine is not answering." };
     }
@@ -210719,6 +210808,9 @@ function createEngineFrontRoutes(input) {
       return Response.json({ error: { code: "engine_background_unavailable", message: outcome.unanswered } }, { status: 503 });
     if ("failed" in outcome)
       return Response.json({ error: { code: "engine_background_failed", message: outcome.failed } }, { status: 502 });
+    try {
+      input.afterAnswer?.(kind);
+    } catch {}
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
   };
   return (request) => {
@@ -210797,6 +210889,16 @@ class OwnerBusyMarks {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
   }
 }
+function restartAfterFront(input) {
+  input.markStopping();
+  (input.waitForExit ?? waitForProcessExit)(input.frontPid).then((ended) => {
+    if (!ended)
+      input.log?.("[engine-split] the front did not end within a minute; restarting anyway.");
+    input.restart();
+  });
+  return true;
+}
+var SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS;
 var init_runtime4 = __esm(() => {
   init_engine_split();
   init_olympus_layout();
@@ -210805,6 +210907,8 @@ var init_runtime4 = __esm(() => {
   init_client3();
   init_commands();
   init_snapshot();
+  SOURCE_SYNC_WAIT_MS = 35 * 60000;
+  DATA_EXPORT_WAIT_MS = 3 * 60 * 60000;
 });
 
 // src/workers/engine-split/front-state.ts
@@ -210848,6 +210952,13 @@ function frontArchiveViews(local, snapshot2, changedAt = () => {
     cardViews: () => archive()?.cards ?? local.cardViews(),
     sourceImports: () => archive()?.source_imports ?? local.sourceImports(),
     archiveSources: () => archive()?.sources ?? local.archiveSources()
+  };
+}
+function frontDataExport(client) {
+  return async (destination) => {
+    const receipt = await client.send({ kind: "export_data", destination }, { timeoutMs: DATA_EXPORT_WAIT_MS });
+    if (receipt.state !== "done")
+      throw new Error(receipt.error ?? "The background did not finish the export.");
   };
 }
 function frontCaptureStop(client) {
@@ -210901,7 +211012,14 @@ function frontModelReload(options) {
     return true;
   };
 }
+function frontCaptureRuntime(local, snapshot2) {
+  return () => {
+    const captures = current2(snapshot2)?.snapshot.captures;
+    return captures && typeof captures === "object" && !Array.isArray(captures) ? captures : local();
+  };
+}
 var init_front_state = __esm(() => {
+  init_runtime4();
   init_commands();
 });
 
@@ -234464,7 +234582,7 @@ async function main() {
   const backupService = createBackupService({
     paths: defaultBackupServicePaths(process.env),
     env: process.env,
-    exportInto: (destination) => exportOlympusData({ destination }),
+    exportInto: engineFront ? frontDataExport(engineFront.client) : (destination) => exportOlympusData({ destination }),
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload()
   });
@@ -234680,7 +234798,8 @@ async function main() {
       return false;
     }
   }));
-  const tierScopes = () => tierLanes.map((lane) => ({
+  const pendingGovernance = createPendingGovernance(tierLanes, (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line2) => console.warn(line2));
+  const tierScopes = () => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
@@ -235273,9 +235392,7 @@ ${key2}`;
   });
   const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
-  const registerConfiguredTierStore = (store) => {
-    registerGovernedStore(tierLanes, store, (ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line2) => console.warn(line2));
-  };
+  const registerConfiguredTierStore = (store) => pendingGovernance.add(store);
   for (const store of configuredConnectorStores)
     registerConfiguredTierStore(store);
   const connectorStores = mergeConnectorStores([
@@ -237219,7 +237336,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         stopMessagingCapture,
         unlinkWhatsAppDevice,
         withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
-        captureRuntime: dashboardCaptureRuntime,
+        captureRuntime: engineFront ? frontCaptureRuntime(dashboardCaptureRuntime, () => engineFront.status()) : dashboardCaptureRuntime,
         workerRestart: {
           canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
           request: (reload) => restartForDelete(reload)
@@ -237999,6 +238116,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     restartFront: () => {
       if (!restartFrontOnly())
         console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
+    },
+    afterAnswer: (kind) => {
+      if (kind === "people")
+        refreshPeople(true);
     }
   }) : undefined;
   const frontWorkerFetch = frontRoutes ? async (request) => await frontRoutes(request) ?? worker.fetch(request) : worker.fetch;
@@ -238276,10 +238397,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
               return { reloaded: target, restarting: false };
             if (frontPid === undefined)
               return { reloaded: target, restarting: requestModelReload() };
-            waitForProcessExit(frontPid).then(() => {
-              requestModelReload();
-            });
-            return { reloaded: target, restarting: true };
+            return { reloaded: target, restarting: restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(), log: (line2) => console.warn(line2) }) };
           }
           const invalidated = target === "scope" && fileExtractionRuntime ? (corpora ?? []).reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0) : 0;
           refreshSchedulerSources();
@@ -238323,6 +238441,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           const { runTierSetOnRecordedItem: runTierSetOnRecordedItem2 } = await Promise.resolve().then(() => (init_tier_cli(), exports_tier_cli));
           return runTierSetOnRecordedItem2(locator, "private", expected);
         },
+        export_data: ({ destination }) => {
+          exportOlympusData({ destination });
+          return { exported: destination };
+        },
         capture_stop: async ({ source }) => {
           await captureOwnership.stopForUnpair(source);
           return { stopped: source };
@@ -238355,6 +238477,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         embed_chunks: ({ request }) => runForwarded(request),
         source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
+        people: ({ request }) => runForwarded(request),
+        source_sync: ({ request }) => runForwarded(request),
+        data_export: ({ request }) => runForwarded(request),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };
@@ -238396,13 +238521,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const frontPid = deleteFromFront;
       if (frontPid === undefined)
         return requestModelReload(request);
-      commands.markStopping();
-      waitForProcessExit(frontPid).then((ended) => {
-        if (!ended)
-          console.warn("[engine-split] the front did not end within a minute of a source-data delete; restarting to delete anyway.");
-        requestModelReload(request);
-      });
-      return true;
+      return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line2) => console.warn(line2) });
     };
     commands.markReady();
     engineBackground = { stop: () => {

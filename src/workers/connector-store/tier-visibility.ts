@@ -254,3 +254,30 @@ export function registerGovernedStore<L extends { ledger: TierLedger; corpusIds:
   lanes.push(newLane(ledger));
   return 'registered';
 }
+
+/**
+ * Stores waiting for their governing ledger (registerGovernedStore answered
+ * `no_ledger` or `unavailable`), kept apart from mount discovery: discovery
+ * reports a store once, while its ledger can appear any time after. `retry`
+ * tries each again and keeps only those still waiting; it is cheap (a file
+ * check per store), so the scopes call it before every read.
+ */
+export function createPendingGovernance<L extends { ledger: TierLedger; corpusIds: Set<string> }>(
+  lanes: L[],
+  newLane: (store: { corpusId: string }, ledger: TierLedger) => L,
+  log: (line: string) => void = () => {},
+) {
+  const waiting = new Map<string, { corpusId: string; governingTierLedger(): TierLedger | undefined }>();
+  const attempt = (store: { corpusId: string; governingTierLedger(): TierLedger | undefined }): void => {
+    const outcome = registerGovernedStore(lanes, store, (ledger) => newLane(store, ledger), log);
+    if (outcome === 'no_ledger' || outcome === 'unavailable') waiting.set(store.corpusId, store);
+    else waiting.delete(store.corpusId);
+  };
+  return {
+    add: attempt,
+    retry(): void {
+      for (const store of [...waiting.values()]) attempt(store);
+    },
+    waiting: (): string[] => [...waiting.keys()],
+  };
+}

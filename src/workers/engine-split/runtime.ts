@@ -153,6 +153,11 @@ export function createEngineFront(input: {
   return { client, ownerBusy: relay, status, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
+/** A forwarded sync answers when its pass ends, as the route did in one process: up to a long pass. */
+export const SOURCE_SYNC_WAIT_MS = 35 * 60_000;
+/** How long the front waits for the background to write an export: a large install's copies take a while. */
+export const DATA_EXPORT_WAIT_MS = 3 * 60 * 60_000;
+
 function restartingResponse(): Response {
   return Response.json({ error: { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' } }, { status: 503 });
 }
@@ -245,6 +250,12 @@ export function createEngineFrontRoutes(input: {
   timeoutMs?: number;
   /** This front's process, which the background waits out before it deletes. */
   pid?: number;
+  /**
+   * After the background answered a forwarded action, before the front
+   * answers: the front re-reads what the background just wrote (People's
+   * corrections rebuild the index there; the front reloads its read-only copy).
+   */
+  afterAnswer?: (kind: EngineForwardedKind) => void;
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
   /** The background's answer, or why there is none: the command was not answered, or it failed there. */
@@ -257,7 +268,7 @@ export function createEngineFrontRoutes(input: {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
@@ -269,6 +280,7 @@ export function createEngineFrontRoutes(input: {
     const outcome = await exchange(kind, request);
     if ('unanswered' in outcome) return Response.json({ error: { code: 'engine_background_unavailable', message: outcome.unanswered } }, { status: 503 });
     if ('failed' in outcome) return Response.json({ error: { code: 'engine_background_failed', message: outcome.failed } }, { status: 502 });
+    try { input.afterAnswer?.(kind); } catch { /* the front's own timer re-reads it */ }
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
   };
   return (request) => {
@@ -361,4 +373,27 @@ export class OwnerBusyMarks {
   busy(resource: string): boolean {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
   }
+}
+
+/**
+ * The background restarts after the front that asked for it has ended: a
+ * delete, a model or judge change, a restore (#1224). It first stops answering
+ * ready, so no new front can pass readiness against this background, open
+ * stores or load settings before the restart; the answer to the command that
+ * asked stays readable. Then it waits the front out (at most a minute) and
+ * restarts. Returns whether the restart was scheduled.
+ */
+export function restartAfterFront(input: {
+  frontPid: number;
+  markStopping: () => void;
+  restart: () => boolean;
+  waitForExit?: (pid: number) => Promise<boolean>;
+  log?: (line: string) => void;
+}): boolean {
+  input.markStopping();
+  void (input.waitForExit ?? waitForProcessExit)(input.frontPid).then((ended) => {
+    if (!ended) input.log?.('[engine-split] the front did not end within a minute; restarting anyway.');
+    input.restart();
+  });
+  return true;
 }
