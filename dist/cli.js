@@ -66832,6 +66832,8 @@ function createLocalModelActivity() {
       }
     };
     const kind = localInferencePriority?.getStore() ?? "owner";
+    if (kind === "owner" && pending.running.length > 0)
+      notifyBusy(key2);
     pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try {
         resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key2, work)) : lease(key2, work)));
@@ -66857,14 +66859,19 @@ function createLocalModelActivity() {
   };
   const resources = new Map;
   const busyListeners = new Map;
+  const notifyBusy = (key2) => {
+    for (const listener of busyListeners.get(key2) ?? []) {
+      try {
+        listener();
+      } catch {}
+    }
+  };
   const get = (key2) => {
     let activity = resources.get(key2);
     if (!activity) {
       activity = createAnswerActivity(() => {
-        if (localInferencePriority?.getStore() !== "background" && localInferencePriority?.getStore() !== "maintenance") {
-          for (const listener of busyListeners.get(key2) ?? [])
-            listener();
-        }
+        if (localInferencePriority?.getStore() !== "background" && localInferencePriority?.getStore() !== "maintenance")
+          notifyBusy(key2);
       });
       resources.set(key2, activity);
     }
