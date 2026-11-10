@@ -318,3 +318,34 @@ export async function waitForProcessExit(pid: number, options: {
   }
   return true;
 }
+
+/**
+ * The background's record of the owner's own calls on a shared local model.
+ * Busy and idle travel as separate commands that can be retried or delayed,
+ * so each carries its front and a sequence number: a change older than the
+ * last one applied for that resource is ignored. A new front (a restart)
+ * supersedes the old one's marks. A busy mark lapses after `lapseMs`, so a
+ * front that died mid-call cannot hold the judge back for good.
+ */
+export class OwnerBusyMarks {
+  private readonly marks = new Map<string, { front: string; seq: number; busyUntil: number }>();
+  private readonly lapseMs: number;
+  private readonly now: () => number;
+
+  constructor(options: { lapseMs?: number; now?: () => number } = {}) {
+    this.lapseMs = options.lapseMs ?? 10 * 60_000;
+    this.now = options.now ?? (() => Date.now());
+  }
+
+  /** Apply a busy or idle change; false when it is stale and changed nothing. */
+  apply(change: { kind: 'owner_busy' | 'owner_idle'; resource: string; front: string; seq: number }): boolean {
+    const last = this.marks.get(change.resource);
+    if (last && last.front === change.front && change.seq <= last.seq) return false;
+    this.marks.set(change.resource, { front: change.front, seq: change.seq, busyUntil: change.kind === 'owner_busy' ? this.now() + this.lapseMs : 0 });
+    return true;
+  }
+
+  busy(resource: string): boolean {
+    return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
+  }
+}

@@ -36,6 +36,7 @@ import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-
 import {
   createEngineFrontRoutes,
   createFrontGate,
+  OwnerBusyMarks,
   tierCommandOnlyReads,
   waitForProcessExit,
 } from '../src/workers/engine-split/runtime.ts';
@@ -246,17 +247,43 @@ describe('commands from the front to the background', () => {
 describe('the owner-busy signal across the split', () => {
   test('busy and idle reach the background; a restarted background is told busy again', async () => {
     const sent: EngineCommand[] = [];
-    const relay = new OwnerBusyRelay({ post: async (command) => { sent.push(command); return { id: 'x', state: 'done', instance_id: 'b' }; } });
+    const relay = new OwnerBusyRelay({ post: async (command) => { sent.push(command); return { id: 'x', state: 'done', instance_id: 'b' }; } }, () => {}, { front: 'front-1' });
     relay.observeInstance('background-1');
     relay.busy('built_in');
     relay.observeInstance('background-1');
-    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in' }]);
+    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in', front: 'front-1', seq: 1 }]);
     relay.observeInstance('background-2');
-    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in' }, { kind: 'owner_busy', resource: 'built_in' }]);
+    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in', front: 'front-1', seq: 1 }, { kind: 'owner_busy', resource: 'built_in', front: 'front-1', seq: 2 }]);
     relay.idle('built_in');
     relay.observeInstance('background-3');
-    expect(sent.at(-1)).toEqual({ kind: 'owner_idle', resource: 'built_in' });
+    expect(sent.at(-1)).toEqual({ kind: 'owner_idle', resource: 'built_in', front: 'front-1', seq: 3 });
     expect(sent).toHaveLength(3);
+  });
+
+  test('a delayed or retried change never overrides a newer one', () => {
+    const clock = createTestClock();
+    const marks = new OwnerBusyMarks({ now: clock.now });
+    const change = (kind: 'owner_busy' | 'owner_idle', seq: number, front = 'front-1') => ({ kind, resource: 'built_in', front, seq });
+    expect(marks.apply(change('owner_busy', 1))).toBe(true);
+    expect(marks.apply(change('owner_idle', 2))).toBe(true);
+    // The busy's retry arrives after the idle: ignored, the judge is not held back.
+    expect(marks.apply(change('owner_busy', 1))).toBe(false);
+    expect(marks.busy('built_in')).toBe(false);
+    expect(marks.apply(change('owner_busy', 3))).toBe(true);
+    // A delayed idle from before that busy does not clear it.
+    expect(marks.apply(change('owner_idle', 2))).toBe(false);
+    expect(marks.busy('built_in')).toBe(true);
+    // A new front (a restart) starts its own count and supersedes the old marks.
+    expect(marks.apply(change('owner_idle', 1, 'front-2'))).toBe(true);
+    expect(marks.busy('built_in')).toBe(false);
+    // A busy mark lapses after ten minutes.
+    marks.apply(change('owner_busy', 2, 'front-2'));
+    clock.set(clock.now() + 10 * 60_000 + 1);
+    expect(marks.busy('built_in')).toBe(false);
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0095', command: { kind: 'owner_busy', resource: 'built_in' } })).toThrow('sequence number');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/owner_busy: \(change\) => \{\s*if \(!remoteOwnerMarks\.apply\(change\)\)/);
+    expect(server).toMatch(/owner_idle: \(change\) => \{\s*if \(!remoteOwnerMarks\.apply\(change\)\)/);
   });
 });
 
@@ -267,15 +294,15 @@ describe('owner busy stays current through a long owner call', () => {
     const relay = new OwnerBusyRelay(
       { post: async (command) => { sent.push(command); return { id: 'x', state: 'done', instance_id: 'b' }; } },
       () => {},
-      { setInterval: (callback, ms) => clock.setInterval(callback, ms), clearInterval: (timer) => clock.clearInterval(timer as never) },
+      { setInterval: (callback, ms) => clock.setInterval(callback, ms), clearInterval: (timer) => clock.clearInterval(timer as never), front: 'front-1' },
     );
     relay.busy('built_in');
-    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in' }]);
+    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in', front: 'front-1', seq: 1 }]);
     // A call longer than the background's ten-minute lapse is renewed before it lapses.
     await clock.advance(12 * 60_000);
     expect(sent.filter((command) => command.kind === 'owner_busy')).toHaveLength(5);
     relay.idle('built_in');
-    expect(sent.at(-1)).toEqual({ kind: 'owner_idle', resource: 'built_in' });
+    expect(sent.at(-1)).toEqual({ kind: 'owner_idle', resource: 'built_in', front: 'front-1', seq: 6 });
     const settled = sent.length;
     await clock.advance(30 * 60_000);
     expect(sent).toHaveLength(settled);

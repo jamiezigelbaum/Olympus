@@ -13,6 +13,7 @@
  * split, and sends it again when a new background instance appears.
  */
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_COMMANDS_PATH } from '../../core/engine-split.ts';
+import { randomUUID } from 'node:crypto';
 import { newEngineCommandId, type EngineCommand, type EngineCommandReceipt } from './commands.ts';
 
 export interface EngineCommandClientOptions {
@@ -154,6 +155,9 @@ export class EngineCommandClient {
  */
 export class OwnerBusyRelay {
   private readonly busyResources = new Set<string>();
+  /** This front process, and the count of busy/idle changes it has sent. */
+  private readonly front: string;
+  private seq = 0;
   private instanceId: string | undefined;
   private renewal: unknown;
   private readonly renewEveryMs: number;
@@ -169,8 +173,9 @@ export class OwnerBusyRelay {
   constructor(
     private readonly client: Pick<EngineCommandClient, 'post'>,
     private readonly log: (line: string) => void = () => {},
-    options: { renewEveryMs?: number; setInterval?: (callback: () => void, ms: number) => unknown; clearInterval?: (timer: unknown) => void } = {},
+    options: { renewEveryMs?: number; setInterval?: (callback: () => void, ms: number) => unknown; clearInterval?: (timer: unknown) => void; front?: string } = {},
   ) {
+    this.front = options.front ?? randomUUID();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60_000;
     this.setTimer = options.setInterval ?? ((callback, ms) => { const timer = setInterval(callback, ms); timer.unref?.(); return timer; });
     this.clearTimer = options.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
@@ -178,17 +183,17 @@ export class OwnerBusyRelay {
 
   busy(resource: string): void {
     this.busyResources.add(resource);
-    this.deliver({ kind: 'owner_busy', resource });
+    this.deliver('owner_busy', resource);
     if (this.renewal === undefined) {
       this.renewal = this.setTimer(() => {
-        for (const busy of this.busyResources) this.deliver({ kind: 'owner_busy', resource: busy });
+        for (const busy of this.busyResources) this.deliver('owner_busy', busy);
       }, this.renewEveryMs);
     }
   }
 
   idle(resource: string): void {
     if (!this.busyResources.delete(resource)) return;
-    this.deliver({ kind: 'owner_idle', resource });
+    this.deliver('owner_idle', resource);
     if (this.busyResources.size === 0) this.stopRenewal();
   }
 
@@ -198,7 +203,7 @@ export class OwnerBusyRelay {
     const restarted = this.instanceId !== undefined;
     this.instanceId = instanceId;
     if (!restarted) return;
-    for (const resource of this.busyResources) this.deliver({ kind: 'owner_busy', resource });
+    for (const resource of this.busyResources) this.deliver('owner_busy', resource);
   }
 
   stop(): void {
@@ -215,7 +220,8 @@ export class OwnerBusyRelay {
     return this.busyResources.has(resource);
   }
 
-  private deliver(command: EngineCommand): void {
+  private deliver(kind: 'owner_busy' | 'owner_idle', resource: string): void {
+    const command: EngineCommand = { kind, resource, front: this.front, seq: ++this.seq };
     void this.client.post(command, { timeoutMs: 30_000 }).catch(() => {
       this.log(`[engine-split] ${command.kind} could not reach the background engine; it is sent again when the background is back.`);
     });

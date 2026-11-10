@@ -550,7 +550,7 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
-import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
@@ -7552,8 +7552,8 @@ export async function main(): Promise<void> {
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
   // The owner's own call on the shared model, as the split's front reported it
   // (owner_busy / owner_idle), until it says idle or ten minutes pass.
-  const remoteOwnerBusyUntil = new Map<string, number>();
-  const remoteOwnerBusy = (resource: string): boolean => (remoteOwnerBusyUntil.get(resource) ?? 0) > Date.now();
+  const remoteOwnerMarks = new OwnerBusyMarks();
+  const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
   // The front judges nothing: the background is the only judge.
   const tierSniffer = !engineFront && snifferLane && snifferModel
     ? new TierSnifferService({
@@ -7708,14 +7708,15 @@ export async function main(): Promise<void> {
           await captureOwnership.stopForUnpair(source);
           return { stopped: source };
         },
-        owner_busy: ({ resource }) => {
-          remoteOwnerBusyUntil.set(resource, Date.now() + 10 * 60_000);
-          if (resource === snifferResource) tierSniffer?.preempt();
+        // A stale change (older than the last applied for that resource) changes nothing.
+        owner_busy: (change) => {
+          if (!remoteOwnerMarks.apply(change)) return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
+          if (change.resource === snifferResource) tierSniffer?.preempt();
           return { busy: true };
         },
-        owner_idle: ({ resource }) => {
-          remoteOwnerBusyUntil.delete(resource);
-          if (resource === snifferResource) tierSniffer?.wake();
+        owner_idle: (change) => {
+          if (!remoteOwnerMarks.apply(change)) return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
+          if (change.resource === snifferResource) tierSniffer?.wake();
           return { busy: false };
         },
         delete_source_data: async ({ request, frontPid }) => {

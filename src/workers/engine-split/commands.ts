@@ -90,8 +90,13 @@ export type EngineCommand =
   | { kind: EngineForwardedKind; request: EngineForwardedRequest; frontPid?: number }
   | { kind: 'sync_now'; source: string; manual: boolean }
   | { kind: 'start_approved'; source: string }
-  | { kind: 'owner_busy'; resource: string }
-  | { kind: 'owner_idle'; resource: string }
+  /**
+   * front names the front process that sent it and seq counts that front's
+   * busy/idle changes, so a delayed or retried delivery never overrides a
+   * newer one (OwnerBusyMarks, runtime.ts).
+   */
+  | { kind: 'owner_busy'; resource: string; front: string; seq: number }
+  | { kind: 'owner_idle'; resource: string; front: string; seq: number }
   /** "Make Private" from the apps-received panel: the recorded item's override, written by the background. */
   | { kind: 'tier_set_recorded'; locator: string; expected: EngineRecordedItem }
   /** Stop a messaging capture before Disconnect or Unpair tears down its grant; done means stopped. */
@@ -289,7 +294,10 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'owner_idle': {
       const resource = command!.resource;
       if (typeof resource !== 'string' || !RESOURCE.test(resource)) fail(`${kind} needs a resource.`);
-      return { id, command: { kind, resource: resource as string } };
+      const front = boundedString(command!.front, 64);
+      const seq = command!.seq;
+      if (!front || !Number.isSafeInteger(seq) || (seq as number) < 1) fail(`${kind} needs its front and a sequence number.`);
+      return { id, command: { kind, resource: resource as string, front: front!, seq: seq as number } };
     }
     case 'judge_boost': {
       const raw = command!.identities;
