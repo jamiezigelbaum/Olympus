@@ -23,7 +23,7 @@ import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_SELF_UPDATE_PATHS, withWorkerBearerAuth,
 } from '../src/workers/http.ts';
 import { checkSite, loadSigningKey, publicKeyPem, signInstaller } from '../scripts/sign-release-manifest.ts';
-import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 
 const dirs: string[] = [];
 afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true }); });
@@ -399,6 +399,7 @@ describe('the notice on Home and Settings', () => {
     // would keep a dead CSRF token: the page reloads before the update starts.
     const page = (csrfToken: string, localSession: boolean) => renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, csrfToken, localSession });
     const calls: { url: string; csrf: string | null }[] = [];
+    let healthReads = 0;
     const open = (html: string, resume?: string) => {
       const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
       let reloads = 0;
@@ -406,7 +407,7 @@ describe('the notice on Home and Settings', () => {
       Object.defineProperty(window, 'setInterval', { value: () => 1 });
       Object.defineProperty(window, 'setTimeout', { value: () => 1 });
       Object.defineProperty(window, 'fetch', { value: async (url: string, init?: { headers?: Record<string, string> }) => {
-        if (url === '/v1/health') return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }));
+        if (url === '/v1/health') { healthReads++; return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } })); }
         calls.push({ url, csrf: init?.headers?.['X-Olympus-CSRF'] ?? null });
         if (url === DASHBOARD_LOCAL_CONTROL_SESSION_PATH) return new window.Response(JSON.stringify({ csrf_token: 'local-c' }));
         return new window.Response(JSON.stringify({ ok: true, update: { state: 'running', step: 1, from: '1.5.0', to: '1.5.1' } }));
@@ -433,9 +434,11 @@ describe('the notice on Home and Settings', () => {
     } finally { await after.window.happyDOM.close(); }
     // A later visit with no click behind it starts nothing.
     calls.length = 0;
+    healthReads = 0;
     const later = open(page('local-c', true));
     try {
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await waitFor(() => healthReads > 0, { description: 'Home health read on the later visit' });
+      await flushMicrotasks();
       expect(calls).toEqual([]);
     } finally { await later.window.happyDOM.close(); }
   });
