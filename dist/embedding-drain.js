@@ -33374,18 +33374,33 @@ async function appendEmbeddingLedgerEntries(path, entries) {
   const line = entries.map((entry) => `${JSON.stringify(entry)}
 `).join("");
   await mkdir4(dirname25(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
+  const handle = await open3(path, "a+", 384);
   try {
     await handle.chmod(384);
+    await restoreLineBoundary(handle);
     await handle.appendFile(line, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
+async function restoreLineBoundary(handle) {
+  const { size } = await handle.stat();
+  if (size === 0)
+    return;
+  const last = Buffer.alloc(1);
+  await handle.read(last, 0, 1, size - 1);
+  if (last[0] !== 10)
+    await handle.appendFile(`
+`, "utf8");
+}
 async function appendEmbeddingLedgerEntriesOnce(path, entries) {
   if (!entries.length)
     return 0;
+  if (!entries.some((entry) => entry.entry_id?.trim())) {
+    await appendEmbeddingLedgerEntries(path, entries);
+    return entries.length;
+  }
   const known = await recordedEntryIds(path);
   const pendingIds = new Set;
   const pending = entries.filter((entry) => {

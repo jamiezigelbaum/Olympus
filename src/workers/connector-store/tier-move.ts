@@ -630,7 +630,7 @@ export async function flushTierMoveNotes(ledger: TierLedger, options: {
           await appendEmbeddingLedgerEntriesOnce(path, notes.map(note => note.entry));
           written.push(...notes);
         } catch (error) {
-          // A partial append is deduplicated on retry; no obligation is lost.
+          // The retry dedupes what landed and cuts any torn line first; no obligation is lost.
           warn(error);
         }
       }
