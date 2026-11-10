@@ -1206,6 +1206,30 @@ export class SourceScheduler {
     }
   }
 
+  /** Whether any task's pass is running right now. */
+  get anyTaskRunning(): boolean {
+    return this.states.some((state) => state.running);
+  }
+
+  /**
+   * For a process about to exit to restart itself (a model change, the
+   * background's memory restart): that exit does not wait for a running pass
+   * to throw, and a pass left with its attempt pending reads to the next
+   * process as a failure, behind the error backoff. So each task still running
+   * is recorded as interrupted by the shutdown now (#803): due again at once,
+   * no failure counted. A pass that still finishes before the exit records its
+   * real result over this. Returns how many were settled.
+   */
+  settleInterruptedAttempts(): number {
+    let settled = 0;
+    for (const state of this.states) {
+      if (!state.running) continue;
+      this.recordShutdownInterruption(state);
+      settled += 1;
+    }
+    return settled;
+  }
+
   /**
    * A pass the shutdown interrupted leaves the task due again: no failure
    * counted, no backoff, the last real result kept. A restart says nothing

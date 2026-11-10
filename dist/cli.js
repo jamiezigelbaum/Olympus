@@ -190397,6 +190397,19 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind2} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind2, error2)}`);
     }
   }
+  get anyTaskRunning() {
+    return this.states.some((state) => state.running);
+  }
+  settleInterruptedAttempts() {
+    let settled = 0;
+    for (const state of this.states) {
+      if (!state.running)
+        continue;
+      this.recordShutdownInterruption(state);
+      settled += 1;
+    }
+    return settled;
+  }
   recordShutdownInterruption(state) {
     const interruptedAt = this.now().toISOString();
     if (this.stateStore?.recordInterruption) {
@@ -238556,7 +238569,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     });
     const rssRestart = startEngineRssRestart({
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => tierSniffer?.passRunning ?? false,
+      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env)))
@@ -238656,6 +238669,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     drain: async () => {
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
       await server?.stop(true);
+      sourceScheduler?.settleInterruptedAttempts();
     },
     exit: (code) => process.exit(code)
   });

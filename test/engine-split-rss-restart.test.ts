@@ -153,7 +153,8 @@ describe('the background\'s wiring', () => {
     expect(server.slice(branch, at)).not.toMatch(/\n {2}\}\n/);
     const wiring = server.slice(at, server.indexOf('});', at));
     expect(wiring).toContain('thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,');
-    expect(wiring).toContain('batchRunning: () => tierSniffer?.passRunning ?? false,');
+    // Between batches: no judge pass and no scheduler task running.
+    expect(wiring).toContain('batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),');
     // The reload a model change uses: a clean shutdown that records a pass it
     // cuts short as interrupted, not failed (#803), then exit for the host to restart.
     expect(wiring).toContain('restart: () => requestModelReload(),');
@@ -161,6 +162,9 @@ describe('the background\'s wiring', () => {
     expect(wiring).toContain('record: () => status.publish(),');
     expect(wiring).toContain('previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env))),');
     expect(server).toMatch(/rss_restarts: rssRestart\.restarts\(\),/);
+    // A task still running at the exit (the wait has a ceiling) is recorded
+    // as interrupted before the process goes, not left pending (#803).
+    expect(server).toMatch(/drain: async \(\) => \{[^\n]*sourceScheduler\?\.settleInterruptedAttempts\(\);[^\n]*\},\n\s*exit: \(code\) => process\.exit\(code\),/);
     expect(server).toMatch(/engineBackground = \{ stop: \(\) => \{ rssRestart\.stop\(\); status\.stop\(\); commands\.stop\(\); \} \};/);
   });
 });

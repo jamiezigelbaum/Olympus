@@ -7942,7 +7942,7 @@ export async function main(): Promise<void> {
     // count the last background left in it.
     const rssRestart = startEngineRssRestart({
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => tierSniffer?.passRunning ?? false,
+      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env))),
@@ -8043,7 +8043,9 @@ export async function main(): Promise<void> {
   shutdownSignals.setShutdown(shutdown);
   const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); },
+    // Last before the exit: a pass still running is recorded as interrupted,
+    // not left pending for the next process to back off on (#803).
+    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); sourceScheduler?.settleInterruptedAttempts(); },
     exit: (code) => process.exit(code),
   });
   // In the split a model change restarts the background too, and the front

@@ -128,3 +128,42 @@ describe('a pass interrupted by worker shutdown', () => {
     expect(task.next_run_at).toBe(new Date(T0 + 5_000 + BACKOFF_MS).toISOString());
   });
 });
+
+describe('a pass still running when the process exits to restart itself', () => {
+  // A self-restart (a model change, the background's memory restart) exits
+  // without waiting for the pass to throw. Without a settle the attempt stays
+  // pending, and the next process reads it as a failure and backs off.
+  test('is recorded as interrupted, so the next process runs it at once', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-scheduler-interrupt-'));
+    let clock = T0;
+    try {
+      const store = new LocalSourceSchedulerStateStore(join(dir, 'state.sqlite'));
+      const pass = interruptiblePass();
+      const running = scheduler(pass.task, () => clock, store);
+      void quietly(() => running.runDueTasks(new Date(T0)));
+      await pass.started;
+      expect(running.anyTaskRunning).toBe(true);
+      clock = T0 + 5_000;
+      running.stop();
+      // The process exits here; the pass never settles itself.
+      expect(running.settleInterruptedAttempts()).toBe(1);
+
+      const persisted = store.get(KEY)!;
+      expect(persisted.attemptPending).toBe(false);
+      expect(persisted.consecutiveFailures).toBe(0);
+      clock = T0 + 60_000;
+      const next = scheduler(interruptiblePass().task, () => clock, store);
+      const due = Date.parse(next.status(new Date(clock)).sources[0]!.tasks[0]!.next_run_at!);
+      expect(due).toBeLessThanOrEqual(clock);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('settles nothing when no pass is running', () => {
+    const running = scheduler(interruptiblePass().task, () => T0);
+    expect(running.anyTaskRunning).toBe(false);
+    expect(running.settleInterruptedAttempts()).toBe(0);
+  });
+});
