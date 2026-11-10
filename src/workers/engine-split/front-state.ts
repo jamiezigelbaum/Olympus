@@ -11,6 +11,7 @@ import type { ArchiveImportDashboard, ArchivePrivateModelState } from '../archiv
 import type { TierClassificationBacklog } from '../classification/sniffer-service.ts';
 import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import type { EngineCommandClient } from './client.ts';
+import { ENGINE_JUDGE_BOOST_MAX_IDS, type EngineItemIdentity } from './commands.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
 type Snapshot = () => EngineStatusRead | undefined;
@@ -85,5 +86,21 @@ export function frontSetItemPrivate(client: Pick<EngineCommandClient, 'send'>): 
     const receipt = await client.send({ kind: 'tier_set_recorded', locator, expected }, { timeoutMs: 30_000 });
     if (receipt.state !== 'done') throw new Error(receipt.error ?? 'The background did not record the override.');
     return (receipt.result ?? {}) as Record<string, unknown>;
+  };
+}
+
+/**
+ * Matched-first judging across the split (#1062): the judge runs in the
+ * background, so a question's matched pending items are raised there. Order
+ * only, and best effort: a lost raise leaves the queue's own order.
+ */
+export function frontJudgeBoost(client: Pick<EngineCommandClient, 'post'>): (identities: readonly EngineItemIdentity[]) => void {
+  return (identities) => {
+    const top = identities.slice(0, ENGINE_JUDGE_BOOST_MAX_IDS).map((identity) => ({
+      provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId,
+      ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+    }));
+    if (top.length === 0) return;
+    void client.post({ kind: 'judge_boost', identities: top }, { timeoutMs: 10_000 }).catch(() => undefined);
   };
 }

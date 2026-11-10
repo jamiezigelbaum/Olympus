@@ -552,7 +552,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -3105,7 +3105,9 @@ export async function main(): Promise<void> {
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
   }));
   // A query's matches still waiting for their privacy judgment are judged next (#1062).
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
+  // The judge runs in the background in the split: raise its boosts there.
+  const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
@@ -7714,7 +7716,11 @@ export async function main(): Promise<void> {
         source_watch: ({ request }) => runForwarded(request),
         extraction_queue: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
-        judge_boost: () => ({ applied: false, reason: 'matched_first_not_in_build' }),
+        // A question the front answered matched these pending items: the judge here asks about them first.
+        judge_boost: ({ identities }) => {
+          judgeBoosts.raise(identities);
+          return { applied: true, raised: identities.length };
+        },
       },
     });
     const status = startEngineBackgroundStatus({

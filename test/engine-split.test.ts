@@ -24,7 +24,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureStop, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -445,6 +445,25 @@ describe('owner actions the background runs, forwarded from the front', () => {
     void waitForProcessExit(4243, { now: clock.now, sleep: clock.sleep, alive: () => true, timeoutMs: 60_000 }).then((value) => { gaveUp = value; });
     await clock.advance(61_000);
     expect(gaveUp).toBe(false);
+  });
+});
+
+describe('matched-first judging across the split', () => {
+  test('a question in the front raises its matched items in the background judge', async () => {
+    const posted: EngineCommand[] = [];
+    const boost = frontJudgeBoost({ post: async (command) => { posted.push(command); return { id: 'c', state: 'received', instance_id: 'b' }; } });
+    const item = (n: number) => ({ provider: 'gmail', accountScope: 'me', providerItemId: `m${n}`, ...(n === 0 ? { providerConversationId: 't0' } : {}) });
+    boost(Array.from({ length: 25 }, (_, n) => item(n)));
+    boost([]);
+    expect(posted).toHaveLength(1);
+    const sent = posted[0] as Extract<EngineCommand, { kind: 'judge_boost' }>;
+    expect(sent.identities).toHaveLength(20);
+    expect(sent.identities[0]).toEqual(item(0));
+    // What the front sends is what the background accepts.
+    expect(parseEngineCommandEnvelope({ id: 'command-0070', command: sent }).command).toEqual(sent);
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/const raiseJudgeBoosts = engineFront \? frontJudgeBoost\(engineFront\.client\)/);
+    expect(server).toMatch(/judge_boost: \(\{ identities \}\) => \{\s*judgeBoosts\.raise\(identities\);/);
   });
 });
 
