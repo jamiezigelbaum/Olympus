@@ -237,9 +237,16 @@ describe('backup routes', () => {
     expect(local.indexOf('id="backup"')).toBeLessThan(local.indexOf('id="updates"'));
     const remote = renderDashboardSettingsPage({ backup: status, outsideHelpLocalSession: false, controlSessionCsrfToken: 'csrf' });
     expect(remote).not.toContain('/Volumes/T7');
-    expect(remote).toContain('Open dashboard controls on this computer to back up or restore.');
-    // A remote page carries the section's words, not its controls.
+    // A session the owner's link opened (bearer grade) offers the in-place unlock, not the controls (#1277).
+    expect(remote).toContain('<form class="bkunlock" data-backup-unlock>');
+    expect(remote).toContain('Unlock on this computer');
+    expect(remote).toContain('"path":"/dashboard/control/session/local"');
     expect(remote).not.toContain('data-backup-run');
+    // With no control session at all the section only explains.
+    const locked = renderDashboardSettingsPage({ backup: status });
+    expect(locked).toContain('Open dashboard controls on this computer to back up or restore.');
+    expect(locked).not.toContain('data-backup-unlock');
+    expect(locked).not.toContain('data-backup-run');
   });
 
   test('a folder with more than 100 subfolders: the picker pages on, and a folder past the first page can be chosen', async () => {
@@ -362,6 +369,44 @@ describe('backup routes', () => {
     await service.tick();
     expect(service.status().lastError?.message).toBeTruthy();
     expect(readdirSync(sharedDataPath('backup-staging', env))).toEqual([]);
+  });
+});
+
+describe('unlocking Back up and restore in place (#1277)', () => {
+  test('the owner\'s link session presses Unlock: the local session is minted with its CSRF token, then the page reloads onto the controls', async () => {
+    const { Window } = await import('happy-dom');
+    const html = renderDashboardSettingsPage({ outsideHelpLocalSession: false, controlSessionCsrfToken: 'csrf-launch' });
+    const section = html.slice(html.indexOf('<section class="setpane" id="backup"'));
+    const start = section.indexOf('<script>') + '<script>'.length;
+    const script = section.slice(start, section.indexOf('</script>', start));
+    const win = new Window({ url: 'http://127.0.0.1:4100/dashboard?settings#backup' });
+    const posts: Array<{ url: string; csrf: string | undefined; method: string | undefined }> = [];
+    let reloads = 0;
+    let answer = 403;
+    const fetchStub = async (url: string, init: { method?: string; headers?: Record<string, string> }) => {
+      posts.push({ url, csrf: init.headers?.['X-Olympus-CSRF'], method: init.method });
+      return new win.Response('{}', { status: answer });
+    };
+    const fakeWindow = { location: { reload: () => { reloads += 1; } } };
+    try {
+      win.document.body.innerHTML = section.slice(0, start - '<script>'.length) + '</section>';
+      new Function('window', 'document', 'fetch', script)(fakeWindow, win.document, fetchStub);
+      const form = win.document.querySelector('form[data-backup-unlock]') as unknown as HTMLFormElement;
+      const button = form.querySelector('button') as unknown as HTMLButtonElement;
+      expect(button.textContent).toBe('Unlock on this computer');
+      form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }) as never);
+      await flushMicrotasks();
+      expect(posts).toEqual([{ url: '/dashboard/control/session/local', csrf: 'csrf-launch', method: 'POST' }]);
+      expect(reloads).toBe(0);
+      expect(win.document.querySelector('[data-backup-unlock-msg]')!.textContent).toBe('Could not unlock. Try again.');
+      expect(button.disabled).toBe(false);
+      answer = 200;
+      form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }) as never);
+      await flushMicrotasks();
+      expect(reloads).toBe(1);
+    } finally {
+      await win.happyDOM.close();
+    }
   });
 });
 

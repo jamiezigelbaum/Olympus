@@ -657,7 +657,13 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open Back up and restore',
         do: { click: tab(BACKUP.title), frame: 'host' },
-        expect: [{ text: BACKUP.intro, frame: 'host' }, { present: { role: 'button', name: BACKUP.backUpNow }, frame: 'host' }, { text: BACKUP.restoreButton, frame: 'host' }],
+        expect: [{ text: BACKUP.intro, frame: 'host' }, { present: { role: 'button', name: BACKUP.unlock }, frame: 'host' }],
+      },
+      {
+        // The owner's link opens a session that is not local grade yet; the section unlocks in place (#1277).
+        name: 'Press Unlock on this computer',
+        do: { click: { role: 'button', name: BACKUP.unlock }, frame: 'host' },
+        expect: [{ present: { role: 'button', name: BACKUP.backUpNow }, frame: 'host' }, { text: BACKUP.restoreButton, frame: 'host' }],
       },
       {
         name: 'Make a backup with a passphrase',
