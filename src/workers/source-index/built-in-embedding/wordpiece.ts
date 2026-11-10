@@ -10,6 +10,11 @@ export interface WordPieceEncoding {
   truncated: boolean;
 }
 
+export interface WordPiecePairEncoding extends WordPieceEncoding {
+  /** Segment id per token: 0 for the first text and its specials, 1 for the second. */
+  typeIds: number[];
+}
+
 const MAX_INPUT_CHARS_PER_WORD = 100;
 const CONTINUING_SUBWORD_PREFIX = '##';
 
@@ -53,6 +58,31 @@ export class WordPieceTokenizer {
       ids: [this.clsId, ...(truncated ? content.slice(0, room) : content), this.sepId],
       truncated,
     };
+  }
+
+  /**
+   * `[CLS] first [SEP] second [SEP]` with BERT segment ids (0 for the first
+   * text, 1 for the second), cut longest-first to `maxLength` total ids: the
+   * pair a cross-encoder reads.
+   */
+  encodePair(first: string, second: string, maxLength: number): WordPiecePairEncoding {
+    let a = this.tokenize(first);
+    let b = this.tokenize(second);
+    const room = Math.max(0, maxLength - 3);
+    const truncated = a.length + b.length > room;
+    if (truncated) {
+      let keepA = a.length;
+      let keepB = b.length;
+      while (keepA + keepB > room) {
+        if (keepB >= keepA) keepB -= 1;
+        else keepA -= 1;
+      }
+      a = a.slice(0, keepA);
+      b = b.slice(0, keepB);
+    }
+    const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+    const typeIds = ids.map((_, index) => (index < a.length + 2 ? 0 : 1));
+    return { ids, typeIds, truncated };
   }
 
   private wordPiece(word: string, out: number[]): void {
