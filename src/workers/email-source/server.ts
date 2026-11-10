@@ -1,4 +1,5 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
@@ -4778,6 +4779,8 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+      // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
+      const sourceReranker = builtInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
@@ -4786,6 +4789,7 @@ export async function main(): Promise<void> {
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
+        ...(sourceReranker ? { reranker: sourceReranker } : {}),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
           const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');
