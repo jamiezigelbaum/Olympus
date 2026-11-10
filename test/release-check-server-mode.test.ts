@@ -421,7 +421,11 @@ describe('the machine scripts', () => {
     expect(saveScript(true)).toContain(`/dashboard/engine/computer-use '{"choice":"server"}'`);
     expect(saveScript(false)).toContain(`'{"choice":"everyday"}'`);
     expect(saveScript(true)).toContain('/dashboard/control/session/local');
-    expect(saveScript(true)).not.toMatch(/authorization:/i);
+    // The owner's token only opens the owner session the local mint needs (#1153); the save itself carries the local session alone.
+    const lines = saveScript(true).split('\n');
+    expect(lines.filter((line) => /authorization:/i.test(line)).every((line) => line.includes('/dashboard/control/session"'))).toBe(true);
+    expect(lines.find((line) => line.includes('--data'))).not.toMatch(/authorization:/i);
+    expect(saveScript(true)).not.toMatch(/echo .*token|printf .*token/);
     expect(stateScript()).toContain(DAEMON_PLIST);
     expect(stateScript()).toContain('Library/LaunchAgents/ai.olympusplugin.engine.plist');
     expect(stateScript()).toContain('.olympus/server-mode-result.json');
