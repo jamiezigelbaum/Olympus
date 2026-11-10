@@ -624,6 +624,17 @@ function isDashboardPrivateAnswersRoute(request: Request): boolean {
 }
 
 /**
+ * What AI apps received (workers/apps-received.ts): the questions apps asked
+ * and the titles Olympus released to them. Private-grade data, so the same
+ * grade as Private answers: a local control session only.
+ */
+export const DASHBOARD_APPS_RECEIVED_ROUTE = '/dashboard/apps-received';
+
+function isDashboardAppsReceivedRoute(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_APPS_RECEIVED_ROUTE;
+}
+
+/**
  * Uploading an archive the person dropped on the dashboard, importing
  * it, declining an agent's request for one, and removing one
  * (archive-import/dashboard.ts): only the person at this computer's dashboard
@@ -664,18 +675,20 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request)
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
 function dashboardLocalGradeRefusal(request: Request): Response {
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardPeopleRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request) && !isDashboardPeopleRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
         ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
+        : isDashboardAppsReceivedRoute(request)
+          ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
         : isDashboardPeopleRoute(request)
           ? 'People opens only in the dashboard on this computer, in an unlocked browser.'
           : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',

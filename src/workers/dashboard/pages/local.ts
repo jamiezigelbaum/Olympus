@@ -103,6 +103,8 @@ export interface DashboardPageOptions {
   outsideHelp?: DashboardOutsideHelpStatus | undefined;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
   outsideHelpLocalSession?: boolean;
+  /** What AI apps received (pages/apps-received.ts): whether this worker keeps the list. */
+  appsReceivedAvailable?: boolean;
   /**
    * The Private answers page's facts. `waiting` only for a local control
    * session; undefined when the record of waiting questions cannot be read.
@@ -360,7 +362,7 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
   const panels = setupable.map((source) =>
     `<div class="srcsetup" data-source-setup="${escapeHtml(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>`
     + renderSetupRow(source, view, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + '</div>').join('');
-  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">'
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">'
     + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>'
     + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">`
     + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`)

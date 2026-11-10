@@ -79,6 +79,12 @@ describe('Sources page', () => {
     expect(doc.body.textContent).toContain('Build a connector');
   });
 
+  test('the setup checklist link #add-source opens the Add a source sheet', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
+    expect(doc.querySelector('dialog#add-source[data-open-hash]')).not.toBeNull();
+  });
+
   test('Build a connector is a dialog over Sources, offered from the bar and from Add a source (#1087)', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
