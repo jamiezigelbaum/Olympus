@@ -168431,10 +168431,10 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))))
         return dashboardControlForbiddenResponse("origin_mismatch");
-      const owner = authorizeDashboardControlSession(request, sessionSecret, now(), true);
-      if (owner.status === "origin_mismatch" || owner.status === "csrf_mismatch")
-        return dashboardControlForbiddenResponse(owner.status);
-      if (owner.status !== "allowed")
+      const owner2 = authorizeDashboardControlSession(request, sessionSecret, now(), true);
+      if (owner2.status === "origin_mismatch" || owner2.status === "csrf_mismatch")
+        return dashboardControlForbiddenResponse(owner2.status);
+      if (owner2.status !== "allowed")
         return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
