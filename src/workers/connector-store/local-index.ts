@@ -2222,7 +2222,12 @@ function connectorStoreCurrentEmbeddingRowsPage(
   const rows = db.query(`
     SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
     ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
-      AND emb.model_id = ?
+      -- The unary + keeps SQLite off the model_id index (#1242). With it, every
+      -- page read all of the model's rows and sorted them, blobs included, to
+      -- find the next 256: quadratic in the store's vector count, which ran a
+      -- 1.3 GB store past the 10 s lane deadline on every question. Walking the
+      -- primary key (chunk_pk, model_id) from afterChunkPk reads each row once.
+      AND +emb.model_id = ?
       AND emb.chunk_pk > ?
       ${accountScope ? 'AND i.account_scope = ?' : ''}
       ${selectedFilters.sql}

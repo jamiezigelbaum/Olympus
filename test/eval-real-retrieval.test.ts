@@ -16,6 +16,7 @@ import {
   buildEvalPack,
   createEvalDropboxLanes,
   evalAnswerStageAudit,
+  failIncompleteRetrieval,
   evalRetrievalAudit,
   openEvalDropboxStores,
   prepareEvalEmbedding,
@@ -109,13 +110,13 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     // The Analyst said it; the release removed it.
     expect(evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is [withheld].'))).toEqual({
       expected: [
-        { inPack: true, inAnalystAnswer: true, inReleasedAnswer: false },
-        { inPack: false, inAnalystAnswer: false, inReleasedAnswer: false },
+        { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false },
+        { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false },
       ],
     });
     // The value was in the pack and in the prompt, and the Analyst missed it.
     expect(evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.'), ['Evidence 1: total is 4182 dollars']).expected[0])
-      .toEqual({ inPack: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false });
+      .toEqual({ inPack: true, inPackAsSubstring: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false });
   });
 
   test('a value only in a locator, a fact or a table counts as in the pack (#1239 review)', async () => {
@@ -135,6 +136,43 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     } as unknown as typeof pack;
     const audit = evalAnswerStageAudit({ expectedAnswerContains: ['ZX-4471', 'B-17'] }, withStructure, answer('x'), answer('x'));
     expect(audit.expected.map((entry) => entry.inPack)).toEqual([true, true]);
+  });
+});
+
+describe('the real eval fails a question whose search was incomplete (#1242)', () => {
+  const audit = (overrides: Record<string, unknown>) => ({
+    packCandidates: 5, lanes: [], skippedCorpora: [], degradations: [], policyDeniedCandidates: 0,
+    unreadCandidates: 0, namesOnlyCandidates: 0, contentPrivateCandidates: 0, corpusReadabilityGaps: 0,
+    secureExclusion: 'not_applied' as const, ...overrides,
+  });
+  const report = (passed: boolean[]) => ({
+    total: passed.length, completed: passed.length, remaining: 0,
+    passed: passed.filter(Boolean).length, failed: passed.filter((value) => !value).length,
+    grades: passed.map((value, index) => ({ questionId: `q${index}`, passed: value, detail: [] as string[] })),
+    timings: [],
+  }) as never;
+
+  test('a store dropped at the deadline, or a vector lane stopped by it, fails the question and says why', () => {
+    const result = failIncompleteRetrieval(report([true, true, true]), [
+      { questionId: 'q0', retrieval: audit({ skippedCorpora: [{ corpusId: 'internal.dropbox.files', reason: 'lane_timeout' }] }) },
+      { questionId: 'q1', retrieval: audit({ lanes: [{ laneName: 'secure_local.dropbox.files:semantic', laneType: 'semantic', candidateCount: 0, returnedCount: 0, skippedReason: 'vector_scan_deadline_exceeded' }] }) },
+      { questionId: 'q2', retrieval: audit({}) },
+    ]) as unknown as { passed: number; failed: number; grades: Array<{ passed: boolean; detail: string[] }> };
+    expect(result.passed).toBe(1);
+    expect(result.failed).toBe(2);
+    expect(result.grades[0]!.detail).toEqual(['retrieval_incomplete: internal.dropbox.files store dropped: lane_timeout']);
+    expect(result.grades[1]!.detail).toEqual(['retrieval_incomplete: secure_local.dropbox.files:semantic lane skipped: vector_scan_deadline_exceeded']);
+    expect(result.grades[2]!.passed).toBe(true);
+  });
+
+  test('a value only inside a longer number is in the pack as a substring, not by the grader\'s rules', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    const answer = { answer: 'x', citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult;
+    // The fixture says "4182"; "418" sits inside it.
+    expect(evalAnswerStageAudit({ expectedAnswerContains: ['418'] }, pack, answer, answer).expected[0])
+      .toMatchObject({ inPack: false, inPackAsSubstring: true });
   });
 });
 
