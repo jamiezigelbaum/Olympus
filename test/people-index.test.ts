@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -403,6 +404,25 @@ describe('people index: owner corrections', () => {
 });
 
 describe('people index: forgetting a source', () => {
+  test('a people index from before the corrections kept their corpora still forgets, dry run included', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-forget-v1-'));
+    const dbPath = join(dir, 'people.sqlite');
+    try {
+      const index = new LocalPeopleIndex({ dbPath });
+      index.rebuild([obs('gmail', 'quinn@example.com', 'Quinn', { corpusId: 'internal.email' })]);
+      index.correct({ kind: 'rename', identity: 'sender:gmail:quinn@example.com', name: 'Quinn H.' });
+      index.close();
+      // The schema #1152 shipped: no corpus list on a correction.
+      const raw = new Database(dbPath);
+      raw.exec('ALTER TABLE people_corrections DROP COLUMN corpus_ids_json');
+      raw.close();
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] }, { dryRun: true })).toBe(2);
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] })).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a source's Delete takes the owner's corrections with it, even once its senders are gone", () => {
     const dir = mkdtempSync(join(tmpdir(), 'people-forget-'));
     const dbPath = join(dir, 'people.sqlite');

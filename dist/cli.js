@@ -46422,8 +46422,9 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
       WHERE EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?)))
     `).all(corpora).map((row) => row.identity_key);
     const keyList = JSON.stringify(keys);
+    const keepsCorpora = db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('people_corrections') WHERE name = 'corpus_ids_json'`).get().n > 0;
     const correctionMatch = `identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-      OR EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?2)))`;
+      ${keepsCorpora ? "OR EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?2)))" : "OR ?2 IS NULL"}`;
     const corrections = db.query(`SELECT COUNT(*) AS n FROM people_corrections WHERE ${correctionMatch}`).get(keyList, corpora).n;
     if (keys.length === 0 && corrections === 0)
       return 0;
