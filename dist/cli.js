@@ -196244,6 +196244,27 @@ class SnifferCallBudget {
     }
   }
 }
+async function completeAfterSlot(model, enqueue, now = () => performance.now()) {
+  const queuedAt = now();
+  let startedAt;
+  const waited = () => Math.max(0, (startedAt ?? now()) - queuedAt);
+  const timed2 = { ...model, complete: (request) => {
+    startedAt ??= now();
+    return model.complete(request);
+  } };
+  let completion;
+  try {
+    completion = await enqueue(timed2);
+  } catch (error2) {
+    if (typeof error2 === "object" && error2 !== null)
+      failedSlotWaits.set(error2, waited());
+    throw error2;
+  }
+  return { ...completion, slotWaitMs: waited() };
+}
+function slotWaitOf(error2) {
+  return typeof error2 === "object" && error2 !== null ? failedSlotWaits.get(error2) ?? 0 : 0;
+}
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
   const key2 = createHash103("sha256").update(own3).digest("base64");
@@ -196293,12 +196314,14 @@ async function runSnifferPass(options) {
   let id = snifferId(options.lane, promptVersion);
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
-  const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
+  const passStarted = monotonicNow();
+  const deadline = passStarted + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
     clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} },
     heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
+    timing: { passMs: 0, setupMs: 0, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 },
     pendingSeen: 0,
     calls: 0,
     failedCalls: 0,
@@ -196503,7 +196526,7 @@ async function runSnifferPass(options) {
     const stopped = await prepareSnifferModel(options);
     if (stopped) {
       report.stoppedBy = stopped;
-      return finish(report);
+      return finish(report, monotonicNow, passStarted);
     }
     id = snifferId(options.lane, promptVersion);
   }
@@ -196548,126 +196571,144 @@ async function runSnifferPass(options) {
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
+  let lastPass;
+  report.timing.setupMs = Math.max(0, monotonicNow() - passStarted);
   const ask = async () => {
     while (pending.length > 0 && report.stoppedBy === undefined) {
-      const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-      let next = options.lane.kind === "venice" ? pending[0] : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
-      if (next.question.pass === "content")
-        next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
-      pending.splice(pending.indexOf(next), 1);
-      const pass = next.question.pass;
-      if (!stillOpen(next.target, next.question)) {
-        if (!midMove(next.target, next.question)) {
-          next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
-          report.staleDropped += 1;
-        }
-        continue;
-      }
-      if (!screenQuestion(next.target, next.question))
-        continue;
-      const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === "content" ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf2(next.question), contentHash: next.question.contentHash }) : undefined;
-      if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
-        apply(next, duplicate, true);
-        report.cacheHits += 1;
-        continue;
-      }
-      const group = [next];
-      for (let i2 = pending.length - 1;i2 >= 0; i2--) {
-        const item = pending[i2];
-        if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question) && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
-          group.push(item);
-          pending.splice(i2, 1);
-        }
-      }
-      const batch = [group];
-      const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-      if (stop) {
-        report.stoppedBy = stop;
-        return;
-      }
-      assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-      const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
-      next.target.sniffer.recordDispatch();
-      dispatches += 1;
-      for (const item of group)
-        report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
-      const callStarted = monotonicNow();
-      report.calls += 1;
-      report.itemsAsked += batch.length;
-      const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-      report.promptChars += promptChars;
-      report.estimatedInputTokens += Math.ceil(promptChars / 4);
-      let text4;
-      let decisionVerdict;
+      const turnStarted = monotonicNow();
+      let turnCallMs = 0;
       try {
-        const completion = await completeSnifferQuestion(options.model, {
-          pass,
-          material: next.question.material,
-          ownerContext: options.ownerContext,
-          signal: options.signal
-        });
-        text4 = completion.text;
-        decisionVerdict = completion.decisionVerdict;
-      } catch (error2) {
-        if (error2 instanceof JudgeCloudStopped) {
-          report.stoppedBy = "cloud_stopped";
+        const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+        let next = options.lane.kind === "venice" ? pending[0] : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+        if (next.question.pass === "content")
+          next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
+        pending.splice(pending.indexOf(next), 1);
+        const pass = next.question.pass;
+        if (!stillOpen(next.target, next.question)) {
+          if (!midMove(next.target, next.question)) {
+            next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
+            report.staleDropped += 1;
+          }
+          continue;
+        }
+        if (!screenQuestion(next.target, next.question))
+          continue;
+        const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === "content" ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf2(next.question), contentHash: next.question.contentHash }) : undefined;
+        if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
+          apply(next, duplicate, true);
+          report.cacheHits += 1;
+          continue;
+        }
+        const group = [next];
+        for (let i2 = pending.length - 1;i2 >= 0; i2--) {
+          const item = pending[i2];
+          if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question) && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+            group.push(item);
+            pending.splice(i2, 1);
+          }
+        }
+        const batch = [group];
+        const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+        if (stop) {
+          report.stoppedBy = stop;
           return;
+        }
+        assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+        const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
+        next.target.sniffer.recordDispatch();
+        dispatches += 1;
+        if (lastPass !== undefined && lastPass !== pass)
+          report.timing.passSwitches += 1;
+        lastPass = pass;
+        for (const item of group)
+          report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
+        const callStarted = monotonicNow();
+        report.calls += 1;
+        report.itemsAsked += batch.length;
+        const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+        report.promptChars += promptChars;
+        report.estimatedInputTokens += Math.ceil(promptChars / 4);
+        let text4;
+        let decisionVerdict;
+        let slotWaitMs = 0;
+        try {
+          const completion = await completeSnifferQuestion(options.model, {
+            pass,
+            material: next.question.material,
+            ownerContext: options.ownerContext,
+            signal: options.signal
+          });
+          text4 = completion.text;
+          decisionVerdict = completion.decisionVerdict;
+          slotWaitMs = typeof completion.slotWaitMs === "number" && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;
+        } catch (error2) {
+          slotWaitMs = slotWaitOf(error2);
+          if (error2 instanceof JudgeCloudStopped) {
+            report.stoppedBy = "cloud_stopped";
+            return;
+          }
+          if (options.signal?.aborted) {
+            report.stoppedBy = "preempted";
+            return;
+          }
+          report.failedCalls += 1;
+          consecutiveTransportFailures += 1;
+          if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+            report.stoppedBy = "transport_failures";
+            return;
+          }
+          continue;
+        } finally {
+          turnCallMs = Math.max(0, monotonicNow() - callStarted);
+          report.callMs += turnCallMs;
+          const waited = Math.min(slotWaitMs, turnCallMs);
+          report.timing.slotWaitMs += waited;
+          report.timing.modelMs += turnCallMs - waited;
         }
         if (options.signal?.aborted) {
           report.stoppedBy = "preempted";
           return;
         }
-        report.failedCalls += 1;
-        consecutiveTransportFailures += 1;
-        if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
-          report.stoppedBy = "transport_failures";
-          return;
+        consecutiveTransportFailures = 0;
+        report.responseChars += text4.length;
+        const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
+        for (const [index, group2] of batch.entries()) {
+          const verdict = decisionVerdict ?? verdicts.get(index + 1);
+          const key2 = keyOf2(group2[0].question);
+          if (verdict) {
+            const stored = { ...verdict, failSafe: false };
+            group2[0].target.sniffer.putVerdict(key2, stored, group2[0].question);
+            for (const item of group2) {
+              if (item.target !== group2[0].target)
+                item.target.sniffer.putVerdict(key2, stored, group2[0].question);
+              const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
+              if (audit)
+                item.target.embeddingPrefilter?.observe(item.question, stored.tier === "private");
+              apply(item, stored);
+            }
+            continue;
+          }
+          const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
+          if (currentGroup.length === 0) {
+            report.staleDropped += group2.length;
+            continue;
+          }
+          const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+          if (attempts >= SNIFFER_MAX_ATTEMPTS) {
+            const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
+            for (const item of group2) {
+              item.target.sniffer.putVerdict(key2, failSafe);
+              apply(item, failSafe);
+            }
+          }
         }
-        continue;
       } finally {
-        report.callMs += Math.max(0, monotonicNow() - callStarted);
-      }
-      if (options.signal?.aborted) {
-        report.stoppedBy = "preempted";
-        return;
-      }
-      consecutiveTransportFailures = 0;
-      report.responseChars += text4.length;
-      const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
-      for (const [index, group2] of batch.entries()) {
-        const verdict = decisionVerdict ?? verdicts.get(index + 1);
-        const key2 = keyOf2(group2[0].question);
-        if (verdict) {
-          const stored = { ...verdict, failSafe: false };
-          group2[0].target.sniffer.putVerdict(key2, stored, group2[0].question);
-          for (const item of group2) {
-            if (item.target !== group2[0].target)
-              item.target.sniffer.putVerdict(key2, stored, group2[0].question);
-            const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
-            if (audit)
-              item.target.embeddingPrefilter?.observe(item.question, stored.tier === "private");
-            apply(item, stored);
-          }
-          continue;
-        }
-        const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
-        if (currentGroup.length === 0) {
-          report.staleDropped += group2.length;
-          continue;
-        }
-        const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
-        if (attempts >= SNIFFER_MAX_ATTEMPTS) {
-          const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
-          for (const item of group2) {
-            item.target.sniffer.putVerdict(key2, failSafe);
-            apply(item, failSafe);
-          }
-        }
+        report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
       }
     }
   };
   await Promise.all(Array.from({ length: concurrency }, () => ask()));
-  return finish(report);
+  return finish(report, monotonicNow, passStarted);
 }
 function snifferStoreTurn(dispatches) {
   return dispatches - Math.floor((dispatches + 1) / 5);
@@ -196699,11 +196740,14 @@ function stopReason(options, report, maxCallsPerPass, timeUp) {
     return "daily_budget";
   return;
 }
-function finish(report) {
+function finish(report, monotonicNow, passStarted) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
+  report.timing.passMs = Math.max(0, monotonicNow() - passStarted);
+  if (report.calls === 0 && report.timing.dispatchMs === 0)
+    report.timing.setupMs = report.timing.passMs;
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, failedSlotWaits, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_answer_activity();
   init_atomic_file();
@@ -196712,6 +196756,7 @@ var init_sniffer_resolver = __esm(() => {
   init_sniffer_store();
   init_tier_classifier();
   init_tier_ledger();
+  failedSlotWaits = new WeakMap;
   secretScreenCache = new Map;
 });
 
@@ -196724,6 +196769,9 @@ function unrefTimer(timer) {
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
+function emptyThroughput() {
+  return { cycles: 0, verdicts: 0, calls: 0, wallMs: 0, idleMs: 0, yieldedMs: 0, slotWaitMs: 0, stepsMs: 0, passMs: 0, setupMs: 0, dispatchMs: 0, modelMs: 0, passSwitches: 0, verdictsPerMinute: 0 };
+}
 
 class TierSnifferService {
   options;
@@ -196735,6 +196783,11 @@ class TierSnifferService {
   trainingJudge;
   finalizingTraining = false;
   lastTickEndedAt;
+  lastTickYielded = false;
+  cycleEndedAt;
+  lastAfterPassMs = 0;
+  lastCycle;
+  cycleTotals = emptyThroughput();
   moveAbort = new AbortController;
   moving;
   moveLedgerOffsets = { raise: 0, lower: 0 };
@@ -197071,8 +197124,39 @@ class TierSnifferService {
       callsToday: this.budget.usedToday(),
       embeddingPrefilter: [...this.embeddingPrefilters.values()].map((filter) => filter.status()),
       ...this.lastTick ? { lastTick: this.lastTick } : {},
-      ...this.waiting ? { waiting: { ...this.waiting } } : {}
+      ...this.waiting ? { waiting: { ...this.waiting } } : {},
+      ...this.lastCycle ? { throughput: { last: { ...this.lastCycle }, total: { ...this.cycleTotals } } } : {}
     };
+  }
+  recordCycle(tick, waitBeforeMs, tickMs, afterPassMs) {
+    const timing = tick.state === "ran" ? tick.report.timing : undefined;
+    const cycle = emptyThroughput();
+    cycle.cycles = 1;
+    cycle.verdicts = tick.state === "ran" ? tick.report.verdictsApplied : 0;
+    cycle.calls = tick.state === "ran" ? tick.report.calls : 0;
+    if (this.lastTickYielded)
+      cycle.yieldedMs = waitBeforeMs;
+    else
+      cycle.idleMs = waitBeforeMs;
+    cycle.setupMs = timing?.setupMs ?? 0;
+    cycle.dispatchMs = timing?.dispatchMs ?? 0;
+    cycle.slotWaitMs = timing?.slotWaitMs ?? 0;
+    cycle.modelMs = timing?.modelMs ?? 0;
+    cycle.passSwitches = timing?.passSwitches ?? 0;
+    cycle.passMs = Math.min(timing?.passMs ?? 0, tickMs);
+    cycle.stepsMs = tickMs - cycle.passMs;
+    cycle.wallMs = waitBeforeMs + tickMs;
+    cycle.verdictsPerMinute = cycle.wallMs > 0 ? cycle.verdicts * 60000 / cycle.wallMs : 0;
+    const totals = this.cycleTotals;
+    for (const key2 of Object.keys(cycle)) {
+      if (key2 !== "verdictsPerMinute")
+        totals[key2] += cycle[key2];
+    }
+    totals.verdictsPerMinute = totals.wallMs > 0 ? totals.verdicts * 60000 / totals.wallMs : 0;
+    this.lastCycle = cycle;
+    this.lastAfterPassMs = afterPassMs;
+    const stop = tick.state === "ran" ? tick.report.stoppedBy : undefined;
+    this.lastTickYielded = stop === "yield" || stop === "preempted";
   }
   async runOnce() {
     if (this.stopped)
@@ -197105,8 +197189,12 @@ class TierSnifferService {
     this.abort = abort;
     let tick;
     const leave = controlPathHeadroom.enter("tier-sniffer");
+    const tickStarted = this.monotonicNow();
+    const waitBeforeMs = this.cycleEndedAt === undefined ? 0 : Math.max(0, tickStarted - this.cycleEndedAt);
+    let tickReturnedAt;
     try {
       tick = await this.tick(abort.signal);
+      tickReturnedAt = this.monotonicNow();
       const lowerMoves = await this.drainMoves("lower");
       if (tick.state === "ran" && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
@@ -197150,6 +197238,9 @@ class TierSnifferService {
       this.closeLedgers();
     else if (this.timer && tick.state === "ran" && !this.yieldNow() && tick.report.stoppedBy !== "daily_budget" && tick.report.stoppedBy !== "transport_failures" && tick.report.stoppedBy !== "cloud_stopped" && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0 || tick.report.stoppedBy === "preempted"))
       this.wake();
+    const cycleEndedAt = this.monotonicNow();
+    this.recordCycle(tick, waitBeforeMs, cycleEndedAt - tickStarted, tickReturnedAt === undefined ? 0 : Math.max(0, cycleEndedAt - tickReturnedAt));
+    this.cycleEndedAt = cycleEndedAt;
     return tick;
   }
   clockMs() {
@@ -197556,6 +197647,7 @@ class TierSnifferService {
       maxCallsPerPass: this.options.maxCallsPerPass,
       concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
+      ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
       shouldYield: () => this.yieldNow(),
       signal
     });
@@ -197564,7 +197656,7 @@ class TierSnifferService {
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? "yield" : "idle"} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; ` + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} ` + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
@@ -224628,7 +224720,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...snifferModel.prepareSniffer ? {
         prepareSniffer: (signal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: "tier_sniffer" }).prepareSniffer(signal))
       } : {},
-      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: "tier_sniffer" }).complete(request))
+      complete: (request) => completeAfterSlot(snifferModel, (timed2) => runClassificationInference(() => localModelActivity.track(snifferResource, timed2, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: "tier_sniffer" }).complete(request)))
     } : snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
