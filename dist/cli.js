@@ -47813,10 +47813,17 @@ function installWorkerShutdownSignals(options) {
     }
     shutdown(signal);
   };
-  const onInt = () => stop("SIGINT");
-  const onTerm = () => stop("SIGTERM");
-  process.once("SIGINT", onInt);
-  process.once("SIGTERM", onTerm);
+  let signalled = false;
+  const onSignal = (signal) => {
+    if (signalled)
+      return;
+    signalled = true;
+    stop(signal);
+  };
+  const onInt = () => onSignal("SIGINT");
+  const onTerm = () => onSignal("SIGTERM");
+  process.on("SIGINT", onInt);
+  process.on("SIGTERM", onTerm);
   return {
     setShutdown(handler) {
       shutdown = handler;

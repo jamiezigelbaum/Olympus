@@ -30,10 +30,21 @@ export function installWorkerShutdownSignals(options: {
     // the next start refusing it (Sparta, 2026-11-03). SQLite stores are safe
     // to leave mid-write; the pass resumes from its checkpoint.
   };
-  const onInt = () => stop('SIGINT');
-  const onTerm = () => stop('SIGTERM');
-  process.once('SIGINT', onInt);
-  process.once('SIGTERM', onTerm);
+  // The first signal starts the shutdown, with its deadline. Later ones are
+  // ignored, and the handlers stay installed so they cannot fall through to
+  // the default action and kill the teardown: under the worker service's own
+  // unit with the engine split on, a worker gets SIGTERM from systemd's
+  // control-group kill and again from the supervisor stopping it.
+  let signalled = false;
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (signalled) return;
+    signalled = true;
+    stop(signal);
+  };
+  const onInt = () => onSignal('SIGINT');
+  const onTerm = () => onSignal('SIGTERM');
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onTerm);
   return {
     setShutdown(handler: (signal: NodeJS.Signals) => void) { shutdown = handler; },
     modelReload(options: { managed: boolean; drain: () => Promise<void>; exit: (code: number) => void }) {
