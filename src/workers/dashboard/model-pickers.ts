@@ -83,7 +83,8 @@ export function renderAnswerModelPickers(choices: DashboardModelChoices | undefi
 /** The zkAPI picker, for "On Private questions". */
 export function renderZkapiModelPicker(choices: DashboardModelChoices | undefined, unlocked: boolean): string {
   if (!choices?.zkapi) return '';
-  return `<section id="zkapi-model"><h3 class="sect">On Private questions</h3><div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div></section>`;
+  // The rows only: Privacy rules › zkAPI (#1047) gives them their section and heading.
+  return `<div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div>`;
 }
 
 export const MODEL_PICKER_CSS = `

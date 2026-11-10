@@ -47,16 +47,16 @@ import {
   setupStepsSheet,
   type DashboardActionInput,
 } from '../components.ts';
-import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
-import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
+import { DASHBOARD_OUTSIDE_HELP_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
+import { DASHBOARD_SETTINGS_ZKAPI_ID, dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
 import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
 import { dashboardActionLabel, DASHBOARD_DISCONNECTED_DATA_KEPT, DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
-import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
-import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
+import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outside-help.ts';
+import { AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_COMPUTER_PANEL_COPY,
   DASHBOARD_EVERNOTE_CONSENT_HELP,
@@ -208,7 +208,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
       + renderModelSetupBlocker(view.model_setup)
       + `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup, { heading: false })}</div>`
       + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + '</section>',
-    renderZkapiModelPicker(options?.modelChoices, unlocked(options)),
+    renderZkapiPrivacy(options, token),
     view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view, options),
   ].filter((block) => block !== '').join('\n');
@@ -217,9 +217,24 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     tab: 'privacy',
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
-    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
     options,
   });
+}
+
+/**
+ * Privacy rules › zkAPI (#1047): its model, and what may be sent, how the
+ * question is prepared, who writes it and its languages. The account (status,
+ * money, setup) is on Settings › zkAPI.
+ */
+function renderZkapiPrivacy(options: DashboardPageOptions | undefined, token: string | undefined): string {
+  const picker = renderZkapiModelPicker(options?.modelChoices, unlocked(options));
+  const csrfToken = options?.controlSessionCsrfToken;
+  const card = options?.outsideHelp
+    ? renderOutsideHelpCard(options.outsideHelp, { ...(csrfToken !== undefined ? { csrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true, part: 'privacy', otherPartHref: `${dashboardLocalPageHref('settings', token)}#${DASHBOARD_SETTINGS_ZKAPI_ID}` })
+    : '';
+  if (!picker && !card) return '';
+  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker}${card}</section>`;
 }
 
 /** The sync route's own name for each source it checks (setup-backend.ts uses the same). */
@@ -588,6 +603,7 @@ function connectAction(source: DashboardSourceCard): DashboardActionInput | unde
 const SETTINGS_SECTIONS = [
   { id: 'agents', label: 'Agents and access' },
   { id: 'models', label: 'Models on this computer' },
+  { id: DASHBOARD_SETTINGS_ZKAPI_ID, label: 'zkAPI' },
   { id: 'updates', label: 'Updates' },
   { id: 'help', label: 'Help' },
 ] as const;
@@ -596,32 +612,41 @@ const SETTINGS_SECTIONS = [
  * Settings (`?settings`, owner 2026-11-07, mockup final-8): the rarely used
  * pieces in one place, with a side list. Agents and access, the built-in
  * models (machinery, so not on Home), updates, and help. The models that
- * answer and sort Private items stay on Privacy rules.
+ * answer and sort Private items stay on Privacy rules. The side list shows
+ * one section at a time (owner, 2026-11-10): each link targets its section,
+ * and with no target the first one shows. Plain CSS, so it works locked.
  */
 export function renderDashboardSettingsPage(options?: DashboardPageOptions): string {
   const now = options?.now ?? new Date();
   const token = readToken(options?.basePath);
   const settings = options?.settings;
   const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map(section => `<a href="#${section.id}">${escapeHtml(section.label)}</a>`).join('')}</nav>`;
-  const agents = `<section id="settings-agents">${options?.agents
-    ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>')
-    : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
-  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>'
+  const agents = `<section class="setpane" id="agents">${options?.agents
+    ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>')
+    : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3>'
     + (settings?.models?.length
       ? `<div class="srows">${settings.models.map(model => `<div class="srow nodot"><div class="smain"><b>${escapeHtml(model.name)}</b> <span class="pnote">· ${escapeHtml(model.state)}</span><p class="pnote">${escapeHtml(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p></div></div>`).join('')}</div>`
       : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>')
     + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml(dashboardLocalPageHref('keys', token)) + '">Privacy rules</a>.</p></section>';
+  // zkAPI's account half (#1047): status, problems, money, setup; its privacy choices are on Privacy rules.
+  const csrfToken = options?.controlSessionCsrfToken;
+  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>`
+    + (options?.outsideHelp
+      ? renderOutsideHelpCard(options.outsideHelp, { ...(csrfToken !== undefined ? { csrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true, part: 'account', otherPartHref: `${dashboardLocalPageHref('keys', token)}#zkapi-model` })
+      : `<p class="pnote" data-outside-unavailable>${escapeHtml(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`)
+    + '</section>';
   const update = settings?.update;
-  const updates = '<section><h3 class="sect" id="updates">Updates</h3>'
+  const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>'
     + (update
       ? `<p>${escapeHtml(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>`
       : '<p class="pnote">Olympus is up to date.</p>')
     + '</section>';
-  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
     + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref('help', token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const proposal = renderSettingsProposal(options?.settingsProposal);
-  const body = lockedGate(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
-  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
+  const body = lockedGate(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
+  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS], options });
 }
 
 /**
@@ -665,8 +690,11 @@ const SETTINGS_CSS = `
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
 .setside a:hover, .setside a:focus-visible { border-color: var(--link); }
-.setmain section + section { margin-top: 24px; }
-.setmain > section:first-child .sect { margin-top: 0; }
+.setmain > .setpane { display: none; scroll-margin-top: 12px; }
+.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }
+.setmain > .setpane > .sect:first-child { margin-top: 0; }
+${SETTINGS_SECTIONS.map(section => `.setlayout:has(#${section.id}:target) .setside a[href="#${section.id}"]`).join(',\n')},
+.setlayout:not(:has(.setpane:target)) .setside a:first-child { border-color: var(--link); background: var(--panel, transparent); font-weight: 600; }
 .setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 @media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
 `;

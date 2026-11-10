@@ -91,14 +91,14 @@ if (verb === 'provision') {
       destinations: {
         computer: { state: 'ready', status: 'Ready', reason: '', control: { tag: 'button', text: 'Ask', href: null, action: 'ask', submit: true, disabled: false } },
         venice: { state: 'not_set_up', status: 'Not connected', reason: 'Not connected. Connect Venice to use its models.', control: link('/dashboard?keys#venice-setup', 'Connect Venice') },
-        anonymous: { state: 'not_set_up', status: 'Not connected', reason: 'Not connected. Connect zkAPI and add money to use it.', control: link('#anonymous-setup', 'Connect zkAPI') },
+        anonymous: { state: 'not_set_up', status: 'Not connected', reason: 'Not connected. Connect zkAPI and add money to use it.', control: link('/dashboard?settings#zkapi', 'Connect zkAPI') },
       },
       entries: [...(primary ? [entry(primary)] : []), ...ids.filter((id) => id !== primary).map((id) => entry(id, { status: 'answering', factsStated: [], citations: 0, citesExpected: false }))],
       pages: primary
         ? [{ id: primary, landedOnInbox: true, rowFound: primary === known, opened: primary === known, factsStated: primary === known ? [true, true] : [], citations: primary === known ? 1 : 0, citesExpected: primary === known }]
         : [{ id: ASK_ID, landedOnInbox: true, rowFound: !faulted, opened: !faulted, factsStated: faulted ? [] : [true, true], citations: faulted ? 0 : 1, citesExpected: !faulted }],
       ask: { pressed: true, answered: true, message: '', factsStated: [true, true], citations: 1, citesExpected: true, ms: 20000, entry: entry('NnNnNnNnNnNnNnNnNnNnNn', { listed: true, path: 'private', fromShown: true, questionMatches: true, status: 'answered', factsStated: [true, true], citations: 1, citesExpected: true }) },
-      fixes: { venice: { clicked: true, landedAt: '/dashboard?keys#venice-setup', anchorShown: true }, anonymous: { clicked: true, landedAt: '/dashboard?private-answers#anonymous-setup', anchorShown: true } },
+      fixes: { venice: { clicked: true, landedAt: '/dashboard?keys#venice-setup', anchorShown: true }, anonymous: { clicked: true, landedAt: '/dashboard?settings#zkapi', anchorShown: true } },
       refusals: { venice: 403 },
       egress: { samples: 500, intervalMs: 150, baseline: 2, fresh: mode === 'egress' ? ['203.0.113.7:443 (bun)'] : [], pageRequests: 30, pageOutside: [] },
       trace: [{ n: 1, name: 'Open the Ask page', action: 'open the owner link, press Unlock', expected: 'the controls unlock', actual: 'unlocked', ok: true, ms: 1200, at: '/dashboard?private-answers', screenshot: 'trace-01.jpg', consoleErrors: [], failedRequests: [], findings: [] }],

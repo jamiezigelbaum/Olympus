@@ -1175,7 +1175,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       return { clicked: true, landedAt: where.replace(/token=[^&#]*/g, 'token=…'), anchorShown: shown };
     };
     if (secondReady.cards?.venice) observation.fixes.venice = await followFix('venice', 'venice-setup');
-    if (secondReady.cards?.anonymous) observation.fixes.anonymous = await followFix('anonymous', 'anonymous-setup');
+    if (secondReady.cards?.anonymous) observation.fixes.anonymous = await followFix('anonymous', 'zkapi');
 
     // 6. No link from an agent (this install issues none): the entry the Ask page just made is opened by its address instead, so the
     //    id-to-entry route is still exercised with a real id. The fault self-test changes the last character of the address.

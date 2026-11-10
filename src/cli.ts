@@ -81,6 +81,41 @@ export async function runZkapiRecoveryCommand(args: string[], deps: {
   return result.ok ? 0 : 1;
 }
 
+/**
+ * `olympus zkapi funding-date <YYYY-MM-DD>`: records the day the zkAPI
+ * deposit was confirmed in the privacy policy file the worker reads, under
+ * the policy file lease (core/zkapi-funding-date.ts). The running worker
+ * follows the new date without a restart.
+ */
+export async function runZkapiFundingDateCommand(
+  args: string[],
+  deps: { env?: Record<string, string | undefined>; print?: (line: string) => void } = {},
+): Promise<number> {
+  if (args.length !== 1 || args[0]!.startsWith('-')) {
+    throw new OperationError('invalid_params', `Usage: ${ZKAPI_FUNDING_DATE_USAGE}`);
+  }
+  const print = deps.print ?? console.log;
+  const { environmentWithWorkerSetupEnv } = await import('./core/worker-auth.ts');
+  const env = environmentWithWorkerSetupEnv({ env: deps.env ?? process.env });
+  const { loadSovereigntyEngine } = await import('./core/sovereignty.ts');
+  const engine = loadSovereigntyEngine({ env });
+  if (engine.source !== 'file' || !engine.path) {
+    throw new OperationError('config_error', 'Your privacy policy is not kept in a file on this computer, so Olympus cannot record the funding date here.');
+  }
+  const { setZkapiFundingDate } = await import('./core/zkapi-funding-date.ts');
+  const result = setZkapiFundingDate({ path: engine.path, date: args[0]! });
+  if (!result.ok) {
+    console.error(result.message);
+    return 1;
+  }
+  print(result.changed
+    ? `zkAPI funding date set to ${result.fundingDate}${result.previous ? ` (was ${result.previous})` : ''}. Olympus uses it from now on; no restart needed.`
+    : `zkAPI funding date is already ${result.fundingDate}. Nothing changed.`);
+  return 0;
+}
+
+const ZKAPI_FUNDING_DATE_USAGE = 'olympus zkapi funding-date <YYYY-MM-DD>';
+
 /** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus. */
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
   return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(olympusPackageRoot(), 'bin', 'olympus') });
@@ -424,6 +459,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'zkapi' && args[1] === 'test-writer') {
     await runZkapiTestWriter(args.slice(2));
+    return;
+  }
+
+  if (args[0] === 'zkapi' && args[1] === 'funding-date') {
+    process.exitCode = await runZkapiFundingDateCommand(args.slice(2));
     return;
   }
 
@@ -1483,6 +1523,7 @@ function printHelp(): void {
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
   console.log('  olympus zkapi check-confinement');
+  console.log('  olympus zkapi funding-date <YYYY-MM-DD>');
   console.log('  olympus zkapi recover [--yes]');
   console.log('  olympus zkapi abandon <scope> [--yes]');
   console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
@@ -1539,6 +1580,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'zkapi install-tools': 'olympus zkapi install-tools',
   'zkapi check-confinement': 'olympus zkapi check-confinement',
   'zkapi test-writer': ZKAPI_TEST_WRITER_USAGE,
+  'zkapi funding-date': ZKAPI_FUNDING_DATE_USAGE,
   'zkapi recover': 'olympus zkapi recover [--yes]',
   'zkapi abandon': 'olympus zkapi abandon <scope> [--yes]',
   serve: 'olympus serve',
@@ -1640,6 +1682,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus zkapi check-confinement   Check anonymous-answer network confinement',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
     '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
+    '  olympus zkapi funding-date <YYYY-MM-DD>   Record the day your zkAPI deposit was confirmed (the expiry estimate counts from it)',
     '  olympus zkapi recover         Finish paying for a held anonymous question (asks for confirmation)',
     '  olympus zkapi abandon <scope> Stop a held question from blocking new ones (asks for confirmation)',
   ],

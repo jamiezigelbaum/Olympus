@@ -24,6 +24,19 @@ test('fresh Linux models report actual downloads, lazy transcription and missing
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('transcription off by setting says so, without ffmpeg advice (#1046)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'linux-model-off-'));
+  try {
+    const env = { HOME: root, XDG_DATA_HOME: root, OLYMPUS_BUILT_IN_TRANSCRIPTION: 'off' };
+    const off = linuxModelReadiness(env, { totalMemoryBytes: 16 * 1024 ** 3, decoderPresent: () => true })[2]!;
+    expect(off.state).toBe('unavailable');
+    expect(off.detail).toContain('turned off by OLYMPUS_BUILT_IN_TRANSCRIPTION=off');
+    expect(off.detail).not.toContain('ffmpeg');
+    const noDecoder = linuxModelReadiness({ HOME: root, XDG_DATA_HOME: root }, { totalMemoryBytes: 16 * 1024 ** 3, decoderPresent: () => false })[2]!;
+    expect(noDecoder.detail).toBe('Built-in transcription needs ffmpeg, which is not installed. Install ffmpeg, then restart Olympus.');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('Linux engine status and local dashboard carry the worker model readiness', async () => {
   const root = mkdtempSync(join(tmpdir(), 'linux-model-surfaces-'));
   const rows = [{ name: 'Transcription', state: 'unavailable', detail: 'Install ffmpeg.', downloadBytes: 1019141728 }];

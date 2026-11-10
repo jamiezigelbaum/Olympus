@@ -30,7 +30,7 @@
  *     the file as it is now (lease, re-read, patch only that block, validate,
  *     atomic commit; a file that no longer matches this adapter's view is a
  *     conflict and nothing is written), then asks the worker to restart,
- *     because the policy is read at boot;
+ *     because the policy is read at boot (only the funding date is followed live);
  *   - `addRoute`: adds the one zkapi profile when none exists;
  *   - where this computer has no network confinement (unsupported Linux hosts), `status` says `unavailable` and `addRoute` and turning
  *     on refuse `confinement_unavailable` (owner ruling 2026-10-12: no
@@ -51,6 +51,7 @@
  */
 import { delimiter, dirname } from 'node:path';
 import { abandonHeldZkapiRequest, recoverHeldZkapiRequest } from '../../core/zkapi-recovery.ts';
+import { zkapiFundingDateRefresher } from '../../core/zkapi-funding-date.ts';
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
   CONSULT_LEVEL_FOR_REPAIR,
@@ -215,7 +216,7 @@ const MESSAGES = {
   acknowledgementsIncomplete: 'Accept the statements on this page before turning anonymous answers on.',
   levelUnknown: 'Choose what zkAPI may send: Standard or Strict.',
   levelSaved: 'Saved.',
-  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements on this page.',
+  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.',
   languageMissing: 'A chosen language has no vocabulary pack installed on this computer.',
   languagesEmpty: 'Choose at least one language.',
   noHome: 'Olympus cannot find your home folder, so it cannot write the settings file.',
@@ -234,6 +235,7 @@ const MESSAGES = {
   confirm: 'This action needs your confirmation.',
   turnedOn: 'Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.',
   turnedOff: 'Anonymous answers are off. No question is sent.',
+  languagesSaved: 'Languages saved.',
   routeSavedRestart: 'Saved. Olympus is restarting its worker to apply the change; this page will refresh.',
   routeSavedNoRestart: 'Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.',
   routeAdded: 'The zkAPI route is added. Finish the steps below.',
@@ -327,8 +329,10 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   // The writer check: started only by the owner's click; the last result is kept in memory for the card.
   let writerCheck: DashboardOutsideHelpWriter['check'] = { state: 'idle' };
 
+  // The funding date follows the policy file as it is now (`olympus zkapi funding-date`), without a restart.
+  const liveFundingDate = zkapiFundingDateRefresher(options.sovereignty.source === 'file' ? options.sovereignty.path : undefined);
   const zkapiProfile = (): { id: string; profile: SovereigntyModelProfile } | undefined => {
-    const entries = Object.entries(policy.modelProfiles).filter(([, profile]) => profile.provider === 'zkapi');
+    const entries = Object.entries(liveFundingDate(policy.modelProfiles)).filter(([, profile]) => profile.provider === 'zkapi');
     if (entries.length !== 1) return undefined;
     const [id, profile] = entries[0]!;
     return { id, profile };
@@ -336,7 +340,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
   // The route without its key: the adapter never resolves a secret.
   const transport = (): ZkapiConsultTransportOptions | undefined => resolveZkapiConsultTransport(
-    policy.modelProfiles,
+    liveFundingDate(policy.modelProfiles),
     () => undefined,
     { env, statePath },
   );
@@ -684,8 +688,12 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       const base = current.state === 'valid' ? current.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen: ConsultLanguage[] = [...base.languages];
       // Turning off keeps the stored languages whatever the form sent (an
-      // empty selection must never stop the off switch).
-      if (enabled && update.languages !== undefined) {
+      // empty selection must never stop the off switch). Saving languages
+      // while zkAPI is off (Privacy rules › zkAPI's own button, which sends
+      // save_languages, #1047) is checked like turning on, so the selection
+      // is kept for when it is turned on.
+      const savingLanguages = update.languages !== undefined && (enabled || update.save_languages === true);
+      if (savingLanguages) {
         if (!Array.isArray(update.languages) || update.languages.length === 0) return invalid(MESSAGES.languagesEmpty, 'languages_empty');
         if (!update.languages.every((item): item is ConsultLanguage => typeof item === 'string' && (ALL_LANGUAGES as string[]).includes(item))) {
           return invalid('An unknown language was chosen.', 'language_unknown');
@@ -715,7 +723,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         if (!route) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
         if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.acknowledgementsIncomplete };
       }
-      if (enabled && (turningOn || update.languages !== undefined)) {
+      if (turningOn || savingLanguages) {
         const installed = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed.has(language))) return invalid(MESSAGES.languageMissing, 'language_pack_missing');
       }
@@ -735,7 +743,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         const paused = enabled && Boolean(zkapiProfile()) && !acknowledgementsComplete();
         const message = update.level !== undefined
           ? paused ? MESSAGES.levelSavedPaused : MESSAGES.levelSaved
-          : enabled ? MESSAGES.turnedOn : MESSAGES.turnedOff;
+          : update.save_languages === true ? MESSAGES.languagesSaved
+            : enabled ? MESSAGES.turnedOn : MESSAGES.turnedOff;
         return { ok: true, status_message: message, revision: result.settings.revision };
       }
       return writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);

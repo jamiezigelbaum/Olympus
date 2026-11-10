@@ -6,7 +6,7 @@ import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } fr
 import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS } from '../top-nav.ts';
-import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard, summaryOf } from '../outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS, summaryOf } from '../outside-help.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
@@ -20,6 +20,8 @@ import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts'
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
 export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous-setup';
+/** Settings › zkAPI, where the zkAPI account lives since #1047. */
+export const DASHBOARD_SETTINGS_ZKAPI_ID = 'zkapi';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
@@ -27,10 +29,14 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
-.pa .pasection > .sect { margin: 0 0 12px; }
+.pa .pasection > .sect, .pa .pawaithead > .sect { margin: 0 0 12px; }
+.pa .pawaithead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pa .palink { padding: 0; border: 0; background: none; color: var(--t2); font: inherit; font-size: var(--fs-body); text-decoration: underline; cursor: pointer; }
+.pa .palink:hover, .pa .palink:focus-visible { color: var(--link); }
+.pa .palink[hidden] { display: none; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
-.pa .pasent { white-space: pre-wrap; }
+.pa .pameta .pasent { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--t2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -195,14 +201,9 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date()) : '';
-  // The zkAPI card carries its own lock and unlock states, as it did on Keys.
-  const zkapiSetup = `<section class="pasection" id="${ANONYMOUS_SETUP_ID}"><h3 class="sect">${escapeHtml(W.zkapiSetupTitle)}</h3>${options?.outsideHelp
-      ? renderOutsideHelpCard(options.outsideHelp, { ...(csrfToken !== undefined ? { csrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true })
-      : csrfToken === undefined ? `<p class="pnote">${escapeHtml(W.locked)}</p>` : `<p class="pnote" data-outside-unavailable>${escapeHtml(W.anonymousNotSetUp)}</p>`}</section>`;
-  return `<div class="privacy pa" data-private-answers>${notes.join('')}${renderAsk(options, ready, inbox)}${zkapiSetup}</div>${script}`;
+  // zkAPI's own settings live on Settings › zkAPI and Privacy rules (#1047); this tab keeps only its card.
+  return `<div class="privacy pa" data-private-answers>${notes.join('')}${renderAsk(options, ready, inbox)}</div>${script}`;
 }
-
-const ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
 
 /**
  * The question box, the models on the right (pick one for this question), and
@@ -215,11 +216,13 @@ function renderAsk(options: DashboardPageOptions | undefined, enabled: boolean, 
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
   const zkModel = zk?.route.state === 'configured' ? zk.route.model : undefined;
-  const zkSetup = `#${ANONYMOUS_SETUP_ID}`;
+  const zkSetup = `${dashboardLocalPageHref('settings', readToken(options?.basePath))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
+  const zkModelHref = `${models}#zkapi-model`;
+  const zkPaused = zkState === 'needs_acceptance' || zkState === 'blocked' || zkState === 'fence_held';
   const destinations = [
     { id: 'computer', name: W.computerCard, model: states.computerModel, line: W.computerLine, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
     { id: 'venice', name: W.veniceCard, model: states.veniceModel, line: W.veniceLine, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
-    { id: 'anonymous', name: W.zkapiCard, model: zkModel, line: W.zkapiLine, setup: zkState === 'off' ? W.turnOnInModels : zkState === 'needs_acceptance' ? W.goToModels : W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState === 'off' ? W.zkapiOff : zkState === 'needs_acceptance' ? W.zkapiPaused : !zkState || zkState === 'route_not_configured' ? W.zkapiNotSetUp : OH.row[zkState], href: zkSetup, action: 'ask_anonymous' },
+    { id: 'anonymous', name: W.zkapiCard, model: zkModel, line: W.zkapiLine, setup: zkState === 'off' ? W.turnOnInModels : zkState === 'needs_acceptance' ? W.goToModels : zkPaused ? W.fixInSettings : W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState === 'off' ? W.zkapiOff : zkState === 'needs_acceptance' ? W.zkapiPaused : !zkState || zkState === 'route_not_configured' ? W.zkapiNotSetUp : OH.row[zkState], href: zkSetup, action: 'ask_anonymous' },
   ];
   const label = (d: typeof destinations[number]) => d.model ? `${d.name} · ${d.model}` : d.name;
   const first = enabled ? destinations.find(d => d.state === 'ready') : undefined;
@@ -233,15 +236,15 @@ function renderAsk(options: DashboardPageOptions | undefined, enabled: boolean, 
     const state = d.state as keyof typeof actions;
     const action = enabled ? actions[state] : '';
     const notReadyLabel = d.id === 'computer' ? d.reason === W.downloading ? W.downloadingStatus : W.notSetUpStatus
-      : d.id === 'anonymous' && zkState === 'off' ? W.offStatus : d.id === 'anonymous' && zkState === 'needs_acceptance' ? W.pausedStatus : W.notConnectedStatus;
+      : d.id === 'anonymous' && zkState === 'off' ? W.offStatus : d.id === 'anonymous' && zkPaused ? W.pausedStatus : W.notConnectedStatus;
     const notReadyDot = notReadyLabel === W.downloadingStatus ? 'run' : notReadyLabel === W.pausedStatus ? 'pause' : 'hollow';
     const statuses = [['ready', W.readyStatus, 'ok'], ['not_set_up', notReadyLabel, notReadyDot], ['not_allowed', W.offStatus, 'hollow'], ['busy', W.answering, 'run']]
       .map(([key, text, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(text!)}</span>`).join('');
     const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml(label(d))}"${d === first ? ' checked' : ''}${enabled && state === 'ready' ? '' : ' disabled'}>`;
     return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">`
-      + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml(d.model)}</span>` : ''}${d.id === 'anonymous' && d.model && enabled ? ` <a class="pamodelchange" href="${escapeHtml(zkSetup)}">${escapeHtml(W.zkapiChangeModel)}</a>` : ''}<span class="pnote paline">${escapeHtml(d.line)}</span></span></label>`
+      + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml(d.model)}</span>` : ''}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml(d.id === 'anonymous' ? zkModelHref : `${models}#private-routing`)}">${escapeHtml(W.zkapiChangeModel)}</a>` : ''}<span class="pnote paline">${escapeHtml(d.line)}</span></span></label>`
       + `<div class="pastate">${statuses}</div>`
-      + (d.id === 'anonymous' && enabled ? renderLevelChoice(zk?.settings.level === 'general' ? 'strict' : 'standard', zkSetup) : '')
+      + (d.id === 'anonymous' && enabled ? renderLevelChoice(zk?.settings.level === 'general' ? 'strict' : 'standard', `${models}#outside-level`) : '')
       + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
   }).join('');
   const answeredBy = first ? W.answeredBy.replace('{name}', label(first)) : W.noneReady;
@@ -273,7 +276,9 @@ function renderFailureNotice(reason: unknown): string {
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
-  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>`];
+  // Delete all sits top right of the heading, as signed off (final-1, #1047).
+  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button>` : '';
+  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(W.unavailable)}</p>`);
     return parts.join('') + '</section>';
@@ -293,7 +298,6 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
       + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join('')}</ul>`);
-  parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button></div>`);
   parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? '' : ' hidden'}>${escapeHtml(W.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join('') + '</section>';
@@ -319,7 +323,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       venicePath: W.veniceName,
       destinationBusy: W.destinationBusy,
       emptyQuestion: W.emptyQuestion,
-      sent: W.sent,
+      sentAsWritten: W.sentAsWritten,
+      sentRewritten: W.sentRewritten,
       privatePath: W.privatePath,
       anonymousPath: W.anonymousPath,
       open: W.open,
@@ -397,9 +402,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   function panel(out, question) {
     out.textContent = '';
     var card = el('div', 'pacard');
-    var heading = el('p', 'paquestion');
-    heading.appendChild(el('strong', '', question));
-    card.appendChild(heading);
+    // An inbox row already shows its question as the row title (#1045); only the Ask result repeats it.
+    if (question && !out.closest('[data-pa-question]')) {
+      var heading = el('p', 'paquestion');
+      heading.appendChild(el('strong', '', question));
+      card.appendChild(heading);
+    }
     out.appendChild(card);
     return card;
   }
@@ -454,8 +462,12 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
-      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      // What left for zkAPI, in the muted meta area (#1045): one line when it is the question as written, the text only when it was rewritten.
+      if (typeof result.sent === 'string') {
+        if (result.sent.trim() === String(question || '').trim()) meta.appendChild(el('p', 'palabel', config.copy.sentAsWritten));
+        else { meta.appendChild(el('div', 'palabel', config.copy.sentRewritten)); meta.appendChild(el('p', 'pasent', result.sent)); }
+      }
       renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {

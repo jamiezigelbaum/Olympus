@@ -46,17 +46,21 @@ describe('the top bar', () => {
 });
 
 describe('Settings', () => {
-  test('one page with a side list: agents and access, models on this computer, updates and help', () => {
+  test('a side list that shows one section at a time: agents and access, models on this computer, zkAPI, updates and help', () => {
     expect(dashboardHtmlRoutePage(new URL(`${ORIGIN}/dashboard?settings`))).toBe('settings');
     const html = renderDashboardLocalPage('settings', { url: new URL(`${ORIGIN}/dashboard?settings`), options: {
       controlSessionCsrfToken: 'c',
       settings: { models: [{ name: 'Search model', state: 'Ready', detail: 'Finds matching passages', downloadBytes: 600_000_000 }], update: { version: '1.4.1', command: 'curl -fsSL https://olympusplugin.ai/install | sh' } },
     } });
     const doc = new Window().document; doc.write(html);
-    expect([...doc.querySelectorAll('.setside a')].map(link => link.textContent)).toEqual(['Agents and access', 'Models on this computer', 'Updates', 'Help']);
-    for (const id of ['agents', 'models', 'updates', 'help']) expect(doc.getElementById(id)).not.toBeNull();
-    expect(doc.getElementById('models')!.parentElement!.textContent).toContain('Search model');
-    expect(doc.getElementById('updates')!.parentElement!.textContent).toContain('Olympus 1.4.1 is available');
+    expect([...doc.querySelectorAll('.setside a')].map(link => link.textContent)).toEqual(['Agents and access', 'Models on this computer', 'zkAPI', 'Updates', 'Help']);
+    // Each side link opens its own section; the rest stay hidden (owner, 2026-11-10).
+    expect([...doc.querySelectorAll('.setside a')].map(link => link.getAttribute('href'))).toEqual(['#agents', '#models', '#zkapi', '#updates', '#help']);
+    expect([...doc.querySelectorAll('.setmain > section.setpane')].map(pane => pane.id)).toEqual(['agents', 'models', 'zkapi', 'updates', 'help']);
+    expect(html).toContain('.setmain > .setpane { display: none;');
+    expect(html).toContain('.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }');
+    expect(doc.getElementById('models')!.textContent).toContain('Search model');
+    expect(doc.getElementById('updates')!.textContent).toContain('Olympus 1.4.1 is available');
     const quiet = renderDashboardLocalPage('settings', { url: new URL(`${ORIGIN}/dashboard?settings`) });
     expect(quiet).toContain('Olympus is up to date.');
   });

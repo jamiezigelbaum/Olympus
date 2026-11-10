@@ -176,6 +176,16 @@ disposition. Rerun only failed jobs when the failed boundary is external, and
 cancel obsolete pull-request runs instead of paying for results that can no
 longer merge.
 
+Tests do not wait on the real clock. Code with a time seam (`now`, `sleep`,
+`setTimeoutImpl`, `schedule`) takes `createTestClock()` from
+`test/helpers/test-clock.ts`, and the test moves time with `advance(ms)`.
+Work that is really asynchronous (a worker, a subprocess, a page) uses
+`waitFor(condition)` from the same file, never a fixed sleep and an assert.
+`test/raw-sleep-guard.test.ts` holds each older file to its count in
+`config/test-raw-sleep-allowance.json`, and the static checks reject a PR that
+adds a file to that list or raises a count, so the list only shrinks (#1066).
+Converting a file is the fix for a timing flake; raising its timeout is not.
+
 ## Legacy hook retirement
 
 Clones created before 2026-08-29 may retain an Olympus-owned `core.hooksPath`

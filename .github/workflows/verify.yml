@@ -33,6 +33,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bun scripts/credential-pattern-check.ts --base "$BASE_SHA" --head "$HEAD_SHA"
+      - name: Keep the raw-sleep allowance shrinking
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bun scripts/raw-sleep-allowance-check.ts --base "$BASE_SHA"
       - name: Keep AI tools out of commit authorship
         # Jamie's rule: commits are his (and named human contributors'), never
         # Claude's or Codex's. GitHub's squash merge turns any AI-authored commit

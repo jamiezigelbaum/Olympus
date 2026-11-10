@@ -153,12 +153,12 @@ function good(): InboxObservation {
     destinations: {
       computer: { state: 'ready', status: 'Ready', reason: '', control: { tag: 'button', text: COPY.ask, href: null, action: 'ask', submit: true, disabled: false } },
       venice: { state: 'not_set_up', status: 'Not connected', reason: COPY.veniceNotSetUp, control: link('/dashboard?keys#venice-setup', COPY.setUpVenice) },
-      anonymous: { state: 'not_set_up', status: 'Not connected', reason: COPY.zkapiNotSetUp, control: link('#anonymous-setup', COPY.setUpZkapi) },
+      anonymous: { state: 'not_set_up', status: 'Not connected', reason: COPY.zkapiNotSetUp, control: link('/dashboard?settings#zkapi', COPY.setUpZkapi) },
     },
     entries: [entry(ID), entry(OTHER, { status: 'answering', factsStated: [], citations: 0, citesExpected: false })],
     pages: [{ id: ID, landedOnInbox: true, rowFound: true, opened: true, factsStated: FACTS, citations: 1, citesExpected: true }],
     ask: { pressed: true, answered: true, message: '', factsStated: FACTS, citations: 1, citesExpected: true, ms: 31_000, entry: entry(NEW) },
-    fixes: { venice: { clicked: true, landedAt: '/dashboard?keys#venice-setup', anchorShown: true }, anonymous: { clicked: true, landedAt: '/dashboard?private-answers#anonymous-setup', anchorShown: true } },
+    fixes: { venice: { clicked: true, landedAt: '/dashboard?keys#venice-setup', anchorShown: true }, anonymous: { clicked: true, landedAt: '/dashboard?settings#zkapi', anchorShown: true } },
     refusals: { venice: 403 },
     egress: { samples: 900, intervalMs: 150, baseline: 3, fresh: [], pageRequests: 40, pageOutside: [] },
     shots: [],
@@ -510,7 +510,7 @@ describe('the page scripts read the product\'s own page', () => {
     expect(Object.keys(state.cards).sort()).toEqual(['anonymous', 'computer', 'venice']);
     expect(state.cards.computer).toMatchObject({ state: 'ready', control: { tag: 'button', text: COPY.ask, action: 'ask', submit: true } });
     expect(state.cards.venice).toMatchObject({ state: 'not_set_up', reason: COPY.veniceNotSetUp, control: { tag: 'a', text: COPY.setUpVenice, href: '/dashboard?keys#venice-setup', submit: false, action: null } });
-    expect(state.cards.anonymous).toMatchObject({ state: 'not_set_up', control: { tag: 'a', text: COPY.setUpZkapi, href: '#anonymous-setup', submit: false } });
+    expect(state.cards.anonymous).toMatchObject({ state: 'not_set_up', control: { tag: 'a', text: COPY.setUpZkapi, href: '/dashboard?settings#zkapi', submit: false } });
     expect(state.cards.venice!.status).toBe(COPY.notConnectedStatus);
     expect(state.page && state.ask && !state.unlock).toBe(true);
     expect(state.rows).toEqual([{ id: ID, question: privateQuestion.text, from: expect.stringContaining('An agent'), unread: true }]);

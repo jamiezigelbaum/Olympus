@@ -5,6 +5,73 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## 1.5 Remove the causes (owner decision 2026-11-10)
+
+The owner approved the 1.5 plan on 2026-11-10 ("Start all seven lanes"). 1.5
+stops fixing symptoms one at a time and removes the causes behind most open
+issues. Every issue open that day has a disposition: fixed in a lane, closed
+as accepted or stale, waiting on the owner or a contributor, or moved to 1.6.
+
+Five moves:
+
+1. **Split the engine** so importing and judging run outside the process that
+   serves the dashboard and answers (#1064). It is built behind a switch and
+   proven on the owner's large install first. If it is not proven by the scope
+   freeze, 1.5 ships the two targeted fixes instead (#858 option 1 and #929)
+   and the split moves to 1.6.
+2. **Findable in minutes**: judge the items a question matched first (#1062),
+   shorten the wait for captured messages (#609, #866), show the judging
+   choices with time and cost at setup (#891, #922), and say "still checking
+   N items" instead of "0 results" (#1036, #1054).
+3. **Owner controls**: fix one item's privacy label (#1060), see what each AI
+   app received (#1061), update with one button (#1063), back up and restore
+   (#1065), one setup path shared by the owner's agent and the dashboard
+   (#1077, #1050), a chat picker that selects by kind with a rule for new
+   chats (#1075), and one person across sources (#1076, #1073).
+4. **Steady tests**: a shared test clock and a check that refuses new
+   real-clock sleeps (#1066), `verify:full` as one process (#1018), and
+   release testing v3 (olympus-ops #138).
+5. **Subtract**: the embedding pre-filter stays only if one week of live
+   counts on the owner's install saves at least 15% of judge calls with zero
+   spot-check Private misses (measurement started 2026-11-10, counts on
+   #1025); otherwise it is removed with its follow-ups. The Google pilot
+   client is removed before about 2026-12-03 (#765). Engine startup moves out
+   of `email-source` (#1068), last.
+
+Seven lanes, each with a brief and a done-when: Engine (#1064), Findable fast
+(#1062), Privacy accuracy (#1060, Critical), Owner controls (#1077), Sources
+and messaging (#765, #1073, #1076, #1075), Tests and release (#1066), Code
+health (#1068). Design work already under way stays with its owners: the
+inbox, the zkAPI settings move and a Settings page that shows one section at a
+time (#1045, #1046, #1047, #1074), and agent-proposed settings with one-click
+apply (#1050; the owner chose "agent proposes, person clicks Apply" on
+2026-11-10).
+
+Rules for this release:
+
+- New or changed screens are built only after the owner signs off a mockup. A
+  screen without sign-off at the freeze moves to 1.6.
+- Scope freezes when the lanes are code-complete. The five moves are the
+  release; the long tail ships if it is ready.
+- No change to who may change privacy, access or spending: those stay a click
+  in the unlocked local dashboard. Linking people across sources and choosing
+  chats never set a privacy tier.
+- The full release check runs once, on the final candidate, and gains
+  journeys for: Ask on an install that is busy judging (#1079), fix one item,
+  update from the dashboard, restore on a clean machine, a three-author
+  WhatsApp group (#1073), and setup led by an agent (#1077).
+- The next ChatGPT and Grok submissions go out with 1.5, not 1.4.x (owner,
+  2026-11-10). #732 closes when the 1.5 ZIP is submitted.
+
+1.4.3 is an urgent patch ahead of 1.5: on the owner's install on 2026-11-10,
+Ask and `source answer` searched no source because every lane timed out while
+the worker thread was held (#1079, with #1056). It does not change the 1.5
+scope.
+
+Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
+Moved to 1.6: #672, #920. Waiting on the owner: fresh calibration labels
+(#883) and, optionally, #581.
+
 ## 1.4.0 The new dashboard (owner decision 2026-11-07)
 
 Planned as 1.3.5; the owner renamed it 1.4 on 2026-11-07. Scope: every fix
@@ -710,6 +777,18 @@ testers have exercised the normal product journey without custom engineering.
   (matching photos 0.73 to 0.78, non-matching queries at most 0.695 on 116 of
   the owner's photos). Design: `docs/design/photo-embeddings.md`.
 
+- **2026-11-10 (superseding the two entries below) — no build ships the
+  beta.11 Google Desktop client (#765).** Its Google Cloud project was shut
+  down on 2026-11-03 and is deleted for good about 30 days later; the owner
+  let it go. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` is now empty, a release built
+  with `OLYMPUS_GOOGLE_PILOT_CLIENT_ID` unset packages no Desktop client (the
+  builder no longer refuses by omission), and the builder refuses the retired
+  id outright. Only its SHA-256 ships, so an install whose Gmail or Drive
+  connection still names it is treated as connected through Olympus's app:
+  once Google refuses the refresh (`deleted_client`, now a permanent refusal
+  that marks the connection for reconnect), the card offers one-click
+  Reconnect through the current publisher client. No known install still uses
+  it.
 - **2026-10-03 (superseding the entry below) — 1.0 ships the beta.11 Google
   Desktop client as the source default.** An independent review found that
   installs which connected Gmail or Drive through the Desktop client that

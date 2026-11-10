@@ -142,8 +142,14 @@ function configuredRoute(input: { complete?: boolean; ready?: ZkapiConsultReadin
   };
 }
 
-function page(value: DashboardOutsideHelpStatus, extra: Record<string, unknown> = {}): string {
-  return renderDashboardPrivateAnswersPage({ now: NOW, controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: true, outsideHelp: value, ...extra });
+/**
+ * The whole card, both halves (#1047 splits it between Settings › zkAPI and
+ * Privacy rules; each half has its own tests below). The behaviour tests read
+ * the full card, which is still the one renderer.
+ */
+function page(value: DashboardOutsideHelpStatus, extra: { controlSessionCsrfToken?: string; outsideHelpLocalSession?: boolean } = {}): string {
+  const csrfToken = 'controlSessionCsrfToken' in extra ? extra.controlSessionCsrfToken : 'csrf';
+  return `<!doctype html><html><head><title>Olympus / Settings</title></head><body>${renderOutsideHelpCard(value, { ...(csrfToken !== undefined ? { csrfToken } : {}), localSession: extra.outsideHelpLocalSession ?? true, untitled: true })}</body></html>`;
 }
 
 /** Every word a reader sees: visible text plus accessible names, scripts and styles removed. */
@@ -250,11 +256,49 @@ describe('Set up zkAPI names the program Olympus installed', () => {
   });
 });
 
+describe('the card split between Settings › zkAPI and Privacy rules (#1047)', () => {
+  const render = (part: 'account' | 'privacy', value = status({ settings: { state: 'on', revision: 3, languages: ['en', 'pt-BR'] } })) =>
+    `<!doctype html><html><body>${renderOutsideHelpCard(value, { csrfToken: 'csrf', localSession: true, untitled: true, part, otherPartHref: part === 'account' ? '/dashboard?keys#zkapi-model' : '/dashboard?settings#zkapi' })}</body></html>`;
+  const sections = (html: string) => [...html.matchAll(/data-outside-section="([a-z]+)"/g)].map((match) => match[1]);
+
+  test('Settings › zkAPI holds the account: status, money and setup, no privacy choices, and links to them', () => {
+    const html = render('account');
+    expect(html).toContain('data-outside-form="enable"');
+    expect(sections(html)).toEqual(['limits', 'statements', 'steps', 'details']);
+    expect(html).not.toContain('type="radio" name="level"');
+    expect(html).toContain(`<a href="/dashboard?keys#zkapi-model">${W.privacyChoicesLink}</a>`);
+  });
+
+  test('Turn off on Settings still posts the saved languages, so the switch never clears them', async () => {
+    const { document, window, posts, settle } = runCardScript(render('account'), () => ({ status: 200, body: { ok: true, status_message: 'saved', revision: 4 } }));
+    const form = document.querySelector('form[data-outside-form="enable"]')!;
+    form.dispatchEvent(Object.assign(new window.Event('submit', { cancelable: true }), { submitter: form.querySelector('button[data-outside-enabled]') }));
+    await settle();
+    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ enabled: false, revision: 3, languages: ['en', 'pt-BR'] });
+  });
+
+  test('Privacy rules holds what may be sent, the preparation, the writer and the languages, with a link back', () => {
+    const html = render('privacy');
+    expect(html).toContain('data-outside-part="privacy"');
+    expect(sections(html)).toEqual(['level', 'languages']);
+    expect(html).not.toContain('data-outside-form="add-route"');
+    expect(html).toContain(`<a href="/dashboard?settings#zkapi">${W.accountLink}</a>`);
+  });
+
+  test('Save languages on Privacy rules posts the switch as it stands with the boxes as chosen', async () => {
+    const { document, window, posts, settle } = runCardScript(render('privacy'), () => ({ status: 200, body: { ok: true, status_message: 'saved', revision: 4 } }));
+    const form = document.querySelector('[data-outside-section="languages"] form[data-outside-form="enable"]')!;
+    const button = form.querySelector('button')!;
+    expect(button.textContent).toBe(W.saveLanguages);
+    form.dispatchEvent(Object.assign(new window.Event('submit', { cancelable: true }), { submitter: button }));
+    await settle();
+    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ enabled: true, revision: 3, languages: ['en', 'pt-BR'], save_languages: true });
+  });
+});
+
 describe('the Outside help page: states and copy', () => {
   test('off, route ready, acknowledged: one status line, no problems, everything else one collapsed line with its value', () => {
     const html = page(status());
-    // The card sits under Private answers, the page that replaced Anonymous answers.
-    expect(html).toContain('<title>Olympus / Privacy</title>');
     expect(html).toContain(`data-outside-state="off">${W.state.off}<`);
     // Above the sections: the title and the status line only (owner 2026-10-10: "way too complicated").
     const firstView = html.slice(html.indexOf('data-outside-help '), html.indexOf('<div class="ohmore">'));
@@ -875,7 +919,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const { cookie, csrf } = await localSession(fetcher);
     const response = await fetcher(post(DASHBOARD_OUTSIDE_HELP_PATHS.enable, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));
     expect(response.status).toBe(501);
-    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(html).toContain('data-outside-unavailable');
   });
 
@@ -885,7 +929,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const counted: DashboardConsultBackend = { ...backend, status: async () => { calls.push('status'); return status(); } };
     const fetcher = worker(counted);
     const { cookie } = await localSession(fetcher);
-    const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(session).toContain('data-outside-help ');
     expect(session).toContain('data-statement="only_when_asked"');
     expect(session).toContain('data-outside-enabled="true"');
@@ -893,12 +937,12 @@ describe('the worker serves the card only inside a local control session', () =>
     expect(calls).toEqual(['status']);
     // A bearer-minted session reads the same facts but is offered the local unlock, no controls.
     const bearerMinted = await controlSession(fetcher);
-    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(offered).toContain('data-outside-unlock');
     expect(offered).not.toContain('data-outside-enabled="true">');
     expect(calls).toEqual(['status', 'status']);
     // The bearer's own GET has write authority elsewhere, but this card needs the control session.
-    const bearer = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
+    const bearer = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
     expect(bearer).toContain('data-dashboard-control-gate');
     expect(calls).toEqual(['status', 'status']);
   });
@@ -1193,6 +1237,20 @@ describe('the adapter: turning outside help on and off', () => {
     expect(await backend.setEnabled({ enabled: true, revision: 3, languages: [] })).toMatchObject({ ok: false, code: 'languages_empty' });
   });
 
+  test('Save languages while zkAPI is off keeps the selection for turning on (#1047)', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    expect((await backend.setEnabled({ enabled: true, revision: 0, languages: ['en'] })).ok).toBe(true);
+    expect((await backend.setEnabled({ enabled: false, revision: 1 })).ok).toBe(true);
+    expect(await backend.setEnabled({ enabled: false, revision: 2, languages: ['en', 'pt-BR'], save_languages: true })).toEqual({ ok: true, status_message: 'Languages saved.', revision: 3 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: false, languages: ['en', 'pt-BR'] } });
+    // The button's own save is checked like turning on; the off switch is not.
+    expect(await backend.setEnabled({ enabled: false, revision: 3, languages: [], save_languages: true })).toMatchObject({ ok: false, code: 'languages_empty' });
+    expect(await backend.setEnabled({ enabled: false, revision: 3, languages: ['xx'], save_languages: true })).toMatchObject({ ok: false, code: 'language_unknown' });
+    expect((await backend.setEnabled({ enabled: true, revision: 3, languages: ['en', 'pt-BR'] })).ok).toBe(true);
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: true, languages: ['en', 'pt-BR'] } });
+  });
+
   test('turning on requires a configured route and complete acknowledgements; off never does', async () => {
     const home = tempHome();
     const noRoute = adapter({ home, zkapi: false }).backend;
@@ -1247,7 +1305,7 @@ describe('the adapter: turning outside help on and off', () => {
     writeFileSync(join(stale.env.HOME, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     expect(summaryOf(await stale.backend.status())).toEqual({ state: 'needs_acceptance' });
     for (const [revision, level] of [[3, 'general'], [4, 'unnamed'], [5, 'general']] as const) {
-      expect(await stale.backend.setEnabled({ enabled: true, revision, level })).toEqual({ ok: true, status_message: 'Saved. Anonymous answers stay paused until you accept the statements on this page.', revision: revision + 1 });
+      expect(await stale.backend.setEnabled({ enabled: true, revision, level })).toEqual({ ok: true, status_message: 'Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.', revision: revision + 1 });
     }
     expect(readConsultSettings({ env: stale.env })).toMatchObject({ settings: { revision: 6, enabled: true, level: 'general' } });
     // Off, a level change is just saved.
@@ -1267,8 +1325,11 @@ describe('the adapter: turning outside help on and off', () => {
     writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     const fetcher = worker(stale.backend);
     const { cookie, csrf } = await localSession(fetcher);
-    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
-    expect(html).toContain(`data-outside-state="needs_acceptance"`);
+    const settings = await (await fetcher(new Request(`${ORIGIN}/dashboard?settings`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    expect(settings).toContain(`data-outside-state="needs_acceptance"`);
+    // What may be sent is saved on Privacy rules (#1047).
+    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?keys`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    expect(html).toContain('data-outside-part="privacy"');
     const { document, window, posts, settle } = runCardScript(html, async (url, body) => {
       const response = await fetcher(post(url, body, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));
       return { status: response.status, body: await response.json() };
@@ -1279,7 +1340,7 @@ describe('the adapter: turning outside help on and off', () => {
     level.dispatchEvent(new window.Event('submit', { cancelable: true }));
     await settle();
     expect(posts.map((entry) => entry.url)).toEqual([DASHBOARD_OUTSIDE_HELP_PATHS.enable]);
-    expect(level.querySelector('[data-action-message]')!.textContent).toBe('Saved. Anonymous answers stay paused until you accept the statements on this page.');
+    expect(level.querySelector('[data-action-message]')!.textContent).toBe('Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.');
     expect(readConsultSettings({ env: stale.env })).toMatchObject({ settings: { revision: 4, enabled: true, level: 'general' } });
   });
 
