@@ -63,6 +63,7 @@ import {
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
+  tierMovingDirectionClause,
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from './tier-ledger.ts';
@@ -259,6 +260,8 @@ function emptyBacklogCounts(): BacklogCounts {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
 
+/** Queued lowering moves counted per ledger on a backlog read, at most. */
+const MOVES_COUNT_BOUND = 10_000;
 /** Ledger and queue rows at or below which the backlog is counted on every read. */
 const BACKLOG_EXACT_ROWS = 20_000;
 /** How old a large backlog's served count may be before a new count starts. */
@@ -272,6 +275,14 @@ export interface TierClassificationBacklog {
   /** Questions still to ask (an item can have a names and an excerpt question). */
   remainingQuestions: number;
   pendingItems: number;
+  /**
+   * Items already judged lower (Personal, say) whose automatic move out of
+   * Private is still queued: an agent outside this computer cannot find them
+   * until it runs. Counted only where automatic moves run (a move waiting for
+   * the owner is not "still checking"), and at most MOVES_COUNT_BOUND per
+   * ledger, so a large migration queue never costs a search a full scan.
+   */
+  lowerMovesQueued: number;
   pendingWithoutQuestion: number;
   oldestPendingAgeMs: number;
   summary: string;
@@ -484,7 +495,36 @@ export class TierSnifferService {
   backlog(): TierClassificationBacklog {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.status()))];
-    return { ...backlog, summary: [backlog.summary, ...messages].join(' ') };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(), summary: [backlog.summary, ...messages].join(' ') };
+  }
+
+  /** Queued lowering moves that automatic moves will carry out, bounded per ledger (see `lowerMovesQueued`). */
+  private lowerMovesQueued(): number {
+    const autoMoves = this.options.autoMoves;
+    try {
+      if (!autoMoves || !autoMoves.localEmbeddingsOnly()) return 0;
+    } catch {
+      return 0;
+    }
+    let queued = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const set = tierSetForLedger(ledgerPath);
+        if (!set || !setEmbedsWithBuiltInOnly(set)) continue;
+      } catch {
+        continue;
+      }
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        queued += (opened.db.query(`SELECT COUNT(*) AS n FROM (
+          SELECT 1 FROM tier_items WHERE state = 'moving' ${tierMovingDirectionClause('lower')} LIMIT ?
+        )`).get(MOVES_COUNT_BOUND) as { n: number }).n;
+      } catch {
+        // An unreadable ledger counts nothing, as in the backlog count itself.
+      } finally { opened.db.close(); }
+    }
+    return queued;
   }
 
   private backlogCounts(): BacklogCounts {
@@ -499,7 +539,7 @@ export class TierSnifferService {
     return this.backlogCache?.counts ?? this.roughBacklog();
   }
 
-  private backlogFrom(counts: BacklogCounts): TierClassificationBacklog {
+  private backlogFrom(counts: BacklogCounts): Omit<TierClassificationBacklog, 'lowerMovesQueued'> {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     return {
       ...counts,

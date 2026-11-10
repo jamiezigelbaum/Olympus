@@ -21808,6 +21808,18 @@ function writeIntentFromRow(row) {
 function idParams(identity2) {
   return [identity2.provider, identity2.accountScope, tierLedgerConversationKey(identity2), identity2.providerItemId];
 }
+function tierMovingDirectionClause(direction) {
+  if (!direction)
+    return "";
+  const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+  const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
+    OR ${rank("target_content_tier")} > ${rank("content_tier")}
+    OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+      AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+      AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+      AND c.superseded_by_generation = tier_items.generation + 1))`;
+  return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+}
 
 class TierLedger {
   dbPath;
@@ -22188,16 +22200,7 @@ class TierLedger {
       ${this.movingDirectionClause(direction)}`).get().n;
   }
   movingDirectionClause(direction) {
-    if (!direction)
-      return "";
-    const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
-    const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
-      OR ${rank("target_content_tier")} > ${rank("content_tier")}
-      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
-        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
-        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
-        AND c.superseded_by_generation = tier_items.generation + 1))`;
-    return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+    return tierMovingDirectionClause(direction);
   }
   listMoving(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
@@ -102758,6 +102761,28 @@ var init_email_policy = __esm(() => {
   ]);
 });
 
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  const one = pendingItems === 1;
+  if (audience === "local") {
+    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
+  }
+  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+function withCoverageNote(answer, note) {
+  if (!note)
+    return answer;
+  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
+    return `${answer.replace(/\s+$/, "")}
+- ${note}`;
+  return `${answer.replace(/\s+$/, "")}
+
+Coverage notes:
+- ${note}`;
+}
+
 // src/core/email.ts
 class EmailClient {
   config;
@@ -103529,6 +103554,7 @@ function parseSourceIndexSearchResult(value, context2) {
     throw new OperationError("email_error", "source index locator policy requires at least one released locator.");
   }
   const secretLocations = parseSecretLocations(value.secret_locations);
+  const privacyNote = typeof audit.pending_privacy_items === "number" ? privacyBacklogCoverageNote(audit.pending_privacy_items, "local") : undefined;
   const searchedCorpora = Array.isArray(audit.searched_corpora) ? audit.searched_corpora.filter((corpus2) => typeof corpus2 === "string") : undefined;
   return {
     kind: "source_index_search",
@@ -103536,6 +103562,7 @@ function parseSourceIndexSearchResult(value, context2) {
     retrieval_source: "local_index",
     hits: value.hits,
     ...secretLocations ? { secret_locations: secretLocations } : {},
+    ...privacyNote ? { coverage_notes: [privacyNote] } : {},
     audit: {
       ...searchedCorpora ? { searched_corpora: searchedCorpora } : {},
       request_id: requiredString5(audit.request_id, "audit.request_id"),
@@ -140714,13 +140741,6 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
-// src/core/privacy-backlog-coverage.ts
-function privacyBacklogCoverageNote(pendingItems) {
-  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
-    return;
-  return `Olympus is still checking ${pendingItems} new item${pendingItems === 1 ? "" : "s"} for privacy before ${pendingItems === 1 ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
-}
-
 // src/core/remote-result.ts
 function providerSourceLabel(provider) {
   return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
@@ -170119,7 +170139,9 @@ function createEmailSourceWorker(options = {}) {
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
               }
-              const response = json({ ...result, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
+              const localNote = caller?.surface !== "remote" ? privacyBacklogCoverageNote(readPendingPrivacyItems(options), "local") : undefined;
+              const answered = localNote && typeof result.answer === "string" ? { ...result, answer: withCoverageNote(result.answer, localNote) } : result;
+              const response = json({ ...answered, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,
@@ -171993,6 +172015,7 @@ function createEmailSourceWorker(options = {}) {
             const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
             const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run2) => run2.scope)) ?? [] : [];
             const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+            const pendingPrivacy = readPendingPrivacyItems(options);
             const safeResult = {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
@@ -172019,7 +172042,8 @@ function createEmailSourceWorker(options = {}) {
                 raw_source_exposed: false,
                 source_text_returned: false,
                 ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
-                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}
+                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {},
+                ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
               },
               policy: {
                 raw_source_exposed: false,
@@ -174594,6 +174618,13 @@ function isSourceIndexStatusResult(value2) {
 }
 function uniqueStrings2(values) {
   return [...new Set(values.map((value2) => value2.trim()).filter(Boolean))];
+}
+function readPendingPrivacyItems(options) {
+  try {
+    return options.pendingPrivacyItems?.();
+  } catch {
+    return;
+  }
 }
 function json(value2, status = 200) {
   return new Response(JSON.stringify(value2), {
@@ -195902,7 +195933,37 @@ class TierSnifferService {
   backlog() {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
-    return { ...backlog, summary: [backlog.summary, ...messages].join(" ") };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(), summary: [backlog.summary, ...messages].join(" ") };
+  }
+  lowerMovesQueued() {
+    const autoMoves = this.options.autoMoves;
+    try {
+      if (!autoMoves || !autoMoves.localEmbeddingsOnly())
+        return 0;
+    } catch {
+      return 0;
+    }
+    let queued = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const set2 = tierSetForLedger(ledgerPath);
+        if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
+          continue;
+      } catch {
+        continue;
+      }
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
+          SELECT 1 FROM tier_items WHERE state = 'moving' ${tierMovingDirectionClause("lower")} LIMIT ?
+        )`).get(MOVES_COUNT_BOUND).n;
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return queued;
   }
   backlogCounts() {
     if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS))
@@ -197103,7 +197164,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_COUNT_BOUND = 1e4, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_embedding_prefilter();
   init_tier_move();
@@ -222571,6 +222632,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     archiveImportAgent: archiveImportDashboard.agent,
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
@@ -223198,7 +223260,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         sourceAnswerJobs
       }),
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       ...caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}
     })
   };

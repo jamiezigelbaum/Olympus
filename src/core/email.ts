@@ -13,6 +13,7 @@ import {
   type SourceWatchMode,
 } from './source-watch.ts';
 import { withWorkerAuthHeader, workerAuthTokenProvider } from './worker-auth.ts';
+import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
 export type EmailFetch = (url: string, init: RequestInit) => Promise<Response>;
 export interface EmailTransportRequestOptions {
@@ -326,6 +327,12 @@ export interface SourceIndexSearchResult {
   retrieval_source: 'local_index';
   hits: unknown[];
   secret_locations?: SourceSecretLocation[];
+  /**
+   * Fixed sentences about what this search could not cover yet: today only
+   * the privacy-backlog note (core/privacy-backlog-coverage.ts), built here
+   * from the worker's count. Never item metadata.
+   */
+  coverage_notes?: string[];
   audit: {
     /** Present when the search covered the source's other tier corpora too. */
     searched_corpora?: string[];
@@ -1425,6 +1432,10 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
     throw new OperationError('email_error', 'source index locator policy requires at least one released locator.');
   }
   const secretLocations = parseSecretLocations(value.secret_locations);
+  // A count only; anything else is ignored rather than passed on.
+  const privacyNote = typeof audit.pending_privacy_items === 'number'
+    ? privacyBacklogCoverageNote(audit.pending_privacy_items, 'local')
+    : undefined;
   const searchedCorpora = Array.isArray(audit.searched_corpora)
     ? audit.searched_corpora.filter((corpus): corpus is string => typeof corpus === 'string')
     : undefined;
@@ -1434,6 +1445,7 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
     retrieval_source: 'local_index',
     hits: value.hits,
     ...(secretLocations ? { secret_locations: secretLocations } : {}),
+    ...(privacyNote ? { coverage_notes: [privacyNote] } : {}),
     audit: {
       ...(searchedCorpora ? { searched_corpora: searchedCorpora } : {}),
       request_id: requiredString(audit.request_id, 'audit.request_id'),

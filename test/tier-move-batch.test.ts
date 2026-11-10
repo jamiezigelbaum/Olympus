@@ -609,3 +609,18 @@ test('a failed raise is retried ahead of lowerings without repeatedly cutting th
   expect(f.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
   expect(f.f.stores.internal!.localContent(localId(raised.id))?.chunks ?? []).toEqual([]);
 }, 15_000);
+
+test('the backlog counts queued lowerings that automatic moves will run, never raises', async () => {
+  const f = await fixture(3, true);
+  expect(f.f.ledger.listMoving({ direction: 'lower' })).toHaveLength(3);
+  // Judged Personal, still in Private until the move: out of a remote agent's reach.
+  expect(serviceFor(f.f).service.backlog()).toMatchObject({ pendingItems: 0, lowerMovesQueued: 3 });
+  // A move left for the owner's approval is not "still checking".
+  expect(serviceFor(f.f, { localEmbeddingsOnly: () => false }).service.backlog().lowerMovesQueued).toBe(0);
+  for (const move of f.moves()) await moveTieredItem(move);
+  const service = serviceFor(f.f).service;
+  expect(service.backlog().lowerMovesQueued).toBe(0);
+  for (const spec of f.specs) f.f.ledger.recordRoutedPlacement(identityOf(spec.id), high, f.f.set.placementFor(high));
+  expect(f.f.ledger.listMoving({ direction: 'raise' })).toHaveLength(3);
+  expect(service.backlog().lowerMovesQueued).toBe(0);
+});
