@@ -298,7 +298,7 @@ test('the default supervision still restarts a ready child that exits zero', asy
     expect(run.health).toEqual([
       'Olympus fixture is starting.',
       'clear',
-      'Olympus fixture exited unexpectedly.',
+      'Olympus fixture stopped; starting it again.',
       'Olympus fixture is starting.',
       'clear',
     ]);

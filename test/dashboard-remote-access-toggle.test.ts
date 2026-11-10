@@ -646,3 +646,18 @@ test('the full-engine restart waits for the response, coalesces requests and rep
   const unsupported = createStandaloneRemoteAccessConfigWriter({ unsupportedReason: 'Unavailable on Linux.', write: () => { throw new Error('must not write'); }, canRestart: () => true, requestRestart: request });
   expect(await unsupported(false)).toMatchObject({ ok: false, status: 501, code: 'restart_unsupported' });
 });
+
+test('a standalone host that cannot change remote access offers no switch and says why (#1034)', async () => {
+  const { createStandaloneRemoteAccessControl } = await import('../src/workers/remote-access-control.ts');
+  const { dashboardAgentsView } = await import('../src/workers/agent-connections.ts');
+  const reason = 'Changing remote access from this dashboard is not available on Linux yet.';
+  const control = createStandaloneRemoteAccessControl({ unsupportedReason: reason, write: () => { throw new Error('must not write'); }, canRestart: () => true, requestRestart: () => true });
+  const access = { state: 'on', mcpUrl: 'https://abc.relay.example/mcp' } as DashboardRemoteAccess;
+  const view = dashboardAgentsView({ store: () => undefined, remoteAccess: () => access, remoteAccessControl: control });
+  const html = renderDashboardAgentsSection({ view, now: NOW, platform: 'linux' });
+  expect(html).not.toContain('Turn off remote access</button>');
+  expect(html).toContain(reason);
+  // A Mac keeps its switch.
+  const mac = createStandaloneRemoteAccessControl({ write: () => {}, canRestart: () => true, requestRestart: () => true });
+  expect(renderDashboardAgentsSection({ view: dashboardAgentsView({ store: () => undefined, remoteAccess: () => access, remoteAccessControl: mac }), now: NOW, platform: 'darwin' })).toContain('Turn off remote access</button>');
+});

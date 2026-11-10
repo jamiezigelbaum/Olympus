@@ -150,10 +150,11 @@ function interposeGroupKill(run: Harness, answer: (signal: NodeJS.Signals | numb
   return { signals, restore };
 }
 
-for (const [name, script] of [
-  ['a deliberate self-restart (exit 75)', SELF_RESTART_75],
-  ['a SIGTERM handled with exit 0', SIGTERM_HANDLED_EXIT_0],
-  ['an unhandled SIGTERM', SIGTERM_UNHANDLED],
+for (const [name, script, said] of [
+  // What the engine logs says what happened, never a crash for a requested restart or a stop signal (#1034).
+  ['a deliberate self-restart (exit 75)', SELF_RESTART_75, 'Olympus fixture is restarting, as it asked to.'],
+  ['a SIGTERM handled with exit 0', SIGTERM_HANDLED_EXIT_0, 'Olympus fixture stopped; starting it again.'],
+  ['an unhandled SIGTERM', SIGTERM_UNHANDLED, 'Olympus fixture stopped on SIGTERM; starting it again.'],
 ] as const) {
   test(`a ready child that exits by itself through ${name}, with an empty process group, is replaced`, async () => {
     const run = harness((launch) => (launch === 0 ? script : STAY_ALIVE));
@@ -166,7 +167,7 @@ for (const [name, script] of [
       expect(run.health).toEqual([
         'Olympus fixture is starting.',
         'clear',
-        'Olympus fixture exited unexpectedly.',
+        said,
         'Olympus fixture is starting.',
         'clear',
       ]);
@@ -277,7 +278,7 @@ test('the incident: EPERM from a group of exiting members after a self-restart s
     expect(run.health).toEqual([
       'Olympus fixture is starting.',
       'clear',
-      'Olympus fixture exited unexpectedly.',
+      'Olympus fixture is restarting, as it asked to.',
       'Olympus fixture is starting.',
       'clear',
     ]);
@@ -306,7 +307,7 @@ test('a group that truly cannot be stopped gets the forced kill, a loud report, 
     expect(run.health).toEqual([
       'Olympus fixture is starting.',
       'clear',
-      'Olympus fixture exited unexpectedly.',
+      'Olympus fixture is restarting, as it asked to.',
       message,
       'Olympus fixture is starting.',
       'clear',
@@ -384,7 +385,7 @@ exit 75;
     expect(run.health.slice(0, 3)).toEqual([
       'Olympus fixture is starting.',
       'clear',
-      'Olympus fixture exited unexpectedly.',
+      'Olympus fixture is restarting, as it asked to.',
     ]);
     expect(run.health.slice(-2)).toEqual(['Olympus fixture is starting.', 'clear']);
   } finally {

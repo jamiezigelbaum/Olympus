@@ -32,7 +32,7 @@ afterEach(() => {
   }
 });
 
-function fixture(upgrade = false, needsLocalUnlock = false) {
+function fixture(upgrade = false, needsLocalUnlock = false, extra: () => string = () => '') {
   const dir = mkdtempSync(join(tmpdir(), 'privacy-sheet-ui-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'sovereignty.json');
@@ -40,7 +40,7 @@ function fixture(upgrade = false, needsLocalUnlock = false) {
   const policy = () => JSON.parse(readFileSync(path, 'utf8'));
   let override: ModelSetupView | undefined;
   const view = () => override ?? new ModelSetupService({ config: policy(), credentialState: () => 'ready', autoCheck: false }).getStatus();
-  const html = () => renderModelSetup(view());
+  const html = () => renderModelSetup(view()) + extra();
   const root = document.createElement('div');
   root.innerHTML = html(); document.body.append(root);
   const calls: string[] = [];
@@ -190,6 +190,25 @@ test('pending worker activation never reports Working and a later read can compl
   f.setView({ ready: true, checked_at: '', cards: [] });
   await f.controller.refresh();
   expect(visiblePanel(f.root)?.textContent).toContain('Working');
+});
+
+test('a connection that completes during the walkthrough redraws its card and keeps the walkthrough and typed keys (#705)', async () => {
+  let google = 'Not connected';
+  const f = fixture(false, false, () => `<section id="google-card"><p data-google-state>${google}</p></section>`
+    + '<section id="other-keys"><form data-connect-kind="api_key"><input name="api_key" type="password"><span data-action-message></span></form></section>');
+  f.root.querySelector<HTMLInputElement>('input[value="local-first"]')!.checked = true;
+  await f.submit('[data-first-run-privacy]');
+  expect(visiblePanel(f.root)?.textContent).toContain('Add a Venice key');
+  const typed = f.root.querySelector<HTMLInputElement>('#other-keys input[name="api_key"]')!;
+  typed.value = 'typed-but-not-saved';
+  // The server saved the Google connection (OAuth finished in another tab); coming back asks for one authoritative read.
+  google = 'Connected';
+  await f.controller.refresh();
+  expect(f.root.querySelector('[data-google-state]')?.textContent).toBe('Connected');
+  expect(visiblePanel(f.root)?.textContent).toContain('Add a Venice key');
+  expect(f.root.querySelector<HTMLInputElement>('#other-keys input[name="api_key"]')).toBe(typed);
+  expect(typed.value).toBe('typed-but-not-saved');
+  expect(f.policy()).toEqual(loadSovereigntyPreset('local-first'));
 });
 
 test('a save conflict uses the separate error state and returns to the choice', async () => {

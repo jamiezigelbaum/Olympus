@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { MessagingCaptureSupervisor } from '../src/core/messaging-capture.ts';
 import { createWorkerMessagingCaptureOwnership } from '../src/workers/email-source/server.ts';
 import { createDashboardMessagingService, retainApprovedCaptureScope } from '../src/workers/email-source/dashboard-messaging-service.ts';
+import { waitFor as waitUntil } from './helpers/test-clock.ts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -95,6 +96,8 @@ for (const scenario of [
           expect(grant.pairingPending).toBeUndefined();
           expect(grant).not.toHaveProperty('tier');
         } else {
+          // The card is told capture stays paused, from the suspended grant on disk (#706).
+          expect((await service.handle('status', { source }) as { capturePaused?: boolean }).capturePaused).toBe(true);
           expect(await makeSupervisor().reconcile()).toMatchObject({ state: 'stopped', reason: 'grant_missing' });
           await expect(service.handle('chats', { source })).rejects.toThrow();
         }
@@ -245,3 +248,35 @@ for (const ending of ['listing-fails', 'cancelled', 'existing-device-fails', 'fa
     service.close();
   });
 }
+
+test('no pairing can start between Disconnect stopping the running one and finishing (#689)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'messaging-hold-')); dirs.push(dir);
+  const registryPath = join(dir, 'handles.json');
+  let pairs = 0;
+  const service = createDashboardMessagingService({ registryPath, secretStore: memorySecrets,
+    withMessagingCapturePaused: async (_source, operation) => operation(),
+    withGrantMutation: async operation => operation(),
+    pairSource: async options => {
+      pairs += 1;
+      await new Promise((_resolve, reject) => options.signal!.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+      throw new Error('unreachable');
+    },
+  });
+  try {
+    await service.handle('start', { source: 'telegram' });
+    await waitUntil(() => pairs === 1);
+    let release: (() => void) | undefined;
+    const disconnecting = service.withPairingHeld('telegram', () => new Promise<string>(resolve => { release = () => resolve('disconnected'); }));
+    // Disconnect has stopped the running pairing and is doing its own work.
+    await waitUntil(() => release !== undefined);
+    expect((await service.handle('status', { source: 'telegram' })).state).toBe('cancelled');
+    // A start that arrives after the old pairing stopped but before Disconnect finished is refused, not registered after it.
+    await expect(service.handle('start', { source: 'telegram' })).rejects.toThrow('Disconnect is running');
+    release!();
+    expect(await disconnecting).toBe('disconnected');
+    expect(pairs).toBe(1);
+    // An explicit later start works again.
+    await service.handle('start', { source: 'telegram' });
+    await waitUntil(() => pairs === 2);
+  } finally { await service.cancelAndWait('telegram'); service.close(); }
+});

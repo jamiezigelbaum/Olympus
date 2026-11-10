@@ -7,6 +7,7 @@ import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/com
 import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
 import { dashboardHtmlRoutePage, renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 const GLOBALS = [
   'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
@@ -1109,6 +1110,51 @@ describe('local messaging pairing', () => {
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(operations).toEqual(['status', 'respond']);
       expect(observed).toBe('12345');
+    } finally { controller.dispose(); }
+  });
+
+  test('Cancel pressed during a status poll reaches pairing exactly once after the poll (#699)', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector<HTMLFormElement>('form')!;
+    form.dataset.messagingKind = 'cancel';
+    let releaseStatus: () => void = () => {};
+    const operations: string[] = [];
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async (operation) => {
+        operations.push(operation);
+        if (operation === 'status') { await new Promise<void>(resolve => { releaseStatus = resolve; }); return { status: 200, body: { ok: true, state: 'waiting', field: 'code' } }; }
+        return { status: 200, body: { ok: true, state: 'cancelled' } };
+      },
+    } });
+    try {
+      await waitFor(() => operations.length === 1);
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(operations).toEqual(['status']);
+      releaseStatus();
+      await waitFor(() => operations.includes('cancel'));
+      await waitFor(() => root.querySelector('[data-messaging-status]')!.textContent!.startsWith('Setup cancelled'));
+      expect(operations).toEqual(['status', 'cancel']);
+    } finally { controller.dispose(); }
+  });
+
+  for (const [state, capturePaused, words] of [
+    ['cancelled', true, 'capture of this account stays paused until pairing again succeeds'],
+    ['failed', true, 'Capture of this account stays paused until pairing again succeeds'],
+    ['cancelled', false, 'Capture permission was not changed'],
+    ['failed', false, 'Pairing failed. Start pairing again to retry.'],
+  ] as const) test(`a ${state} ${capturePaused ? 're-pair says capture stays paused' : 'first pairing claims no pause'} (#706)`, async () => {
+    const root = messagingRoot();
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async () => ({ status: 200, body: { ok: true, state, ...(capturePaused ? { capturePaused } : {}) } }),
+    } });
+    try {
+      await waitFor(() => root.querySelector('[data-messaging-status]')!.textContent);
+      const text = root.querySelector('[data-messaging-status]')!.textContent!;
+      expect(text).toContain(words);
+      if (!capturePaused) expect(text).not.toContain('paused');
     } finally { controller.dispose(); }
   });
 
