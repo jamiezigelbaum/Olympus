@@ -18,6 +18,28 @@ Mac, Omarchy or Ubuntu 24.04 LTS x86_64 computer with one command (on a Mac, the
 `olympus-setup` skill shows it; on Linux, use the Linux command in the
 README), and the README's "Get started" section is the user guide. That path needs no OpenClaw.
 
+## Start here: install, then follow `olympus setup status`
+
+1. Install Olympus (Steps 0 and 1 below).
+2. Run `olympus setup status` and follow it. It lists every setup step
+   (installed, Private answers, privacy judge, sources, chat choices, an AI
+   app, first items findable), what is done, and exactly one way forward for
+   each:
+   - `"kind": "command"`: an `olympus` command you may run yourself.
+   - `"kind": "owner"`: a dashboard link to give your operator. It needs
+     their click because it changes what is private, who has access or what
+     Olympus spends. Give them that one link, wait, then run
+     `olympus setup status` again and carry on when the step shows `done`.
+     Do not ask them what is on screen.
+3. `olympus setup status --text` prints the same list for a person to read.
+   Inside OpenClaw the same list is the `olympus_setup_status` tool.
+
+Setup status is the source of truth for what is done and what is next; the
+dashboard's Home shows the same list. On an OpenClaw host the steps below
+still cover what setup status does not report yet: the privacy posture
+conversation and `olympus setup`, the worker, the gateway restart, and the
+Control UI page.
+
 ## Normal setup sequence
 
 Choose the privacy posture with the operator, run setup (which registers and
@@ -1970,7 +1992,8 @@ If your session was interrupted (a gateway restart will do this to
 resident agents), do NOT replay steps from the top. First observe, then
 continue: `openclaw plugins list` (is olympus installed/enabled?),
 `ls ~/.olympus/sovereignty.json` (did setup already write the policy?),
-`olympus doctor` (what remains unmet?). Skip every step whose outcome
+`olympus doctor` (what remains unmet?), `olympus setup status` (which
+setup steps are done, and the one way forward for the rest). Skip every step whose outcome
 already exists. In particular, never re-run `olympus setup` or
 `olympus sovereignty init` when the config file exists — the CLI refuses
 without `--force`, and `--force` requires the operator's explicit consent

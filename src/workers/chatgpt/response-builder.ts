@@ -1,6 +1,7 @@
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
+import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '../../core/app-release-capture.ts';
 /**
  * The allowlisted response builder: the ONLY way a ChatGPT-bound response
  * leaves the engine. Every tool result (text content, structuredContent,
@@ -751,16 +752,23 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   // Set only when Private evidence reached this answer despite the request
   // (a policy breach the answer is withheld for), never by the probe.
   let privateMatched = false;
+  let privateDropped = 0;
   const citations: ChatGptCitation[] = [];
+  // What the app receives, by name, for the owner's list of what each AI app received.
+  const released: ReleasedItem[] = [];
   for (const value of Array.isArray(record.evidence) ? record.evidence : []) {
     const evidence = asRecord(value);
     if (!evidence) continue;
     if (typeof evidence.trust_domain !== 'string' || !CITABLE_TRUST_DOMAINS.has(evidence.trust_domain)) {
       privateMatched = true;
+      privateDropped += 1;
       continue;
     }
     const citation = citationFrom(evidence);
-    if (citation && citations.length < MAX_CITATIONS) citations.push(citation);
+    if (citation && citations.length < MAX_CITATIONS) {
+      citations.push(citation);
+      released.push(releasedItemFromEvidence(evidence, citation.source, citation.title));
+    }
   }
   const synthesis = asRecord(asRecord(record.audit)?.answer_synthesis);
   const usedPrivate = synthesis?.private_context_used === true
@@ -768,6 +776,9 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (usedPrivate) privateMatched = true;
   const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
   const shownCitations = usedPrivate ? [] : citations;
+  const consulted = typeof synthesis?.secure_local_items_consulted === 'number' && Number.isFinite(synthesis.secure_local_items_consulted)
+    ? Math.max(0, Math.floor(synthesis.secure_local_items_consulted)) : 0;
+  noteReleasedItems(usedPrivate ? [] : released, privateDropped + consulted, usedPrivate);
   // A released answer with citations is evidence the model answers from.
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
@@ -851,11 +862,14 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   let privateMatched = false;
   let flagged = false;
   const evidence: SearchEvidence[] = [];
+  const released: ReleasedItem[] = [];
+  let privateDropped = 0;
   for (const value of record.evidence) {
     const item = asRecord(value);
     if (!item) continue;
     if (typeof item.trust_domain !== 'string' || !CITABLE_TRUST_DOMAINS.has(item.trust_domain)) {
       privateMatched = true;
+      privateDropped += 1;
       continue;
     }
     const source = sourceLabel(item.provider, item.family);
@@ -871,8 +885,10 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     }
     if (item.source_instructions_flagged === true) flagged = true;
     evidence.push(entry);
+    released.push(releasedItemFromEvidence(item, source, entry.title));
   }
   const coverageRecord = asRecord(record.coverage) ?? {};
+  noteReleasedItems(released, privateDropped + whole(record.withheld) + whole(coverageRecord.content_private_items));
   const coverage: SearchResult['coverage'] = {
     searchedSources: whole(coverageRecord.searched_corpora),
     unreadableItems: whole(coverageRecord.unreadable_items),
