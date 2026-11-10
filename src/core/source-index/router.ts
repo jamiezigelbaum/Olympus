@@ -284,7 +284,22 @@ export interface RouteSourceIndexSearchOptions {
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
+  /** The lane deadline's clock and timers; tests pass a test clock. Defaults to the real ones. */
+  laneClock?: LaneDeadlineClock;
 }
+
+/** The time seam of the lane deadline (runCorpusLaneWithDeadline). */
+export interface LaneDeadlineClock {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(timer: unknown): void;
+}
+
+const REAL_LANE_CLOCK: LaneDeadlineClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+};
 
 // Default per-lane retrieval deadline (ms).
 //
@@ -420,6 +435,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)),
       laneTimeoutMs,
       corpus.corpusId,
+      options.laneClock ?? REAL_LANE_CLOCK,
     );
     return { corpus, outcome, retrievalState };
   }));
@@ -722,6 +738,7 @@ async function runCorpusLaneWithDeadline(
   run: () => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
   timeoutMs: number,
   corpusId: string,
+  clock: LaneDeadlineClock = REAL_LANE_CLOCK,
 ): Promise<CorpusLaneOutcome> {
   const startedAt = Date.now();
   const runValidated = async (): Promise<SourceIndexCorpusSearchResponse> => {
@@ -752,7 +769,7 @@ async function runCorpusLaneWithDeadline(
     }
   }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: unknown;
   const laneSettled: Promise<
     { kind: 'response'; response: SourceIndexCorpusSearchResponse } | { kind: 'error'; error: unknown }
   > = runValidated().then(
@@ -768,12 +785,12 @@ async function runCorpusLaneWithDeadline(
   // dashboard Ask, every lane missed its 10 s deadline together and the Ask
   // reported every source as unsearchable, although the lanes had found
   // candidates.
-  const hardStopAtMs = startedAt + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
+  const hardStopAtMs = clock.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise<{ kind: 'timeout' }>((resolve) => {
     const arm = (delayMs: number) => {
-      const dueAtMs = Date.now() + delayMs;
-      timer = setTimeout(() => {
-        const now = Date.now();
+      const dueAtMs = clock.now() + delayMs;
+      timer = clock.setTimeout(() => {
+        const now = clock.now();
         if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
           arm(HELD_THREAD_GRACE_MS);
           return;
@@ -822,7 +839,7 @@ async function runCorpusLaneWithDeadline(
     });
     return { kind: 'response', response: settled.response, elapsedMs };
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer !== undefined) clock.clearTimeout(timer);
   }
 }
 

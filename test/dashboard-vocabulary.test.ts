@@ -1177,7 +1177,7 @@ test('Private answers uses the owner-selected Models vocabulary and Inbox except
   expect([copy.askComputer, copy.askZkapi, copy.askVenice]).toEqual(['Ask the local model', 'Ask a model through zkAPI', 'Ask a Venice model']);
   expect([copy.waitingTitle, copy.waitingIntro, copy.noneWaiting]).toEqual(['Inbox', 'Answers from every model, kept on this computer.', 'Your private inbox is empty.']);
   expect([copy.privatePath, copy.anonymousPath, copy.veniceName]).toEqual(['Local model', 'zkAPI model', 'Venice model']);
-  expect([copy.sentItems, copy.sent]).toEqual(['What was sent to Venice', 'What was sent to zkAPI']);
+  expect([copy.sentItems, copy.sentAsWritten, copy.sentRewritten]).toEqual(['What was sent to Venice', 'Sent to zkAPI as you wrote it.', 'Sent to zkAPI (rewritten)']);
   expect([copy.veniceNotSetUp, copy.veniceNotAllowed, copy.zkapiNotSetUp, copy.zkapiOff, copy.zkapiPaused, copy.downloading]).toEqual([
     'Not connected. Connect Venice to use its models.',
     'Turned off. Private questions can’t go to Venice until you allow it.',

@@ -1496,10 +1496,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (page === 'settings') {
             const installer = installerForPlatform(options.platform ?? process.platform);
             const update = installer ? options.updateAvailable?.() : undefined;
+            // Settings › zkAPI (#1047): the card's facts only with the control session, as on Private questions before.
+            const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined
+              ? await sourceDashboard.consult.status().catch(() => undefined)
+              : undefined;
             return html(renderDashboardLocalPage('settings', {
               url,
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                ...(outsideHelp ? { outsideHelp } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
                 ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
                 settings: {
