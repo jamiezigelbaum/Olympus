@@ -144839,6 +144839,125 @@ var init_judge_setup = __esm(() => {
   init_venice_models();
 });
 
+// src/workers/classification/judge-pacing.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { createHash as createHash83 } from "node:crypto";
+function header(response, name) {
+  const raw = response.headers.get(name);
+  if (raw === null || raw.trim() === "")
+    return;
+  const value2 = Number(raw);
+  return Number.isFinite(value2) && value2 >= 0 ? value2 : undefined;
+}
+
+class JudgeRateLimitPacer {
+  clock;
+  remaining;
+  resetAt = 0;
+  lastSeq = 0;
+  reportSeq = 0;
+  blockedUntil = 0;
+  calls = new AsyncLocalStorage7;
+  constructor(clock2 = realClock) {
+    this.clock = clock2;
+  }
+  async acquire(signal) {
+    for (;; ) {
+      const now = this.clock.now();
+      if (this.blockedUntil > now) {
+        await this.clock.sleep(Math.min(MAX_WAIT_MS, this.blockedUntil - now), signal);
+        continue;
+      }
+      if (this.remaining !== undefined && this.resetAt > now && this.remaining - (this.lastSeq - this.reportSeq) <= 0) {
+        await this.clock.sleep(Math.min(MAX_WAIT_MS, this.resetAt - now), signal);
+        continue;
+      }
+      if (this.resetAt <= now)
+        this.remaining = undefined;
+      this.lastSeq += 1;
+      return this.lastSeq;
+    }
+  }
+  observeHeaders(response, seq) {
+    const remaining = header(response, "x-ratelimit-remaining-requests");
+    const resetAt = header(response, "x-ratelimit-reset-requests");
+    const now = this.clock.now();
+    if (remaining === undefined || resetAt === undefined || resetAt <= now)
+      return;
+    if (seq <= this.reportSeq && this.remaining !== undefined && this.resetAt > now) {
+      this.remaining = Math.min(this.remaining, remaining - (this.reportSeq - seq));
+      return;
+    }
+    this.remaining = remaining;
+    this.resetAt = resetAt;
+    this.reportSeq = seq;
+  }
+  fetch(fetchImpl) {
+    return async (url2, init) => {
+      const response = await fetchImpl(url2, init);
+      const call = this.calls.getStore();
+      if (call)
+        this.observeHeaders(response, call.seq);
+      if (response.status === 429) {
+        const now = this.clock.now();
+        const reset = header(response, "x-ratelimit-reset-requests");
+        const retryAfter = header(response, "retry-after");
+        const until = reset !== undefined && reset > now ? reset : retryAfter !== undefined ? now + retryAfter * 1000 : undefined;
+        if (call) {
+          call.limited = true;
+          if (until !== undefined)
+            call.retryAt = until;
+        }
+        if (until !== undefined)
+          this.blockedUntil = Math.max(this.blockedUntil, Math.min(until, now + MAX_WAIT_MS));
+        this.remaining = 0;
+      }
+      return response;
+    };
+  }
+  model(model, retries = JUDGE_RATE_LIMIT_RETRIES) {
+    return {
+      complete: async (request) => {
+        for (let attempt = 0;; attempt++) {
+          const call = { seq: await this.acquire(request.signal), limited: false };
+          try {
+            return await this.calls.run(call, () => model.complete(request));
+          } catch (error2) {
+            if (!call.limited || attempt >= retries || request.signal?.aborted)
+              throw error2;
+            if (call.retryAt === undefined) {
+              await this.clock.sleep(Math.min(MAX_WAIT_MS, FALLBACK_BACKOFF_MS * 2 ** attempt), request.signal);
+            }
+          }
+        }
+      }
+    };
+  }
+}
+var JUDGE_PROMPT_CACHE_KEY, DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS = 16, JUDGE_RATE_LIMIT_RETRIES = 6, FALLBACK_BACKOFF_MS = 1000, MAX_WAIT_MS = 65000, realClock;
+var init_judge_pacing = __esm(() => {
+  init_sniffer();
+  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash83("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
+  realClock = {
+    now: () => Date.now(),
+    sleep: (ms, signal) => new Promise((resolve25, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve25();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    })
+  };
+});
+
 // src/workers/classification/sniffer-decision-mass.ts
 function tierMass(tokens, alreadyWritten = "") {
   const left = (word) => word.slice(alreadyWritten.length);
@@ -147561,7 +147680,7 @@ var init_readiness_ledger = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-import { createHash as createHash83, randomBytes as randomBytes25 } from "node:crypto";
+import { createHash as createHash84, randomBytes as randomBytes25 } from "node:crypto";
 function createUnreadableVerdict(input) {
   return (item) => {
     const located = input.locate(item.ref);
@@ -147637,7 +147756,7 @@ function createUnreadableFiles(options) {
     }
   }
   function placeOf2(item) {
-    return { at: item.failedAt, id: createHash83("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
+    return { at: item.failedAt, id: createHash84("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
   }
   function cursorOf(item) {
     const place = placeOf2(item);
@@ -148349,6 +148468,7 @@ function createVeniceAnalystModel(options) {
     ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
     ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
     extraBody: {
+      ...options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {},
       venice_parameters: {
         enable_web_search: "off",
         enable_web_scraping: false,
@@ -150554,7 +150674,7 @@ var init_locator_result_projector2 = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash84 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 import { readFileSync as readFileSync83 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir42 } from "node:os";
@@ -151047,7 +151167,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2568(value2) {
-  return createHash84("sha256").update(value2, "utf8").digest("hex");
+  return createHash85("sha256").update(value2, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -153842,7 +153962,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 function escapeHtml2(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -153893,14 +154013,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash85("sha256").update(normalised).digest("hex");
+  return createHash86("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash85("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash86("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -165113,9 +165233,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash86 } from "node:crypto";
+import { createHash as createHash87 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash86("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash87("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -165782,10 +165902,10 @@ function withDashboardControlContextHeader(request, csrfToken, grade) {
     request.headers.set(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, grade);
   return request;
 }
-function cookieValue(header, name) {
-  if (!header)
+function cookieValue(header2, name) {
+  if (!header2)
     return;
-  for (const part of header.split(";")) {
+  for (const part of header2.split(";")) {
     const separator = part.indexOf("=");
     if (separator < 0)
       continue;
@@ -165836,10 +165956,10 @@ function isUnauthenticatedHealthRequest(request, basePath) {
   const url2 = new URL(request.url);
   return url2.pathname === `${basePath}/health` && url2.search === "";
 }
-function hasValidWorkerBearerToken(header, expectedToken) {
-  if (!header)
+function hasValidWorkerBearerToken(header2, expectedToken) {
+  if (!header2)
     return false;
-  const [scheme, ...rest] = header.split(" ");
+  const [scheme, ...rest] = header2.split(" ");
   if (scheme !== "Bearer" || rest.length !== 1)
     return false;
   return constantTimeStringEqual(rest[0] ?? "", expectedToken);
@@ -166309,7 +166429,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash87 } from "node:crypto";
+import { createHash as createHash88 } from "node:crypto";
 function parseStructuredChatScope(value2) {
   const parts = value2.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -166337,7 +166457,7 @@ function unresolvedChatTitleResolution(value2) {
   };
 }
 function safeDigest(value2) {
-  return createHash87("sha256").update(value2).digest("hex");
+  return createHash88("sha256").update(value2).digest("hex");
 }
 function conversationTitleTerms(value2) {
   const seen = new Set;
@@ -169228,7 +169348,7 @@ var init_file_mime = __esm(() => {
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash88 } from "node:crypto";
+import { createHash as createHash89 } from "node:crypto";
 function isRecord11(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
@@ -169282,7 +169402,7 @@ function cleanTags(tags) {
   return out;
 }
 function sha2569(value2) {
-  return createHash88("sha256").update(value2).digest("hex");
+  return createHash89("sha256").update(value2).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -169644,7 +169764,7 @@ var init_listing = __esm(() => {
 });
 
 // src/workers/evernote/connector.ts
-import { createHash as createHash89 } from "node:crypto";
+import { createHash as createHash90 } from "node:crypto";
 function evernoteDeletionCap(storedNotes) {
   return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
 }
@@ -169751,7 +169871,7 @@ function createEvernoteSourceConnector(options) {
         ...createdAt ? { createdAt } : {},
         ...updatedAt ? { updatedAt } : {},
         attachmentCount: resources.length,
-        contentHash: createHash89("sha256").update(text4).digest("hex")
+        contentHash: createHash90("sha256").update(text4).digest("hex")
       }),
       fetchedAt: now().toISOString()
     };
@@ -170044,7 +170164,7 @@ function createEvernoteSourceConnector(options) {
       bytes.set(chunk, at);
       at += chunk.byteLength;
     }
-    if (createHash89("md5").update(bytes).digest("hex") !== hash)
+    if (createHash90("md5").update(bytes).digest("hex") !== hash)
       throw new FileExtractionSourceError("source_content_unavailable");
     allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? "application/octet-stream";
@@ -170085,7 +170205,7 @@ function createEvernoteSourceConnector(options) {
     lastOutcome: () => outcome
   };
 }
-var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash89("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
+var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash90("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
 var init_connector5 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
@@ -170451,7 +170571,7 @@ var init_live_sync3 = __esm(() => {
 });
 
 // src/workers/email-source/index.ts
-import { createHash as createHash90, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash91, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync86, statSync as statSync41 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 import { join as join128, resolve as resolve28 } from "node:path";
@@ -172034,20 +172154,20 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(403, "mac_dashboard_only", "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.");
           }
           if (url2.pathname === "/dashboard/archive-import/upload-file") {
-            const header = (name) => request.headers.get(name) ?? "";
+            const header2 = (name) => request.headers.get(name) ?? "";
             let relPath;
             try {
-              relPath = decodeURIComponent(header("X-Olympus-Upload-Path"));
+              relPath = decodeURIComponent(header2("X-Olympus-Upload-Path"));
             } catch {
               throw new EmailSourceWorkerError(400, "bad_path", "The name of the file could not be read.");
             }
-            const modified = Number(header("X-Olympus-Upload-Modified"));
-            const declared = Number(header("Content-Length"));
-            const offsetHeader = header("X-Olympus-Upload-Offset");
+            const modified = Number(header2("X-Olympus-Upload-Modified"));
+            const declared = Number(header2("Content-Length"));
+            const offsetHeader = header2("X-Olympus-Upload-Offset");
             const offset = offsetHeader === "" ? 0 : Number(offsetHeader);
-            const final = header("X-Olympus-Upload-Final") !== "0";
+            const final = header2("X-Olympus-Upload-Final") !== "0";
             try {
-              const received = await archiveImports.upload.receive(header("X-Olympus-Upload-Id"), relPath, request.body, {
+              const received = await archiveImports.upload.receive(header2("X-Olympus-Upload-Id"), relPath, request.body, {
                 ...Number.isFinite(modified) && modified > 0 ? { modified } : {},
                 ...Number.isFinite(declared) && declared > 0 ? { declaredBytes: declared } : {},
                 offset,
@@ -174485,7 +174605,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual8(createHash90("sha256").update(expected).digest(), createHash90("sha256").update(state).digest());
+  return timingSafeEqual8(createHash91("sha256").update(expected).digest(), createHash91("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -174749,7 +174869,7 @@ function dashboardOAuthClientSecretRequired(source) {
 }
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash90("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash91("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url2, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -176004,7 +176124,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash91, randomUUID as randomUUID33 } from "node:crypto";
+import { createHash as createHash92, randomUUID as randomUUID33 } from "node:crypto";
 import { realpathSync as realpathSync22, rmSync as rmSync38, readdirSync as readdirSync28 } from "node:fs";
 import { join as join131, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -176019,7 +176139,7 @@ function nameAsOnDisk(scopeRoot, rel) {
   return dir;
 }
 function localFilesItemId(scopePath) {
-  return `f1.${createHash91("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
+  return `f1.${createHash92("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
 function identityFor(scopePath, version2) {
   const providerItemId = localFilesItemId(scopePath);
@@ -176576,7 +176696,7 @@ var init_connector6 = __esm(() => {
 });
 
 // src/workers/local-files/provider-store-sync.ts
-import { createHash as createHash92 } from "node:crypto";
+import { createHash as createHash93 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   const prefix = `${LOCAL_FILES_POLICY_SOURCE}:`;
   if (!approvedScopeKey.startsWith(prefix))
@@ -176586,7 +176706,7 @@ function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   return root;
 }
 function localFilesConnectorIdForScope(approvedScopeKey, scope) {
-  const hash = createHash92("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const hash = createHash93("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
 function localFilesStoreView(tierSet) {
@@ -176741,7 +176861,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash92("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash93("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
@@ -177052,7 +177172,7 @@ var init_whatsapp = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash93 } from "node:crypto";
+import { createHash as createHash94 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -178080,7 +178200,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash93("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash94("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -178835,7 +178955,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value2) {
-  return createHash93("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash94("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -179975,9 +180095,9 @@ function decodeURIComponentWithCharset(encodedStr, charset2) {
   }
   return decodeCharset(byteStr, charset2);
 }
-function decodeParameterValueContinuations(header) {
+function decodeParameterValueContinuations(header2) {
   let paramKeys = new Map;
-  Object.keys(header.params).forEach((key2) => {
+  Object.keys(header2.params).forEach((key2) => {
     let match = key2.match(/\*((\d+)\*?)?$/);
     if (!match) {
       return;
@@ -179992,17 +180112,17 @@ function decodeParameterValueContinuations(header) {
       };
       paramKeys.set(actualKey, paramVal);
     }
-    let value2 = header.params[key2];
+    let value2 = header2.params[key2];
     let encoded = match[0].charAt(match[0].length - 1) === "*";
     if (nr === 0 && encoded && (match = value2.match(/^([^']*)'[^']*'(.*)$/))) {
       paramVal.charset = match[1] || "utf-8";
       value2 = match[2];
     }
     paramVal.values.push({ nr, value: value2, encoded });
-    delete header.params[key2];
+    delete header2.params[key2];
   });
   paramKeys.forEach((paramVal, key2) => {
-    if (Object.prototype.hasOwnProperty.call(header.params, key2)) {
+    if (Object.prototype.hasOwnProperty.call(header2.params, key2)) {
       return;
     }
     let result = "";
@@ -180021,7 +180141,7 @@ function decodeParameterValueContinuations(header) {
     if (pending) {
       result += decodeURIComponentWithCharset(pending, paramVal.charset);
     }
-    header.params[key2] = result;
+    header2.params[key2] = result;
   });
 }
 var textEncoder, isWsp = (c) => c === 32 || c === 9, base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", base64Lookup, charsetAliases, codePageAliases, codePagePattern, ENCODING_LABELS, REPLACEMENT_LABELS, replacementDecoder, UTF16_LABELS, decoders, utf8Decoder, UTF16_ENCODINGS, UTF16_UNORDERED_LABELS, META_PRESCAN_BYTES = 1024, CHARSET_ATTRIBUTE, ENCODED_WORD_PATTERN = "=\\?([^?\\s]+)\\?([QqBb])\\?([^?]*)\\?=", ENCODED_WORD_REGEX, WORD_SEPARATOR_REGEX, ENCODED_WORDS_ONLY_REGEX;
@@ -184560,9 +184680,9 @@ class PostalMime {
       ["in-reply-to", "inReplyTo"],
       ["references", "references"]
     ]) {
-      const header = headers.find((line2) => line2.key === key2);
-      if (header && header.value) {
-        message2[camelKey] = decodeWords(header.value);
+      const header2 = headers.find((line2) => line2.key === key2);
+      if (header2 && header2.value) {
+        message2[camelKey] = decodeWords(header2.value);
       }
     }
     let dateHeader = headers.find((line2) => line2.key === "date");
@@ -184639,12 +184759,12 @@ var init_postal_mime = __esm(() => {
 });
 
 // src/workers/archive-import/mbox/parse.ts
-import { createHash as createHash94 } from "node:crypto";
+import { createHash as createHash95 } from "node:crypto";
 function sha25610(value2) {
-  return createHash94("sha256").update(value2).digest("hex");
+  return createHash95("sha256").update(value2).digest("hex");
 }
 function headerValue(email2, key2) {
-  const value2 = email2.headers.find((header) => header.key === key2)?.value?.trim();
+  const value2 = email2.headers.find((header2) => header2.key === key2)?.value?.trim();
   return value2 ? value2 : undefined;
 }
 function decoded(value2) {
@@ -185436,19 +185556,19 @@ class WhatsAppMessageReader {
       }
       const line2 = step.line;
       const text4 = whatsAppLineText(line2);
-      const header = matchWhatsAppHeader(text4);
+      const header2 = matchWhatsAppHeader(text4);
       if (this.expectHeader) {
         this.expectHeader = false;
-        if (!header)
+        if (!header2)
           throw new WhatsAppFormatError("No message starts where this import was to resume.");
       }
-      if (header) {
+      if (header2) {
         const done = this.building;
-        const first = splitWhatsAppSender(header.rest);
+        const first = splitWhatsAppSender(header2.rest);
         this.building = {
           offset: line2.offset,
           crc: line2.crc,
-          header,
+          header: header2,
           sender: first.sender,
           parts: [],
           bytes: line2.bytes.length + 1,
@@ -185509,13 +185629,13 @@ function scanWhatsAppDateOrder(source, options = {}) {
       break;
     if (step.line.offset > maxBytes)
       break;
-    const header = matchWhatsAppHeader(normalizeWhatsAppLine(utf83.decode(step.line.bytes.subarray(0, WHATSAPP_HEADER_PREFIX_BYTES))));
-    if (!header)
+    const header2 = matchWhatsAppHeader(normalizeWhatsAppLine(utf83.decode(step.line.bytes.subarray(0, WHATSAPP_HEADER_PREFIX_BYTES))));
+    if (!header2)
       continue;
-    style ??= header.style;
-    if (header.style !== style)
+    style ??= header2.style;
+    if (header2.style !== style)
       continue;
-    const span = whatsAppHeaderSpan(header);
+    const span = whatsAppHeaderSpan(header2);
     if (span && above && span.latest < above.earliest && backwards < WHATSAPP_ORDER_BACKWARDS_LEFT_OUT) {
       backwards += 1;
       continue;
@@ -185523,13 +185643,13 @@ function scanWhatsAppDateOrder(source, options = {}) {
     backwards = 0;
     if (span)
       above = span;
-    const evidence = whatsAppOrderEvidence(header);
+    const evidence = whatsAppOrderEvidence(header2);
     if (evidence) {
       votes[evidence] += 1;
       total += 1;
       if (total >= votesEnough)
         break;
-    } else if (header.p1 !== header.p2) {
+    } else if (header2.p1 !== header2.p2) {
       ambiguous = true;
     }
   }
@@ -185694,9 +185814,9 @@ var init_place = __esm(() => {
 });
 
 // src/workers/archive-import/whatsapp/connector.ts
-import { createHash as createHash95 } from "node:crypto";
+import { createHash as createHash96 } from "node:crypto";
 function sha25611(value2) {
-  return createHash95("sha256").update(value2).digest("hex");
+  return createHash96("sha256").update(value2).digest("hex");
 }
 function stoppedFrom2(error2, relPath) {
   if (error2 instanceof WhatsAppFormatError) {
@@ -185704,8 +185824,8 @@ function stoppedFrom2(error2, relPath) {
   }
   return archiveStopFromScopeError(error2, relPath);
 }
-function localTimeIso(header) {
-  const time3 = new Date(header.year, header.month - 1, header.day, header.hour, header.minute, header.second).getTime();
+function localTimeIso(header2) {
+  const time3 = new Date(header2.year, header2.month - 1, header2.day, header2.hour, header2.minute, header2.second).getTime();
   return Number.isFinite(time3) ? new Date(time3).toISOString() : undefined;
 }
 function dateOrderOf(mark) {
@@ -185823,11 +185943,11 @@ function createWhatsAppArchiveConnector(input) {
     const done = Math.min(unit.base + Math.min(offset, unitSize(unit)), context2.total);
     return Math.floor(context2.file.version.size * done / Math.max(1, context2.total));
   };
-  const itemOf = (unit, raw, header, textHash, sameAtTime) => {
+  const itemOf = (unit, raw, header2, textHash, sameAtTime) => {
     const sender = raw.sender;
     const apart = sameAtTime !== undefined ? `#${sameAtTime}` : `@${unit.sourceKey}:${raw.offset}`;
-    const providerItemId = sha25611([unit.chat, header.sentAt, sender, textHash, apart].join("\x00")).slice(0, 32);
-    const authoredAt = localTimeIso(header);
+    const providerItemId = sha25611([unit.chat, header2.sentAt, sender, textHash, apart].join("\x00")).slice(0, 32);
+    const authoredAt = localTimeIso(header2);
     return {
       identity: {
         family: input.format.family,
@@ -185853,8 +185973,8 @@ function createWhatsAppArchiveConnector(input) {
         sourceFile: unit.file.relPath,
         ...unit.entry ? { sourceMember: unit.entry.name } : {},
         sourceFileIndex: unit.fileIndex,
-        writtenAt: header.sentAt,
-        timePrecision: header.style.at(-2) === "s" ? "second" : "minute",
+        writtenAt: header2.sentAt,
+        timePrecision: header2.style.at(-2) === "s" ? "second" : "minute",
         occurrence: apart
       }),
       fetchedAt: new Date().toISOString()
@@ -186092,23 +186212,23 @@ function createWhatsAppArchiveConnector(input) {
               const raw = step.message;
               run2.progressed = true;
               run2.pending = true;
-              const header = resolveWhatsAppHeader(raw.header, dateOrder);
+              const header2 = resolveWhatsAppHeader(raw.header, dateOrder);
               const otherStyle = style !== "" && raw.header.style !== style;
-              if (otherStyle || header && prev !== "" && header.sentAt < prev) {
+              if (otherStyle || header2 && prev !== "" && header2.sentAt < prev) {
                 note(ARCHIVE_COMMON_FINDINGS.itemStartAssumed, "gap", raw.offset);
               }
-              if (header && !otherStyle)
-                prev = header.sentAt;
+              if (header2 && !otherStyle)
+                prev = header2.sentAt;
               if (raw.sender === undefined) {
                 note(WHATSAPP_FINDINGS.systemMessage, "skipped", raw.offset);
               } else if (raw.cut) {
                 note(WHATSAPP_FINDINGS.tooLarge, "gap", raw.offset);
-              } else if (raw.text.trim() === "" || !header) {
+              } else if (raw.text.trim() === "" || !header2) {
                 note(WHATSAPP_FINDINGS.messageEmpty, "skipped", raw.offset);
               } else {
                 const textHash = sha25611(raw.text);
-                const sameAtTime = window2.ordinal(header.sentAt, sha25611(`${raw.sender}\x00${textHash}`).slice(0, 12));
-                run2.page.push(itemOf(unit, raw, header, textHash, sameAtTime));
+                const sameAtTime = window2.ordinal(header2.sentAt, sha25611(`${raw.sender}\x00${textHash}`).slice(0, 12));
+                run2.page.push(itemOf(unit, raw, header2, textHash, sameAtTime));
                 run2.positions.push({ fileIndex: unit.fileIndex, offset: findingOffsetOf(context2, unit, raw.offset) });
                 const media = whatsAppMediaMarkerCount(raw.text);
                 if (media > 0)
@@ -188015,9 +188135,9 @@ var init_xml_stream = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/connector.ts
-import { createHash as createHash96 } from "node:crypto";
+import { createHash as createHash97 } from "node:crypto";
 function sha25612(value2) {
-  return createHash96("sha256").update(value2).digest("hex");
+  return createHash97("sha256").update(value2).digest("hex");
 }
 function enexTime(value2) {
   const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
@@ -188094,7 +188214,7 @@ function decodeBase64Range(reader, start, end, cap) {
   return bytes;
 }
 function md5OfBase64Range(reader, start, end) {
-  const hash2 = createHash96("md5");
+  const hash2 = createHash97("md5");
   decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash2.update(chunk));
   return hash2.digest("hex");
 }
@@ -190335,7 +190455,7 @@ var init_extraction_runtime = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash97 } from "node:crypto";
+import { createHash as createHash98 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -190361,7 +190481,7 @@ function receiptOf(record8, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash97("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash98("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -190983,7 +191103,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash98 } from "node:crypto";
+import { createHash as createHash99 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
 import { existsSync as existsSync99, lstatSync as lstatSync50, readFileSync as readFileSync90, readdirSync as readdirSync29, realpathSync as realpathSync27 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
@@ -191147,7 +191267,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash98("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash99("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -192039,13 +192159,13 @@ function parseHeaders(block) {
   }
   return { get: (name) => map2.get(name) };
 }
-function splitParams(header) {
+function splitParams(header2) {
   const pieces = [];
   let current2 = "";
   let quoted2 = false;
-  for (let index = 0;index < header.length; index += 1) {
-    const char = header[index];
-    if (char === '"' && header[index - 1] !== "\\")
+  for (let index = 0;index < header2.length; index += 1) {
+    const char = header2[index];
+    if (char === '"' && header2[index - 1] !== "\\")
       quoted2 = !quoted2;
     if (char === ";" && !quoted2) {
       pieces.push(current2);
@@ -194161,11 +194281,11 @@ var init_export_zone = __esm(() => {
 });
 
 // src/workers/whatsapp/archive-input.ts
-import { createHash as createHash99 } from "node:crypto";
+import { createHash as createHash100 } from "node:crypto";
 import { existsSync as existsSync102 } from "node:fs";
 import { posix as posix7 } from "node:path";
 function hash2(value2) {
-  return createHash99("sha256").update(value2).digest("hex").slice(0, 24);
+  return createHash100("sha256").update(value2).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -195064,7 +195184,7 @@ function createGmailMailScopeBrowser(options) {
       const sample = contentPage.messages.slice(0, GMAIL_SCOPE_SENDER_SAMPLE);
       for (const message2 of sample) {
         const fetched = await count(client.getMessage(message2.id, { format: "metadata", metadataHeaders: ["From"] }));
-        const from = fetched.payload?.headers?.find((header) => header.name?.toLowerCase() === "from")?.value;
+        const from = fetched.payload?.headers?.find((header2) => header2.name?.toLowerCase() === "from")?.value;
         const sender = senderAddress2(from);
         if (sender)
           tally2.set(sender, (tally2.get(sender) ?? 0) + 1);
@@ -195215,10 +195335,10 @@ function gmailHeaderMatch(client, options = {}) {
     for (const id of candidates2) {
       const message2 = await api2.getMessage(id, { format: "metadata", metadataHeaders: ["Message-ID", "Date", "From", "Subject"] });
       const found = new Map;
-      for (const header of message2.payload?.headers ?? []) {
-        const name = header.name?.trim().toLowerCase();
-        if (name && header.value !== undefined && !found.has(name))
-          found.set(name, header.value);
+      for (const header2 of message2.payload?.headers ?? []) {
+        const name = header2.name?.trim().toLowerCase();
+        if (name && header2.value !== undefined && !found.has(name))
+          found.set(name, header2.value);
       }
       if (bareMessageId(found.get("message-id")) === wanted && sameDate(found.get("date"), headers.date) && same(found.get("from"), headers.from) && same(found.get("subject"), headers.subject)) {
         agreeing.push(id);
@@ -195465,7 +195585,7 @@ var init_gmail_attachment_extraction = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -195501,7 +195621,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash100("sha256").update(`${accessToken}
+    const key2 = createHash101("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -195559,7 +195679,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash100("sha256").update(session.token).digest("hex");
+    const key2 = createHash101("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -195783,7 +195903,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash101 } from "node:crypto";
+import { createHash as createHash102 } from "node:crypto";
 import { mkdirSync as mkdirSync63, readFileSync as readFileSync91 } from "node:fs";
 import { dirname as dirname102 } from "node:path";
 
@@ -195841,7 +195961,7 @@ class SnifferCallBudget {
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash101("sha256").update(own3).digest("base64");
+  const key2 = createHash102("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -196138,7 +196258,8 @@ async function runSnifferPass(options) {
       return true;
     });
   }
-  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
+  const maxConcurrent = options.lane.kind === "venice" ? SNIFFER_MAX_CONCURRENT_CLOUD_CALLS : SNIFFER_MAX_CONCURRENT_CALLS;
+  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(maxConcurrent, Math.floor(options.concurrentCalls ?? 1)));
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
@@ -196297,7 +196418,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_answer_activity();
   init_atomic_file();
@@ -197675,7 +197796,7 @@ function tierSnifferServiceEnv(env) {
     embeddingPrefilterEnabled: !["0", "false", "no", "off"].includes(env.OLYMPUS_EMBEDDING_PREFILTER_ENABLED?.trim().toLowerCase() ?? ""),
     intervalMs: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim() ? { maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) } : {},
-    ...env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim() ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger7(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) } : {},
+    ...env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim() ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CLOUD_CALLS, positiveInteger7(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) } : {},
     ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim() ? { maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}
   };
 }
@@ -199914,8 +200035,8 @@ function chatgptPrivateAnswerProgram(config2) {
           return fail(T.macOffline, true, byUser);
         if (!keepWaiting)
           return fail(T.generic, false, byUser);
-        const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
-        const seconds2 = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
+        const header2 = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
+        const seconds2 = isFinite(header2) && header2 > 0 ? Math.min(30, header2) : 2;
         if (Date.now() + seconds2 * config2.secondMs > deadline)
           return slow(byUser);
         await wait(seconds2 * config2.secondMs);
@@ -214215,10 +214336,10 @@ function detachableSignal(upstream) {
   upstream.addEventListener("abort", follow, { once: true });
   return { signal: controller.signal, detach: () => upstream.removeEventListener("abort", follow) };
 }
-function bearerToken(header) {
-  if (!header)
+function bearerToken(header2) {
+  if (!header2)
     return;
-  const match = /^Bearer ([^\s]+)$/i.exec(header.trim());
+  const match = /^Bearer ([^\s]+)$/i.exec(header2.trim());
   return match?.[1];
 }
 function unauthorized(error2, urls, protectedResourceMetadataUrl = urls?.protectedResourceMetadataUrl) {
@@ -214439,7 +214560,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash102, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash103, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -214807,7 +214928,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash102("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash103("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -215074,7 +215195,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha25613(value2) {
-  return createHash102("sha256").update(value2).digest("hex");
+  return createHash103("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -217267,7 +217388,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash103 } from "node:crypto";
+import { createHash as createHash104 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -217284,7 +217405,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash103("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash104("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -217662,7 +217783,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync92 } from "node:fs";
-import { createHash as createHash104 } from "node:crypto";
+import { createHash as createHash105 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -217686,7 +217807,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash104("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash105("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -217694,7 +217815,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync92(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
-    const policyRevision = createHash104("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
+    const policyRevision = createHash105("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
       return {
         configured: false,
@@ -220262,16 +220383,18 @@ function createTierSnifferModel(input) {
     const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Tier sniffer Venice model profile", bootSecretOptions(input.bootSecretResolver, [lane.profileId], ["classification"], { id: lane.profileId, profile }));
     if (!apiKey)
       return;
-    const model = createVeniceAnalystModel({
+    const pacer = new JudgeRateLimitPacer;
+    const model = pacer.model(createVeniceAnalystModel({
       apiKey,
       model: profile.model,
       ...profile.baseUrl ? { baseUrl: profile.baseUrl } : {},
-      ...input.judgeFetch ? { fetchImpl: input.judgeFetch } : {},
+      fetchImpl: pacer.fetch(input.judgeFetch ?? ((url2, init) => fetch(url2, init))),
       thinking: "disabled",
       reasoningEffort: "low",
       reasoningHeadroomTokens: 0,
-      timeoutMs: 60000
-    });
+      timeoutMs: 60000,
+      promptCacheKey: JUDGE_PROMPT_CACHE_KEY
+    }));
     return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
   }
   return;
@@ -224214,7 +224337,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...snifferModel.prepareSniffer ? {
         prepareSniffer: (signal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: "tier_sniffer" }).prepareSniffer(signal))
       } : {},
-      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: "tier_sniffer" }).complete(request))
+      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: "tier_sniffer" }).complete(request))
     } : snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -224229,7 +224352,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     intervalMs: snifferEnv.intervalMs,
     embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
-    ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
+    ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
     ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
@@ -224936,6 +225059,7 @@ var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUS
 var init_server5 = __esm(async () => {
   init_judge_setup();
   init_judge_spending();
+  init_judge_pacing();
   init_sniffer_decision();
   init_engine_service();
   init_privacy_questions();
@@ -225101,6 +225225,7 @@ var init_server5 = __esm(async () => {
   init_answer_activity();
   init_privacy_profile();
   init_sniffer_service();
+  init_sniffer_resolver();
   init_classification_ledger();
   init_tier_migration();
   init_embedding_ledger();
