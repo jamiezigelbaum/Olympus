@@ -591,28 +591,30 @@ const SETTINGS_SECTIONS = [
  * Settings (`?settings`, owner 2026-11-07, mockup final-8): the rarely used
  * pieces in one place, with a side list. Agents and access, the built-in
  * models (machinery, so not on Home), updates, and help. The models that
- * answer and sort Private items stay on Privacy rules.
+ * answer and sort Private items stay on Privacy rules. The side list shows
+ * one section at a time (owner, 2026-11-10): each link targets its section,
+ * and with no target the first one shows. Plain CSS, so it works locked.
  */
 export function renderDashboardSettingsPage(options?: DashboardPageOptions): string {
   const now = options?.now ?? new Date();
   const token = readToken(options?.basePath);
   const settings = options?.settings;
   const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map(section => `<a href="#${section.id}">${escapeHtml(section.label)}</a>`).join('')}</nav>`;
-  const agents = `<section id="settings-agents">${options?.agents
-    ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>')
-    : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
-  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>'
+  const agents = `<section class="setpane" id="agents">${options?.agents
+    ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>')
+    : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3>'
     + (settings?.models?.length
       ? `<div class="srows">${settings.models.map(model => `<div class="srow nodot"><div class="smain"><b>${escapeHtml(model.name)}</b> <span class="pnote">· ${escapeHtml(model.state)}</span><p class="pnote">${escapeHtml(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p></div></div>`).join('')}</div>`
       : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>')
     + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml(dashboardLocalPageHref('keys', token)) + '">Privacy rules</a>.</p></section>';
   const update = settings?.update;
-  const updates = '<section><h3 class="sect" id="updates">Updates</h3>'
+  const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>'
     + (update
       ? `<p>${escapeHtml(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>`
       : '<p class="pnote">Olympus is up to date.</p>')
     + '</section>';
-  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
     + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref('help', token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const body = lockedGate(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
   return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
@@ -623,8 +625,11 @@ const SETTINGS_CSS = `
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
 .setside a:hover, .setside a:focus-visible { border-color: var(--link); }
-.setmain section + section { margin-top: 24px; }
-.setmain > section:first-child .sect { margin-top: 0; }
+.setmain > .setpane { display: none; scroll-margin-top: 12px; }
+.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }
+.setmain > .setpane > .sect:first-child { margin-top: 0; }
+${SETTINGS_SECTIONS.map(section => `.setlayout:has(#${section.id}:target) .setside a[href="#${section.id}"]`).join(',\n')},
+.setlayout:not(:has(.setpane:target)) .setside a:first-child { border-color: var(--link); background: var(--panel, transparent); font-weight: 600; }
 .setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 @media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
 `;
