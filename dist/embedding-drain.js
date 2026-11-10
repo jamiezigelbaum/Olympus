@@ -31764,12 +31764,28 @@ var init_local_index = __esm(() => {
       const memo = this.vectorLaneMemo?.get(modelId);
       if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
         return true;
+      if (!this.tierHiddenCountsMemo) {
+        this.refreshTierHiddenCountsInTurns();
+        return this.anyCurrentEmbedding(modelId);
+      }
       const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
       if (servable)
         (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
       else
         this.vectorLaneMemo?.delete(modelId);
       return servable;
+    }
+    anyCurrentEmbedding(modelId) {
+      return this.db.query(`
+      SELECT 1 AS present
+      FROM chunk_embeddings emb
+      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+      JOIN items i ON i.item_pk = emb.item_pk
+      WHERE emb.model_id = ?
+        AND i.tombstoned = 0
+        AND emb.content_hash = c.embedding_input_hash
+      LIMIT 1
+    `).get(modelId) !== null;
     }
     vectorLaneMemo;
     async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {

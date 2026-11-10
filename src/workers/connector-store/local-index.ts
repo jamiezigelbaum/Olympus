@@ -11435,10 +11435,34 @@ export class LocalConnectorStore {
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
     const memo = this.vectorLaneMemo?.get(modelId);
     if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
+    // No hidden set built yet (the first search after a start): building it
+    // here held Sparta's thread for most of a 75-86 s freeze (2026-11-10).
+    // Build it in turns for the next search, and answer this one from the
+    // vectors alone, hidden or not: the lane's rows are still filtered by the
+    // current tier ledger, so a hidden vector can switch the lane on but
+    // never be returned.
+    if (!this.tierHiddenCountsMemo) {
+      void this.refreshTierHiddenCountsInTurns();
+      return this.anyCurrentEmbedding(modelId);
+    }
     const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
     if (servable) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
     else this.vectorLaneMemo?.delete(modelId);
     return servable;
+  }
+
+  /** Whether any live chunk has a current vector for the model, before visibility. */
+  private anyCurrentEmbedding(modelId: string): boolean {
+    return this.db.query(`
+      SELECT 1 AS present
+      FROM chunk_embeddings emb
+      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+      JOIN items i ON i.item_pk = emb.item_pk
+      WHERE emb.model_id = ?
+        AND i.tombstoned = 0
+        AND emb.content_hash = c.embedding_input_hash
+      LIMIT 1
+    `).get(modelId) !== null;
   }
 
   // No initializer: a class-field initializer is a load-time side effect that
