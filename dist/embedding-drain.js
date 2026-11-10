@@ -24862,11 +24862,13 @@ var init_embeddings = __esm(() => {
   TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
   TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
     reason;
-    constructor(provider, reason, attempts, budgetMs = 0) {
+    modelStarting;
+    constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
       const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
       super("source_index_error", message2, suggestion);
       this.name = "TransientSourceEmbeddingError";
       this.reason = reason;
+      this.modelStarting = options.modelStarting === true;
     }
   };
 });
@@ -36049,7 +36051,10 @@ class BuiltInSourceEmbeddingProvider {
         this.load().catch(() => {
           return;
         });
-        throw new BuiltInEmbeddingNotReadyError(this.status());
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
+        });
       }
     }
     const model = await this.ready();
@@ -36506,8 +36511,8 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status, cause) {
-      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
+    constructor(status, cause, options = {}) {
+      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
       this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
@@ -41944,8 +41949,12 @@ var init_vocabulary = __esm(() => {
       itemsOne: "1 item",
       itemsMany: "{n} items",
       checked: "checked {when}",
-      allSources: "All sources",
-      progress: "In progress"
+      progress: "In progress",
+      left: "about {duration} left",
+      openPrivacy: "Open Privacy",
+      waitBudget: "daily {api} API budget used",
+      waitRateLimit: "{api} rate limit reached",
+      resumes: "resumes at {local} ({utc} UTC)"
     },
     needsYou: "Needs you",
     sources: "Sources",
@@ -42033,7 +42042,8 @@ var init_vocabulary = __esm(() => {
     findingItems: "Finding items",
     findingFound: "Finding {unit} · {done} found so far",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
-    stalledSources: "{sources} paused",
+    stalledRetrying: "{sources} retrying",
+    stalledOff: "{sources} switched off",
     stalledAnd: "{first} and {last}",
     stalledMore: "{count} more",
     sourceFailures: DASHBOARD_SOURCE_FAILURE_WORDS,
@@ -44659,7 +44669,7 @@ function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -45472,8 +45482,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostLinks = value.kind === "computer" ? links : {};
     const landing = value.landing;
     if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
-      state.landing = landing.sourceId;
-      state.landingImport = landing.import === true;
+      if (landing.sourceId === config.allSourcesId)
+        state.open["home-all"] = true;
+      else {
+        state.landing = landing.sourceId;
+        state.landingImport = landing.import === true;
+      }
     }
   }
   function onComputer() {
@@ -46159,13 +46173,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const line = add(el("p", "stale"), el("span", "muted", words2));
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
-  function needsYouSection(items) {
+  function needsYouSection(items, extra) {
     const waiting = waitingRow();
-    if (!items.length && !waiting)
+    const more = extra || [];
+    if (!items.length && !waiting && !more.length)
       return null;
     const section = add(el("section", "section"), el("h2", "", P.needsYou));
     const list = el("ul", "rows");
     add(list, waiting);
+    for (const row of more)
+      add(list, row);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
       const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(archiveNeedFix(item), key2, "warn", true, itemSource(item)));
@@ -46422,7 +46439,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    return archiveGroups().some((meta) => !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking"));
+    return archiveGroups().some(archiveMoving);
+  }
+  function archiveMoving(meta) {
+    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking");
   }
   function startArchivePick(key2, sourceId) {
     supersede();
@@ -46548,6 +46568,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function sourceImportsNeed(group) {
     return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
+  }
+  function sourceImportsMoving(group) {
+    return !archiveSetting(group) && group.imports.filter(validArchive).some((entry) => entry.status === "importing");
   }
   function sourceImportList(group) {
     const S = H.copy.archives.inSource;
@@ -47197,7 +47220,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
-      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
+      const names = progress.stalled ? stalledNames() : "";
+      const paused = progressPaused() ? ", " + P.progressPaused : names ? ", " + names : "";
       const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
       return phase + ": " + foundSoFar(first && first.done, progress.unit) + paused;
     }
@@ -47212,15 +47236,25 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill2(P.eta, { duration: duration(progress.etaSeconds) }));
     }
-    if (progress.stalled)
+    if (progress.stalled && stalledNames())
       parts.push(stalledNames());
     return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
   }
   function stalledNames() {
     const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
-    const names = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label).map((source) => String(source.label));
-    if (!names.length)
+    const stalled = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label);
+    const failing = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "failing");
+    const off = stalled.filter((source) => source.progress.stall && source.progress.stall.cause === "switched_off");
+    if (!stalled.length)
       return P.stalled;
+    const parts = [];
+    if (failing.length)
+      parts.push(fill2(P.stalledRetrying, { sources: nameList(failing.map((source) => String(source.label))) }));
+    if (off.length)
+      parts.push(fill2(P.stalledOff, { sources: nameList(off.map((source) => String(source.label))) }));
+    return parts.join(", ");
+  }
+  function nameList(names) {
     let list;
     if (names.length === 1)
       list = names[0];
@@ -47228,7 +47262,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       list = fill2(P.stalledAnd, { first: names[0], last: names[1] });
     else
       list = fill2(P.stalledAnd, { first: names[0] + ", " + names[1], last: fill2(P.stalledMore, { count: count(names.length - 2) }) });
-    return fill2(P.stalledSources, { sources: list });
+    return list;
   }
   function progressSection(progress, withDetails) {
     if (!progress || progressFinished(progress))
@@ -47486,32 +47520,182 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const entry = models.transcription;
     if (!entry || typeof entry !== "object")
       return false;
+    if (entry.state === "not_needed")
+      return false;
     return !!entry.download || entry.state === "failed" || entry.state === "load_failed" || entry.state === "interrupted";
   }
   function renderHome(page2, data2) {
+    page2.className += " home-page";
     const all = Array.isArray(data2.sources) ? data2.sources : [];
     const needs = Array.isArray(data2.needsYou) ? data2.needsYou.filter((item) => !!item) : [];
+    const extra = [privacyPendingRow(data2), transcriptionNeedRow(data2.models)].filter((row) => !!row);
     const waiting = waitingRow() ? 1 : 0;
-    add(page2, homeStatus(data2, needs.length + waiting + (data2.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
+    add(page2, homeStatus(data2, needs.length + extra.length + waiting + (data2.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
     add(page2, staleLine());
-    add(page2, needsYouSection(needs));
-    const progress = progressSection(data2.progress, true);
-    if (progress) {
-      const head = progress.querySelector("h2");
-      if (head)
-        head.textContent = P.home.progress;
+    add(page2, homeSetupSlot(data2));
+    add(page2, needsYouSection(needs, extra));
+    add(page2, homeProgressSection(data2));
+    add(page2, homeFocusedSources(all));
+    return page2;
+  }
+  function homeSetupSlot(_data) {
+    return null;
+  }
+  function privacyPendingRow(data2) {
+    const info = data2 && data2.privacy && typeof data2.privacy === "object" ? data2.privacy : null;
+    if (!info || !privacy || info.configured !== true)
+      return null;
+    const pending2 = typeof info.pendingCount === "number" && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    if (pending2 < 1)
+      return null;
+    const W = config.privacy.copy;
+    const blocked = globalReason();
+    const open4 = button(P.home.openPrivacy, "need:privacy-pending", blocked ? null : () => openPrivacy("need:privacy-pending"), "plain");
+    const body = add(el("div", "need-body"), el("p", "row-text", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })), add(el("span", "fix"), open4));
+    const row = add(el("li", "row need"), body);
+    row.setAttribute("data-privacy-pending", String(pending2));
+    return row;
+  }
+  function transcriptionNeedRow(models) {
+    if (!models || !transcriptionNeedsHand(models))
+      return null;
+    const words2 = transcriptionWords(models);
+    const fix = models.transcription && models.transcription.download;
+    if (!words2 || !fix)
+      return null;
+    const body = add(el("div", "need-body"), el("p", "row-text", P.modelTranscription + ": " + words2), fixControl(fix, "models:transcription", "warn", false));
+    return add(el("li", "row need"), body);
+  }
+  function homeProgressSection(data2) {
+    const rows = [];
+    const progress = data2.progress;
+    if (progress && !progressFinished(progress))
+      rows.push(homeIndexRow(progress));
+    if (data2.models) {
+      for (const entry of installLines(data2.models))
+        if (entry.state !== "failed")
+          rows.push(add(el("li", "row home-line"), installLine(entry)));
     }
-    add(page2, progress);
-    if (data2.models && (installLines(data2.models).some((entry) => entry.state !== "failed") || transcriptionNeedsHand(data2.models)))
-      add(page2, modelsSection(data2.models));
-    add(page2, privacySection(data2));
-    if (state.landing || state.landed)
-      state.open["home-sources"] = true;
-    if (state.open["home-sources"] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds)))
-      state.open["home-sources"] = true;
-    const box = details("home-sources", doc.createTextNode(P.home.allSources + " (" + count(all.filter((source) => !isArchivesCard(source)).length) + ")"), "section home-sources");
-    add(box, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
-    return add(page2, box);
+    const waits = Array.isArray(data2.waits) ? data2.waits : [];
+    for (const wait of waits) {
+      const row = waitRow(wait);
+      if (row)
+        rows.push(row);
+    }
+    if (!rows.length)
+      return null;
+    const section = add(el("section", "section home-progress"), el("h2", "", P.home.progress));
+    const list = el("ul", "rows");
+    for (const row of rows)
+      add(list, row);
+    return add(section, list);
+  }
+  function indexingNames() {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const names = sources.filter((source) => {
+      const progress = sourceProgress(source);
+      return !!progress && progress.stage !== "done" && !isArchivesCard(source);
+    }).map((source) => String(source.label || "")).filter((name) => !!name);
+    return names.slice(0, 3).join(", ") + (names.length > 3 ? " " + fill2(P.stalledMore, { count: count(names.length - 3) }) : "");
+  }
+  function homeIndexRow(progress) {
+    const facts = [];
+    const names = indexingNames();
+    if (names)
+      facts.push(names);
+    if (progressPaused())
+      facts.push(P.progressPaused);
+    else if (totalUnknown(progress)) {
+      const first = Array.isArray(progress.details) ? progress.details[0] : undefined;
+      facts.push(foundSoFar(first && first.done, progress.unit));
+    } else {
+      if (progress.percent !== undefined)
+        facts.push(percent(progress.percent) + "%");
+      if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled)
+        facts.push(fill2(P.home.left, { duration: duration(progress.etaSeconds) }));
+    }
+    const stalled = progress.stalled && !progressPaused() ? stalledNames() : "";
+    if (stalled)
+      facts.push(stalled);
+    const line = add(el("p", "row-text home-index"), el("strong", "", progress.phase === "initial" ? P.progressInitial : P.progressRefresh), facts.length ? el("span", "muted", " · " + facts.join(" · ")) : null);
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    const faster = indexFasterControl();
+    const row = add(el("li", "row home-line"), add(el("div", "need-body"), line));
+    row.setAttribute("data-home-index", progress.phase === "initial" ? "initial" : "refresh");
+    if (!stages.length && !faster)
+      return row;
+    const open4 = !!state.open["progress-details"];
+    const toggle = button(P.details, "progress-details", () => {
+      state.open["progress-details"] = !state.open["progress-details"];
+      render("progress-details");
+    }, "plain");
+    toggle.setAttribute("aria-expanded", open4 ? "true" : "false");
+    toggle.setAttribute("aria-controls", "progress-details");
+    add(row.firstChild, toggle);
+    if (!open4)
+      return row;
+    const box = el("div", "home-details");
+    box.id = "progress-details";
+    const list = el("ul", "plain");
+    stages.forEach((stage) => add(list, el("li", "", fill2(P.stageLine, {
+      stage: String(stage.stage || ""),
+      done: count(stage.done),
+      total: count(stage.total),
+      unit: unitWord(stage.unit, Number(stage.total) || 0)
+    }))));
+    return add(row, add(box, stages.length ? list : null, faster));
+  }
+  function resumeWords(iso) {
+    const at = new Date(iso);
+    if (!isFinite(at.getTime()))
+      return "";
+    const two = (value) => (value < 10 ? "0" : "") + String(value);
+    const local = two(at.getHours()) + ":" + two(at.getMinutes());
+    const utc = two(at.getUTCHours()) + ":" + two(at.getUTCMinutes());
+    return fill2(P.home.resumes, { local, utc });
+  }
+  function waitRow(wait) {
+    if (!wait || typeof wait.label !== "string")
+      return null;
+    const api = String(wait.api || wait.label);
+    const facts = [fill2(wait.reason === "rate_limit" ? P.home.waitRateLimit : P.home.waitBudget, { api })];
+    const when = typeof wait.resumesAt === "string" ? resumeWords(wait.resumesAt) : "";
+    if (when)
+      facts.push(when);
+    const line = add(el("p", "row-text"), el("strong", "", wait.label), el("span", "muted", " · " + facts.join(" · ")));
+    const row = add(el("li", "row home-line"), add(el("div", "need-body"), line));
+    row.setAttribute("data-source-wait", String(wait.sourceId || ""));
+    return row;
+  }
+  function homeFocusedSources(all) {
+    if (state.open["home-all"]) {
+      const section2 = el("div", "home-sources");
+      add(section2, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+      return section2;
+    }
+    const focus = state.landing || (state.landed ? state.landed.id : "");
+    const shown = all.filter((source) => {
+      const id = String(source && (source.id || source.label));
+      if (focus && (id === focus || focus.indexOf(id + ":") === 0))
+        state.open["home-focus:" + id] = true;
+      if (state.open["home-focus:" + id])
+        return true;
+      const archives2 = archivesMeta(id);
+      const joined = sourceImportsMeta(id);
+      if (!!archives2 && (archiveNeeds(archives2) || archiveMoving(archives2)) || !!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))
+        state.open["home-focus:" + id] = true;
+      return !!state.open["home-focus:" + id];
+    });
+    if (!shown.length && !archivesMoving())
+      return null;
+    const sources = shown.filter((source) => !isArchivesCard(source));
+    const archives = all.filter(isArchivesCard)[0];
+    const section = el("div", "home-sources");
+    if (sources.length)
+      add(section, sourcesSection(sources));
+    if (archives && (shown.indexOf(archives) >= 0 || archivesMoving()))
+      add(section, otherArchivesSection(archives));
+    return section.childNodes.length ? section : null;
   }
   function renderFull() {
     const page2 = el("main", "page");
@@ -51486,6 +51670,7 @@ function chatgptDashboardPageHtml(options = {}) {
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
+    allSourcesId: DASHBOARD_ALL_SOURCES_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -51556,6 +51741,7 @@ var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESU
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
+  init_open_targets();
   init_shared_privacy_logic();
   init_picker();
   init_privacy();
@@ -51873,6 +52059,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .home-status{display:flex;align-items:center;gap:1rem;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem;margin:0 0 1.5rem;background:var(--surface)}.home-status .home-title{font-weight:600;margin:0}.home-status .muted{margin:0.15rem 0 0}.home-sources>summary{cursor:pointer;color:var(--muted);padding:0.5rem 0}
+.home-page .rows{border-top:0}.home-page .row.need,.home-page .row.home-line{display:block;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:0.875rem 1.25rem;margin:0.5rem 0}.home-page .row.home-line{background:var(--bg)}.home-page .row.need .row-text{font-weight:600}.home-page .need-body{align-items:center}.home-page .btn.warnfill{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.home-page .home-index,.home-page .row.home-line .row-text{margin:0}.home-page .home-details{margin-top:0.75rem}.home-page .home-details ul{margin:0;padding-left:1.25rem}.home-page .model-install p{margin:0}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
@@ -71417,6 +71604,11 @@ init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
 init_source_failure();
+
+// src/workers/dashboard/models-on-computer.ts
+var LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
+
+// src/workers/email-source/index.ts
 init_google_own_app();
 init_sovereignty();
 init_first_run_privacy();

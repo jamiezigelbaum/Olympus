@@ -8,6 +8,7 @@
 // Synthetic files only; names are invented.
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -26,7 +27,6 @@ import {
   V0_4_PUBLIC_REMOTE_MCP_TOOLS,
 } from '../src/core/public-surface.ts';
 import { exposedOperations, type OperationSurface } from '../src/core/operation-exposure.ts';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import * as scopeSafe from '../src/core/scope-safe-fs.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import {
@@ -46,7 +46,7 @@ import { secretLocationsPathForStore } from '../src/workers/classification/tier-
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createArchivePathResolver } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
@@ -825,9 +825,7 @@ describe('remove asks; the person\'s approval removes that archive only', () => 
 describe('no path that holds only the worker bearer approves or removes anything', () => {
   /** This computer's own browser: same origin, a loopback socket peer, no bearer. */
   async function localSession(f: Fixture): Promise<Record<string, string>> {
-    const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(request, '127.0.0.1');
-    const mint = await f.guarded(request);
+    const mint = await ownerLocalMint(f.guarded, ORIGIN, TOKEN);
     expect(mint.status).toBe(200);
     return {
       Cookie: (mint.headers.get('Set-Cookie') ?? '').split(';')[0]!,

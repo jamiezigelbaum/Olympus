@@ -148,6 +148,16 @@ export interface SourceIndexCorpusSearchAdapter {
   (request: SourceIndexCorpusSearchRequest): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>;
   // Optional local-only preparation before lane deadlines start.
   prepareKeywords?: (query: string) => Promise<void>;
+  /**
+   * Optional: get the query's embedding ready before lane deadlines start, so
+   * a local embedding model that is still starting (the first question after
+   * idle) can finish within `budgetMs` instead of dropping the semantic lane.
+   * It must bound itself to `budgetMs`, never throw, and never read the store:
+   * the router calls it only when the adapter already reported a servable
+   * hybrid lane, and only for searches that read content. A lane still skipped
+   * afterwards is reported as usual (semantic_lane_skipped).
+   */
+  prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
@@ -285,6 +295,9 @@ export interface RouteSourceIndexSearchOptions {
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
+  // How long preparation may wait for a starting embedding model before the
+  // lanes run (see DEFAULT_SEMANTIC_PREPARE_BUDGET_MS). Non-positive skips it.
+  semanticPrepareBudgetMs?: number;
   // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
   laneClock?: LaneDeadlineClock;
 }
@@ -301,6 +314,17 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
 };
+
+// How long one search may wait, before its lane deadlines start, for a local
+// embedding model that is still starting (#1172). A third of the 45 s
+// source-answer hand-off (SOURCE_ANSWER_HANDOFF_DEFAULT_MS in
+// core/source-answer-jobs.ts): this wait plus the 10 s lane deadline below
+// leaves the remaining 20 s for evidence reading and the Analyst, so a cold
+// first question still answers before the hand-off instead of becoming a job.
+// A warm model never waits: preparation returns as soon as the query embeds.
+// A model still not started by then leaves the semantic lane skipped, and the
+// EvidencePack's coverage says so.
+export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
 // Default per-lane retrieval deadline (ms).
 //
@@ -414,10 +438,34 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     searchableCorpora.push(corpus);
   }
 
+  // Each corpus's retrieval state, read once (its hybridAvailability is a
+  // store read): preparation uses it to decide whether a semantic lane is
+  // worth warming, and the lane's honesty check below uses the same answer.
+  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
+    corpus.corpusId,
+    retrievalStateForAdapter(options.adapters[corpus.corpusId]!, {
+      query: request.query,
+      maxResults: request.maxResults,
+      corpus,
+      context: request.context,
+    }),
+  ] as const));
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
+  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
   await Promise.all(searchableCorpora.map(async (corpus) => {
-    try { await options.adapters[corpus.corpusId]!.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
+    const adapter = options.adapters[corpus.corpusId]!;
+    try { await adapter.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
+    // A metadata-only search (the Private-match probe) has its own short
+    // budget and reports an incomplete lane as unknown; it never waits here.
+    if (
+      adapter.prepareSemantic
+      && semanticPrepareBudgetMs > 0
+      && request.context.metadataOnly !== true
+      && retrievalStates.get(corpus.corpusId)!.hybridServable
+    ) {
+      try { await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs); } catch { /* the lane reports its own skip */ }
+    }
   }));
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
@@ -430,7 +478,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       context: request.context,
       ...(cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}),
     };
-    const retrievalState = retrievalStateForAdapter(adapter, corpusRequest);
+    const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(
       () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)),
@@ -696,17 +744,20 @@ function semanticLaneDegradation(
 function retrievalStateForAdapter(
   adapter: SourceIndexCorpusSearchAdapter,
   request: SourceIndexCorpusSearchRequest,
-): SourceIndexRetrievalState {
+): { state: SourceIndexRetrievalState; hybridServable: boolean } {
   let hybridAvailability: SourceIndexHybridAvailability | undefined;
   try {
     hybridAvailability = adapter.hybridAvailability?.(request);
   } catch {
     hybridAvailability = { servable: false, reason: 'hybrid_capability_unreported' };
   }
-  return assessSourceIndexRetrievalState({
-    declaredMode: request.corpus.activationMode,
-    ...(hybridAvailability ? { hybridAvailability } : {}),
-  });
+  return {
+    state: assessSourceIndexRetrievalState({
+      declaredMode: request.corpus.activationMode,
+      ...(hybridAvailability ? { hybridAvailability } : {}),
+    }),
+    hybridServable: hybridAvailability?.servable === true,
+  };
 }
 
 function normalizeSearchRequest(request: SourceIndexSearchRequest): SourceIndexSearchRequest {
