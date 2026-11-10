@@ -8,6 +8,7 @@ import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayo
 import { processInstanceIdentity } from './file-lease.ts';
 import { resolveLinuxEngineLayout, preflightLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
 import { workerFetch } from './worker-transport.ts';
+import { isReleaseVersion, newerVersion } from './update-check.ts';
 /**
  * The standalone Olympus engine on macOS: a LaunchAgent by default, or an
  * optional LaunchDaemon running as the same account. Both run
@@ -1320,6 +1321,7 @@ async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin
   preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, 'The previous app');
   assertFile(join(paths.previousAppDir, 'dist', 'cli.js'), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
+  if (paths.engineManager === 'daemon') assertServerModeCanRunPrevious(paths.previousAppDir);
   const bunBin = options.bunBin ?? installed.runtimePath;
 
   swapAppDirectories(paths);
@@ -1385,6 +1387,31 @@ async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin
       : `Rolling back to build ${failedBuild} failed (${result.reason}); putting back build ${restored.build} failed too: ${restored.reason}`,
     restored,
   };
+}
+
+/** The first release whose host reads its build from the installed app when server mode starts it. */
+const SERVER_MODE_MIN_ROLLBACK_VERSION = '1.3.2';
+
+/**
+ * Server mode's daemon sets no OLYMPUS_ENGINE_BUILD, and a host from before
+ * 1.3.2 reads its build only from that variable, so it would fail the health
+ * check and the rollback would undo itself (#768). Refuse before changing
+ * anything, and say how to get there. An unreadable version counts as too old.
+ */
+function assertServerModeCanRunPrevious(previousAppDir: string): void {
+  let version: string | undefined;
+  try {
+    const manifest = JSON.parse(readFileSync(join(previousAppDir, 'package.json'), 'utf8')) as { version?: unknown };
+    if (typeof manifest.version === 'string' && isReleaseVersion(manifest.version)) version = manifest.version;
+  } catch {
+    version = undefined;
+  }
+  if (version && !newerVersion(SERVER_MODE_MIN_ROLLBACK_VERSION, version)) return;
+  throw new OperationError(
+    'config_error',
+    `The previous Olympus (${version ?? 'an unknown version'}) is older than ${SERVER_MODE_MIN_ROLLBACK_VERSION} and cannot run in server mode, so nothing was changed. Turn server mode off in Keys, then roll back again.`,
+    'Turn off “Keep Olympus running when no one is logged in” in Keys, then run olympus engine rollback.',
+  );
 }
 
 /**

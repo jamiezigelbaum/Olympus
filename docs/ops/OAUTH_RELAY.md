@@ -66,7 +66,8 @@ Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
   no Desktop client is configured, Google keeps the Web client, relay and
   publisher exchange it used from 2026-09-03 to 2026-10-13. The older pilot
   Desktop identity (`google-pilot-client.ts`) is not this client: it was
-  refused at Google's token endpoint because Olympus sent it no secret.
+  refused at Google's token endpoint because Olympus sent it no secret, and
+  its Google project is deleted (no build ships it since #765).
 
 Both publisher apps ship **filled in**. Dropbox: the owner created the
 "Olympus-Plugin" app 2026-09-03, registered both redirect URIs it needs (the

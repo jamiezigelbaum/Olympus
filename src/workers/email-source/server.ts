@@ -1,5 +1,6 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
@@ -537,6 +538,7 @@ import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudg
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { SNIFFER_MAX_CONCURRENT_CALLS } from '../classification/sniffer-resolver.ts';
 import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
@@ -552,7 +554,7 @@ import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
  */
 const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
-import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
+import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -571,6 +573,8 @@ export function createWorkerMessagingCaptureOwnership(options: {
   revokeGrant?: (path: string) => void;
   shouldResumeCapture?: () => boolean;
   onResumeFailure?: (source: MessagingCaptureSource) => void;
+  /** A resume after a pause worked: a failure recorded earlier no longer holds (#687). */
+  onResumeSuccess?: (source: MessagingCaptureSource, status: MessagingCaptureStatus) => void;
 }): {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   nativeOwners: Record<MessagingCaptureSource, boolean>;
@@ -649,8 +653,10 @@ export function createWorkerMessagingCaptureOwnership(options: {
         } finally {
           paused[source] -= 1;
           if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
-            try { await capture.reconcile(); }
+            let resumed: MessagingCaptureStatus | undefined;
+            try { resumed = await capture.reconcile(); }
             catch { options.onResumeFailure?.(source); }
+            if (resumed) options.onResumeSuccess?.(source, resumed);
           }
         }
       });
@@ -2016,16 +2022,19 @@ function createTierSnifferModel(input: {
       bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
     );
     if (!apiKey) return undefined;
-    const model = createVeniceAnalystModel({
+    // Paced to the key's per-model request limit; a 429 waits and retries (#884).
+    const pacer = new JudgeRateLimitPacer();
+    const model = pacer.model(createVeniceAnalystModel({
       apiKey,
       model: profile.model,
       ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-      ...(input.judgeFetch ? { fetchImpl: input.judgeFetch } : {}),
+      fetchImpl: pacer.fetch(input.judgeFetch ?? ((url, init) => fetch(url, init))),
       thinking: 'disabled',
       reasoningEffort: 'low',
       reasoningHeadroomTokens: 0,
       timeoutMs: 60_000,
-    });
+      promptCacheKey: JUDGE_PROMPT_CACHE_KEY,
+    }));
     return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
   }
   return undefined;
@@ -2578,17 +2587,18 @@ export async function main(): Promise<void> {
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
   const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  // What each supervisor last reported, for the dashboard. Absent for a source
+  // whose capture the native service owns: this worker runs nothing there.
+  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
     onResumeFailure: (source) => { captureFailures[source] = true; },
+    onResumeSuccess: (source, status) => { delete captureFailures[source]; captureStatuses[source] = status; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  // What each supervisor last reported, for the dashboard. Absent for a source
-  // whose capture the native service owns: this worker runs nothing there.
-  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   // Sources whose last reconcile threw: their old status is no fact about the helper.
   const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
@@ -6402,9 +6412,8 @@ export async function main(): Promise<void> {
       restart: () => { restartEngine({ quietWaitMs: 0 }); },
       failed: () => { remoteAccessRestartFailed = true; console.warn('[olympus] remote_access_restart_failed'); },
     });
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: remoteAccessHostKind === 'standalone'
-        ? createStandaloneRemoteAccessConfigWriter({
+    dashboardRemoteAccessControl = remoteAccessHostKind === 'standalone'
+      ? createStandaloneRemoteAccessControl({
             write: enabled => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
             ...(process.platform !== 'darwin' ? { unsupportedReason: 'Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support.' } : {}),
             canRestart: () => {
@@ -6413,8 +6422,7 @@ export async function main(): Promise<void> {
             },
             requestRestart: () => { remoteAccessRestartFailed = false; return requestEngineRestart(); },
           })
-        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
-    });
+      : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   // A background connection: a live remote agent that is not ChatGPT (the
   // owner's ChatGPT is the owner's own work). An unknown id is not one.
@@ -7311,7 +7319,7 @@ export async function main(): Promise<void> {
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: 'tier_sniffer' }).complete(request)),
+          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request)),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -7328,7 +7336,8 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
-        ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
+        ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls }
+          : snifferLane.kind === 'venice' ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {}),
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
