@@ -1,0 +1,7 @@
+# olympusplugin.ai: every page may be crawled. Pages under /open/ are links
+# your own computer opens; they carry noindex instead of a Disallow so
+# crawlers can read that.
+User-agent: *
+Allow: /
+
+Sitemap: https://olympusplugin.ai/sitemap.xml

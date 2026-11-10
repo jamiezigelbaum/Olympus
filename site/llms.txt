@@ -1,0 +1,26 @@
+# Olympus
+
+> Olympus keeps your email, files and messages on your own computer and decides, item by item, what each AI may see. ChatGPT, Claude, Grok and any app that speaks MCP can use it, while your private things stay private. Free and open source (MIT), published by Open Coordination Unlimited, Inc.
+
+## What it does
+- Indexes Gmail, Google Drive, Dropbox, Telegram, WhatsApp, X bookmarks and Readwise on your computer. There is no hosted copy of your things, no account and no subscription.
+- Judges every item as Personal, Private or Secret. Labels are automatic and can be wrong.
+- Personal: connected AI apps can read the parts that answer your question, with citations.
+- Private: only a model on your computer reads it, or Venice's private models if you turn them on. In ChatGPT only you see the answer; other apps get an answer written from it, which can repeat what it says.
+- Secret: passwords, recovery codes and keys. Once Olympus recognizes a Secret, it is never sent or answered from.
+- ChatGPT, Claude and Grok reach your computer through Olympus's relay at mcp.olympusplugin.ai, which forwards requests without storing them. Apps on your computer, such as Claude Code and Codex, connect there directly.
+- Optional anonymous answers: Venice's private models, paid through zkAPI and sent over Tor. Off by default.
+
+## Runs on
+- Macs with Apple silicon on macOS 13 or later.
+- x86_64 computers running Omarchy or Ubuntu 24.04 LTS.
+- Not yet: Windows, Intel Macs, other Linux distributions, ARM Linux.
+
+## Pages
+- [Home](https://olympusplugin.ai/)
+- [Install: add Olympus to your AI](https://olympusplugin.ai/install/)
+- [Help](https://olympusplugin.ai/help/)
+- [Support](https://olympusplugin.ai/support/)
+- [Privacy policy: what each AI can and cannot see](https://olympusplugin.ai/privacy/)
+- [Terms](https://olympusplugin.ai/terms/)
+- [Source code](https://github.com/jamiezigelbaum/Olympus)
