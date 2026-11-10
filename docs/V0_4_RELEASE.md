@@ -75,7 +75,10 @@ independent Critical review. That review found three older gaps of the same
 kind, which join the Owner controls lane as Critical work: connection approval
 that trusts loopback alone (#1186), a forwarded Linux owner socket (#1188,
 fixed in #1196) and a dashboard cookie not confined to the engine's origin
-(#1187, fixed with a per-port unlock key: owner decision 2026-11-10).
+(#1187, fixed with a per-port unlock key: owner decision 2026-11-10). Published
+2026-11-10 (tag at `ebe51d4b`). The `release/1.4.x` branch stays for 1.4.5,
+the search fixes below, which ships only after #1276 lands and two runs in a
+row of the held-out eval on the owner's install drop no store.
 
 Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
 
@@ -155,6 +158,41 @@ miss is still there on the real store after both and is being measured there
 directly. Two questions also fail at the answer step with the evidence in the
 pack (#1234). #707 stays open; this is the top open item for the Findable
 fast lane.
+
+Measured on copies of the owner's stores later that day (counts on #707):
+4 of 7 on main at `bec230bc`, with no store dropped. The time was going to
+the keyword lane, not the vector lane: it ran the same search twice, counted
+and ranked more rows than the page needed and checked foreign keys on every
+open, and so used up the 10-second budget both lanes share (#1261, #1262,
+#1265, #1273). Two eval faults were corrected on the way: a value written
+with its unit attached could not match (#1275), and the privacy line failed
+answers the product had released correctly with uncited Private context
+(#1282). The runner now reads each candidate with the product's budget
+(#1300). Open: one expected item is not retrieved, one is seated on the wrong
+chunk, heavy questions still spend 6 to 8 seconds per store in the keyword
+lane, and most keyword rows in the Private store belong to superseded copies
+(#1276). One change in this series (#1284) passed a synthetic fixture and
+hung keyword search on real-size stores; it was reverted (#1292, tracked in
+#1293). Rule since then: a search performance change is probed on the copies
+of the owner's stores from its PR head before it merges, and the owner's
+install takes only a commit that passed that eval.
+
+Found by the same measurement: on the owner's install, items under a Dropbox
+folder approved as names only show as "Private, decided by the judge" although
+nothing read them. The folder approval reaches the connector but not the
+store's names-only rule. The Privacy accuracy lane fixes the label and the
+missing verdict (#1295); unsupported file kinds and an honest "in scope, not
+read yet" count are #1298 and #1299.
+
+Claude dashboard (owner decision 2026-11-10, #1266): Claude connectors may
+show the Olympus dashboard as an MCP App, not only the four remote tools, on
+the condition that a privacy proof passes on each Claude client. The proof
+passed on Claude web and desktop and is not yet run on the phone app. The
+build is behind `remote.claudeAppEnabled`, off by default (#1288). Because
+all three Claude clients share one pinned client id, the switch gets no
+dashboard control and no release-note line, and is turned on only on test
+machines, until the phone app passes. This is a side lane and does not gate
+1.5. Decisions has the entry.
 
 Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
 Moved to 1.6: #672, #920. Waiting on the owner: optionally, #581. The fresh
@@ -681,6 +719,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-11-10 — Claude may get the dashboard, behind a switch.** Owner
+  decision ("Yes, if the privacy proof passes", #1266): Claude connectors may
+  show the Olympus dashboard as an MCP App on relayed `/mcp`. This changes the
+  2026-10-12 entry below for Claude only; Grok and `/openai/mcp` stay as they
+  are. The condition is a proof on each Claude client that tool-result `_meta`
+  and app-only tool results reach the panel and never the model, and that the
+  model cannot call app-only tools, because privacy-lowering saves ride a
+  confirmation in `_meta`. Passed on Claude web and desktop on 2026-11-10; the
+  phone app is not yet checked. Until it is, `remote.claudeAppEnabled` stays
+  off by default, has no dashboard control and is not in release notes.
 - **2026-11-05 — Decision mode for local judging.** Local llama.cpp servers
   now answer the privacy question with a one-token read instead of a written
   JSON reply; Venice and the built-in model keep full mode. The owner approved
