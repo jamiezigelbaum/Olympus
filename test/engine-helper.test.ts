@@ -358,6 +358,19 @@ describe('olympus engine install-helper', () => {
     expect(readdirSync(enginePaths(home).appSupportDir)).toEqual(['Olympus Engine.app']);
   });
 
+  test('a recovery that another process finished first does not fail (#693 review)', () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    interrupted(home, 999_997);
+    const rival = (from: string, to: string) => {
+      renameSync(from, to); // the other process restores the helper first
+      renameSync(from, to); // then this one's rename finds nothing to move
+    };
+    expect(recoverInterruptedHelperSwap(paths, { pidAlive: dead, rename: rival })).toBe('cleaned');
+    expect(existsSync(paths.helperAppPath!)).toBe(true);
+    expect(readdirSync(paths.appSupportDir)).toEqual(['Olympus Engine.app']);
+  });
+
   test('a replacement still running in another process is left alone; a stale folder beside a helper is cleared', () => {
     const { home } = fixture();
     const paths = enginePaths(home);

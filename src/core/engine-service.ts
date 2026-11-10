@@ -1463,8 +1463,13 @@ export function recoverInterruptedHelperSwap(paths: EnginePaths, deps: HelperRec
       .filter(path => { try { const stat = lstatSync(path); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; } })
       .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
     if (aside) {
-      rename(aside, target);
-      result = 'restored';
+      try {
+        rename(aside, target);
+        result = 'restored';
+      } catch (error) {
+        // Another process recovering the same folder won the race: the helper is back.
+        if (!exists(target)) throw error;
+      }
     }
   }
   for (const name of over) rmSync(join(paths.appSupportDir, name), { recursive: true, force: true });

@@ -111200,8 +111200,13 @@ function recoverInterruptedHelperSwap(paths, deps = {}) {
       }
     }).sort((a, b) => statSync33(b).mtimeMs - statSync33(a).mtimeMs)[0];
     if (aside) {
-      rename2(aside, target);
-      result = "restored";
+      try {
+        rename2(aside, target);
+        result = "restored";
+      } catch (error) {
+        if (!exists(target))
+          throw error;
+      }
     }
   }
   for (const name of over)
