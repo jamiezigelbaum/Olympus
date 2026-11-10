@@ -270,7 +270,18 @@ function loadNative(): Native | null {
           // (cleared first) tells them apart, and a failed listing is not a
           // complete one.
           clearErrno();
-          const entry = s[`readdir${suffix}`]!(dir as never) as number | bigint | null;
+          let entry = s[`readdir${suffix}`]!(dir as never) as number | bigint | null;
+          if (!entry && errno() !== 0) {
+            // errno is read through FFI after the call returned, and runtime
+            // work in between can overwrite it (#951 was the same race on
+            // openat2): a listing that ended can read as failed. The end is
+            // confirmed by asking again: at the end readdir answers NULL and
+            // leaves errno alone, while a real error makes libc call getdents
+            // again at the same offset, so it fails again (or, if it passed,
+            // the listing goes on from where it stopped) (#844).
+            clearErrno();
+            entry = s[`readdir${suffix}`]!(dir as never) as number | bigint | null;
+          }
           if (!entry) {
             const failure = errno();
             if (failure !== 0) throw new ScopeSafeError('io', `readdir errno ${failure}`);

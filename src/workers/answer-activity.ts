@@ -198,6 +198,12 @@ export function createLocalModelActivity() {
       }
     };
     const kind = localInferencePriority?.getStore() ?? 'owner';
+    // An owner call that must wait for a busy resource preempts at once, not
+    // when its own call starts: a classification call already running would
+    // otherwise finish first, 30-100 s on a 4-core CPU (#1033). Preempting
+    // cancels it (llama-server stops a cancelled prompt within a 64-token
+    // batch) and no new one starts ahead of this call (owner-first order).
+    if (kind === 'owner' && pending.running.length > 0) notifyBusy(key);
     pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key, work)) : lease(key, work))); } catch (error) { reject(error); }
     } });
@@ -220,13 +226,16 @@ export function createLocalModelActivity() {
   };
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
+  const notifyBusy = (key: string): void => {
+    for (const listener of busyListeners.get(key) ?? []) {
+      try { listener(); } catch { /* Preempting background work never fails an answer. */ }
+    }
+  };
   const get = (key: string) => {
     let activity = resources.get(key);
     if (!activity) {
       activity = createAnswerActivity(() => {
-        if (localInferencePriority?.getStore() !== 'background' && localInferencePriority?.getStore() !== 'maintenance') {
-          for (const listener of busyListeners.get(key) ?? []) listener();
-        }
+        if (localInferencePriority?.getStore() !== 'background' && localInferencePriority?.getStore() !== 'maintenance') notifyBusy(key);
       });
       resources.set(key, activity);
     }
