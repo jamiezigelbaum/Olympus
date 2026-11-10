@@ -275,18 +275,32 @@ async function runDesktopChecks(machine: Machine, options: CanaryOptions): Promi
       { id: 'canary.window.launcher', title: 'Dashboard window from olympus dashboard', script: `${OLYMPUS} dashboard >/dev/null` },
       { id: 'canary.window.link', title: 'Dashboard window from an olympus:// link', script: `open ${shellQuote(DASHBOARD_LINK)}` },
     ];
+  const listed = async (): Promise<DesktopWindow[] | string> => {
+    const result = await sh(windowsScript(options.os));
+    if (result.code !== 0) return `the window list could not be read (exit ${result.code}): ${result.stderr.trim().slice(0, 200)}`;
+    try { return parseWindows(options.os, result.stdout); } catch (error) { return error instanceof Error ? error.message : String(error); }
+  };
+  // A dashboard an earlier run left on screen (a tab in the web clients' own Chrome, a window in the default browser: #627) would
+  // hide the one each check opens, so every dashboard window is closed before the checks start.
+  const strays = await listed();
+  if (typeof strays !== 'string' && strays.some(isDashboard)) {
+    const closing = strays.filter(isDashboard);
+    await closeDashboards(machine, options, closing);
+    await sleep(2_000);
+    const after = await listed();
+    const left = typeof after === 'string' ? [] : after.filter(isDashboard);
+    checks.push({
+      id: 'canary.window.leftover', title: 'Dashboard windows left from an earlier run, closed first', status: 'warn',
+      detail: `closed ${closing.map(describe).join(', ')}${left.length ? `; still open: ${left.map(describe).join(', ')}` : ''}`,
+    });
+  }
   for (const open of opens) {
     started = Date.now();
-    const listed = async (): Promise<DesktopWindow[] | string> => {
-      const result = await sh(windowsScript(options.os));
-      if (result.code !== 0) return `the window list could not be read (exit ${result.code}): ${result.stderr.trim().slice(0, 200)}`;
-      try { return parseWindows(options.os, result.stdout); } catch (error) { return error instanceof Error ? error.message : String(error); }
-    };
     const before = await listed();
     if (typeof before === 'string') { record(open.id, open.title, 'fail', before, started); continue; }
-    // A dashboard already on screen hides the next one: a browser may open it as a tab behind that window's title.
+    // A dashboard still on screen hides the next one: a browser may open it as a tab behind that window's title.
     const already = before.find(isDashboard);
-    if (already) { record(open.id, open.title, 'fail', `a dashboard window was already open before this check (${describe(already)}), so a new one could not be told from it; close it and run the canary again`, started); continue; }
+    if (already) { record(open.id, open.title, 'fail', `a dashboard window was already open before this check and could not be closed (${describe(already)}), so a new one could not be told from it; close it and run the canary again`, started); continue; }
     const launched = await sh(open.script);
     let opened: Array<DesktopWindow & { reused: boolean }> = [];
     let outcome: { status: CheckStatus; detail: string } | undefined;
@@ -372,6 +386,33 @@ async function closeWindows(machine: Machine, options: CanaryOptions, before: re
   const left = opened.filter((window) => after.some((other) => other.id === window.id && (!window.reused || other.title === window.title)));
   return left.length === 0 ? undefined : `still open: ${left.map(describe).join(', ')}`;
 }
+
+/**
+ * Closes dashboard windows that were on screen before the checks. A window's title is its front tab's, so on Linux Control-W goes
+ * to that window by its address; on macOS the window is raised by its title through System Events (the accessibility permission the
+ * machine's setup grants) and closed with Command-W. A tab closed this way leaves the rest of its window alone.
+ */
+async function closeDashboards(machine: Machine, options: CanaryOptions, windows: readonly DesktopWindow[]): Promise<void> {
+  if (windows.length === 0) return;
+  if (options.os === 'linux') {
+    await machine.exec(windows.map((window) => hyprDispatch(
+      `sendshortcut ${shellQuote(`CTRL, W, address:${window.id}`)}`,
+      `hl.dsp.send_shortcut({ mods = "CTRL", key = "W", window = ${JSON.stringify(`address:${window.id}`)} })`,
+    )).join('\n'), { timeoutMs: 30_000 });
+    return;
+  }
+  for (const window of windows) {
+    await machine.exec(`open -a ${shellQuote(window.app)} && ${macRaise(window)} && sleep 1 && ${macCommandKey(MAC_KEY_W)}`, { timeoutMs: 30_000 });
+  }
+}
+
+/** Brings one window of an app to the front by its title, so the next Command-W closes that window's front tab and no other. */
+export const macRaise = (window: DesktopWindow): string => String.raw`osascript -l JavaScript <<'EOF'
+const proc = Application("System Events").processes.byName(${JSON.stringify(window.app)});
+const match = proc.windows.whose({ name: ${JSON.stringify(window.title)} });
+if (match.length > 0) match[0].actions.byName("AXRaise").perform();
+"raised";
+EOF`;
 
 /**
  * A Hyprland dispatch for both config languages. The classic form goes first; a Hyprland with a Lua config (0.56 on

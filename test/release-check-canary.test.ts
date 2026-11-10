@@ -14,6 +14,8 @@ interface FakeWindow { id: string; app: string; title: string }
 function fakeDesktop(os: 'linux' | 'macos', opts: {
   version?: string; brief?: string; missing?: string[]; launcherOk?: boolean; upgradeFails?: boolean; linkFails?: boolean;
   windows?: FakeWindow[]; onLauncher?: (windows: FakeWindow[]) => void; onLink?: (windows: FakeWindow[]) => void;
+  /** Windows that ignore every close (a page that asks before it leaves). */
+  stuck?: string[];
 } = {}) {
   const windows: FakeWindow[] = [...(opts.windows ?? [])];
   const initial = new Set(windows.map((w) => w.id));
@@ -37,13 +39,15 @@ function fakeDesktop(os: 'linux' | 'macos', opts: {
       const closed = /closewindow address:'([^']+)'/g;
       for (const match of script.matchAll(closed)) windows.splice(windows.findIndex((w) => w.id === match[1]), 1);
       const tab = /sendshortcut 'CTRL, W, address:([^']+)'/.exec(script);
-      if (tab) { const w = windows.find((x) => x.id === tab[1]); if (w) w.title = 'New Tab'; }
+      if (tab) { const w = windows.find((x) => x.id === tab[1]); if (w && !opts.stuck?.includes(w.id)) w.title = 'New Tab'; }
       if (script.startsWith('open -a ')) {
         const app = /open -a '([^']+)'/.exec(script)![1];
         if (/CGEventCreateKeyboardEvent\(\$\(\), 12,/.test(script)) for (let i = windows.length - 1; i >= 0; i -= 1) { if (windows[i]!.app === app) windows.splice(i, 1); }
         if (/CGEventCreateKeyboardEvent\(\$\(\), 13,/.test(script)) {
           // Command-W closes a window the check opened, or the tab it opened in a window that was already there.
-          const at = windows.findIndex((x) => x.app === app && /Olympus/.test(x.title));
+          // A raise names the window by its title first; without one, the app's first Olympus window is the front one.
+          const raised = /whose\(\{ name: ("[^"]*") \}\)/.exec(script);
+          const at = windows.findIndex((x) => x.app === app && (raised ? x.title === JSON.parse(raised[1]!) : /Olympus/.test(x.title)) && !opts.stuck?.includes(x.id));
           if (at >= 0 && initial.has(windows[at]!.id)) windows[at]!.title = 'Start Page'; else if (at >= 0) windows.splice(at, 1);
         }
       }
@@ -123,13 +127,43 @@ describe('release-check canary', () => {
     expect(result.checks.some((c) => c.id.endsWith('.closed'))).toBe(false);
   });
 
-  test('a dashboard already on screen fails the check instead of hiding a tab opened behind it', async () => {
-    const desktop = fakeDesktop('macos', { windows: [{ id: '5', app: 'Safari', title: 'Olympus' }], onLauncher: () => {} });
+  test('a dashboard that cannot be closed fails the check instead of hiding a tab opened behind it', async () => {
+    const desktop = fakeDesktop('macos', { windows: [{ id: '5', app: 'Safari', title: 'Olympus' }], stuck: ['5'], onLauncher: () => {} });
     const result = await runCanary(desktop.machine, options('macos'));
     const check = result.checks.find((c) => c.id === 'canary.window.launcher')!;
     expect(check.status).toBe('fail');
-    expect(check.detail).toContain('already open before this check');
+    expect(check.detail).toContain('already open before this check and could not be closed');
+    expect(result.checks.find((c) => c.id === 'canary.window.leftover')!.detail).toContain('still open: Safari "Olympus"');
     expect(desktop.scripts.some((s) => s.includes(' dashboard >/dev/null'))).toBe(false);
+  });
+
+  test('macOS: a dashboard window a default browser kept from an earlier run is closed first, by its title, and both window checks pass', async () => {
+    const desktop = fakeDesktop('macos', {
+      // A Safari window on another page comes first; the leftover dashboard window behind it is the one closed.
+      windows: [{ id: '4', app: 'Safari', title: 'Start Page' }, { id: '5', app: 'Safari', title: 'Olympus / Keys' }],
+      onLauncher: (w) => w.push({ id: '8', app: 'Olympus', title: 'Olympus' }),
+      onLink: (w) => w.push({ id: '9', app: 'Olympus', title: 'Olympus' }),
+    });
+    const result = await runCanary(desktop.machine, options('macos'));
+    expect(statusOf(result.checks)).toMatchObject({ 'canary.window.leftover': 'warn', 'canary.window.launcher': 'pass', 'canary.window.link': 'pass' });
+    expect(result.checks.find((c) => c.id === 'canary.window.leftover')!.detail).toBe('closed Safari "Olympus / Keys"');
+    expect(desktop.scripts.some((s) => s.startsWith("open -a 'Safari'") && s.includes('whose({ name: "Olympus / Keys" })') && s.includes('CGEventCreateKeyboardEvent($(), 13,'))).toBe(true);
+    expect(desktop.windows.find((w) => w.id === '4')!.title).toBe('Start Page');
+    expect(canaryVerdict(result.checks)).toBe('pass');
+  });
+
+  test('Linux: an Ask Olympus tab in the web clients\' Chrome from an earlier run is closed first, and both window checks pass', async () => {
+    const desktop = fakeDesktop('linux', {
+      windows: [{ id: '0xc3', app: 'google-chrome', title: 'Ask Olympus – Google Chrome' }, { id: '0xd4', app: 'kitty', title: 'olympus logs' }],
+      onLauncher: (w) => w.push({ id: '0xa1', app: 'chrome-127.0.0.1__-Default', title: 'Olympus' }),
+      onLink: (w) => w.push({ id: '0xb2', app: 'chrome-127.0.0.1__-Default', title: 'Olympus' }),
+    });
+    const result = await runCanary(desktop.machine, options('linux'));
+    expect(statusOf(result.checks)).toMatchObject({ 'canary.window.leftover': 'warn', 'canary.window.launcher': 'pass', 'canary.window.link': 'pass' });
+    expect(desktop.scripts.some((s) => s.includes("sendshortcut 'CTRL, W, address:0xc3'"))).toBe(true);
+    // Only the dashboard's tab was closed; the terminal, whose title merely says olympus, was left alone.
+    expect(desktop.scripts.some((s) => s.includes('0xd4'))).toBe(false);
+    expect(desktop.windows.map((w) => w.id)).toEqual(['0xc3', '0xd4']);
   });
 
   test('Linux: windows and tabs close on a Hyprland with a classic config and on one with a Lua config', async () => {
