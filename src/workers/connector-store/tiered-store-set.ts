@@ -139,6 +139,37 @@ export const TIER_KEY_TRUST_DOMAIN: Readonly<Record<Exclude<TierKey, 'secrets'>,
 };
 
 /**
+ * The least private domain each copy of an item may go to, before a set maps
+ * it onto the legs it has (`placementFor`). Secrets get no copy; an open NAME
+ * question holds the whole item in Private; an item whose text arrives later
+ * and has not been read gets only its metadata copy; otherwise the content
+ * goes at least as high as the names, and to Private while an own-record
+ * content question holds it. Shared so a read-only reader of a ledger
+ * (eval/calibration) places an item exactly as a store set does.
+ */
+export type TierPlacementFloors =
+  | { kind: 'secrets' }
+  | { kind: 'whole'; domain: SourceTrustDomain }
+  | { kind: 'metadata'; metadata: SourceTrustDomain }
+  | { kind: 'split'; metadata: SourceTrustDomain; content: SourceTrustDomain; contentHeld: boolean };
+
+export function tierPlacementFloors(
+  decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'metadataPending' | 'contentPending'>
+    & Partial<Pick<TierDecision, 'contentRead' | 'reasons'>>,
+  deferred: boolean,
+): TierPlacementFloors {
+  if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') return { kind: 'secrets' };
+  if (decision.metadataPending) return { kind: 'whole', domain: 'secure_local' };
+  const metadata = TIER_KEY_TRUST_DOMAIN[decision.metadataTier];
+  if (deferred && decision.contentRead !== true) return { kind: 'metadata', metadata };
+  const contentHeld = contentHeldForJudgment(decision);
+  const content = contentHeld
+    ? 'secure_local'
+    : TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier) as Exclude<TierKey, 'secrets'>];
+  return { kind: 'split', metadata, content, contentHeld };
+}
+
+/**
  * The store that keeps a Secret's location row when no other store holds one for it. A Secret
  * classifies at tier S5, whose trust domain is this one (`buildSourceSensitivity`).
  */
@@ -615,35 +646,29 @@ export class TieredStoreSet {
       & Partial<Pick<TierDecision, 'contentRead' | 'reasons'>>,
     options: { contentArrivesLater?: boolean } = {},
   ): TierPlacementPlan {
-    if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
-      return { copies: [], embedHold: false };
-    }
     const deferred = this.contentArrivesLater
       || (this.contentArrivesLaterFor !== undefined
         && (options.contentArrivesLater ?? decision.contentRead !== true));
-    const wholePending = decision.metadataPending;
-    if (wholePending) {
-      const domain = this.domainAtLeast('secure_local');
+    const floors = tierPlacementFloors(decision, deferred);
+    if (floors.kind === 'secrets') return { copies: [], embedHold: false };
+    if (floors.kind === 'whole') {
+      const domain = this.domainAtLeast(floors.domain);
       return {
         copies: [{ corpusId: this.corpusFor(domain), trustDomain: domain, layers: 'both' }],
         embedHold: true,
         stored: { trustDomain: domain, trustTier: this.restingTierFor(domain) },
       };
     }
-    const metadataDomain = this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[decision.metadataTier]);
-    if (deferred && decision.contentRead !== true) {
+    const metadataDomain = this.domainAtLeast(floors.metadata);
+    if (floors.kind === 'metadata') {
       return {
         copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: 'metadata' }],
         embedHold: false,
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = contentHeldForJudgment(decision);
-    const contentDomain = contentHeld
-      ? this.domainAtLeast('secure_local')
-      : this.domainAtLeast(
-          TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier) as Exclude<TierKey, 'secrets'>],
-        );
+    const contentHeld = floors.contentHeld;
+    const contentDomain = this.domainAtLeast(floors.content);
     const copies: TierCopyPlan[] = !this.splitLayers || metadataDomain === contentDomain
       ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: 'both' }]
       : [

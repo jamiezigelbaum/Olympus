@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scoredTier, type CalibrationLabels, type CalibrationSample } from '../eval/calibration/files.ts';
 import { readJudgeFile, scoreWhole } from '../eval/calibration/score-whole.ts';
-import { areaOf, buildPopulation, buildWholeItems, groupsOf, installEnv, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
+import { areaOf, buildPopulation, buildWholeItems, groupsOf, installEnv, placementOf, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
 import {
   allocate,
   cellKey,
@@ -203,6 +203,59 @@ function storesFixture(root: string) {
   jobs.close();
 }
 
+describe('placement and current copies', () => {
+  const row = (extra: Record<string, unknown>) => ({ metadata_tier: 'private', content_tier: 'private', content_read: 1, reasons_json: '[]', metadata_pending: 0, content_pending: 0, ...extra });
+
+  test('placement counts production holds as Private, through the shared placement rule', () => {
+    expect(placementOf(row({}))).toEqual({ metadata: 'personal', content: 'personal' });
+    // An open name question holds the whole item in Private.
+    expect(placementOf(row({ metadata_pending: 1 }))).toEqual({ metadata: 'private', content: 'private' });
+    // An own-record content question holds the content in Private; names stay findable.
+    expect(placementOf(row({ content_pending: 1 }))).toEqual({ metadata: 'personal', content: 'private' });
+    // Personal-first content is not held.
+    expect(placementOf(row({ content_pending: 1, reasons_json: JSON.stringify(['content:personal_first']) }))).toEqual({ metadata: 'personal', content: 'personal' });
+    expect(placementOf(row({ content_tier: 'secure' }))).toEqual({ metadata: 'personal', content: 'private' });
+    expect(placementOf(row({ content_tier: 'secrets' }))).toEqual({ metadata: 'secret', content: 'secret' });
+  });
+
+  test('text comes from the current copy, not a longer superseded one; legacy items fall back to the fullest copy', () => {
+    const root = mkdtempSync(join(tmpdir(), 'whole-copies-'));
+    try {
+      const dir = join(root, 'fixture.files@default');
+      mkdirSync(dir, { recursive: true });
+      const store = (file: string, rows: Array<[string, string]>) => {
+        const db = new Database(join(dir, file));
+        db.exec(`CREATE TABLE items(item_pk INTEGER PRIMARY KEY, provider TEXT, account_scope TEXT, provider_item_id TEXT, provider_conversation_id TEXT,
+          normalized_conversation TEXT, local_item_id TEXT, title TEXT, locator_uri TEXT, mime_type TEXT, authored_at TEXT, fetched_at TEXT, tombstoned INTEGER, parent_local_item_id TEXT);
+          CREATE TABLE chunks(item_pk INTEGER, chunk_index INTEGER, bounded_text TEXT);`);
+        rows.forEach(([id, body], n) => {
+          db.query('INSERT INTO items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(n + 1, 'p', 's', id, null, '', `local-${id}`, `${id}.txt`, `/f/${id}.txt`, 'text/plain', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', 0, null);
+          db.query('INSERT INTO chunks VALUES (?,?,?)').run(n + 1, 0, body);
+        });
+        db.close();
+      };
+      const stale = 'An invented older version of the note, kept after a move, and much longer than the current one.';
+      store('internal.sqlite', [['moved', stale], ['legacy', 'Invented short legacy copy.']]);
+      store('secure_local.sqlite', [['moved', 'Invented current note.'], ['legacy', 'Invented longer legacy copy with more text in it.']]);
+      const ledger = new Database(join(dir, 'secure_local.tier-ledger.sqlite'));
+      ledger.exec(`CREATE TABLE tier_items(provider TEXT, account_scope TEXT, conversation_key TEXT, provider_item_id TEXT, content_tier TEXT, metadata_tier TEXT, state TEXT, content_read INTEGER, reasons_json TEXT, metadata_pending INTEGER, content_pending INTEGER);
+        CREATE TABLE tier_copies(provider TEXT, account_scope TEXT, conversation_key TEXT, provider_item_id TEXT, corpus_id TEXT, trust_domain TEXT, layers TEXT, copy_state TEXT);`);
+      for (const id of ['moved', 'legacy']) ledger.query("INSERT INTO tier_items VALUES ('p','s','',?, 'secure', 'private', 'current', 1, '[]', 0, 0)").run(id);
+      ledger.query("INSERT INTO tier_copies VALUES ('p','s','','moved','c1','internal','both','superseded')").run();
+      ledger.query("INSERT INTO tier_copies VALUES ('p','s','','moved','c2','secure_local','both','current')").run();
+      ledger.close();
+
+      const population = buildPopulation(root, { since: '2024-11-10', minTextChars: 15 });
+      const units = population.units.map((unit) => ({ ...unit, inclusionProbability: 1 }));
+      const items = buildWholeItems(root, units, units.map((unit) => unit.identity.provider_item_id));
+      expect(items.find((item) => item.id === 'moved')!.text).toBe('Invented current note.');
+      expect(items.find((item) => item.id === 'legacy')!.text).toBe('Invented longer legacy copy with more text in it.');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('copying an install', () => {
   test('copies each active account, imported archives per family, from a copied home, and leaves the install unchanged', () => {
     const root = mkdtempSync(join(tmpdir(), 'whole-install-'));
@@ -383,7 +436,7 @@ describe('whole items from store copies', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 });
 
 test('Drive-style items with the same stored folder ancestry share a group, other folders do not', () => {

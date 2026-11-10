@@ -19,6 +19,8 @@ import { snapshotPrefilterDatabase } from '../../src/workers/classification/pref
 import { snifferInjectionRule, snifferMaterialForModel, snifferOwnMaterial } from '../../src/workers/classification/sniffer.ts';
 import { tierLedgerPathForStore, tierSnifferPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
 import { SNIFFER_EXCERPT_MAX_CHARS } from '../../src/workers/classification/tier-classifier.ts';
+import type { TierKey } from '../../src/workers/classification/tier-classifier.ts';
+import { tierPlacementFloors } from '../../src/workers/connector-store/tiered-store-set.ts';
 import type { CalibrationSampleItem, ExtractionNote, PlacedTier, WholeItemChild } from './files.ts';
 import { storedJudgeInput, type Row } from './stored-input.ts';
 import type { PopulationUnit, WholeStratum } from './whole-item.ts';
@@ -69,6 +71,8 @@ interface LedgerRow extends LedgerIdentity {
   state: string;
   content_read: number;
   reasons_json: string;
+  metadata_pending?: number;
+  content_pending?: number;
 }
 
 const hasTable = (db: Database, name: string) => Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
@@ -82,7 +86,40 @@ export function judgeCalledPrivate(row: Pick<LedgerRow, 'reasons_json' | 'conten
   return row.content_tier === 'secure';
 }
 
-export const placedTier = (tier: string | null | undefined): PlacedTier => (tier === 'secrets' ? 'secret' : tier === 'secure' ? 'private' : 'personal');
+const reasonsOf = (json: string) => {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((reason): reason is string => typeof reason === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Where production places a ledger row's names and content, holds included,
+ * by the same rule a store set uses (`tierPlacementFloors`, behind
+ * `placementFor`). Content not read yet stays with the names, as in a lane
+ * whose text arrives later.
+ */
+export function placementOf(row: Pick<LedgerRow, 'metadata_tier' | 'content_tier' | 'content_read' | 'reasons_json' | 'metadata_pending' | 'content_pending'>): { metadata: PlacedTier; content: PlacedTier } {
+  const contentRead = row.content_read === 1;
+  const floors = tierPlacementFloors({
+    metadataTier: row.metadata_tier as TierKey,
+    contentTier: row.content_tier as TierKey,
+    metadataPending: row.metadata_pending === 1,
+    contentPending: row.content_pending === 1,
+    contentRead,
+    reasons: reasonsOf(row.reasons_json),
+  }, !contentRead);
+  const tier = (domain: string): PlacedTier => (domain === 'secure_local' ? 'private' : 'personal');
+  switch (floors.kind) {
+    case 'secrets': return { metadata: 'secret', content: 'secret' };
+    case 'whole': return { metadata: tier(floors.domain), content: tier(floors.domain) };
+    case 'metadata': return { metadata: tier(floors.metadata), content: tier(floors.metadata) };
+    default: return { metadata: tier(floors.metadata), content: tier(floors.content) };
+  }
+}
+
 const rank = { personal: 0, private: 1, secret: 2 } as const;
 const highest = (tiers: readonly PlacedTier[]): PlacedTier => tiers.reduce<PlacedTier>((top, tier) => (rank[tier] > rank[top] ? tier : top), 'personal');
 
@@ -158,9 +195,10 @@ class Extraction {
 class AccountStores {
   readonly ledger: Database;
   private readonly sniffer: Database | undefined;
-  private readonly stores: Array<{ db: Database; item: ReturnType<Database['query']>; chunks: ReturnType<Database['query']>; children: ReturnType<Database['query']> | undefined; textChars: Map<number, number> }>;
+  private readonly stores: Array<{ domain: string; db: Database; item: ReturnType<Database['query']>; chunks: ReturnType<Database['query']>; children: ReturnType<Database['query']> | undefined; textChars: Map<number, number> }>;
   private readonly ledgerRow;
   private readonly queued;
+  private readonly copies: ReturnType<Database['query']> | undefined;
 
   constructor(dir: string) {
     const open = (file: string) => (existsSync(join(dir, file)) ? new Database(join(dir, file), { readonly: true, create: false }) : undefined);
@@ -172,6 +210,7 @@ class AccountStores {
       const textChars = new Map((db.query('SELECT item_pk, SUM(LENGTH(bounded_text)) AS chars FROM chunks GROUP BY item_pk').all() as Array<{ item_pk: number; chars: number }>)
         .map((row) => [row.item_pk, row.chars]));
       return [{
+        domain: file.replace(/\.sqlite$/, ''),
         db,
         item: db.query('SELECT * FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0'),
         chunks: db.query('SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index'),
@@ -182,23 +221,36 @@ class AccountStores {
       }];
     });
     this.ledgerRow = this.ledger.query('SELECT * FROM tier_items WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?');
+    this.copies = hasTable(this.ledger, 'tier_copies')
+      ? this.ledger.query(`SELECT trust_domain, layers FROM tier_copies WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'`)
+      : undefined;
     this.queued = this.sniffer && hasTable(this.sniffer, 'sniffer_questions')
       ? this.sniffer.query(`SELECT material FROM sniffer_questions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = 'content'`)
       : undefined;
   }
 
   ledgerRows(): LedgerRow[] {
-    return this.ledger.query('SELECT provider, account_scope, conversation_key, provider_item_id, content_tier, metadata_tier, state, content_read, reasons_json FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id').all() as LedgerRow[];
+    return this.ledger.query('SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id').all() as LedgerRow[];
   }
 
   ledgerOf(identity: LedgerIdentity): LedgerRow | undefined {
     return (this.ledgerRow.get(identity.provider, identity.account_scope, identity.conversation_key, identity.provider_item_id) as LedgerRow | null) ?? undefined;
   }
 
-  /** The stored row of an item, from whichever tier's copy holds it (the one with text first). */
+  /**
+   * The stored row of an item. The ledger's current copy serving the content
+   * decides which store's copy that is: a superseded copy can stay behind after
+   * a tier move. An item with no copy records (from before them) falls back to
+   * the copy with the most text.
+   */
   find(identity: LedgerIdentity): { row: Row; chars: number; store: number } | undefined {
+    const current = (this.copies?.all(identity.provider, identity.account_scope, identity.conversation_key, identity.provider_item_id) ?? []) as Array<{ trust_domain: string; layers: string }>;
+    const serving = new Set(current.filter((copy) => copy.layers === 'both' || copy.layers === 'content').map((copy) => copy.trust_domain));
+    const names = new Set(current.filter((copy) => copy.layers === 'metadata').map((copy) => copy.trust_domain));
+    const allowed = serving.size > 0 ? serving : names.size > 0 ? names : undefined;
     let found: { row: Row; chars: number; store: number } | undefined;
     this.stores.forEach((store, index) => {
+      if (allowed && !allowed.has(store.domain)) return;
       const row = store.item.get(identity.provider, identity.account_scope, identity.conversation_key, identity.provider_item_id) as Row | null;
       if (!row) return;
       const chars = store.textChars.get(row['item_pk'] as number) ?? 0;
@@ -211,18 +263,24 @@ class AccountStores {
     return (this.stores[found.store]!.chunks.all(found.row['item_pk'] as number) as Array<{ bounded_text: string }>).map((part) => part.bounded_text).join('\n');
   }
 
-  /** Every child of an item across both copies, once each. */
+  /** Every child of an item, once each, from its current copy (as `find` picks it). */
   children(localItemId: string): Array<{ row: Row; store: number }> {
-    const seen = new Map<string, { row: Row; store: number; chars: number }>();
-    this.stores.forEach((store, index) => {
+    const identities = new Map<string, LedgerIdentity>();
+    for (const store of this.stores) {
       for (const row of (store.children?.all(localItemId) ?? []) as Row[]) {
-        const key = String(row['provider_item_id']);
-        const chars = store.textChars.get(row['item_pk'] as number) ?? 0;
-        const before = seen.get(key);
-        if (!before || chars > before.chars) seen.set(key, { row, store: index, chars });
+        const identity = {
+          provider: String(row['provider']),
+          account_scope: String(row['account_scope']),
+          conversation_key: String(row['normalized_conversation'] ?? ''),
+          provider_item_id: String(row['provider_item_id']),
+        };
+        identities.set(JSON.stringify(identity), identity);
       }
+    }
+    return [...identities.values()].flatMap((identity) => {
+      const found = this.find(identity);
+      return found ? [found] : [];
     });
-    return [...seen.values()];
   }
 
   queuedInput(identity: LedgerIdentity): string | undefined {
@@ -346,13 +404,12 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
           mimeType: String(child.row['mime_type'] ?? ''),
           ...cut(stores.textOf(child)),
           ...(note ? { extraction: note } : {}),
-          ...(childLedger ? { placement: highest([placedTier(childLedger.content_tier), placedTier(childLedger.metadata_tier)]) } : {}),
+          ...(childLedger ? { placement: highest(Object.values(placementOf(childLedger))) } : {}),
         };
       });
       const note = extraction.note(provider, String(found.row['local_item_id']));
       const whole = cut(own);
-      const content = placedTier(ledger.content_tier);
-      const metadata = placedTier(ledger.metadata_tier);
+      const { content, metadata } = placementOf(ledger);
       const locator = text(found.row['locator_uri']);
       return {
         id: ids[index]!,
