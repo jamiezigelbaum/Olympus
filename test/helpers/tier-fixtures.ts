@@ -189,10 +189,12 @@ export function openTierFixture(
     /** Where the three stores and the secret-locations index are, when not the fixture's own names in `dir`. */
     paths?: Record<SourceTrustDomain, string>;
     secretsPath?: string;
+    /** The ledger's clock (a shared test clock's `date`). */
+    now?: () => Date;
   } = {},
 ): TierFixture {
   const paths = options.paths ?? storePaths(dir);
-  const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
+  const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local), ...(options.now ? { now: options.now } : {}) });
   const secrets = new SecretLocationsIndex({ dbPath: options.secretsPath ?? join(dir, 'secret-locations.sqlite') });
   const stores: Partial<Record<SourceTrustDomain, LocalConnectorStore>> = {
     internal: openLegStore(paths, 'internal', ledger, options.family, options.exclusions),
