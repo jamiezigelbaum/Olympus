@@ -104588,7 +104588,7 @@ function judgeConfidence(reason) {
   return Number.isFinite(value) && last.trim() !== "" ? value : 1;
 }
 function judged(item) {
-  return (item.tier === "Personal" || item.tier === "Private") && (item.decided_by === "sniffer" || item.decided_by === "move") && item.judge_reason !== null && !item.owner_set && item.moving_to === undefined;
+  return (item.tier === "Personal" || item.tier === "Private") && (item.decided_by === "sniffer" || item.decided_by === "move" || item.decided_by === "default") && item.judge_reason !== null && item.waiting_for_judge !== true && !item.owner_set && item.moving_to === undefined;
 }
 function randomTally(items) {
   const compared = items.filter((item) => item.random && item.answer !== undefined && item.answer !== "not_sure");
@@ -149857,6 +149857,7 @@ function view3(row, state) {
     owner_set: state.ownerSet,
     ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier && record4.targetContentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
     judge_reason: judgeReason(record4),
+    ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) ? { waiting_for_judge: true } : {},
     decided_at: record4?.decidedAt ?? null
   };
 }

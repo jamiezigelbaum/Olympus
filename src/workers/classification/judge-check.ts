@@ -173,8 +173,11 @@ export function judgeConfidence(reason: string | null): number {
  */
 function judged(item: OwnerTierItem): item is OwnerTierItem & { tier: JudgeLabel } {
   return (item.tier === 'Personal' || item.tier === 'Private')
-    && (item.decided_by === 'sniffer' || item.decided_by === 'move')
+    // A Personal verdict that left the label where it was keeps the `default` decider; its
+    // recorded judge reason is what shows the judge has read it.
+    && (item.decided_by === 'sniffer' || item.decided_by === 'move' || item.decided_by === 'default')
     && item.judge_reason !== null
+    && item.waiting_for_judge !== true
     && !item.owner_set
     && item.moving_to === undefined;
 }

@@ -64,6 +64,8 @@ describe('a round', () => {
       // Held Private by default while waiting for the judge, and a judge verdict not recorded yet.
       item(104, { judge_reason: null, decided_by: 'default', tier: 'Private' }),
       item(105, { judge_reason: null }),
+      // Read by the judge but waiting for it to read the item again.
+      item(106, { judge_reason: 'ordinary:0.01', decided_by: 'default', waiting_for_judge: true }),
     ];
     const { check } = fixture(items);
     const round = check.start();
@@ -78,7 +80,15 @@ describe('a round', () => {
     const leastSure = Array.from({ length: JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS }, (_, index) => `oti_${index + 1}`);
     for (const id of leastSure) expect(ids.has(id)).toBe(true);
     expect([...ids].filter((id) => !leastSure.includes(id))).toHaveLength(JUDGE_CHECK_RANDOM_PICKS);
-    for (const id of ['oti_100', 'oti_101', 'oti_102', 'oti_103', 'oti_104', 'oti_105']) expect(ids.has(id)).toBe(false);
+    for (const id of ['oti_100', 'oti_101', 'oti_102', 'oti_103', 'oti_104', 'oti_105', 'oti_106']) expect(ids.has(id)).toBe(false);
+  });
+
+  test('asks about a Personal verdict that left the label where it was, which keeps the default decider', () => {
+    // The judge read it and said Personal, so nothing moved: decided_by stays `default`.
+    const { check } = fixture([item(1, { tier: 'Personal', decided_by: 'default', judge_reason: 'ordinary:0.40' })]);
+    const view = check.start();
+    expect(view.total).toBe(1);
+    expect(view.current!.item_id).toBe('oti_1');
   });
 
   test('the judge\'s label stays hidden until the owner answers', () => {

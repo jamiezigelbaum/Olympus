@@ -68,6 +68,8 @@ export interface OwnerTierItem {
   owner_choice?: string;
   /** The judge's stored reason code (its category and confidence), where the judge decided it. */
   judge_reason: string | null;
+  /** The item is waiting for the judge to read it (again): its label is a holding label, not a verdict. */
+  waiting_for_judge?: true;
   decided_at: string | null;
   /**
    * The start of what the item says, for the owner to read before deciding.
@@ -431,6 +433,7 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     ...(state.ownerTier && (!record || (record.contentTier !== state.ownerTier && record.targetContentTier !== state.ownerTier))
       ? { owner_choice: tierDisplayName(state.ownerTier) } : {}),
     judge_reason: judgeReason(record),
+    ...(record?.state === 'pending' && (record.contentPending || record.metadataPending) ? { waiting_for_judge: true as const } : {}),
     decided_at: record?.decidedAt ?? null,
   };
 }
