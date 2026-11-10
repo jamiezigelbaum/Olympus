@@ -1,0 +1,6 @@
+# Installed first, into Telegram's private Python, so pyaes (published only as source) builds with a
+# hash-checked setuptools rather than one pip would fetch unchecked for an isolated build.
+# Olympus installs it with: python -m pip install --require-hashes --no-deps -r telegram-build-requirements.txt
+setuptools==82.0.1 \
+    --hash=sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb \
+    --hash=sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9
