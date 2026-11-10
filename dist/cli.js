@@ -12060,7 +12060,11 @@ async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs, tokenUr
       body: JSON.stringify({ path: "", limit: 1 }),
       redirect: "error"
     }, { timeoutMs, limitBytes: 64 * 1024 }));
-  } catch {
+  } catch (error) {
+    if (isBoundedResponseTooLargeError(error))
+      throw new Error("Dropbox returned an answer to the final check that Olympus could not use. No credentials were stored; try again.");
+    if (isAbortError(error))
+      throw new Error("Dropbox did not answer the final check in time. No credentials were stored; try again.");
     throw new Error("Dropbox could not be reached for the final check. No credentials were stored; try again.");
   }
   let missingScope = false;
@@ -12070,7 +12074,7 @@ async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs, tokenUr
     } catch {}
   }
   if (missingScope)
-    throw new Error("Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.");
+    throw new Error(DROPBOX_MISSING_SCOPE_MESSAGE);
   if (!response.ok)
     throw new Error("Dropbox could not complete the list check. No credentials were stored; try again.");
 }
@@ -13291,7 +13295,7 @@ function retryableErrorDisposition(error, now) {
     retryAt: new Date(now.getTime() + candidate.retryAfterMs).toISOString()
   };
 }
-var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, DROPBOX_OAUTH_SCOPES, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
+var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, DROPBOX_MISSING_SCOPE_MESSAGE = "Dropbox needs more permissions. On your Dropbox app's Permissions tab, tick files.metadata.read, files.content.read, sharing.read and account_info.read, choose Submit, and sign in again. No credentials were stored.", DROPBOX_OAUTH_SCOPES, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
   init_google_own_app();
   init_owner_config_read();
@@ -175229,8 +175233,8 @@ function safeVeniceCheckFailure(error2) {
 }
 function dashboardCallbackFailureReason(error2, source, clientIdSource) {
   const message2 = error2 instanceof Error ? error2.message : "";
-  if (source === "dropbox" && clientIdSource === "byo" && message2 === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.")
-    return message2;
+  if (source === "dropbox" && clientIdSource === "byo" && message2 === DROPBOX_MISSING_SCOPE_MESSAGE)
+    return "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.";
   const setupMessages = source === "x" ? [
     "X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.",
     "X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.",
