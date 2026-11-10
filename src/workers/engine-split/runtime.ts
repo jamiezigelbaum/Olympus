@@ -248,6 +248,12 @@ export function createEngineFrontRoutes(input: {
   timeoutMs?: number;
   /** This front's process, which the background waits out before it deletes. */
   pid?: number;
+  /**
+   * After the background answered a forwarded action, before the front
+   * answers: the front re-reads what the background just wrote (People's
+   * corrections rebuild the index there; the front reloads its read-only copy).
+   */
+  afterAnswer?: (kind: EngineForwardedKind) => void;
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
   /** The background's answer, or why there is none: the command was not answered, or it failed there. */
@@ -272,6 +278,7 @@ export function createEngineFrontRoutes(input: {
     const outcome = await exchange(kind, request);
     if ('unanswered' in outcome) return Response.json({ error: { code: 'engine_background_unavailable', message: outcome.unanswered } }, { status: 503 });
     if ('failed' in outcome) return Response.json({ error: { code: 'engine_background_failed', message: outcome.failed } }, { status: 502 });
+    try { input.afterAnswer?.(kind); } catch { /* the front's own timer re-reads it */ }
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
   };
   return (request) => {

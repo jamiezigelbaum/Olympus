@@ -7529,6 +7529,8 @@ export async function main(): Promise<void> {
       // Only the front: the background is already restarting for the delete.
       if (!restartFrontOnly()) console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
     },
+    // People's corrections rebuilt the background's index: the front reads it now (#1224).
+    afterAnswer: (kind) => { if (kind === 'people') refreshPeople(true); },
   }) : undefined;
   const frontWorkerFetch = frontRoutes
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)

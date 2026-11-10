@@ -348,6 +348,24 @@ describe('owner actions the background runs, forwarded from the front', () => {
       .toEqual({ kind: 'delete_source_data', request: deleting, frontPid: 42 });
   });
 
+  test('after People\'s correction is answered, the front re-reads the index the background rebuilt', async () => {
+    const order: string[] = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command) => { order.push(`sent:${command.kind}`); return sentReceipt({ status: 200, body: { ok: true } }); } },
+      gate: createFrontGate(), restartFront: () => {},
+      afterAnswer: (kind) => order.push(`reread:${kind}`),
+    });
+    const response = await routes(new Request('http://127.0.0.1/dashboard/people', { method: 'POST', body: JSON.stringify({ action: 'correct' }) }));
+    expect(response!.status).toBe(200);
+    expect(order).toEqual(['sent:people', 'reread:people']);
+    // A failed correction re-reads nothing.
+    const failing = createEngineFrontRoutes({ client: { send: async () => ({ id: 'c', state: 'failed', instance_id: 'b', error: 'no' }) }, gate: createFrontGate(), restartFront: () => {}, afterAnswer: (kind) => order.push(`reread:${kind}`) });
+    expect((await failing(new Request('http://127.0.0.1/dashboard/people', { method: 'POST', body: '{}' })))!.status).toBe(502);
+    expect(order).toHaveLength(2);
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/afterAnswer: \(kind\) => \{ if \(kind === 'people'\) refreshPeople\(true\); \}/);
+  });
+
   test('a forwarded sync waits for its pass, as the route did in one process', async () => {
     const waits: Array<number | undefined> = [];
     const routes = createEngineFrontRoutes({
