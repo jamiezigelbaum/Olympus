@@ -30,7 +30,7 @@
  *     the file as it is now (lease, re-read, patch only that block, validate,
  *     atomic commit; a file that no longer matches this adapter's view is a
  *     conflict and nothing is written), then asks the worker to restart,
- *     because the policy is read at boot;
+ *     because the policy is read at boot (only the funding date is followed live);
  *   - `addRoute`: adds the one zkapi profile when none exists;
  *   - where this computer has no network confinement (unsupported Linux hosts), `status` says `unavailable` and `addRoute` and turning
  *     on refuse `confinement_unavailable` (owner ruling 2026-10-12: no
@@ -51,6 +51,7 @@
  */
 import { delimiter, dirname } from 'node:path';
 import { abandonHeldZkapiRequest, recoverHeldZkapiRequest } from '../../core/zkapi-recovery.ts';
+import { zkapiFundingDateRefresher } from '../../core/zkapi-funding-date.ts';
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
   CONSULT_LEVEL_FOR_REPAIR,
@@ -328,8 +329,10 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   // The writer check: started only by the owner's click; the last result is kept in memory for the card.
   let writerCheck: DashboardOutsideHelpWriter['check'] = { state: 'idle' };
 
+  // The funding date follows the policy file as it is now (`olympus zkapi funding-date`), without a restart.
+  const liveFundingDate = zkapiFundingDateRefresher(options.sovereignty.source === 'file' ? options.sovereignty.path : undefined);
   const zkapiProfile = (): { id: string; profile: SovereigntyModelProfile } | undefined => {
-    const entries = Object.entries(policy.modelProfiles).filter(([, profile]) => profile.provider === 'zkapi');
+    const entries = Object.entries(liveFundingDate(policy.modelProfiles)).filter(([, profile]) => profile.provider === 'zkapi');
     if (entries.length !== 1) return undefined;
     const [id, profile] = entries[0]!;
     return { id, profile };
@@ -337,7 +340,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
   // The route without its key: the adapter never resolves a secret.
   const transport = (): ZkapiConsultTransportOptions | undefined => resolveZkapiConsultTransport(
-    policy.modelProfiles,
+    liveFundingDate(policy.modelProfiles),
     () => undefined,
     { env, statePath },
   );

@@ -6718,14 +6718,17 @@ export async function main(): Promise<void> {
     // holds the conversation), or named by the caller.
     const { consultChatgptFrontierModel, consultChatgptModelUnavailableMessage } = await import('../../core/consult-settings.ts');
     const chatgptModel = (): string => consultChatgptFrontierModel(readConsultSettings().settings);
+    // The funding date follows the policy file (`olympus zkapi funding-date`) without a restart.
+    const { zkapiFundingDateRefresher } = await import('../../core/zkapi-funding-date.ts');
+    const zkapiProfiles = zkapiFundingDateRefresher(sovereigntyEngine.source === 'file' ? sovereigntyEngine.path : undefined);
     const transport = (model: string) => resolveZkapiConsultTransport(
-      sovereigntyEngine.config.modelProfiles,
+      zkapiProfiles(sovereigntyEngine.config.modelProfiles),
       (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
       { env: process.env, model },
     );
     // The route's settings and today's record only: no key is resolved for this check.
     zkapiDailyLimitNow = () => {
-      const route = resolveZkapiConsultTransport(sovereigntyEngine.config.modelProfiles, () => undefined, { env: process.env });
+      const route = resolveZkapiConsultTransport(zkapiProfiles(sovereigntyEngine.config.modelProfiles), () => undefined, { env: process.env });
       return route ? zkapiDailyLimitState(route.settings, route.statePath ?? defaultZkapiStatePath(), new Date()) : 'unset';
     };
     // The owner's own writer model (consult.json `writer`) arrives as the Ask
@@ -8288,45 +8291,73 @@ export function parseConnectorStoreMountsFromEnv(
   return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
 }
 
-/** Compile fixed configuration once; only pending absent files need probes on reads. */
+/**
+ * Compile fixed configuration once; only pending absent files need probes on
+ * reads. A store whose file exists but fails to mount (an account mid-deletion,
+ * say) is retried on a bounded backoff, so it is found without a roster change
+ * or restart while repeated reads still skip the ownership scan. Each store's
+ * failure is logged once until its message changes or it mounts.
+ */
 export function createConnectorStoreMountDiscovery(raw: string | undefined, options: {
   stores(): readonly LocalConnectorStore[];
   registeredCorpora(): NonNullable<ConnectorStoreMountParsingOptions['registeredCorpora']>;
   storeOwner(): StoreFileOwner;
   reportFailure?(message: string): void;
+  now?(): number;
 }): () => ConnectorStoreMount[] {
-  const reported = new Set<string>();
+  // Local, not module-level: startup runs this factory while the module is
+  // paused at the entrypoint's top-level await, before later bindings exist.
+  const retryBaseMs = 5_000;
+  const retryMaxMs = 10 * 60_000;
+  const reported = new Map<string, string>();
   const reportFailure = (message: string): void => {
     const label = message.split(' skipped:')[0]!;
-    if (reported.has(label)) return;
-    reported.add(label);
+    if (reported.get(label) === message) return;
+    reported.set(label, message);
     (options.reportFailure ?? console.error)(message);
   };
+  const now = options.now ?? Date.now;
   const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
   const registeredCorpora = options.registeredCorpora();
   let previousStores: readonly LocalConnectorStore[] | undefined;
   let pending: readonly ValidatedConnectorStoreMountDeclaration[] = declarations;
+  const failed = new Map<ValidatedConnectorStoreMountDeclaration, { attempts: number; retryAt: number }>();
   return () => {
     const stores = options.stores();
     if (!previousStores || previousStores.length !== stores.length || stores.some((store, i) => store !== previousStores![i])) {
       pending = declarations;
       previousStores = [...stores];
     }
-    if (!pending.length) return [];
+    const time = now();
+    const due = [...failed].filter(([declaration, failure]) => failure.retryAt <= time && !pending.includes(declaration));
+    const candidates = due.length ? [...pending, ...due.map(([declaration]) => declaration)] : pending;
+    if (!candidates.length) return [];
     const byCorpus = new Map(stores.map(store => [store.corpusId, store]));
     const ready: ValidatedConnectorStoreMountDeclaration[] = [];
     const absent: ValidatedConnectorStoreMountDeclaration[] = [];
-    for (const declaration of pending) {
+    for (const declaration of candidates) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
       if (byCorpus.has(declaration.corpusId) || (!placed && (!declaration.dbPath || existsSync(declaration.dbPath)))) ready.push(declaration);
       else absent.push(declaration);
     }
     pending = absent;
     if (!ready.length) return [];
-    return mountConnectorStoreDeclarations(ready, {
+    const mounts = mountConnectorStoreDeclarations(ready, {
       existingOnly: true, collidingStores: stores, registeredCorpora: options.registeredCorpora(),
       storeOwner: options.storeOwner(), reportFailure,
     });
+    const mounted = new Set(mounts.map(mount => mount.store.corpusId));
+    for (const declaration of ready) {
+      if (mounted.has(declaration.corpusId)) {
+        failed.delete(declaration);
+        reported.delete(`Connector-store mount ${declaration.corpusId}`);
+        continue;
+      }
+      const attempts = (failed.get(declaration)?.attempts ?? 0) + 1;
+      const delay = Math.min(retryBaseMs * 2 ** Math.min(attempts - 1, 30), retryMaxMs);
+      failed.set(declaration, { attempts, retryAt: time + delay });
+    }
+    return mounts;
   };
 }
 
