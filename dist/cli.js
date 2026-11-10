@@ -30501,21 +30501,21 @@ function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
   };
 }
 async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
-  const clock2 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
+  const clock3 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
   const text2 = query.trim();
   if (!text2 || !Number.isFinite(budgetMs) || budgetMs <= 0)
     return;
-  const deadline = clock2.now() + budgetMs;
+  const deadline = clock3.now() + budgetMs;
   const expiresIn = (ms) => {
     let timer;
     const done = new Promise((resolve12) => {
-      timer = clock2.setTimeout(() => resolve12("expired"), ms);
+      timer = clock3.setTimeout(() => resolve12("expired"), ms);
     });
-    return { done, cancel: () => clock2.clearTimeout(timer) };
+    return { done, cancel: () => clock3.clearTimeout(timer) };
   };
   let retryMs = STARTING_MODEL_FIRST_RETRY_MS;
   for (;; ) {
-    const remaining = deadline - clock2.now();
+    const remaining = deadline - clock3.now();
     if (remaining <= 0)
       return;
     const attempt = provider.embed([{ text: text2 }], { taskType: "RETRIEVAL_QUERY" }).then(() => "done", (error) => error instanceof TransientSourceEmbeddingError && error.modelStarting ? "starting" : "done");
@@ -30524,7 +30524,7 @@ async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
     expiry.cancel();
     if (outcome !== "starting")
       return;
-    const pause = Math.min(retryMs, deadline - clock2.now());
+    const pause = Math.min(retryMs, deadline - clock3.now());
     if (pause <= 0)
       return;
     const wait = expiresIn(pause);
@@ -156709,8 +156709,10 @@ function standaloneDashboardControllerScript(input) {
         root: root,
         transport: {
           async openLocalControls() {
+            // The live session's CSRF token is the owner proof with the cookie (#1187).
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken },
             });
             // The local session is a new one: later requests carry its CSRF token, not the launch session's,
             // and the poll expects its marker (the server's hash of that token), so it does not reload the page.
@@ -157597,7 +157599,7 @@ function outsideHelpClientScript(config2) {
     var response;
     try {
       response = await fetch(path, body === null
-        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }
         : {
           method: 'POST', credentials: 'same-origin', cache: 'no-store',
           headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
@@ -157625,8 +157627,8 @@ function outsideHelpClientScript(config2) {
       }
       message(form, config.copy.saving, false);
       try {
-        // The local unlock presents no credential at all: the boundary wants a
-        // loopback browser and nothing else. Every other form carries the CSRF token.
+        // The local unlock sends no body and no bearer, only the live session's
+        // CSRF token (#1187). Every other form carries the CSRF token and a body.
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var outcome = await send(paths[kind], body);
         if (!outcome.ok) return fail(outcome.text);
@@ -164789,7 +164791,7 @@ function hostProgram(input, bridge, mount) {
   function localUnlock(name) {
     if (localSession || input.localTools.indexOf(name) < 0)
       return Promise.resolve();
-    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrfToken = body.csrf_token;
         localSession = true;
@@ -164918,7 +164920,7 @@ function hostProgram(input, bridge, mount) {
       landing = { sourceId: input.allSourcesLanding.id };
   }
   function openLocalSession() {
-    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrfToken = body.csrf_token;
         localSession = true;
@@ -166299,7 +166301,7 @@ function renderPrivateAnswersBody(options) {
     notes.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
   } else if (!localSession) {
     notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
-    script2 = `<script>${privateAnswersClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
+    script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
@@ -166434,7 +166436,7 @@ function privateAnswersClientScript(input) {
       event.preventDefault();
       var button = unlock.querySelector('button');
       if (button) button.disabled = true;
-      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
         if (response.ok) { window.location.reload(); return; }
         var msg = unlock.querySelector('[data-pa-msg]');
         if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }
@@ -167936,8 +167938,13 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))))
         return dashboardControlForbiddenResponse("origin_mismatch");
-      if (!requestFromOwnerSocket(request) && !hasOwnerControlSession(request, sessionSecret, now()))
-        return unauthorizedWorkerResponse();
+      if (!requestFromOwnerSocket(request)) {
+        const owner = authorizeDashboardControlSession(request, sessionSecret, now(), true);
+        if (owner.status === "origin_mismatch" || owner.status === "csrf_mismatch")
+          return dashboardControlForbiddenResponse(owner.status);
+        if (owner.status !== "allowed")
+          return unauthorizedWorkerResponse();
+      }
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
@@ -168127,9 +168134,6 @@ function dashboardLaunchRefusedResponse(status) {
 }
 function isDashboardLocalControlSessionRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
-}
-function hasOwnerControlSession(request, sessionSecret, nowMs) {
-  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === "allowed";
 }
 function isLoopbackOrigin(origin) {
   try {
