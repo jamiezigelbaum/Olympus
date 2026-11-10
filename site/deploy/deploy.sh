@@ -68,6 +68,13 @@ if grep -rqF '/install-linux.sh' --include='*.html' "$SITE_DIR" &&
   echo "Refusing to publish: the site offers install-linux.sh; run bun scripts/publish-release-to-site.ts --linux --artifact <artifact> first." >&2
   exit 1
 fi
+# Update now (#1063) runs only an installer with a signed release manifest
+# beside it. Once the engine ships the release key, every rendered installer
+# here must carry one that verifies.
+if ! bun "$SITE_DIR/../scripts/sign-release-manifest.ts" --check; then
+  echo "Refusing to publish: sign the installers with bun scripts/sign-release-manifest.ts site/install.sh (and site/install-linux.sh)." >&2
+  exit 1
+fi
 
 SSH_CMD="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes"
 echo "Publishing $SITE_DIR to $TARGET:$REMOTE_DIR"
