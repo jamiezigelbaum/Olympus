@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   answerPrivately,
   builtInAnalystEnabled,
+  builtInMessages,
   builtInPrivateModelStatus,
   createBuiltInAnalystModel,
   echoesEvidenceScaffolding,
@@ -907,6 +908,44 @@ describe('answer speed: bounded output, optional audit, stage timings', () => {
     expect(typeof calls[0]!.ms).toBe('number');
     expect(calls[0]!.promptBytes).toBeGreaterThan(0);
     expect(JSON.stringify(calls)).not.toMatch(/Hemoglobin|June|13\.9/);
+  });
+
+  test("the audit continues the draft's exchange, so llama-server reuses the evidence it already read", async () => {
+    const { model, requests } = stubModel(reply);
+    await answerPrivately('What did my June blood work show?', evidence, { model });
+    expect(requests).toHaveLength(2);
+    const draft = requests[0]!.body.messages as Array<{ role: string; content: string }>;
+    const audit = requests[1]!.body.messages as Array<{ role: string; content: string }>;
+    expect(draft.map((message) => message.role)).toEqual(['system', 'user']);
+    // The audit's prompt starts with the draft's exact prompt: a shared prefix the slot keeps.
+    expect(audit.slice(0, 2)).toEqual(draft);
+    expect(audit[2]).toEqual({ role: 'assistant', content: reply });
+    expect(audit[3]!.role).toBe('user');
+    expect(audit[3]!.content).toContain('Now audit the JSON answer draft you just wrote');
+    expect(audit[3]!.content).not.toContain('Hemoglobin');
+  });
+
+  test('a continuation that might not fit the context is sent standalone', () => {
+    const continues = { system: 'SYS', prompt: 'E'.repeat(20_000), reply: '{}', followUp: 'AUDIT' };
+    const request = { system: 'AUDIT SYS', prompt: 'AUDIT PROMPT', localOnly: true, maxOutputChars: 2_400, continues };
+    // 20 KB at a worst case of 2 bytes a token, plus the 1,200-token reply, fits 12,288 tokens.
+    expect(builtInMessages(request, 12_288).map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user']);
+    // It does not fit 11,000.
+    expect(builtInMessages(request, 11_000)).toEqual([
+      { role: 'system', content: 'AUDIT SYS' },
+      { role: 'user', content: 'AUDIT PROMPT' },
+    ]);
+  });
+
+  test('the prompt tokens llama-server reused from its cache are reported', async () => {
+    const { model } = stubModel('', {
+      fetchImpl: (async () => Response.json({
+        choices: [{ message: { content: '{}' } }],
+        timings: { cache_n: 3_700, prompt_n: 420, prompt_ms: 5_000, predicted_n: 90, predicted_ms: 9_000 },
+      })) as unknown as typeof fetch,
+    });
+    const completion = await model.complete({ system: 's', prompt: 'p', localOnly: true });
+    expect(completion.usage).toEqual({ promptTokens: 420, promptMs: 5_000, outputTokens: 90, outputMs: 9_000, cachedPromptTokens: 3_700 });
   });
 
   test('with the audit on (the default) the second call reports as the audit stage', async () => {
