@@ -1134,11 +1134,10 @@ const VISIBILITY_BACKSTOP_MS = 5_000;
 const VISIBILITY_LEASE_MS = 30_000;
 
 /** Another connection is publishing this store's visibility set: this one retries later. */
-class VisibilityPublishLeaseError extends Error {
-  constructor() {
-    super('Another connection is saving this store\'s visibility set.');
-    this.name = 'VisibilityPublishLeaseError';
-  }
+function visibilityPublishLeaseError(): Error {
+  const error = new Error('Another connection is saving this store\'s visibility set.');
+  error.name = 'VisibilityPublishLeaseError';
+  return error;
 }
 /** A failed save is retried after 1 s, doubling to at most a minute. */
 const VISIBILITY_RETRY_MIN_MS = 1_000;
@@ -1148,7 +1147,12 @@ const LEDGER_VISIBILITY_FEED_RETENTION = 8_192;
 /** Items an import writes between checks that the writers on its ledger are within both feeds. */
 const VISIBILITY_TICK_ITEMS = 256;
 /** The writable stores in this process that save a visibility set, by the ledger they judge with. */
-const VISIBILITY_WRITERS = new Map<TierLedger, Set<LocalConnectorStore>>();
+// Made on first use: a module-level `new Map()` is a side effect at load,
+// which keeps this module (and bun:sqlite) in the Node plugin bundle.
+let visibilityWritersByLedger: Map<TierLedger, Set<LocalConnectorStore>> | undefined;
+function visibilityWriters(): Map<TierLedger, Set<LocalConnectorStore>> {
+  return visibilityWritersByLedger ??= new Map();
+}
 
 function emptyTierVisibilityMemo(
   ledger: TierLedger,
@@ -2989,6 +2993,15 @@ export class LocalConnectorStore {
   private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
+    this.visibilityOwner = randomUUID();
+    this.visibilityNow = () => Date.now();
+    this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
+    this.visibilityTimers = {
+      setTimeout: (callback, ms) => setTimeout(callback, ms),
+      clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+    };
     this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
@@ -3510,19 +3523,17 @@ export class LocalConnectorStore {
   private visibilityRefreshing: Promise<void> | undefined;
   private visibilityRegisteredLedger: TierLedger | undefined;
   private visibilityClosed = false;
+  // Set in the constructor, not as field initializers: an initializer that
+  // calls or builds something keeps this module (and bun:sqlite) in the Node
+  // plugin bundle (test/plugin-bundle-no-bun-sqlite.test.ts).
   /** This connection's name on the publish lease. */
-  private readonly visibilityOwner = randomUUID();
+  private readonly visibilityOwner: string;
   /** The publish lease's clock (tests pass a test clock). */
-  private visibilityNow: () => number = () => Date.now();
+  private visibilityNow: () => number;
   /** Members written per publish step (tests make it small). */
-  private visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
+  private visibilityPublishChunk: number;
   /** The timers the publisher uses (tests pass a test clock). */
-  private visibilityTimers: VisibilityTimers = {
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
-    setInterval: (callback, ms) => setInterval(callback, ms),
-    clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
-  };
+  private visibilityTimers: VisibilityTimers;
 
   /** The writer's indexed copy of its own set, for the SQL filters below (temp: this connection only). */
   private createVisibilityJournal(): void {
@@ -3824,7 +3835,7 @@ export class LocalConnectorStore {
           .get() as { owner: string; expires_at: number } | null;
         const mine = lease?.owner === this.visibilityOwner;
         if (options.take === true ? (lease !== null && !mine && lease.expires_at > now) : !mine) {
-          throw new VisibilityPublishLeaseError();
+          throw visibilityPublishLeaseError();
         }
         this.db.query('INSERT OR REPLACE INTO main.tier_visibility_lease (id, owner, expires_at) VALUES (1, ?, ?)')
           .run(this.visibilityOwner, now + VISIBILITY_LEASE_MS);
@@ -4025,7 +4036,7 @@ export class LocalConnectorStore {
     if (!ledger) return;
     let ledgerCursor: number;
     try { ledgerCursor = ledger.visibilityChangesSince().cursor; } catch { return; }
-    for (const store of VISIBILITY_WRITERS.get(ledger) ?? []) {
+    for (const store of visibilityWriters().get(ledger) ?? []) {
       store.refreshVisibilityIfBehind({ ledgerCursor, anyMovement: options.completed === true && store === this });
     }
   }
@@ -4034,8 +4045,8 @@ export class LocalConnectorStore {
     if (this.readOnly || !this.visibilityFeedPresent || this.visibilityClosed || ledger === this.visibilityRegisteredLedger) return;
     this.unregisterVisibilityWriter();
     if (!ledger) return;
-    let writers = VISIBILITY_WRITERS.get(ledger);
-    if (!writers) VISIBILITY_WRITERS.set(ledger, writers = new Set());
+    let writers = visibilityWriters().get(ledger);
+    if (!writers) visibilityWriters().set(ledger, writers = new Set());
     writers.add(this);
     this.visibilityRegisteredLedger = ledger;
   }
@@ -4043,9 +4054,9 @@ export class LocalConnectorStore {
   private unregisterVisibilityWriter(): void {
     const ledger = this.visibilityRegisteredLedger;
     if (!ledger) return;
-    const writers = VISIBILITY_WRITERS.get(ledger);
+    const writers = visibilityWriters().get(ledger);
     writers?.delete(this);
-    if (writers?.size === 0) VISIBILITY_WRITERS.delete(ledger);
+    if (writers?.size === 0) visibilityWriters().delete(ledger);
     this.visibilityRegisteredLedger = undefined;
   }
 
