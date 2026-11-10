@@ -20863,11 +20863,22 @@ function visibilityMemberBits(flags) {
   return value;
 }
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
+  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
+  const rows = db.query(sql).all(...params);
+  return rows.map((row) => ({
+    itemPk: row.item_pk,
+    chunkPk: row.chunk_pk,
+    localItemId: row.local_item_id,
+    embedding: row.embedding
+  }));
+}
+function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const pageLimit = Math.max(1, Math.floor(limit));
-  const rows = db.query(`
+  return {
+    sql: `
     SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
     ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
       -- The unary + keeps SQLite off the model_id index (#1242). With it, every
@@ -20881,13 +20892,15 @@ function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit
       ${selectedFilters.sql}
     ORDER BY emb.chunk_pk ASC
     LIMIT ?
-  `).all(modelId, afterChunkPk, ...accountScope ? [accountScope] : [], ...selectedFilters.params, pageLimit);
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding
-  }));
+  `,
+    params: [
+      modelId,
+      afterChunkPk,
+      ...accountScope ? [accountScope] : [],
+      ...selectedFilters.params,
+      pageLimit
+    ]
+  };
 }
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;

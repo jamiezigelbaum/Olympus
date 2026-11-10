@@ -2215,11 +2215,37 @@ function connectorStoreCurrentEmbeddingRowsPage(
   afterChunkPk: number,
   limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
 ): ConnectorStoreCurrentEmbeddingRow[] {
+  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
+  const rows = db.query(sql).all(...params) as Array<{
+    item_pk: number;
+    chunk_pk: number;
+    local_item_id: string;
+    embedding: unknown;
+  }>;
+  return rows.map((row) => ({
+    itemPk: row.item_pk,
+    chunkPk: row.chunk_pk,
+    localItemId: row.local_item_id,
+    embedding: row.embedding,
+  }));
+}
+
+/**
+ * The exact page query the vector lane runs, with its parameters. Exported so
+ * the read-only store probe (eval/store-probe.ts) can time and EXPLAIN the
+ * same statement on a real store instead of a copy of it.
+ */
+export function connectorStoreCurrentEmbeddingPageQuery(
+  options: ConnectorStoreCurrentEmbeddingRowsOptions,
+  afterChunkPk: number,
+  limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
+): { sql: string; params: Array<string | number> } {
   const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const pageLimit = Math.max(1, Math.floor(limit));
-  const rows = db.query(`
+  return {
+    sql: `
     SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
     ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
       -- The unary + keeps SQLite off the model_id index (#1242). With it, every
@@ -2233,24 +2259,15 @@ function connectorStoreCurrentEmbeddingRowsPage(
       ${selectedFilters.sql}
     ORDER BY emb.chunk_pk ASC
     LIMIT ?
-  `).all(
-    modelId,
-    afterChunkPk,
-    ...(accountScope ? [accountScope] : []),
-    ...selectedFilters.params,
-    pageLimit,
-  ) as Array<{
-    item_pk: number;
-    chunk_pk: number;
-    local_item_id: string;
-    embedding: unknown;
-  }>;
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding,
-  }));
+  `,
+    params: [
+      modelId,
+      afterChunkPk,
+      ...(accountScope ? [accountScope] : []),
+      ...selectedFilters.params,
+      pageLimit,
+    ],
+  };
 }
 
 /**
@@ -14791,10 +14808,13 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
+  const keywordStartedAt = Date.now();
   let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size
     ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
     : undefined;
+  const keywordElapsedMs = Date.now() - keywordStartedAt;
+  const vectorStartedAt = Date.now();
   const vectorLane = await store.vectorSearchLane(
     request.query,
     provider,
@@ -14803,6 +14823,7 @@ async function hybridConnectorStoreSearch(
     filters,
     request.deadlineAtMs,
   );
+  const vectorElapsedMs = Date.now() - vectorStartedAt;
   let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
@@ -14885,12 +14906,13 @@ async function hybridConnectorStoreSearch(
     // same audit fields the Dropbox retrieval audit records
     // (keyword_candidates / vector_candidates / fused_candidates).
     laneAudits: [
-      connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length),
+      { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
       {
         laneName: `${store.corpusId}:connector_store_vector`,
         laneType: 'semantic',
         candidateCount: scoredVectorRows.length,
         returnedCount: vectorRows.length,
+        elapsedMs: vectorElapsedMs,
         ...(bestCosine !== undefined ? { bestCosine } : {}),
         ...(suppressedBelowBar > 0 ? { suppressedBelowBar } : {}),
         // The lane's own refusal outranks the relevance bar: a fence that

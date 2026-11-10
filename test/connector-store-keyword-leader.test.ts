@@ -55,6 +55,10 @@ describe('connector-store fusion keeps each lane\'s best hit', () => {
         retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
       });
       expect(hitIds(hybrid)).toContain('target');
+      // Each lane reports its own wall time, so a slow lane is named.
+      for (const laneType of ['keyword', 'semantic']) {
+        expect(typeof hybrid.laneAudits?.find((lane) => lane.laneType === laneType)?.elapsedMs).toBe('number');
+      }
     });
   });
 

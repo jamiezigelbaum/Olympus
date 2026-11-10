@@ -450,7 +450,10 @@ export interface EvalRetrievalAudit {
     skippedReason?: string;
     bestCosine?: number;
     suppressedBelowBar?: number;
+    elapsedMs?: number;
   }>;
+  /** Each store's whole search: wall time, the adapter's own time, and whether it beat the deadline. */
+  corpusTimings: Array<{ corpusId: string; elapsedMs: number; adapterReportedMs?: number; outcome: string }>;
   skippedCorpora: Array<{ corpusId: string; reason: string }>;
   degradations: Array<{ laneName: string; reason: string; detail?: string; occurrences: number }>;
   policyDeniedCandidates: number;
@@ -472,6 +475,13 @@ export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetriev
       ...(lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {}),
       ...(lane.bestCosine !== undefined ? { bestCosine: lane.bestCosine } : {}),
       ...(lane.suppressedBelowBar !== undefined ? { suppressedBelowBar: lane.suppressedBelowBar } : {}),
+      ...(lane.elapsedMs !== undefined ? { elapsedMs: lane.elapsedMs } : {}),
+    })),
+    corpusTimings: (detail.corpusTimings ?? []).map((timing) => ({
+      corpusId: timing.corpusId,
+      elapsedMs: timing.elapsedMs,
+      ...(timing.adapterReportedMs !== undefined ? { adapterReportedMs: timing.adapterReportedMs } : {}),
+      outcome: timing.outcome,
     })),
     skippedCorpora: detail.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
     degradations: detail.degradations.map((degradation) => ({
