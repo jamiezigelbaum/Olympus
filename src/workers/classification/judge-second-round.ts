@@ -61,6 +61,7 @@ export class SecondRoundConfirmed {
   private readonly db: Database;
   constructor(path: string) {
     this.db = new Database(path, { create: true });
+    this.db.exec('PRAGMA busy_timeout = 10000;');
     try { chmodSync(path, 0o600); } catch { /* Best effort, as the other judge records. */ }
     this.db.run('CREATE TABLE IF NOT EXISTS confirmed (digest TEXT PRIMARY KEY)');
   }

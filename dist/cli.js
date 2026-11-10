@@ -144876,6 +144876,7 @@ class SecondRoundConfirmed {
   db;
   constructor(path) {
     this.db = new Database24(path, { create: true });
+    this.db.exec("PRAGMA busy_timeout = 10000;");
     try {
       chmodSync35(path, 384);
     } catch {}
