@@ -28,6 +28,10 @@ export interface TestClock {
   setTimeout(callback: () => void, ms?: number): TestTimer;
   /** Cancels a timer from `setTimeout`. Pass as a `clearTimeout` seam. */
   clearTimeout(timer: TestTimer | undefined): void;
+  /** Calls `callback` every `ms` of fake time until cleared. Pass as a `setInterval` seam. */
+  setInterval(callback: () => void, ms?: number): TestTimer;
+  /** Cancels a timer from `setInterval`. Pass as a `clearInterval` seam. */
+  clearInterval(timer: TestTimer | undefined): void;
   /**
    * Moves time forward by `ms`, firing every timer that falls due in order of
    * its due time. Promise callbacks queued by each timer run before the next
@@ -56,6 +60,8 @@ interface Scheduled {
   timer: TestTimer;
   callback: () => void;
   order: number;
+  /** Set for an interval: the gap before it fires again. */
+  every?: number;
 }
 
 export const DEFAULT_TEST_CLOCK_START = Date.UTC(2026, 0, 1, 12, 0, 0);
@@ -71,9 +77,7 @@ export function createTestClock(startMs: number = DEFAULT_TEST_CLOCK_START): Tes
   let order = 0;
   const scheduled = new Map<number, Scheduled>();
 
-  const makeTimer = (dueAt: number): TestTimer => {
-    const id = nextId;
-    nextId += 1;
+  const makeTimer = (dueAt: number, id = nextId++): TestTimer => {
     let referenced = true;
     const timer: TestTimer = {
       id,
@@ -101,6 +105,13 @@ export function createTestClock(startMs: number = DEFAULT_TEST_CLOCK_START): Tes
   const fire = async (entry: Scheduled): Promise<void> => {
     scheduled.delete(entry.timer.id);
     current = Math.max(current, entry.timer.dueAt);
+    if (entry.every !== undefined) {
+      // Same id, so clearInterval from inside the callback still cancels it.
+      order += 1;
+      const next = makeTimer(current + entry.every, entry.timer.id);
+      if (!entry.timer.hasRef()) next.unref();
+      scheduled.set(next.id, { ...entry, timer: next, order });
+    }
     entry.callback();
     await flushMicrotasks();
   };
@@ -119,6 +130,17 @@ export function createTestClock(startMs: number = DEFAULT_TEST_CLOCK_START): Tes
       return timer;
     },
     clearTimeout: (timer) => {
+      if (timer) scheduled.delete(timer.id);
+    },
+    setInterval: (callback, ms = 0) => {
+      // A zero interval would never let time move; real timers clamp it too.
+      const every = Number.isFinite(ms) && ms >= 1 ? ms : 1;
+      const timer = makeTimer(current + every);
+      order += 1;
+      scheduled.set(timer.id, { timer, callback, order, every });
+      return timer;
+    },
+    clearInterval: (timer) => {
       if (timer) scheduled.delete(timer.id);
     },
     advance: async (ms) => {
