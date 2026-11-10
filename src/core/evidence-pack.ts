@@ -318,7 +318,7 @@ async function buildPreparedEvidencePackDetailed(
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
-  const extractionGaps: string[] = [];
+  const extractionGaps: string[] = semanticLaneSkippedGaps(routed.degradations, input);
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
@@ -928,6 +928,42 @@ function expansionQueries(
 
 function hitProvenance(hit: SourceIndexRoutedSearchHit): SourceIndexProvenance {
   return hit.provenance ?? { sourceItem: hit.sourceItem };
+}
+
+/**
+ * A semantic lane that should have run for this question and did not (its
+ * query embedding failed, timed out or came back unusable, or its vectors
+ * could not be read): the corpus was searched by keyword only, so a
+ * meaning-based match may be missing (#1172). It goes in coverage, where the
+ * Analyst reads it and the answer's unanswered notes carry it, because an
+ * answer built without it looks complete when it is not. Per question, never
+ * per corpus: a corpus that simply has no vectors yet (semantic_lane_unservable)
+ * or answers by keyword by design (semantic_lane_not_run) is not a gap here.
+ * Counts only: the corpus id and the lane's own stable reason token.
+ */
+export function semanticLaneSkippedGap(corpusId: string, detail: string | undefined): string {
+  return `${corpusId}: the meaning-based search was skipped for this question`
+    + `${detail ? ` (${detail})` : ''}; only keyword matches were searched, so related items may be missing.`;
+}
+
+function semanticLaneSkippedGaps(
+  degradations: readonly RetrievalDegradation[],
+  input: BuildEvidencePackInput,
+): string[] {
+  const gaps: string[] = [];
+  const seen = new Set<string>();
+  for (const degradation of degradations) {
+    if (degradation.reason !== 'semantic_lane_skipped') continue;
+    const corpusId = degradation.laneName.endsWith(':semantic')
+      ? degradation.laneName.slice(0, -':semantic'.length)
+      : degradation.laneName;
+    // A rebuild that leaves secure content out leaves its lanes' notes out too.
+    if (input.excludeSecureSensitivity && input.registry.get(corpusId)?.trustDomain === 'secure_local') continue;
+    if (seen.has(corpusId)) continue;
+    seen.add(corpusId);
+    gaps.push(semanticLaneSkippedGap(corpusId, degradation.detail));
+  }
+  return gaps;
 }
 
 function extractionGapFor(

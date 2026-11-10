@@ -24000,11 +24000,13 @@ var init_embeddings = __esm(() => {
   TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
   TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
     reason;
-    constructor(provider, reason, attempts, budgetMs = 0) {
+    modelStarting;
+    constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
       const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
       super("source_index_error", message2, suggestion);
       this.name = "TransientSourceEmbeddingError";
       this.reason = reason;
+      this.modelStarting = options.modelStarting === true;
     }
   };
 });
@@ -35144,7 +35146,10 @@ class BuiltInSourceEmbeddingProvider {
         this.load().catch(() => {
           return;
         });
-        throw new BuiltInEmbeddingNotReadyError(this.status());
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
+        });
       }
     }
     const model = await this.ready();
@@ -35601,8 +35606,8 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status, cause) {
-      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
+    constructor(status, cause, options = {}) {
+      super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
       this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
