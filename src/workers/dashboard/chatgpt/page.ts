@@ -35,6 +35,7 @@ import {
   DISCONNECT_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
+import { DASHBOARD_ALL_SOURCES_ID } from '../../../core/open-targets.ts';
 import { privacyLogic } from '../shared-privacy-logic.ts';
 import {
   CHATGPT_CONNECT_HOST,
@@ -378,6 +379,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .home-status{display:flex;align-items:center;gap:1rem;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem;margin:0 0 1.5rem;background:var(--surface)}.home-status .home-title{font-weight:600;margin:0}.home-status .muted{margin:0.15rem 0 0}.home-sources>summary{cursor:pointer;color:var(--muted);padding:0.5rem 0}
+.home-page .rows{border-top:0}.home-page .row.need,.home-page .row.home-line{display:block;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:0.875rem 1.25rem;margin:0.5rem 0}.home-page .row.home-line{background:var(--bg)}.home-page .row.need .row-text{font-weight:600}.home-page .need-body{align-items:center}.home-page .btn.warnfill{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.home-page .home-index,.home-page .row.home-line .row-text{margin:0}.home-page .home-details{margin-top:0.75rem}.home-page .home-details ul{margin:0;padding-left:1.25rem}.home-page .model-install p{margin:0}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
@@ -398,6 +400,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
+    allSourcesId: DASHBOARD_ALL_SOURCES_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,

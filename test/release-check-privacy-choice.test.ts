@@ -35,12 +35,13 @@ test.each([false, true])('fresh release check saves through the real local dashb
     return worker.fetch(request);
   }, { authToken: 'release-fixture-bearer', sessionSecret: 'release-fixture-session-secret' });
   const workerFetch = async (route: string, init?: RequestInit) => {
-    expect(new Headers(init?.headers).has('authorization')).toBe(false);
+    // The bearer opens the owner's session, and only that: never the local unlock or a save.
+    expect(new Headers(init?.headers).has('authorization')).toBe(route === '/dashboard/control/session');
     const request = new Request(`http://127.0.0.1:8010${route}`, init);
     recordRequestPeer(request, '127.0.0.1');
     return authenticated(request);
   };
-  await saveFreshInstallPrivacyChoice({ workerFetch, readPolicy: () => JSON.parse(readFileSync(path, 'utf8')), computerChoicePending: computerPending });
+  await saveFreshInstallPrivacyChoice({ workerFetch, readPolicy: () => JSON.parse(readFileSync(path, 'utf8')), computerChoicePending: computerPending, bearer: () => 'release-fixture-bearer' });
   expect(seen.at(-1)).toEqual({ path: '/dashboard/models/first-run-privacy', grade: 'local', csrf: true });
   expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(loadSovereigntyPreset('no-sensitive'));
   expect(pending).toBe(false);
@@ -48,12 +49,15 @@ test.each([false, true])('fresh release check saves through the real local dashb
 
 test('a missing dashboard POST or a save that does not persist fails the release leg', async () => {
   const mint = () => Response.json({ csrf_token: 'csrf' }, { headers: { 'set-cookie': 'session=fixture; Path=/dashboard' } });
+  const minted = (path: string) => path.endsWith('/local') || path === '/dashboard/control/session';
   await expect(saveFreshInstallPrivacyChoice({
-    workerFetch: async path => path.endsWith('/local') ? mint() : new Response('missing', { status: 404 }),
+    workerFetch: async path => minted(path) ? mint() : new Response('missing', { status: 404 }),
     readPolicy: () => createPendingPrivacyPolicy(),
+    bearer: () => 'fixture',
   })).rejects.toThrow('404');
   await expect(saveFreshInstallPrivacyChoice({
-    workerFetch: async path => path.endsWith('/local') ? mint() : Response.json({ ok: true }),
+    workerFetch: async path => minted(path) ? mint() : Response.json({ ok: true }),
     readPolicy: () => createPendingPrivacyPolicy(),
+    bearer: () => 'fixture',
   })).rejects.toThrow('does not match');
 });

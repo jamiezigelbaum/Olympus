@@ -9,8 +9,8 @@
  * Full sequences, against the real HTTP boundary with a recording handler.
  */
 import { createHmac } from 'node:crypto';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { describe, expect, test } from 'bun:test';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,12 +67,12 @@ async function launchSession(f: ReturnType<typeof fixture>): Promise<{ cookie: s
   return { cookie: cookieOf(redeemed), csrf: ((await redeemed.json()) as { csrf_token: string }).csrf_token };
 }
 
-/** The local mint as a loopback browser makes it: same origin, and the socket peer the server recorded is loopback. */
+/**
+ * The local mint as the owner's loopback browser makes it: its control session, same origin, and the socket peer
+ * the server recorded is loopback. `null` peer: no peer recorded at all (a request the server never saw the socket of).
+ */
 async function localSession(f: ReturnType<typeof fixture>, origin = ORIGIN, headers: Record<string, string> = {}, peer: string | null = '127.0.0.1'): Promise<Response> {
-  const request = new Request(`${origin}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: origin, ...headers } });
-  // `null`: no peer recorded at all (a request the server never saw the socket of).
-  if (peer !== null) recordRequestPeer(request, peer);
-  return f.fetch(request);
+  return ownerLocalMint(f.fetch, origin, TOKEN, headers, peer);
 }
 
 /** The cookie re-signed as the bearer could compute it, were sessions keyed by the bearer (they are not). */

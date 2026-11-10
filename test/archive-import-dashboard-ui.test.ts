@@ -148,6 +148,12 @@ const LINKS = {
   connector: 'http://127.0.0.1:8787/dashboard?connector',
 };
 const COMPUTER = { kind: 'computer', readOnly: false, links: LINKS };
+/**
+ * Home lists no sources (#1085): the rows and their archives are reached from the Sources tab's Imported
+ * archives and details, which lands on every row. Each test here mounts Home that way unless it lands
+ * somewhere else.
+ */
+const ON_ARCHIVES = { ...COMPUTER, landing: { sourceId: 'all.sources' } };
 
 /** The panel on a host that answers its tool calls from `serve`; `computer: false` is ChatGPT. */
 async function mount(serve: Serve, options: {
@@ -175,7 +181,7 @@ async function mount(serve: Serve, options: {
       if (message.method === 'ui/initialize') {
         reply(message.id, {
           protocolVersion: '2026-01-26',
-          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], ...(computer ? { [OLYMPUS_HOST_CONTEXT_KEY]: options.host ?? COMPUTER } : {}) },
+          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], ...(computer ? { [OLYMPUS_HOST_CONTEXT_KEY]: options.host ?? ON_ARCHIVES } : {}) },
         });
       } else if (message.method === 'tools/call') {
         const handler = serve[message.params.name];
@@ -840,6 +846,19 @@ describe('Reflect, Roam and Evernote: import-only sources with cards of their ow
     expect(Array.from(reflect.querySelectorAll('li.archive button')).map((node) => node.textContent)).toContain(A.remove);
     const other = page.doc.querySelector('section.other-archives')!;
     expect(other.querySelector('li.archive')).toBeNull();
+  });
+
+  test('on a plain Home load (no landing), a Reflect import still running keeps the Reflect row, with its progress and Remove (#1163 review)', async () => {
+    const answer = split('archives-notes-reflect');
+    const meta = answer._meta[COMPUTER_META_KEY];
+    const cards = meta.archiveCards.map((card: any) => card.sourceId === 'reflect.archive'
+      ? { ...card, archives: card.archives.map((entry: any) => ({ ...entry, status: 'importing', percent: 42 })) }
+      : card);
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => ({ ...answer, _meta: { ...answer._meta, [COMPUTER_META_KEY]: { ...meta, archiveCards: cards } } }) }, { host: COMPUTER });
+    const reflect = cardRow(page, 'Reflect');
+    expect(reflect.querySelector('li.archive .archive-name')?.textContent).toBe('Reflect export.zip');
+    expect(reflect.querySelector('li.archive [role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('42');
+    expect(Array.from(reflect.querySelectorAll('li.archive button')).map((node) => node.textContent)).toContain(A.remove);
   });
 
   test('a card with nothing imported offers Import an archive, which opens the drop zone for its exports and names it on approval', async () => {
@@ -1537,6 +1556,22 @@ describe('an import inside its source\'s card', () => {
     const lines = Array.from(sourceCard(page).querySelectorAll('li[data-source-import]')).map((item) => item.textContent ?? '');
     expect(lines[0]).not.toContain('already there');
     expect(lines[1]).toContain(A.inSource.alreadyThere.one);
+  });
+
+  test('on a plain Home load (no landing), a source whose joined import is still running shows under In progress, with its progress and Stop (#1163 review)', async () => {
+    const page = await mount(
+      { [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 42, read: 500, alreadyThere: 0 }] }]) },
+      { host: COMPUTER },
+    );
+    const item = sourceCard(page).querySelector('li[data-source-import]')!;
+    expect(item.textContent).toContain(fill(A.inSource.importingLineNone, { percent: '42' }));
+    expect(item.querySelector('[role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('42');
+    expect(Array.from(item.querySelectorAll('button')).map((node) => node.textContent)).toContain(A.inSource.stop);
+  });
+
+  test('on a plain Home load, a source whose joined import finished is not listed: Home holds only what needs the owner or is moving', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [IMPORT] }]) }, { host: COMPUTER });
+    expect(page.doc.querySelector('li[data-source-import]')).toBeNull();
   });
 
   test('a later read with a lower percent never moves the bar back (owner, Sparta 2026-11-04)', async () => {
