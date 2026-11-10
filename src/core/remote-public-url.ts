@@ -11,6 +11,7 @@
  * `olympus connections add` keep working.
  */
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
+import { claudeAppDomain } from '../../connect-relay/shared/mcp-app-client.ts';
 
 export const REMOTE_PUBLIC_BASE_URL_ENV = 'OLYMPUS_PUBLIC_BASE_URL';
 export const REMOTE_MCP_RESOURCE_PATH = '/mcp';
@@ -139,4 +140,9 @@ export function matchConfiguredResource(value: string, urls: RemotePublicUrls): 
 
 export function isConfiguredResource(value: string, urls: RemotePublicUrls): boolean {
   return matchConfiguredResource(value, urls) !== undefined;
+}
+
+/** The sandbox origin Claude serves an MCP App from for this install's public /mcp URL. */
+export function claudeAppOrigin(urls: RemotePublicUrls): string {
+  return `https://${claudeAppDomain(urls.resource)}`;
 }

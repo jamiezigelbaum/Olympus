@@ -46,6 +46,8 @@ export interface PrivateQuestionAskInput {
   readonly signal: AbortSignal;
   /** The transport's final check before it reserves and dispatches (ConsultAskInput.stillAuthorized): the opening connection is not revoked. */
   readonly stillAuthorized: () => boolean;
+  /** The verified connection that opened the panel (and its "Ask another" successors), when known. */
+  readonly connectionId?: string;
 }
 
 /**
@@ -282,6 +284,7 @@ export class PrivateQuestionJobs {
           signal: job.abort.signal,
           // Revoked while the question was being prepared or the session started: nothing is sent.
           stillAuthorized: () => this.originActive(job),
+          ...(job.origin.connectionId !== undefined ? { connectionId: job.origin.connectionId } : {}),
         });
         result = resultOf(outcome);
       } catch {

@@ -38,6 +38,7 @@
  */
 import { DEMO_GRANT_REMOTE_TOOLS, toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
 import type { CredentialSurface } from '../shared/tokens.ts';
+import { appClientCopy, appResourceMeta, type McpAppClient } from '../shared/mcp-app-client.ts';
 import { OFFLINE_RETRY_AFTER_SECONDS, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
@@ -112,8 +113,19 @@ const APPROVED_CATALOG: RelayCatalog = {
 };
 
 /** The listing an endpoint's relay answers come from. */
-export function catalogFor(surface: McpSurface): RelayCatalog {
-  return surface === 'directory' ? APPROVED_CATALOG : CURRENT_CATALOG;
+export function catalogFor(surface: McpSurface, client?: McpAppClient): RelayCatalog {
+  if (surface === 'directory') return APPROVED_CATALOG;
+  if (!client) return CURRENT_CATALOG;
+  const contents = (items: ReadonlyArray<{ text: string; _meta: Record<string, unknown> }>) => items.map(item => ({
+    ...item, text: appClientCopy(item.text, client), _meta: appResourceMeta(item._meta, client),
+  }));
+  return {
+    ...CURRENT_CATALOG,
+    tools: appClientCopy(CHATGPT_TOOLS, client),
+    dashboard: contents(DASHBOARD_RESOURCE_CONTENTS),
+    privateAnswer: contents(PRIVATE_ANSWER_RESOURCE_CONTENTS),
+    privateQuestion: contents(PRIVATE_QUESTION_RESOURCE_CONTENTS),
+  };
 }
 
 export type RelayMcpState =
@@ -122,6 +134,8 @@ export type RelayMcpState =
     state: 'mac_offline';
     lastSeenAt: number | undefined;
     credentialSurface: CredentialSurface;
+    /** The public /mcp URL, used for Claude's per-host sandbox domain. */
+    connectorUrl?: string;
     /** A per-app demo install (relay.ts demoInstallsByClient): its remote list is the demo grant's. */
     demoInstall?: boolean;
   };
@@ -142,7 +156,8 @@ function json(body: unknown, headers: Record<string, string> = {}): Response {
 
 export function relayMcpResponse(input: { method: string; body: string; now: number; surface?: McpSurface } & RelayMcpState): Response {
   const surface = input.surface ?? 'default';
-  const catalog = catalogFor(surface);
+  const claude = input.state === 'mac_offline' && input.credentialSurface === 'claude-app' && !!input.connectorUrl;
+  const catalog = catalogFor(surface, claude && input.connectorUrl ? { host: 'claude', connectorUrl: input.connectorUrl } : undefined);
   if (input.method !== 'POST') {
     // No standalone SSE stream or session to end without an engine.
     return new Response(null, { status: 405, headers: { Allow: 'POST' } });
@@ -162,8 +177,8 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
   const args = params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
   const offline = input.state === 'mac_offline' ? input : undefined;
   const notice = offline ? offlineSentence(offline.lastSeenAt, input.now) : NOT_CONNECTED_MESSAGE;
-  // Offline, a credential not confirmed as ChatGPT's gets the remote surface.
-  const remote = offline !== undefined && offline.credentialSurface !== 'chatgpt' && surface === 'default';
+  // Offline, only confirmed App credentials get an App catalog.
+  const remote = offline !== undefined && offline.credentialSurface !== 'chatgpt' && !claude && surface === 'default';
 
   switch (method) {
     case 'initialize': {

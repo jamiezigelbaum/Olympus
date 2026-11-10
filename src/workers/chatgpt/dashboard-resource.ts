@@ -1,3 +1,4 @@
+import { appClientCopy, appResourceMeta, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 /**
  * The `ui://olympus/dashboard` MCP Apps resource (advertised content-versioned,
  * `ui://olympus/dashboard?v=<hash>`): the single path the MCP
@@ -58,15 +59,15 @@ export const DASHBOARD_UI_DOMAIN = 'https://mcp.olympusplugin.ai';
 export const DASHBOARD_REDIRECT_DOMAINS = [DASHBOARD_UI_DOMAIN, 'https://olympusplugin.ai'] as const;
 
 /** `_meta` on the resource contents: no external fetch origins, fullscreen preferred. */
-export function dashboardResourceMeta(): Record<string, unknown> {
-  return {
+export function dashboardResourceMeta(client?: McpAppClient): Record<string, unknown> {
+  return appResourceMeta({
     ui: { csp: { connectDomains: [], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     // ChatGPT's own CSP key: openExternal needs redirect_domains.
     'openai/widgetCSP': { connect_domains: [], resource_domains: [], redirect_domains: [...DASHBOARD_REDIRECT_DOMAINS] },
     'openai/ui': { preferredDisplayMode: 'fullscreen', availableDisplayModes: ['inline', 'fullscreen'] },
-  };
+  }, client);
 }
 
-export function dashboardResourceHtml(): string {
-  return DASHBOARD_HTML;
+export function dashboardResourceHtml(client?: McpAppClient): string {
+  return appClientCopy(DASHBOARD_HTML, client);
 }

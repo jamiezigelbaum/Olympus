@@ -1,3 +1,4 @@
+import { appClientCopy, appResourceMeta, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 /**
  * The `ui://olympus/private-answer` MCP Apps resource (advertised
  * content-versioned, `?v=<hash>`): the private answer
@@ -41,17 +42,17 @@ export const PRIVATE_ANSWER_RESOURCE = {
 } as const;
 
 /** `_meta` on the resource contents: the relay is the one origin the panel may contact. */
-export function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN): Record<string, unknown> {
-  return {
+export function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN, client?: McpAppClient): Record<string, unknown> {
+  return appResourceMeta({
     ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     // The Secret Inbox button uses the same website landing domain as the dashboard.
     'openai/widgetCSP': { connect_domains: [relayOrigin], resource_domains: [], redirect_domains: ['https://olympusplugin.ai'] },
     'openai/widgetDescription': 'Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives.',
-  };
+  }, client);
 }
 
-export function privateAnswerResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN): string {
-  return relayOrigin === PRIVATE_ANSWER_RELAY_ORIGIN ? PRIVATE_ANSWER_HTML : privateAnswerPageHtml({ relayOrigin });
+export function privateAnswerResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN, client?: McpAppClient): string {
+  return appClientCopy(relayOrigin === PRIVATE_ANSWER_RELAY_ORIGIN ? PRIVATE_ANSWER_HTML : privateAnswerPageHtml({ relayOrigin }), client);
 }
 
 /**

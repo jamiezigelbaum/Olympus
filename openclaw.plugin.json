@@ -2848,6 +2848,11 @@
             "type": "string",
             "description": "Advanced: manual https origin for a tunnel you run yourself (for example a Cloudflare quick tunnel), with no path, instead of the Olympus relay. Leave relayHost unset."
           },
+          "claudeAppEnabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show the dashboard in Claude custom connectors. Restart Olympus after changing this setting."
+          },
           "demoConsent": {
             "type": "object",
             "additionalProperties": false,

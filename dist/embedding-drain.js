@@ -5882,6 +5882,8 @@ function applyOpenClawPluginRemote(config, env) {
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
+  if (remote.claudeAppEnabled !== undefined)
+    parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
   for (const key of ["relayHost", "publicBaseUrl"]) {
     const value = remote[key];
     if (typeof value === "string" && value.trim())
@@ -18470,10 +18472,14 @@ var init_directory_tools = __esm(() => {
   DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
 });
 
+// connect-relay/shared/mcp-app-client.ts
+var init_mcp_app_client = () => {};
+
 // src/core/remote-public-url.ts
 var LOOPBACK_HOSTNAMES;
 var init_remote_public_url = __esm(() => {
   init_directory_tools();
+  init_mcp_app_client();
   LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
@@ -53964,6 +53970,7 @@ function versionedResourceUri(base, html2) {
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
+  init_mcp_app_client();
   init_page();
   init_dashboard_contract();
   DASHBOARD_HTML = chatgptDashboardPageHtml();

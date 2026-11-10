@@ -41,8 +41,8 @@
  * metadata-URL client is refused.
  *
  * Being pinned is not being ChatGPT: only ChatGPT's clients get the ChatGPT
- * surface and the directory endpoint. Claude, Grok and Grok Bot or Cursor
- * get the remote operation surface on `/mcp` only.
+ * surface and the directory endpoint. Claude can opt into the shared MCP
+ * App on `/mcp`; Grok and Grok Bot or Cursor keep the remote surface.
  */
 export const CHATGPT_CLIENT_ID = 'https://chatgpt.com/oauth/client.json';
 export const CHATGPT_REDIRECT_URI = 'https://chatgpt.com/connector_platform_oauth_redirect';
@@ -84,12 +84,18 @@ export function isClientIdMetadataUrl(clientId: string): boolean {
 
 /**
  * Whether a connection is an OAuth grant to a pinned ChatGPT client: only
- * those get the ChatGPT surface (setup tools, private answers). Claude and
- * Grok grants, bearer connections and self-registered clients keep the
- * operation surface.
+ * those get the ChatGPT surface and directory access. Claude's App opt-in
+ * is selected separately by grantMcpSurface; every other connection keeps
+ * the operation surface.
  */
 export function isChatGptGrant(connection: { clientId?: string | null }): boolean {
   return typeof connection.clientId === 'string' && pinnedClient(connection.clientId)?.host === 'chatgpt';
+}
+
+/** The per-install Claude switch never changes directory eligibility or another client's surface. */
+export function grantMcpSurface(connection: { clientId?: string | null }, claudeAppEnabled = false): 'chatgpt' | 'claude-app' | 'remote' {
+  if (isChatGptGrant(connection)) return 'chatgpt';
+  return claudeAppEnabled && connection.clientId === CLAUDE_CLIENT_ID ? 'claude-app' : 'remote';
 }
 
 export function pinnedClient(clientId: string): PinnedClient | undefined {

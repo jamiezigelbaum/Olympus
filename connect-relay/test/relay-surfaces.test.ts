@@ -15,7 +15,7 @@ import { FORWARDED_PATHS } from '../client/forward.ts';
 import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
 import { AUTH_BOUND, base64url, installAuthMessage, MAX_SURFACE_ENTRIES, parseSurfacesMessage, type SurfaceEntry } from '../shared/protocol.ts';
 import { lastSeenPhrase, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
-import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, mintCredential, type CredentialSurface } from '../shared/tokens.ts';
 import { MemoryInstallRegistry } from '../server/registry.ts';
 import { SurfaceMap } from '../server/surface-map.ts';
 import { startRelay, surfacesFrameAccepted, type RelayHandle } from '../server/relay.ts';
@@ -45,7 +45,7 @@ function fingerprintOf(token: string): string {
   return createHash('sha256').update('olympus-relay/surface-fingerprint/v1\n', 'utf8').update(digest).digest('base64url');
 }
 
-function entry(token: string, surface: 'chatgpt' | 'remote', expiresAtMs = Date.now() + HOUR_MS): SurfaceEntry {
+function entry(token: string, surface: CredentialSurface, expiresAtMs = Date.now() + HOUR_MS): SurfaceEntry {
   return { endpoint: 'default', fingerprint: fingerprintOf(token), surface, expiresAt: Math.floor(expiresAtMs / 1000) };
 }
 
@@ -184,6 +184,47 @@ describe('mapping lifecycle', () => {
     expect(await toolNames(relay, mintCredential('access', installId))).toEqual(remoteNames);
   });
 
+  test('Claude App mappings round-trip, serve the App offline and gate the exact panel origin per install', async () => {
+    const map = new SurfaceMap();
+    const relay = await makeRelay(map);
+    let entries: SurfaceEntry[] = [];
+    const { client, identity } = await connectInstall(relay, async () => entries);
+    const token = mintCredential('access', identity.installId);
+    const jobId = mintCredential('private', identity.installId);
+    const connectorUrl = `https://${PUBLIC_HOST}/mcp`;
+    const domain = createHash('sha256').update(connectorUrl).digest('hex').slice(0, 32) + '.claudemcpcontent.com';
+    const preflight = (job = jobId, origin = `https://${domain}`) => fetch(`${relay.url}/private/${job}`, { method: 'OPTIONS', headers: { origin } });
+    expect((await preflight()).status).toBe(403);
+    entries = [entry(token, 'claude-app')];
+    await until(() => map.lookup(identity.installId, 'default', fingerprintOf(token)) === 'claude-app');
+    expect(map.snapshot()[0]!.entries[0]!.surface).toBe('claude-app');
+    expect((await preflight()).status).toBe(204);
+    expect((await preflight()).headers.get('access-control-allow-origin')).toBe(`https://${domain}`);
+    expect((await preflight(jobId, 'https://00000000000000000000000000000000.claudemcpcontent.com')).status).toBe(403);
+    expect((await preflight(mintCredential('private', 'b'.repeat(32)))).status).toBe(403);
+    await goOffline(relay, client);
+    const tools = (await (await post(relay, token, rpc('tools/list'))).json()).result.tools;
+    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(chatgptNames);
+    expect(JSON.stringify(tools)).not.toContain('ChatGPT');
+    for (const original of chatgptSurface.tools) {
+      expect(tools.find((tool: { name: string }) => tool.name === original.name)._meta).toEqual(original._meta);
+    }
+    const resources = (await (await post(relay, token, rpc('resources/list'))).json()).result.resources;
+    expect(resources).toEqual(chatgptSurface.resources);
+    for (const resource of resources) {
+      const contents = (await (await post(relay, token, rpc('resources/read', { uri: resource.uri }))).json()).result.contents;
+      expect(contents[0]._meta.ui.domain).toBe(domain);
+      expect(contents[0].text).not.toContain('ChatGPT');
+    }
+    const dashboard = (await (await post(relay, token, rpc('tools/call', { name: 'olympus_dashboard' }))).json()).result;
+    expect(dashboard.structuredContent.connection.state).toBe('mac_offline');
+    expect(dashboard._meta.ui.resourceUri).toBe(tools[0]._meta.ui.resourceUri);
+    // Turning off/revoking the mapping removes the App and its extra CORS origin.
+    map.replace(identity.installId, [entry(token, 'remote')]);
+    expect(await toolNames(relay, token)).toEqual(remoteNames);
+    expect((await preflight()).status).toBe(403);
+  });
+
   test('rotation adds the new fingerprint; revocation and expiry remove a mapping', async () => {
     let clock = Date.now();
     const map = new SurfaceMap(undefined, () => clock);
@@ -289,13 +330,13 @@ describe('bounds and content', () => {
     expect(map.lookup('install-c', 'default', fingerprintOf('old'))).toBeUndefined();
   });
 
-  test('the frame is bounded and closed: no extra fields, no oversized list, no unknown surface', () => {
+  test('the frame is bounded and closed; unknown surface names fail closed to remote', () => {
     const ok = entry('t', 'chatgpt');
     expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: [ok] })).toEqual([ok]);
     expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: Array(MAX_SURFACE_ENTRIES + 1).fill(ok) })).toBeUndefined();
     expect(parseSurfacesMessage({ type: 'surfaces', v: 2, entries: [ok] })).toBeUndefined();
     expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: [{ ...ok, provider: 'claude' }] })).toBeUndefined();
-    expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: [{ ...ok, surface: 'admin' }] })).toBeUndefined();
+    expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: [{ ...ok, surface: 'admin' }] })).toEqual([{ ...ok, surface: 'remote' }]);
     expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: [{ ...ok, fingerprint: 'oly2.abc' }] })).toBeUndefined();
     expect(parseSurfacesMessage({ type: 'surfaces', v: 1, entries: [{ ...ok, expiresAt: 1.5 }] })).toBeUndefined();
   });

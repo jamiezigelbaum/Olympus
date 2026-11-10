@@ -1,3 +1,4 @@
+import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
@@ -61,6 +62,8 @@ import {
 import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
 
 export interface ChatGptSurfaceOptions {
+  /** Host presentation only; absent preserves the ChatGPT wire format. */
+  appClient?: McpAppClient;
   /** The engine's dashboard view (the `/dashboard.json` object). */
   dashboardView: (signal?: AbortSignal) => Promise<SourceDashboardViewModel>;
   /**
@@ -393,7 +396,7 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
   ...SETUP_TOOLS,
 ];
 
-export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly'> = {}): ChatGptToolDefinition[] {
+export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly' | 'appClient'> = {}): ChatGptToolDefinition[] {
   const tools: ChatGptToolDefinition[] = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
   if (answerToolsListed(ctx, options)) tools.push(...ANSWER_TOOLS);
   // A handed-off anonymous answer is collected with source_answer_result
@@ -401,7 +404,7 @@ export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSur
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
-  return options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools;
+  return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
 }
 
 /** source_answer works only with an answer model on the Mac and the operation exposed remotely. */
@@ -632,14 +635,18 @@ async function runChatGptTool(
         // The job is opened here; the question itself never passes through this surface.
         // The job is bound to this connection (revoking it stops new questions); a demo grant also needs a daily limit.
         const origin = { ...(ctx.caller?.connectionId ? { connectionId: ctx.caller.connectionId } : {}), readOnly: options.readOnly === true };
-        return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin(origin) : undefined);
+        return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin(origin) : undefined, options.appClient);
       }
       default:
-        if (isSetupTool(name)) return await callSetupTool(name, args, options.setup);
+        if (isSetupTool(name)) {
+          const result = await callSetupTool(name, args, options.setup);
+          // Only fixed error copy is host-specific. Picker data and privacy-confirmation _meta stay untouched.
+          return result.isError ? { ...result, content: appClientCopy(result.content, options.appClient) } : result;
+        }
         throw new ChatGptSurfaceError('unknown_tool');
     }
   } catch (error) {
-    return errorToolResult(error);
+    return errorToolResult(error, options.appClient);
   }
 }
 
@@ -945,14 +952,14 @@ export const CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE, P
  * older versions (tool results cached before an update); the contents echo
  * the URI asked for and always carry the current page.
  */
-export function readChatGptResource(uri: string): { contents: Array<Record<string, unknown>> } {
+export function readChatGptResource(uri: string, client?: McpAppClient): { contents: Array<Record<string, unknown>> } {
   if (matchesResourceUri(uri, PRIVATE_ANSWER_RESOURCE_URI)) {
     return {
       contents: [{
         uri,
         mimeType: PRIVATE_ANSWER_RESOURCE.mimeType,
-        text: privateAnswerResourceHtml(),
-        _meta: privateAnswerResourceMeta(),
+        text: privateAnswerResourceHtml(undefined, client),
+        _meta: privateAnswerResourceMeta(undefined, client),
       }],
     };
   }
@@ -961,8 +968,8 @@ export function readChatGptResource(uri: string): { contents: Array<Record<strin
       contents: [{
         uri,
         mimeType: PRIVATE_QUESTION_RESOURCE.mimeType,
-        text: privateQuestionResourceHtml(),
-        _meta: privateQuestionResourceMeta(),
+        text: privateQuestionResourceHtml(undefined, client),
+        _meta: privateQuestionResourceMeta(undefined, client),
       }],
     };
   }
@@ -973,8 +980,8 @@ export function readChatGptResource(uri: string): { contents: Array<Record<strin
     contents: [{
       uri,
       mimeType: DASHBOARD_RESOURCE.mimeType,
-      text: dashboardResourceHtml(),
-      _meta: dashboardResourceMeta(),
+      text: dashboardResourceHtml(client),
+      _meta: dashboardResourceMeta(client),
     }],
   };
 }
@@ -998,6 +1005,6 @@ export function createChatGptMcpServer(
     callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri, options.appClient));
   return server;
 }

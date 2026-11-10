@@ -1,3 +1,4 @@
+import { credentialSurface, type CredentialSurface } from './tokens.ts';
 /**
  * Olympus connect-relay wire protocol, version 2.
  *
@@ -136,7 +137,7 @@ export interface SurfaceEntry {
   /** The token's surface fingerprint (shared/tokens.ts surfaceFingerprint). */
   readonly fingerprint: string;
   /** The tool surface the engine serves that token. */
-  readonly surface: 'chatgpt' | 'remote';
+  readonly surface: CredentialSurface;
   /** When the token expires, in whole seconds since the epoch. */
   readonly expiresAt: number;
 }
@@ -167,9 +168,9 @@ export function parseSurfaceEntry(raw: unknown): SurfaceEntry | undefined {
   const { endpoint, fingerprint, surface, expiresAt } = raw as Record<string, unknown>;
   if (endpoint !== 'default' && endpoint !== 'directory') return undefined;
   if (typeof fingerprint !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(fingerprint)) return undefined;
-  if (surface !== 'chatgpt' && surface !== 'remote') return undefined;
+  if (typeof surface !== 'string') return undefined;
   if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) return undefined;
-  return { endpoint, fingerprint, surface, expiresAt };
+  return { endpoint, fingerprint, surface: credentialSurface(surface), expiresAt };
 }
 
 export function base64url(data: Uint8Array): string {

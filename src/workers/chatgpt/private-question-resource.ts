@@ -1,3 +1,4 @@
+import { appClientCopy, appResourceMeta, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 /**
  * The `ui://olympus/private-question` MCP Apps resource (advertised
  * content-versioned, `?v=<hash>`): the private question panel, where the
@@ -34,15 +35,15 @@ export const PRIVATE_QUESTION_RESOURCE = {
 } as const;
 
 /** `_meta` on the resource contents: the relay is the one origin the panel may contact. */
-export function privateQuestionResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN): Record<string, unknown> {
-  return {
+export function privateQuestionResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN, client?: McpAppClient): Record<string, unknown> {
+  return appResourceMeta({
     ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
     'openai/widgetDescription': 'A question field whose question and answer stay between the user and their own computer; ChatGPT never receives either.',
-  };
+  }, client);
 }
 
-export function privateQuestionResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN): string {
-  return relayOrigin === PRIVATE_ANSWER_RELAY_ORIGIN ? PRIVATE_QUESTION_HTML : privateQuestionPageHtml({ relayOrigin });
+export function privateQuestionResourceHtml(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN, client?: McpAppClient): string {
+  return appClientCopy(relayOrigin === PRIVATE_ANSWER_RELAY_ORIGIN ? PRIVATE_QUESTION_HTML : privateQuestionPageHtml({ relayOrigin }), client);
 }
 
 /** The panel page. Self-contained: no external scripts, styles or fonts. */

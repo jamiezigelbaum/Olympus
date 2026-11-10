@@ -1,3 +1,4 @@
+import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
@@ -1483,11 +1484,11 @@ function mintErrorRef(): string {
  * A tool-level error with a fixed sentence; the internal message never
  * leaves. An opaque one also names the reference its log line carries.
  */
-export function errorToolResult(error: unknown): ChatGptToolResult {
+export function errorToolResult(error: unknown, client?: McpAppClient): ChatGptToolResult {
   const code = errorCode(error);
   if (!REFERENCED_ERROR_CODES.has(code)) {
     return {
-      content: [{ type: 'text', text: ERROR_TEXT[code] }],
+      content: [{ type: 'text', text: appClientCopy(ERROR_TEXT[code], client) }],
       structuredContent: { error: code },
       isError: true,
     };
@@ -1496,7 +1497,7 @@ export function errorToolResult(error: unknown): ChatGptToolResult {
   const errorClass = error instanceof Error ? error.name : typeof error;
   console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)}`);
   return {
-    content: [{ type: 'text', text: `${ERROR_TEXT[code]} ${errorReferenceSentence(ref)}` }],
+    content: [{ type: 'text', text: `${appClientCopy(ERROR_TEXT[code], client)} ${errorReferenceSentence(ref)}` }],
     structuredContent: { error: code, ref },
     isError: true,
   };
@@ -1572,10 +1573,11 @@ export const PRIVATE_QUESTION_DAILY_LIMIT_TEXT = {
  */
 export function openPrivateQuestionToolResult(
   meta: PrivateQuestionMetaV1 | { refused: keyof typeof PRIVATE_QUESTION_DAILY_LIMIT_TEXT } | undefined,
+  client?: McpAppClient,
 ): ChatGptToolResult {
   if (!meta) {
     return {
-      content: [{ type: 'text', text: PRIVATE_QUESTION_UNAVAILABLE_TEXT }],
+      content: [{ type: 'text', text: appClientCopy(PRIVATE_QUESTION_UNAVAILABLE_TEXT, client) }],
       structuredContent: { status: 'unavailable', reason: 'not_connected' },
     };
   }

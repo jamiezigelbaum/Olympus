@@ -5,7 +5,7 @@
  */
 import type { BucketSpec } from '../shared/rate-limit.ts';
 import { KeyedCounter, KeyedTokenBuckets } from '../shared/rate-limit.ts';
-import type { CredentialSurface } from '../shared/tokens.ts';
+import { credentialSurface, type CredentialSurface } from '../shared/tokens.ts';
 
 export interface RelayLimits {
   /** New install registrations per address (IPv6 by /48; burst, refill). */
@@ -377,7 +377,7 @@ export class ConfirmedCredentials {
 
   add(key: string, surface?: CredentialSurface): void {
     this.entries.delete(key);
-    this.entries.set(key, { expiresAt: this.now() + this.ttlMs, surface });
+    this.entries.set(key, { expiresAt: this.now() + this.ttlMs, surface: surface === undefined ? undefined : credentialSurface(surface) });
     // Map order is insertion order: the first entry is the oldest.
     while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
   }

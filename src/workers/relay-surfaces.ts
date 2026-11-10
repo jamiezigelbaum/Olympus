@@ -23,18 +23,19 @@ import { surfaceFingerprint } from '../../connect-relay/shared/tokens.ts';
 import { RELAY_SURFACES_PATH } from '../core/remote-access.ts';
 import type { RemoteConnectionStore } from '../core/remote-connections.ts';
 import { currentRemotePublicUrls, remoteMcpResource, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
-import { isChatGptGrant } from './remote-oauth/pinned-clients.ts';
+import { grantMcpSurface } from './remote-oauth/pinned-clients.ts';
 
 export interface RelaySurfacesOptions {
   /** The connection store, when one exists (never created here). */
   connections: () => RemoteConnectionStore | undefined;
   publicUrls: RemotePublicUrlsSource;
+  claudeAppEnabled?: () => boolean;
   /** Whether a request carries the relay child's per-boot secret (core/remote-access.ts isRelayedRequest). */
   isRelayed: (request: Request) => boolean;
 }
 
 /** The mapping as it stands: at most MAX_SURFACE_ENTRIES, latest expiry first; empty when the relay is off or no store exists. */
-export function relaySurfaceEntries(options: Pick<RelaySurfacesOptions, 'connections' | 'publicUrls'>): SurfaceEntry[] {
+export function relaySurfaceEntries(options: Pick<RelaySurfacesOptions, 'connections' | 'publicUrls' | 'claudeAppEnabled'>): SurfaceEntry[] {
   const urls = currentRemotePublicUrls(options.publicUrls);
   if (!urls) return [];
   const store = options.connections();
@@ -44,7 +45,7 @@ export function relaySurfaceEntries(options: Pick<RelaySurfacesOptions, 'connect
     endpoint: 'default',
     fingerprint: surfaceFingerprint(token.tokenHash),
     // The surface the worker serves this token through the relay (email-source/server.ts servesRequest).
-    surface: isChatGptGrant({ clientId: token.clientId }) ? 'chatgpt' : 'remote',
+    surface: grantMcpSurface({ clientId: token.clientId }, options.claudeAppEnabled?.() === true),
     expiresAt: Math.floor(Date.parse(token.expiresAt) / 1000),
   }));
 }
