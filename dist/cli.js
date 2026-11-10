@@ -164355,9 +164355,18 @@ function hostProgram(input, bridge, mount) {
         if (!notice || !sentence)
           return;
         const state = notice.getAttribute("data-update-state");
+        const valid = typeof version2 === "string" && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version2);
+        if (state === "failed" || state === "rolled_back") {
+          if (valid) {
+            notice.setAttribute("data-update-version", version2);
+            const retry = notice.querySelector("[data-update-now]");
+            if (retry)
+              retry.hidden = false;
+          }
+          return;
+        }
         if (state !== "none" && state !== "available")
           return;
-        const valid = typeof version2 === "string" && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version2);
         sentence.textContent = valid ? input.updateWords.notice.replace("{version}", version2) : "";
         notice.setAttribute("data-update-state", valid ? "available" : "none");
         notice.setAttribute("data-update-version", valid ? version2 : "");

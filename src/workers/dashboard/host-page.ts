@@ -591,8 +591,18 @@ function hostProgram(input: {
         const sentence = document.querySelector<HTMLElement>('[data-update-title]');
         if (!notice || !sentence) return;
         const state = notice.getAttribute('data-update-state');
-        if (state !== 'none' && state !== 'available') return;
         const valid = typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
+        if (state === 'failed' || state === 'rolled_back') {
+          // Keep the outcome's words; a version found since (a worker just
+          // restarted has an empty update cache) brings the retry back.
+          if (valid) {
+            notice.setAttribute('data-update-version', version);
+            const retry = notice.querySelector<HTMLElement>('[data-update-now]');
+            if (retry) retry.hidden = false;
+          }
+          return;
+        }
+        if (state !== 'none' && state !== 'available') return;
         sentence.textContent = valid ? input.updateWords.notice.replace('{version}', version) : '';
         notice.setAttribute('data-update-state', valid ? 'available' : 'none');
         notice.setAttribute('data-update-version', valid ? version : '');

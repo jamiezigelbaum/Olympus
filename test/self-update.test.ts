@@ -342,6 +342,25 @@ describe('the notice on Home and Settings', () => {
     expect(html).toContain("Olympus 1.5.1 didn't start, so Olympus put 1.5.0 back.");
   });
 
+  test('a rollback drawn before the update check still offers the retry once the check finds the version', async () => {
+    // A worker that just restarted has an empty update cache, so the page is
+    // drawn with no version; Home's health read brings Update now back.
+    const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+    Object.defineProperty(window, 'setInterval', { value: () => 1 });
+    Object.defineProperty(window, 'setTimeout', { value: () => 1 });
+    Object.defineProperty(window, 'fetch', { value: async () => new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } })) });
+    try {
+      window.document.write(renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', selfUpdate: true, csrfToken: 'c', localSession: true, updateStatus: { state: 'rolled_back', from: '1.5.0', to: '1.5.1' } }));
+      window.document.close();
+      const button = window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement;
+      const notice = window.document.querySelector('[data-update-notice]')!;
+      await waitFor(() => !button.hidden, { description: 'retry offered after the health read' });
+      expect(notice.getAttribute('data-update-version')).toBe('1.5.1');
+      expect(notice.getAttribute('data-update-state')).toBe('rolled_back');
+      expect(window.document.querySelector('[data-update-title]')!.textContent).toContain("Olympus 1.5.1 didn't start, so Olympus put 1.5.0 back.");
+    } finally { await window.happyDOM.close(); }
+  });
+
   test('Settings › Updates carries the same notice', () => {
     const html = renderDashboardSettingsPage({ settings: { update: { version: '1.5.1', command: 'curl -fsSL https://olympusplugin.ai/install.sh | sh' }, updater: { command: 'curl -fsSL https://olympusplugin.ai/install.sh | sh', selfUpdate: true } } });
     expect(html).toContain('Olympus 1.5.1 is available.');
