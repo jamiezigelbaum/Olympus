@@ -191057,6 +191057,32 @@ function blocksText(content) {
 
 `) : undefined, unsupported };
 }
+function visibleThread2(messages) {
+  const byId = new Map;
+  let newest;
+  let newestAt = "";
+  for (const message2 of messages) {
+    if (!isRecord11(message2) || typeof message2.uuid !== "string" || typeof message2.parent_message_uuid !== "string")
+      return messages;
+    byId.set(message2.uuid, message2);
+    const at = isoTime2(message2.created_at) ?? "";
+    if (!newest || at >= newestAt) {
+      newest = message2;
+      newestAt = at;
+    }
+  }
+  if (!newest)
+    return messages;
+  const chain = [];
+  const seen = new Set;
+  for (let at = newest;at; at = byId.get(at.parent_message_uuid)) {
+    if (seen.has(at.uuid))
+      return messages;
+    seen.add(at.uuid);
+    chain.push(at);
+  }
+  return chain.reverse();
+}
 function parseClaudeConversation(record8) {
   if (!isRecord11(record8))
     return { kind: "unreadable" };
@@ -191065,7 +191091,7 @@ function parseClaudeConversation(record8) {
     return { kind: "unsupported" };
   const turns = [];
   let unsupported = 0;
-  for (const message2 of Array.isArray(messages) ? messages : []) {
+  for (const message2 of visibleThread2(Array.isArray(messages) ? messages : [])) {
     if (!isRecord11(message2) || message2.sender !== "human" && message2.sender !== "assistant") {
       unsupported += 1;
       continue;

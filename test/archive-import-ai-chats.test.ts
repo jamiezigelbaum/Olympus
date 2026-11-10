@@ -300,6 +300,34 @@ describe('one Claude conversation', () => {
     expect(note.unsupported).toBeUndefined();
   });
 
+  test('an edited prompt: only the chain ending at the newest message is read; without parents, list order', () => {
+    const root = '00000000-0000-4000-8000-000000000000';
+    const at = (minute: number) => new Date(Date.UTC(2024, 5, 1, 9, minute)).toISOString();
+    const message = (uuid: string, parent: string, sender: string, text: string, minute: number) =>
+      ({ ...claudeMessage(sender, text, { at: at(minute) }), uuid, parent_message_uuid: parent });
+    const messages = [
+      message('h1', root, 'human', 'First question', 0),
+      message('a1', 'h1', 'assistant', 'First answer', 1),
+      message('h2', 'a1', 'human', 'Original follow-up', 2),
+      message('a2', 'h2', 'assistant', 'Answer to the original', 3),
+      // The follow-up edited: a new branch off the first answer, and its reply is the newest message.
+      message('h2b', 'a1', 'human', 'Edited follow-up', 4),
+      message('a2b', 'h2b', 'assistant', 'Answer to the edit', 5),
+    ];
+    const edited = noteOf(parseClaudeConversation(claudeConversation({ messages })));
+    expect(edited.body).toBe('You: First question\n\nClaude: First answer\n\nYou: Edited follow-up\n\nClaude: Answer to the edit');
+    // Listed out of time order, the newest message still ends the thread.
+    const shuffled = noteOf(parseClaudeConversation(claudeConversation({ messages: [messages[4], messages[5], ...messages.slice(0, 4)] })));
+    expect(shuffled.body).toBe(edited.body);
+    // One message without the field: the list order, every message read.
+    const { parent_message_uuid: _dropped, ...noParent } = messages[0]!;
+    const listed = noteOf(parseClaudeConversation(claudeConversation({ messages: [noParent, ...messages.slice(1)] })));
+    expect(listed.body).toBe('You: First question\n\nClaude: First answer\n\nYou: Original follow-up\n\nClaude: Answer to the original\n\nYou: Edited follow-up\n\nClaude: Answer to the edit');
+    // A parent chain that loops is no thread: the list order again.
+    const looped = noteOf(parseClaudeConversation(claudeConversation({ messages: [message('x', 'y', 'human', 'one', 0), message('y', 'x', 'assistant', 'two', 1)] })));
+    expect(looped.body).toBe('You: one\n\nClaude: two');
+  });
+
   test('attachments are named, not read; an unknown sender or block is counted; nothing to read is empty', () => {
     const conversation = claudeConversation({
       name: '',

@@ -7,8 +7,9 @@
  * attachments, files}`: `sender` is `human` (the owner) or `assistant`
  * (Claude), `text` the message's words, and `content`, where the export has
  * it, the same message as blocks (`{type: "text", text}`, and Claude's
- * thinking and tool use beside them). The messages are read in the order the
- * export lists them.
+ * thinking and tool use beside them). Only the visible thread is read: when
+ * the messages name their parents (`parent_message_uuid`), the chain ending at
+ * the newest message; otherwise the order the export lists them in.
  *
  * - Read: the text blocks of a message's `content`; a message with none reads
  *   its `text`.
@@ -57,6 +58,38 @@ function blocksText(content: unknown): { text: string | undefined; unsupported: 
   return { text: pieces.length > 0 ? pieces.join('\n\n') : undefined, unsupported };
 }
 
+/**
+ * The messages of the visible thread, in order. When every message names its
+ * parent (`parent_message_uuid`), the conversation is a tree (an edited prompt
+ * or a retried reply starts a branch) and what was shown is the chain from the
+ * newest message (by `created_at`; the later in the list on a tie) back
+ * through its parents. Without that field on every message, or with a chain
+ * that loops, the export's list order is the thread.
+ */
+function visibleThread(messages: readonly unknown[]): readonly unknown[] {
+  const byId = new Map<string, Record<string, unknown>>();
+  let newest: Record<string, unknown> | undefined;
+  let newestAt = '';
+  for (const message of messages) {
+    if (!isRecord(message) || typeof message.uuid !== 'string' || typeof message.parent_message_uuid !== 'string') return messages;
+    byId.set(message.uuid, message);
+    const at = isoTime(message.created_at) ?? '';
+    if (!newest || at >= newestAt) {
+      newest = message;
+      newestAt = at;
+    }
+  }
+  if (!newest) return messages;
+  const chain: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (let at: Record<string, unknown> | undefined = newest; at; at = byId.get(at.parent_message_uuid as string)) {
+    if (seen.has(at.uuid as string)) return messages;
+    seen.add(at.uuid as string);
+    chain.push(at);
+  }
+  return chain.reverse();
+}
+
 /** One record of a Claude export's conversations as a note, an empty conversation, or no conversation at all. */
 export function parseClaudeConversation(record: unknown): NoteOutcome {
   if (!isRecord(record)) return { kind: 'unreadable' };
@@ -64,7 +97,7 @@ export function parseClaudeConversation(record: unknown): NoteOutcome {
   if (messages !== undefined && messages !== null && !Array.isArray(messages)) return { kind: 'unsupported' };
   const turns: ConversationTurn[] = [];
   let unsupported = 0;
-  for (const message of Array.isArray(messages) ? messages : []) {
+  for (const message of visibleThread(Array.isArray(messages) ? messages : [])) {
     if (!isRecord(message) || (message.sender !== 'human' && message.sender !== 'assistant')) {
       unsupported += 1;
       continue;
