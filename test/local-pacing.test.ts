@@ -384,6 +384,8 @@ test('the checkbox sits under the choice cards, only where the setting exists', 
   expect(on).toContain('<input type="checkbox" data-go-easy checked> <b>Go easy on this computer</b>');
   expect(on).toContain("Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.");
   expect(on.indexOf('data-go-easy')).toBeGreaterThan(on.indexOf('class="judgeopts"'));
+  // Box 3 of the approved mock: straight above the spending limit, below the choices and the Venice note.
+  expect(on).toContain('<p class="pnote" data-go-easy-message role="status"></p></div><div class="judgecapbox">');
   expect(renderJudgeChoice(view, { controlSessionCsrfToken: 'synthetic', judgeSetup, goEasy: false })).toContain('<input type="checkbox" data-go-easy> ');
   expect(renderJudgeChoice(view, { controlSessionCsrfToken: 'synthetic', judgeSetup })).not.toContain('data-go-easy');
 });

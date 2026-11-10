@@ -831,8 +831,8 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ''}"${capAttrs}></label>`
     + `<p class="pnote">${escapeHtml(spent)}</p>${judgeChoiceUsesVenice(status.choice) ? `<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button>` : ''}</div>`;
   // Box 3 of the approved mock (#922, "Go easy on this computer"): the idle-mode
-  // checkbox goes here, between the choices and the spending limit.
-  const idleModeSlot = '';
+  // checkbox, between the choices and the spending limit.
+  const idleModeSlot = options?.goEasy === undefined ? '' : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? ' checked' : ''}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`;
   const reply = '<span data-action-message role="status"></span>';
   const dialog = (pick: JudgeChoice, title: string, body: string, button: string) =>
     `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>`
@@ -857,7 +857,6 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
     <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? '' : ' disabled'}><legend class="judgelegend">${escapeHtml(S.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ''}${stopped}
     <div class="judgeopts">${local}${doubleCheck}${venice}</div>
-    ${options?.goEasy === undefined ? '' : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? ' checked' : ''}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`}
     ${cloud || status.stop === 'storage' ? '' : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
     ${idleModeSlot}${capBox}
     <p class="pnote judgeorder">${escapeHtml(S.judgeOrder)}</p>
