@@ -207600,7 +207600,7 @@ function copyPrivacySettings(settings) {
       if (rule.kind === "chat") {
         if (!PRIVACY_CHAT_SOURCE_IDS.has(rule.source_id))
           return [];
-        const display2 = text4(rule.display);
+        const display2 = text5(rule.display);
         return [{ kind: "chat", source_id: rule.source_id, key: opaque(rule.key), ...display2 ? { display: display2 } : {} }];
       }
       if (!SCOPE_SOURCE_IDS2.has(rule.source_id))
