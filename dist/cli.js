@@ -124670,13 +124670,13 @@ var init_settings_proposal = __esm(() => {
     description: "Write a JSON object with any of these keys, then run olympus settings propose <file>. The owner applies it with one click on the dashboard Settings page. Run olympus settings show for the current values and the allowed model choices.",
     keys: {
       private_answer_mode: { type: "string", allowed: [...SOVEREIGNTY_PRESETS] },
-      computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only." },
+      computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only, while the choice is still open. Propose it on its own." },
       privacy_judge: {
         type: "object",
         fields: {
           choice: { type: "string", allowed: ["local", "venice"] },
           spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
-          note: { type: "note", note: "Propose privacy_judge on its own. Propose any models, private_answer_mode or computer_use change first, separately." }
+          note: { type: "note", note: "Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately." }
         }
       },
       models: {
@@ -149225,11 +149225,14 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
   let lastApplied;
   async function rowsFor(input) {
     const rows = [];
+    if (input.computer_use && Object.keys(input).length > 1) {
+      throw new SettingsProposalError("How this computer runs goes in two proposals: propose computer_use on its own first, and once it is applied, propose the other changes.");
+    }
     if (input.private_answer_mode) {
       if (!targets.saveAnswerMode)
         throw new SettingsProposalError("This Olympus cannot change the Private-answer mode from the dashboard.");
-      if (!input.computer_use && targets.computerSetup?.().computer_use_pending === true) {
-        throw new SettingsProposalError("Choose how this computer runs first: add computer_use to the proposal.");
+      if (targets.computerSetup?.().computer_use_pending === true) {
+        throw new SettingsProposalError("Choose how this computer runs first: propose computer_use on its own, and once it is applied, propose private_answer_mode.");
       }
       rows.push({ key: "private_answer_mode", label: "Private-answer mode", current: targets.answerMode().label, proposed: modeLabel(input.private_answer_mode) });
     }
@@ -149242,7 +149245,7 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
       }
       rows.push({ key: "computer_use", label: "How this computer runs", current: "Not chosen yet", proposed: input.computer_use === "server" ? "Always-on server" : "Everyday computer" });
     }
-    if (input.privacy_judge && (input.models || input.private_answer_mode || input.computer_use)) {
+    if (input.privacy_judge && (input.models || input.private_answer_mode)) {
       throw new SettingsProposalError("The privacy judge goes in two proposals: propose the other changes first, and once they are applied, propose privacy_judge on its own.");
     }
     if (input.privacy_judge) {

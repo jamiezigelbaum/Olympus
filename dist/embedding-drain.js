@@ -70539,13 +70539,13 @@ var SETTINGS_PROPOSAL_SCHEMA = {
   description: "Write a JSON object with any of these keys, then run olympus settings propose <file>. The owner applies it with one click on the dashboard Settings page. Run olympus settings show for the current values and the allowed model choices.",
   keys: {
     private_answer_mode: { type: "string", allowed: [...SOVEREIGNTY_PRESETS] },
-    computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only." },
+    computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only, while the choice is still open. Propose it on its own." },
     privacy_judge: {
       type: "object",
       fields: {
         choice: { type: "string", allowed: ["local", "venice"] },
         spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
-        note: { type: "note", note: "Propose privacy_judge on its own. Propose any models, private_answer_mode or computer_use change first, separately." }
+        note: { type: "note", note: "Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately." }
       }
     },
     models: {

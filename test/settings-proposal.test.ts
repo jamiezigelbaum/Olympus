@@ -129,7 +129,7 @@ describe('the proposal holder', () => {
     expect(holder.current()).toBeUndefined();
   });
 
-  test('a computer still choosing how it runs needs that choice first, applied before the mode', async () => {
+  test('a computer still choosing how it runs needs that choice first, in a proposal of its own', async () => {
     const calls: string[] = [];
     const { targets: t } = targets({
       computerSetup: () => ({ computer_use_pending: true, engine_server_mode: { enabled: false, pending: false } }),
@@ -137,10 +137,11 @@ describe('the proposal holder', () => {
       saveAnswerMode: (choice) => { calls.push(`mode:${choice}`); return { ok: true }; },
     });
     const holder = createSettingsProposalHolder(t);
-    await expect(holder.propose({ private_answer_mode: 'local-first' })).rejects.toThrow('add computer_use');
-    const proposal = await holder.propose({ private_answer_mode: 'local-first', computer_use: 'server' });
+    await expect(holder.propose({ private_answer_mode: 'local-first' })).rejects.toThrow('propose computer_use on its own');
+    await expect(holder.propose({ private_answer_mode: 'local-first', computer_use: 'server' })).rejects.toThrow('two proposals');
+    const proposal = await holder.propose({ computer_use: 'server' });
     await holder.apply(proposal.id);
-    expect(calls).toEqual(['computer:server', 'mode:local-first']);
+    expect(calls).toEqual(['computer:server']);
   });
 });
 

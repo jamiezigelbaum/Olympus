@@ -63,10 +63,15 @@ export function createSettingsProposalHolder(targets: SettingsProposalTargets, n
 
   async function rowsFor(input: SettingsProposalInput): Promise<SettingsProposalRow[]> {
     const rows: SettingsProposalRow[] = [];
+    if (input.computer_use && Object.keys(input).length > 1) {
+      // Choosing how a Mac runs can hand off to an administrator prompt that
+      // finishes after Apply returns, so nothing else may ride on it.
+      throw new SettingsProposalError('How this computer runs goes in two proposals: propose computer_use on its own first, and once it is applied, propose the other changes.');
+    }
     if (input.private_answer_mode) {
       if (!targets.saveAnswerMode) throw new SettingsProposalError('This Olympus cannot change the Private-answer mode from the dashboard.');
-      if (!input.computer_use && targets.computerSetup?.().computer_use_pending === true) {
-        throw new SettingsProposalError('Choose how this computer runs first: add computer_use to the proposal.');
+      if (targets.computerSetup?.().computer_use_pending === true) {
+        throw new SettingsProposalError('Choose how this computer runs first: propose computer_use on its own, and once it is applied, propose private_answer_mode.');
       }
       rows.push({ key: 'private_answer_mode', label: 'Private-answer mode', current: targets.answerMode().label, proposed: modeLabel(input.private_answer_mode) });
     }
@@ -78,7 +83,7 @@ export function createSettingsProposalHolder(targets: SettingsProposalTargets, n
       }
       rows.push({ key: 'computer_use', label: 'How this computer runs', current: 'Not chosen yet', proposed: input.computer_use === 'server' ? 'Always-on server' : 'Everyday computer' });
     }
-    if (input.privacy_judge && (input.models || input.private_answer_mode || input.computer_use)) {
+    if (input.privacy_judge && (input.models || input.private_answer_mode)) {
       // The judge is approved for the exact model and lane the running Olympus
       // uses. Models, the Private-answer mode and how the computer runs change
       // only after the restart, so a judge saved in the same batch would be
