@@ -104702,7 +104702,12 @@ function createJudgeCheck(options) {
       const other = Math.floor(random() * (index + 1));
       [picked[index], picked[other]] = [picked[other], picked[index]];
     }
-    return picked.map(({ item, random: byChance }) => ({ item_id: item.item_id, judge: item.tier, ...byChance ? { random: true } : {} }));
+    return picked.map(({ item, random: byChance }) => ({
+      item_id: item.item_id,
+      judge: item.tier,
+      ...item.decided_at ? { decided_at: item.decided_at } : {},
+      ...byChance ? { random: true } : {}
+    }));
   };
   return {
     status: () => viewOf(read()),
@@ -104741,7 +104746,11 @@ function createJudgeCheck(options) {
         throw new JudgeCheckError("not_current", "That is not the item waiting for an answer.");
       }
       current2.answer = answer;
-      const item = answer === "not_sure" ? undefined : options.get(itemId);
+      const item = options.get(itemId);
+      if (item && judged(item) && current2.decided_at !== undefined && item.decided_at !== current2.decided_at) {
+        current2.judge = item.tier;
+        current2.decided_at = item.decided_at;
+      }
       const now = answer === "not_sure" ? undefined : item?.owner_choice ?? item?.moving_to ?? item?.tier ?? current2.judge;
       if (answer !== "not_sure" && answer !== now) {
         const choice = answer === "Personal" ? "personal" : "private";

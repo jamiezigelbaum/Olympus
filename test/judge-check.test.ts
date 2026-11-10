@@ -349,32 +349,37 @@ describe('the numbers', () => {
   });
 });
 
-describe('deleting a source', () => {
-  const idOf = (provider: string, n: number) => `oti_${Buffer.from(JSON.stringify([provider, 'acct', '', `i${n}`])).toString('base64url')}`;
+describe('an item judged again during a round', () => {
+  test('the answer is compared with the newer verdict, since the owner answers about the text shown now', () => {
+    const items = pool();
+    const { check, sets } = fixture(items);
+    let view = check.start();
+    const id = view.current!.item_id;
+    const index = items.findIndex((candidate) => candidate.item_id === id);
+    const before = items[index]!.tier;
+    const after = before === 'Private' ? 'Personal' : 'Private';
+    // The text changed and the judge decided again, with the other label.
+    items[index] = { ...items[index]!, tier: after, decided_at: '2026-11-05T00:00:00.000Z' };
 
-  test('forgets the deleted source\'s ids, keeps the rest of the round and its answers, and keeps the counts', () => {
-    const path = join(root, 'judge-check.json');
-    writeFileSync(path, JSON.stringify({
-      v: 1,
-      round: { started_at: '2026-11-01T00:00:00.000Z', items: [
-        { item_id: idOf('gmail', 1), judge: 'Private', answer: 'Private', random: true },
-        { item_id: idOf('dropbox', 2), judge: 'Personal', answer: 'Private', random: true, changed: true },
-        { item_id: idOf('gmail', 3), judge: 'Personal' },
-      ] },
-      seen: [idOf('gmail', 4), idOf('dropbox', 5)],
-      random_tally: { compared: 6, agreed: 5 },
-    }));
-    expect(forgetJudgeCheckItems(path, [['gmail', 'acct']], { dryRun: true })).toBe(3);
-    expect(forgetJudgeCheckItems(path, [['gmail', 'acct']])).toBe(3);
-    const left = JSON.parse(readFileSync(path, 'utf8'));
-    expect(left.round.items.map((saved: { item_id: string }) => saved.item_id)).toEqual([idOf('dropbox', 2)]);
-    expect(left.round.items[0].answer).toBe('Private');
-    expect(left.seen).toEqual([idOf('dropbox', 5)]);
-    // The forgotten random answer (gmail 1, agreed) still counts.
-    expect(left.random_tally).toEqual({ compared: 7, agreed: 6 });
-    expect(forgetJudgeCheckItems(path, [['gmail', 'acct']])).toBe(0);
-    expect(forgetJudgeCheckItems(path, [['dropbox', 'other-acct']])).toBe(0);
-    expect(forgetJudgeCheckItems(path, [['dropbox', 'acct']])).toBe(2);
-    expect(JSON.parse(readFileSync(path, 'utf8')).round).toBeUndefined();
+    view = check.answer(id, after);
+    expect(view.answered[0]!.judge).toBe(after);
+    expect(view.agreed).toBe(1);
+    expect(view.answered[0]!.changed).toBe(false);
+    expect(sets).toHaveLength(0);
+  });
+
+  test('an item the owner changed meanwhile is still compared with the verdict the round began with', () => {
+    const items = pool();
+    const { check } = fixture(items);
+    let view = check.start();
+    const id = view.current!.item_id;
+    const index = items.findIndex((candidate) => candidate.item_id === id);
+    const before = items[index]!.tier!;
+    const other = before === 'Private' ? 'Personal' : 'Private';
+    items[index] = { ...items[index]!, tier: other, owner_set: true, decided_by: 'override', decided_at: '2026-11-05T00:00:00.000Z' };
+
+    view = check.answer(id, before);
+    expect(view.answered[0]!.judge).toBe(before);
+    expect(view.agreed).toBe(1);
   });
 });

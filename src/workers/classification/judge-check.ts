@@ -44,6 +44,8 @@ interface StoredRoundItem {
   not_applied?: boolean;
   /** Picked at random, not for the judge's doubt: only these answers estimate how often the judge agrees overall. */
   random?: boolean;
+  /** When the judge decided `judge`: a later time means it judged the item again (its text changed). */
+  decided_at?: string;
 }
 
 interface StoredJudgeCheck {
@@ -291,7 +293,9 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
       const other = Math.floor(random() * (index + 1));
       [picked[index], picked[other]] = [picked[other]!, picked[index]!];
     }
-    return picked.map(({ item, random: byChance }) => ({ item_id: item.item_id, judge: item.tier, ...(byChance ? { random: true } : {}) }));
+    return picked.map(({ item, random: byChance }) => ({
+      item_id: item.item_id, judge: item.tier, ...(item.decided_at ? { decided_at: item.decided_at } : {}), ...(byChance ? { random: true } : {}),
+    }));
   };
 
   return {
@@ -331,10 +335,16 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
         throw new JudgeCheckError('not_current', 'That is not the item waiting for an answer.');
       }
       current.answer = answer;
-      // Agreement is measured against the judge's label at the start; whether the answer needs
-      // applying is decided by the item's label now, which the owner may have changed since.
+      const item = options.get(itemId);
+      // The owner answers about the text shown now. If the judge has judged the item again since
+      // the round began (its text changed), agreement is measured against that newer verdict.
+      if (item && judged(item) && current.decided_at !== undefined && item.decided_at !== current.decided_at) {
+        current.judge = item.tier;
+        current.decided_at = item.decided_at;
+      }
+      // Agreement is measured against the judge's label; whether the answer needs applying is
+      // decided by the item's label now, which the owner may have changed since.
       // A choice or move still waiting for its pass counts as the label it is becoming.
-      const item = answer === 'not_sure' ? undefined : options.get(itemId);
       const now = answer === 'not_sure' ? undefined : item?.owner_choice ?? item?.moving_to ?? item?.tier ?? current.judge;
       if (answer !== 'not_sure' && answer !== now) {
         const choice: OwnerItemChoice = answer === 'Personal' ? 'personal' : 'private';
