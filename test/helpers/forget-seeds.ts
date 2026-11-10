@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { writeIngestionHealthState, readIngestionHealthState, defaultIngestionHealthStatePath } from '../../src/core/ingestion-health-state.ts';
 import { resolveRemoteConnectionsDbPath } from '../../src/core/remote-connections.ts';
+import { appReleaseLogDbPath, openAppReleaseLog } from '../../src/core/app-release-log.ts';
 import {
   openWaitingPrivateQuestionStore,
   waitingPrivateQuestionsDbPath,
@@ -148,6 +149,9 @@ export const storedAnswer = (corpusId: string): StoredPrivateAnswer => ({
 export const waitingPath = (layout: ForgetLayout): string =>
   waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(layout.env));
 
+export const appReleasePath = (layout: ForgetLayout): string =>
+  appReleaseLogDbPath(resolveRemoteConnectionsDbPath(layout.env));
+
 /** The dashboard database's rows for a source, however keyed. */
 const dashboardRows = (path: string, source: SeededSource): number =>
   count(path, 'source_dashboard_samples', 'source_id = ? OR source_id = ? OR corpus_id = ?', source.source_id, source.ledger_id, source.corpus_id)
@@ -230,6 +234,40 @@ export const SEEDED_FILES: readonly SeededFile[] = [
           question.result?.read.some((item) => item.corpusId === source.corpus_id)).length;
       } finally {
         store.close();
+      }
+    },
+  },
+  {
+    stepId: 'app-release-log',
+    mine: MINE,
+    other: OTHER,
+    path: appReleasePath,
+    seed(layout) {
+      mkdirSync(dirname(appReleasePath(layout)), { recursive: true });
+      const store = openAppReleaseLog(appReleasePath(layout));
+      try {
+        for (const source of [MINE, OTHER]) {
+          store.record({
+            at: Date.now(),
+            connection: { name: 'ChatGPT', kind: 'app' },
+            question: `What do my ${source.source_id} files say?`,
+            items: [{ source: 'Files', title: `${source.source_id} notes`, tier: 'personal', corpusId: source.corpus_id, provider: 'synthetic', providerItemId: `item-${source.source_id}` }],
+            heldBack: 0,
+            answeredPrivately: false,
+            withheld: false,
+          });
+        }
+      } finally {
+        store.close();
+      }
+    },
+    left(layout, source) {
+      if (!existsSync(appReleasePath(layout))) return 0;
+      const db = new Database(appReleasePath(layout), { readonly: true });
+      try {
+        return (db.query('SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id = ?').get(source.corpus_id) as { n: number }).n;
+      } finally {
+        db.close();
       }
     },
   },

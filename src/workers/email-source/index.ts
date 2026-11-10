@@ -10,6 +10,7 @@ import { createSettingsProposalHolder, type SettingsProposalHolder } from '../se
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
+import { agentAnswerReceipt, recordAgentAnswerReceipt, type AgentAnswerReceipt } from '../../core/app-release-agent.ts';
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
@@ -214,6 +215,7 @@ import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  DASHBOARD_APPS_RECEIVED_ROUTE,
   DASHBOARD_PRIVATE_ANSWERS_PATH,
 } from '../http.ts';
 import {
@@ -581,6 +583,12 @@ export interface EmailSourceWorkerOptions {
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
     systemReport?: () => SystemSupportFacts;
+    /**
+     * The setup checklist (#1077, core/setup-checklist.ts), built from the
+     * dashboard view and the facts beside it. For `olympus setup status` and
+     * the agent tool, through the `setup-status` CLI route. Names and states only.
+     */
+    setupStatus?: () => Promise<import('../../core/setup-checklist.ts').SetupChecklist>;
     judgeSetup?: {
       status: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
@@ -623,6 +631,11 @@ export interface EmailSourceWorkerOptions {
      * answers 501.
      */
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
+    /**
+     * What AI apps received (workers/apps-received.ts): served only through
+     * DASHBOARD_APPS_RECEIVED_ROUTE to a locally minted control session.
+     */
+    appsReceived?: Pick<import('../apps-received.ts').AppsReceived, 'handle'>;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
@@ -922,7 +935,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceAnswer = options.sourceAnswer;
   // Content-free manifests for stdio's delayed collection. Tickets never
   // appear on an assistant surface; missing/expired tickets fail closed.
-  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[] }>();
+  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[]; receipt?: AgentAnswerReceipt }>();
   const pruneReleaseTickets = () => {
     for (const [ticket, entry] of releaseTickets) if (entry.expires <= Date.now()) releaseTickets.delete(ticket);
   };
@@ -1158,6 +1171,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
+        // An agent on this computer received this answer (its tool result,
+        // core/app-release-agent.ts): record what the worker kept with the
+        // ticket on the owner's list of what each AI app received, once. The
+        // caller names only the ticket and whether it was withheld; the
+        // question, app and items are the worker's own.
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/received`) {
+          const body = await parseObjectBody(request);
+          const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
+          if (entry?.receipt && entry.expires > Date.now()) {
+            const { receipt } = entry;
+            delete entry.receipt;
+            recordAgentAnswerReceipt(receipt, body.withheld !== false);
+          }
+          return json({ ok: true });
+        }
+
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json() as { ticket?: unknown };
           const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
@@ -1200,11 +1229,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // Forward the manifest to an in-process remote call's sink too.
               for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
+              // Not recorded on the owner's list of what each AI app received yet: a local agent's
+              // answer is recorded when its tool result says it was received (/source/answer/received,
+              // core/app-release-agent.ts), after collection and the release-ticket check. A remote call
+              // is recorded where its own output leaves.
+              const receipt = agentAnswerReceipt(sourceAnswerRequest.question, caller, result);
               let releaseTicket: string | undefined;
               if (caller?.surface !== 'remote') {
                 pruneReleaseTickets();
                 releaseTicket = randomBytes(32).toString('base64url');
-                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests });
+                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests, ...(receipt ? { receipt } : {}) });
                 while (releaseTickets.size > 256) releaseTickets.delete(releaseTickets.keys().next().value!);
               }
               // A remote caller's output adds its own note (core/remote-result.ts, chatgpt/response-builder.ts).
@@ -1256,6 +1290,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'tier': return json(await tierForCli(body));
               case 'pairing-placement': return json(pairingPlacementForCli(body));
               case 'pairing-account': return json(pairingAccountForCli(body));
+              case 'setup-status': {
+                if (!sourceDashboard?.setupStatus) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no setup checklist to show.');
+                return json(await sourceDashboard.setupStatus());
+              }
               case 'settings-propose': {
                 if (!settingsProposal) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to change.');
                 try {
@@ -1601,6 +1639,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   }),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
                 },
+              },
+            }));
+          }
+          if (page === 'apps_received') {
+            // The page carries no request: its script reads the list through the local-only route.
+            return html(renderDashboardLocalPage('apps_received', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                appsReceivedAvailable: sourceDashboard?.appsReceived !== undefined,
               },
             }));
           }
@@ -2398,6 +2447,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           } catch {
             return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
           }
+        }
+
+        // What AI apps received: the questions apps asked and the titles they got. Like Private
+        // answers, only with the context header of a locally minted control session.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_APPS_RECEIVED_ROUTE) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.appsReceived) {
+            throw new EmailSourceWorkerError(501, 'apps_received_not_supported', 'What AI apps received is not available in this worker.');
+          }
+          const outcome = await sourceDashboard.appsReceived.handle(await parseObjectBody(request));
+          return new Response(JSON.stringify(outcome.body), {
+            status: outcome.status,
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+          });
         }
 
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {

@@ -1,3 +1,4 @@
+import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
  * The MCP surface ChatGPT reaches through the relay: Olympus's search and
@@ -34,7 +35,7 @@ import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, SEARCH_TOOL_NAME } from '.
 import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta, matchesResourceUri } from './dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from './dashboard-view-model.ts';
 import { callSetupTool, isSetupTool, SETUP_TOOLS, type ChatGptSetupBackend } from './setup-tools.ts';
-import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateAnswerDetail, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
+import { PRIVATE_ANSWER_META_KEY, PRIVATE_ANSWER_RESOURCE_URI, type PrivateAnswerDetail, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
 import type { PrivateAnswerJobs, PrivateAnswerWaitingRef, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
 import type { WaitingQuestionStore, WaitingQuestionTicket } from '../../core/waiting-private-questions.ts';
 import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
@@ -437,7 +438,13 @@ export async function callChatGptTool(
   detachedContext?: () => OperationContext,
 ): Promise<ChatGptToolResult> {
   const manifests = createReleaseManifestSink();
-  const result = await runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext));
+  const capture = createReleaseCapture();
+  const result = await runWithReleaseCapture(capture, () => runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext)));
+  // What ChatGPT received, for the owner's local list (core/app-release-capture.ts).
+  const record = (final: ChatGptToolResult, withheldAfter = false): ChatGptToolResult => {
+    recordChatGptRequest(name, args, ctx, final, capture, withheldAfter);
+    return final;
+  };
   // The Private probe may finish after evidence hydration. Recheck again
   // after that await, immediately before the tool result leaves the surface.
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
@@ -445,7 +452,7 @@ export async function callChatGptTool(
     const reason = ctx.releaseCheck
       ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
       : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() });
+    if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
   }
   if ((name === 'source_answer' || name === 'source_answer_result')
       && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
@@ -453,9 +460,41 @@ export async function callChatGptTool(
     const reason = ctx.releaseCheck
       ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
       : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }));
+    if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result;
+  return record(PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result);
+}
+
+/** Records a search or source answer as it leaves for ChatGPT; anything else (and an error) records nothing. */
+function recordChatGptRequest(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: OperationContext,
+  result: ChatGptToolResult,
+  capture: ReturnType<typeof createReleaseCapture>,
+  withheldAfter: boolean,
+): void {
+  if (result.isError) return;
+  const structured = result.structuredContent as Record<string, unknown> | undefined;
+  if (structured && 'anonymous' in structured) return;
+  let question: string | undefined;
+  if (name === SEARCH_TOOL_NAME) question = typeof args.question === 'string' ? args.question : undefined;
+  else if (name === 'source_answer' || name === 'source_answer_result') {
+    question = sourceAnswerQuestion(name, args, structured?.status, structured?.job_id);
+    if (structured?.status === 'working') return;
+  } else return;
+  const meta = result._meta as Record<string, unknown> | undefined;
+  const panel = meta?.[PRIVATE_ANSWER_META_KEY] as { count?: unknown } | undefined;
+  const privateCount = typeof panel?.count === 'number' && panel.count > 0 ? Math.floor(panel.count) : 0;
+  recordAppRequest({
+    caller: ctx.caller,
+    question,
+    // The panel's count and the search's own count of Private matches can name the same items: the larger stands.
+    capture: { ...capture, heldBack: Math.max(capture.heldBack, privateCount) },
+    // A match is not an answer: the row says the question was answered privately only once the
+    // waiting question's answer completes (notePrivateAnswerCompleted), whatever the panel's state.
+    withheldAfter,
+  });
 }
 
 async function runChatGptTool(
@@ -565,6 +604,9 @@ async function runChatGptTool(
         const done = pendingJobId(raw) === undefined;
         // Only this connection's own handed-off question, and only once it is answered.
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
+        // The waiting question made at the match follows the collected answer's row (what each AI
+        // app received), so the row is marked once that private answer completes.
+        if (done && isAnswered(raw)) notePrivateQuestion(pending?.match?.waiting);
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {}) });
       }
@@ -697,7 +739,10 @@ function recordWaiting(
 ): PrivateAnswerWaitingRef | undefined {
   if (!ticket) return undefined;
   try {
-    return options.waitingQuestions?.()?.record(ticket, { question, surface: 'chatgpt', state: 'waiting', detail });
+    const ref = options.waitingQuestions?.()?.record(ticket, { question, surface: 'chatgpt', state: 'waiting', detail });
+    // The request's row (what each AI app received) follows this question to its answer.
+    notePrivateQuestion(ref);
+    return ref;
   } catch {
     console.warn('[chatgpt] waiting private question not recorded reason=store_unavailable');
     return undefined;

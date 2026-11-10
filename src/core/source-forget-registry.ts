@@ -14,6 +14,7 @@
  * `test/store-open-guard.test.ts` ties the two lists to the code: a module that
  * opens a shared SQLite file must own a step or a kept entry.
  */
+import { appReleaseLogDbPath, forgetAppReleaseItems } from './app-release-log.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 import { resolveRemoteConnectionsDbPath } from './remote-connections.ts';
@@ -220,6 +221,18 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
         { corpusIds: account.corpus_ids, knownCorpusIds: context.knownCorpusIds },
         { dryRun, answeredOnly: repeatableOnly === true },
       ));
+    },
+  },
+  {
+    // What each AI app received: the titles a deleted source released go with it.
+    id: 'app-release-log',
+    file: 'app-release-log',
+    modules: ['src/core/app-release-log.ts'],
+    // An answer written from the deleted stores' open handles can still be recorded before the restart.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
+      return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
     },
   },
   {

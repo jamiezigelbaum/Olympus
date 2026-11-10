@@ -32,6 +32,8 @@
  * source_answer_result stays while ask_anonymously is listed, because a
  * handed-off anonymous answer is collected with it.
  */
+import { createReleaseCapture, recordAppRequest, runWithReleaseCapture } from '../core/app-release-capture.ts';
+import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
 import type { RemotePrivatePart } from '../core/remote-private-part.ts';
 import { remoteErrorOutput, remotePrivateNote, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
@@ -69,6 +71,11 @@ export interface RemoteSearchRequestContext {
    * the MCP call's signal.
    */
   signal?: AbortSignal;
+  /**
+   * Who asked, for the owner's local list of what each AI app received
+   * (core/app-release-capture.ts). Absent: nothing is recorded.
+   */
+  caller?: OperationCaller;
 }
 
 const MAX_QUESTION_CHARS = 2_000;
@@ -168,7 +175,9 @@ async function runSearch(
     return errorResult(remoteErrorOutput(new OperationError('source_index_error', 'unexpected search shape')));
   }
   // The same allowlisted, field-by-field result ChatGPT gets, with no panel.
-  let result = searchToolResult(raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
+  const capture = createReleaseCapture();
+  let result = runWithReleaseCapture(capture, () => searchToolResult(raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() }));
+  let withheldAfter = false;
   let note: string | undefined;
   if (privateCall) {
     // The probe may still be running: wait for its verdict (it is bounded) and record, then check
@@ -183,8 +192,18 @@ async function runSearch(
       const rawRecord = raw as Record<string, unknown>;
       const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
+      withheldAfter = true;
     }
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
+  }
+  if (context.caller) {
+    recordAppRequest({
+      caller: context.caller,
+      question,
+      capture: note === undefined ? capture : { ...capture, heldBack: Math.max(1, capture.heldBack) },
+      privateQuestion: note !== undefined ? privateCall?.answerRef : undefined,
+      withheldAfter,
+    });
   }
   if (note === undefined) {
     return {

@@ -133,19 +133,21 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
   });
 }
 
-/** The tab bar the Privacy page's two halves share: Private questions first, then Privacy settings (?keys). */
-export function dashboardPrivacyTabs(active: 'questions' | 'settings', token?: string): string {
-  const tab = (id: 'questions' | 'settings', href: string, label: string) => id === active
+/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), What AI apps received (?apps-received). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'apps', token?: string): string {
+  const tab = (id: 'questions' | 'settings' | 'apps', href: string, label: string) => id === active
     ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
     : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
     + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
     + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
+    + tab('apps', dashboardLocalPageHref('appsReceived', token), W.tabApps)
     + '</nav>';
 }
 
 export const PRIVACY_TABS_CSS = `
-.ptabs { display: flex; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs { display: flex; flex-wrap: wrap; gap: 0 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs .ptab { white-space: nowrap; }
 .ptabs .ptab { padding: 8px 14px; color: var(--t2); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .ptabs .ptab.on { color: var(--t1); border-bottom-color: var(--link); font-weight: 600; }
 .ptabs .ptab:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -175,6 +177,7 @@ form[data-judge-choice]:has(input[name="choice"][value="local-then-venice"]:chec
 .judgeorder { margin: 12px 0; }
 .judgehow { margin: 10px 0 0; color: var(--t2); }
 @media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .ptabs .ptab { padding: 8px 10px; } }
 `;
 
 /** The read-only token a dash_ reader's basePath carries, for the link to the gate. */

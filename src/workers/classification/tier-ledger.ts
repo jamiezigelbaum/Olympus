@@ -25,7 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
-import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   TIER_KEYS,
@@ -401,7 +401,7 @@ export class TierLedger {
     try {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
-        db.exec('PRAGMA query_only = ON;');
+        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
         this.db = db;
         return;
       }
@@ -414,6 +414,11 @@ export class TierLedger {
       throw error;
     }
     this.db = db;
+  }
+
+  /** Whether this file is at this build's schema (a read-only open never migrates it). */
+  hasCurrentSchema(): boolean {
+    return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
   }
 
   close(): void {
