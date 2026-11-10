@@ -298,6 +298,27 @@ function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedIte
  * exists, and the set ledger a store is bound to. With the id each bound one
  * must have, so an open checks it (`withLedgerAt`).
  */
+/**
+ * Reads one known store read-only (the owner's one-item lookup,
+ * tier-owner-items.ts), with the columns its items table has; `fallback` when
+ * the store cannot be read or holds no items table.
+ */
+export function withStore<T>(dbPath: string, fallback: T, run: (db: Database, columns: Set<string>) => T): T {
+  let db: Database | undefined;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const columns = new Set((db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!columns.has('provider_item_id')) return fallback;
+    return run(db, columns);
+  } catch {
+    // A store that cannot be read holds nothing to list.
+    return fallback;
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
 export function knownTierLedgers(context: TierCliContext = {}): Array<{ path: string; boundLedgerId?: string }> {
   const ledgers = new Map<string, string | undefined>();
   for (const dbPath of knownStorePaths(context)) {

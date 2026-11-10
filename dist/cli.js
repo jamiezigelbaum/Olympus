@@ -124382,6 +124382,22 @@ function locateMatched(needle, context2) {
   const fallback = matches2[0];
   return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
 }
+function withStore(dbPath, fallback, run) {
+  let db;
+  try {
+    db = new Database23(dbPath, { readonly: true });
+    db.exec("PRAGMA busy_timeout = 10000;");
+    const columns = new Set(db.query("PRAGMA table_info(items)").all().map((column) => column.name));
+    if (!columns.has("provider_item_id"))
+      return fallback;
+    return run(db, columns);
+  } catch {
+    return fallback;
+  } finally {
+    if (db)
+      closeSqliteStore(db, { checkpoint: false });
+  }
+}
 function knownTierLedgers(context2 = {}) {
   const ledgers = new Map;
   for (const dbPath of knownStorePaths(context2)) {
@@ -145326,7 +145342,6 @@ var init_judge_setup = __esm(() => {
 });
 
 // src/workers/classification/tier-owner-items.ts
-import { Database as Database24 } from "bun:sqlite";
 function createOwnerTierItems(context2 = {}) {
   return {
     find: (input) => findOwnerTierItems(input, context2),
@@ -145393,22 +145408,6 @@ function clampLimit(limit) {
 }
 function likePattern(words2) {
   return `%${words2.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
-}
-function withStore(dbPath, fallback, run2) {
-  let db;
-  try {
-    db = new Database24(dbPath, { readonly: true });
-    db.exec("PRAGMA busy_timeout = 10000;");
-    const columns = new Set(db.query("PRAGMA table_info(items)").all().map((column) => column.name));
-    if (!columns.has("provider_item_id"))
-      return fallback;
-    return run2(db, columns);
-  } catch {
-    return fallback;
-  } finally {
-    if (db)
-      closeSqliteStore(db, { checkpoint: false });
-  }
 }
 function selectColumns(columns) {
   const sender = columns.has("sender_label") ? "sender_label, sender_id" : "NULL AS sender_label, NULL AS sender_id";
@@ -197310,7 +197309,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database25 } from "bun:sqlite";
+import { Database as Database24 } from "bun:sqlite";
 import { existsSync as existsSync103 } from "node:fs";
 function unrefTimer(timer) {
   timer?.unref?.();
@@ -197501,7 +197500,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database25(ledgerPath, { readonly: true, create: false });
+      db = new Database24(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {
