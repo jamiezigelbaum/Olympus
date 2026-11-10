@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
-import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
+import { isRetiredGooglePilotClientId, packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
 import { dropboxPublisherAppKey, googleDesktopClient, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
   createOAuthRelayNonce,
@@ -182,6 +182,7 @@ import {
   DASHBOARD_TOOLS_CALL_PATH,
   dashboardHtmlRoutePage,
   dashboardLegacyRedirect,
+  dashboardConnectorRedirect,
   dashboardOutsideHelpRedirect,
   dashboardReadToken,
   renderComputerHostPage,
@@ -1001,6 +1002,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
     withGrantMutation: withDashboardGrantMutation,
   }) : undefined;
+  /**
+   * A confirmed Disconnect, Unpair or Delete indexed data of a chat source stops its pairing before taking the grant lock (the
+   * pairing may itself wait for that lock), and no new pairing can start until the operation is done (#689).
+   */
+  const withMessagingPairingHeld = <T>(record: Record<string, unknown>, operation: () => Promise<T>): Promise<T> => {
+    const source = record.acknowledge !== true ? undefined
+      : record.source_id === 'telegram.messages' ? 'telegram' as const
+        : record.source_id === 'whatsapp.personal.messages' ? 'whatsapp' as const : undefined;
+    return source && dashboardMessaging ? dashboardMessaging.withPairingHeld(source, operation) : operation();
+  };
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
 
   return {
@@ -1482,7 +1493,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // A locked reader: names, never an open token (no opener).
             return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url, request)));
           }
-          if (page === 'connector') return html(renderDashboardLocalPage('connector', { url, options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) } }));
+          if (page === 'connector') {
+            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url), 'Cache-Control': 'no-store' } });
+          }
           if (page === 'agents') {
             return html(renderDashboardLocalPage('agents', {
               url,
@@ -2531,11 +2544,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
 
         if (request.method === 'POST' && url.pathname === '/dashboard/disconnect') {
           const disconnectRecord = await parseObjectBody(request);
-          if (disconnectRecord.acknowledge === true) {
-            if (disconnectRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
-            if (disconnectRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(disconnectRecord, () => withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -2704,7 +2713,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               });
             },
           );
-          });
+          }));
         }
 
         // Delete indexed data: removes what Olympus indexed from a source that
@@ -2720,11 +2729,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
           const mutationRecord = await parseObjectBody(request);
           // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
-            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -2763,7 +2768,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               raw_runtime_secrets_exposed: false,
             },
           });
-          });
+          }));
         }
 
         // Unpair: Disconnect's twin for a source paired as a session.
@@ -2786,11 +2791,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'POST' && url.pathname === '/dashboard/unpair') {
           const mutationRecord = await parseObjectBody(request);
           // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
-            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -3098,7 +3099,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               });
             },
           );
-          });
+          }));
         }
 
         // Importing an archive (archive-import/dashboard.ts): the upload of
@@ -7184,6 +7185,11 @@ async function dashboardStoredClientIdIsPublisherOwned(
   clientIdKey: string,
   secretStore: SecretStore,
 ): Promise<boolean> {
+  // The beta.11 Desktop pilot client is Olympus's, never the owner's, however
+  // the id was stored. Its Google project is deleted (#765), so treating it as
+  // the owner's app would offer a reconnect through a client that no longer
+  // exists; as a publisher id, the card reconnects through the current one.
+  if (dashboardGoogleOAuthSource(source) && isRetiredGooglePilotClientId(clientId)) return true;
   const provenance = await secretStore.get(dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey));
   if (provenance === 'publisher') return true;
   if (provenance === 'byo') return false;
