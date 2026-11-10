@@ -1847,6 +1847,7 @@ var init_public_surface = __esm(() => {
     "source_watches",
     "source_watch_cancel",
     "olympus_doctor",
+    "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
     "olympus_open_remote"
@@ -1860,6 +1861,7 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
+    "olympus_setup_status",
     "ask_anonymously",
     "archive_import"
   ];
@@ -1871,6 +1873,7 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
+    "olympus_setup_status",
     "ask_anonymously",
     "archive_import"
   ];
@@ -41536,7 +41539,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_SETUP_AGENT_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -41871,6 +41874,27 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  DASHBOARD_SETUP_AGENT_COPY = {
+    open: "Set up with my agent",
+    title: "Set up with my agent",
+    intro: "Copy this to the agent you already use (Claude, ChatGPT, Codex, OpenClaw). It will check what's done, run the steps it's allowed to, and send you a link here for anything that needs your click.",
+    brief: [
+      "Help me finish setting up Olympus on this computer.",
+      "",
+      "1. Run: olympus setup status",
+      "   It lists every setup step, what's done, and the one way forward for each.",
+      '2. Do the steps marked "you can run this" yourself.',
+      `3. For steps marked "needs the owner", give me the link it shows, wait for me, then run setup status again. Don't ask me what's on screen.`,
+      "4. To change several settings at once, use olympus settings propose. I'll apply them with one click.",
+      "",
+      "You can't change what's Private, who has access, or what Olympus spends. Those always need my click in the dashboard."
+    ].join(`
+`),
+    copy: "Copy for my agent",
+    copied: "Copied",
+    copyFailed: "Select the text and copy it.",
+    close: "Close"
+  };
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
     email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
@@ -44950,6 +44974,16 @@ var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
   init_source_placement();
   init_source_registry();
+});
+
+// src/core/cli-via-worker.ts
+var init_cli_via_worker = __esm(() => {
+  init_config();
+  init_data_owner_lock();
+  init_olympus_layout();
+  init_operation_error();
+  init_worker_auth();
+  init_worker_transport();
 });
 
 // src/core/native-process-service.ts
@@ -71032,15 +71066,8 @@ init_source_registry();
 init_data_owner_lock();
 init_pairing_session_paths();
 
-// src/core/cli-via-worker.ts
-init_config();
-init_data_owner_lock();
-init_olympus_layout();
-init_operation_error();
-init_worker_auth();
-init_worker_transport();
-
 // src/core/pairing-placement.ts
+init_cli_via_worker();
 init_olympus_layout();
 init_source_placement();
 init_source_registry();
@@ -72107,6 +72134,15 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 .pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
 .pairing::backdrop{background:rgba(0,0,0,0.45)}
 .pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
+.setup-agent{width:min(46rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:1.25rem 1.5rem;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,0.12)}
+.setup-agent::backdrop{background:rgba(0,0,0,0.35)}
+.setup-agent .head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem}
+.setup-agent h2{margin:0;font-size:1.0625rem;font-weight:600}
+.setup-agent .x{border:0;background:transparent;color:var(--muted);font:inherit;font-size:1.25rem;line-height:1;min-width:2.25rem;min-height:2.25rem;cursor:pointer;border-radius:999px}
+.setup-agent .x:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.setup-agent .intro{margin:0.375rem 0 0.75rem;color:var(--muted);font-size:0.9375rem}
+.setup-agent pre{margin:0 0 0.75rem;padding:0.875rem 1rem;background:var(--surface);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all}
+.setup-agent .actions{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 `;
 var COMPUTER_HOST_PAGE_CSP = [
   "default-src 'none'",
@@ -72416,6 +72452,7 @@ var CHAT_TITLE_STOPWORDS = new Set([
 // src/workers/email-source/index.ts
 init_this_computer();
 init_data_lifecycle();
+init_cli_via_worker();
 init_remote_access();
 
 // src/data-backup.ts
@@ -73336,6 +73373,7 @@ init_paths();
 init_backup_paths();
 
 // src/workers/cli-operations.ts
+init_cli_via_worker();
 init_config();
 init_data_owner_lock();
 init_olympus_layout();

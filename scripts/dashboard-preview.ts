@@ -1,4 +1,5 @@
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
+import { buildSetupChecklist } from '../src/core/setup-checklist.ts';
 import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
@@ -1959,6 +1960,15 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
       ...(result._meta ?? {}),
       [COMPUTER_META_KEY]: {
         indexFaster: { on: indexFasterOn },
+        // The setup checklist (#1077) as mockup 1-home-setup shows it: 4 of 7, WhatsApp chats next.
+        setup: buildSetupChecklist({
+          version: '1.5.0', running: true,
+          privateAnswers: { chosen: true, label: 'Local models with Venice fallback' },
+          judge: { chosen: true, choice: 'venice', limitDollars: 5 },
+          sources: [{ id: 'gmail.email', name: 'Gmail', state: 'connected' }, { id: 'whatsapp.personal.messages', name: 'WhatsApp', state: 'connected' }],
+          messaging: [{ name: 'WhatsApp', paired: true, chatsChosen: false }],
+          aiApps: [], findableItems: 0,
+        }),
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
         ...(previewArchivesMeta(state) ? { archives: previewSplitArchives(previewArchivesMeta(state)!).archives } : {}),
