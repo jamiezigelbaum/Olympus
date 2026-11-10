@@ -215,7 +215,7 @@ const MESSAGES = {
   acknowledgementsIncomplete: 'Accept the statements on this page before turning anonymous answers on.',
   levelUnknown: 'Choose what zkAPI may send: Standard or Strict.',
   levelSaved: 'Saved.',
-  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements on this page.',
+  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.',
   languageMissing: 'A chosen language has no vocabulary pack installed on this computer.',
   languagesEmpty: 'Choose at least one language.',
   noHome: 'Olympus cannot find your home folder, so it cannot write the settings file.',
@@ -234,6 +234,7 @@ const MESSAGES = {
   confirm: 'This action needs your confirmation.',
   turnedOn: 'Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.',
   turnedOff: 'Anonymous answers are off. No question is sent.',
+  languagesSaved: 'Languages saved.',
   routeSavedRestart: 'Saved. Olympus is restarting its worker to apply the change; this page will refresh.',
   routeSavedNoRestart: 'Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.',
   routeAdded: 'The zkAPI route is added. Finish the steps below.',
@@ -684,8 +685,12 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       const base = current.state === 'valid' ? current.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen: ConsultLanguage[] = [...base.languages];
       // Turning off keeps the stored languages whatever the form sent (an
-      // empty selection must never stop the off switch).
-      if (enabled && update.languages !== undefined) {
+      // empty selection must never stop the off switch). Saving languages
+      // while zkAPI is off (Privacy rules › zkAPI's own button, which sends
+      // save_languages, #1047) is checked like turning on, so the selection
+      // is kept for when it is turned on.
+      const savingLanguages = update.languages !== undefined && (enabled || update.save_languages === true);
+      if (savingLanguages) {
         if (!Array.isArray(update.languages) || update.languages.length === 0) return invalid(MESSAGES.languagesEmpty, 'languages_empty');
         if (!update.languages.every((item): item is ConsultLanguage => typeof item === 'string' && (ALL_LANGUAGES as string[]).includes(item))) {
           return invalid('An unknown language was chosen.', 'language_unknown');
@@ -715,7 +720,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         if (!route) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
         if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.acknowledgementsIncomplete };
       }
-      if (enabled && (turningOn || update.languages !== undefined)) {
+      if (turningOn || savingLanguages) {
         const installed = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed.has(language))) return invalid(MESSAGES.languageMissing, 'language_pack_missing');
       }
@@ -735,7 +740,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         const paused = enabled && Boolean(zkapiProfile()) && !acknowledgementsComplete();
         const message = update.level !== undefined
           ? paused ? MESSAGES.levelSavedPaused : MESSAGES.levelSaved
-          : enabled ? MESSAGES.turnedOn : MESSAGES.turnedOff;
+          : update.save_languages === true ? MESSAGES.languagesSaved
+            : enabled ? MESSAGES.turnedOn : MESSAGES.turnedOff;
         return { ok: true, status_message: message, revision: result.settings.revision };
       }
       return writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);
