@@ -33349,26 +33349,9 @@ async function restoreLineBoundary(handle) {
     return;
   const last = Buffer.alloc(1);
   await handle.read(last, 0, 1, size - 1);
-  if (last[0] === 10)
-    return;
-  let boundary = 0;
-  const chunk = Buffer.alloc(64 * 1024);
-  for (let end = size;end > 0 && boundary === 0; ) {
-    const start = Math.max(0, end - chunk.length);
-    const { bytesRead } = await handle.read(chunk, 0, end - start, start);
-    const newline = chunk.subarray(0, bytesRead).lastIndexOf(10);
-    if (newline >= 0)
-      boundary = start + newline + 1;
-    end = start;
-  }
-  const tail = Buffer.alloc(size - boundary);
-  await handle.read(tail, 0, tail.length, boundary);
-  if (parseEmbeddingLedgerJsonl(tail.toString("utf8")).entries.length === 1) {
+  if (last[0] !== 10)
     await handle.appendFile(`
 `, "utf8");
-  } else {
-    await handle.truncate(boundary);
-  }
 }
 async function appendEmbeddingLedgerEntriesOnce(path, entries) {
   if (!entries.length)

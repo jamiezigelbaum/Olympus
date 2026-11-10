@@ -186,7 +186,7 @@ describe('append and read', () => {
 });
 
 describe('interrupted appends (#1012, #1014)', () => {
-  test('a retry after A + partial B leaves A, B and C readable and no corrupt line', async () => {
+  test('a retry after A + partial B leaves A, B and C readable and skips only the fragment', async () => {
     const path = tempLedgerPath();
     const [a, b, c] = ['note-a', 'note-b', 'note-c'].map(id => entry({ entry_id: id }));
     // The first attempt writes A and part of B, then the disk fills.
@@ -210,11 +210,51 @@ describe('interrupted appends (#1012, #1014)', () => {
     // The caller still holds A and B; it retries them with C.
     expect(await appendEmbeddingLedgerEntriesOnce(path, [a!, b!, c!])).toBe(2);
     const ledger = await readEmbeddingLedger(path);
-    expect(ledger.skipped).toBe(0);
+    // The torn fragment of B is its own skipped line; nothing else is lost.
+    expect(ledger.skipped).toBe(1);
     for (const id of ['note-a', 'note-b', 'note-c']) {
       expect(ledger.entries.filter(found => found.entry_id === id)).toHaveLength(1);
     }
-    expect(readFileSync(path, 'utf8').split('\n').filter(Boolean)).toHaveLength(3);
+    expect(readFileSync(path, 'utf8').split('\n').filter(Boolean)).toHaveLength(4);
+  });
+
+  test('two writers racing over the same torn tail never lose an acknowledged entry', async () => {
+    const path = tempLedgerPath();
+    writeFileSync(path, `${JSON.stringify(entry({ entry_id: 'before' }))}\n${JSON.stringify(entry()).slice(0, 15)}`);
+    // Writer one inspects the torn tail, then stalls until writer two has
+    // repaired it, appended and fsynced its own entry.
+    let release!: () => void;
+    const stalled = new Promise<void>(resolve => { release = resolve; });
+    let inspected!: () => void;
+    const hasInspected = new Promise<void>(resolve => { inspected = resolve; });
+    const original = fs.open;
+    let first = true;
+    const opened = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await original(...args);
+      if (args[1] === 'a+' && first) {
+        first = false;
+        const read = handle.read.bind(handle) as (...readArgs: unknown[]) => Promise<unknown>;
+        spyOn(handle, 'read').mockImplementation((async (...readArgs: unknown[]) => {
+          const result = await read(...readArgs);
+          inspected();
+          await stalled;
+          return result;
+        }) as never);
+      }
+      return handle;
+    });
+    try {
+      const one = appendEmbeddingLedgerEntry(path, entry({ entry_id: 'writer-one' }));
+      await hasInspected;
+      await appendEmbeddingLedgerEntry(path, entry({ entry_id: 'writer-two' }));
+      release();
+      await one;
+    } finally { opened.mockRestore(); }
+    const ledger = await readEmbeddingLedger(path);
+    for (const id of ['before', 'writer-one', 'writer-two']) {
+      expect(ledger.entries.filter(found => found.entry_id === id)).toHaveLength(1);
+    }
+    expect(ledger.skipped).toBe(1);
   });
 
   test('an ID-less append also starts on a line boundary', async () => {
@@ -222,7 +262,7 @@ describe('interrupted appends (#1012, #1014)', () => {
     writeFileSync(path, `${JSON.stringify(entry({ entry_id: 'kept', recorded_at: '2026-08-24T08:00:00.000Z' }))}\n${JSON.stringify(entry()).slice(0, 15)}`);
     await appendEmbeddingLedgerEntry(path, entry({ what: 'After the tear.' }));
     const ledger = await readEmbeddingLedger(path);
-    expect(ledger.skipped).toBe(0);
+    expect(ledger.skipped).toBe(1);
     const mine = ledger.entries.filter(found => found.entry_id === 'kept' || found.what === 'After the tear.');
     expect(mine.map(found => found.entry_id ?? found.what)).toEqual(['After the tear.', 'kept']);
   });
@@ -237,11 +277,11 @@ describe('interrupted appends (#1012, #1014)', () => {
     expect(ledger.entries.filter(found => found.entry_id === 'next')).toHaveLength(1);
   });
 
-  test('a torn tail with no earlier newline is dropped entirely', async () => {
+  test('a torn tail is terminated, never cut, so earlier bytes are untouched', async () => {
     const path = tempLedgerPath();
     writeFileSync(path, '{"recorded_at":"2026-');
     await appendEmbeddingLedgerEntry(path, entry({ entry_id: 'first-whole' }));
-    expect(readFileSync(path, 'utf8')).toBe(`${JSON.stringify(entry({ entry_id: 'first-whole' }))}\n`);
+    expect(readFileSync(path, 'utf8')).toBe(`{"recorded_at":"2026-\n${JSON.stringify(entry({ entry_id: 'first-whole' }))}\n`);
   });
 });
 

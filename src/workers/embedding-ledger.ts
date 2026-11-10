@@ -193,36 +193,23 @@ async function appendEmbeddingLedgerEntries(path: string, entries: readonly Embe
  * An append interrupted after a partial line (ENOSPC, a crash before fsync)
  * leaves an incomplete tail. Appending straight after it would weld the next
  * entry onto that fragment as one unreadable line, and the caller would then
- * acknowledge an entry nobody can read. The fragment itself was never
- * acknowledged, because its append never fsynced, so it is cut back to the
- * last newline; the caller still holds it and will write it again whole. One
- * exception keeps valid history: a last line that already parses as an entry
- * (a hand-edited file saved without a final newline) is terminated instead.
+ * acknowledge an entry nobody can read. So a missing final newline is written
+ * first: the fragment becomes its own line, which readers skip and count, and
+ * the caller, still holding that entry, writes it again whole. A complete last
+ * entry that only lacked its newline stays readable the same way.
  *
- * The common case costs one fstat and a one-byte read.
+ * Terminate, never truncate: two writers (the worker and the drain process)
+ * can see the same torn tail, and a truncation computed by one could cut away
+ * an entry the other has already fsynced and acknowledged. Racing terminators
+ * only leave a blank line, which readers ignore. The check costs one fstat and
+ * a one-byte read.
  */
 async function restoreLineBoundary(handle: FileHandle): Promise<void> {
   const { size } = await handle.stat();
   if (size === 0) return;
   const last = Buffer.alloc(1);
   await handle.read(last, 0, 1, size - 1);
-  if (last[0] === 0x0a) return;
-  let boundary = 0;
-  const chunk = Buffer.alloc(64 * 1024);
-  for (let end = size; end > 0 && boundary === 0;) {
-    const start = Math.max(0, end - chunk.length);
-    const { bytesRead } = await handle.read(chunk, 0, end - start, start);
-    const newline = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
-    if (newline >= 0) boundary = start + newline + 1;
-    end = start;
-  }
-  const tail = Buffer.alloc(size - boundary);
-  await handle.read(tail, 0, tail.length, boundary);
-  if (parseEmbeddingLedgerJsonl(tail.toString('utf8')).entries.length === 1) {
-    await handle.appendFile('\n', 'utf8');
-  } else {
-    await handle.truncate(boundary);
-  }
+  if (last[0] !== 0x0a) await handle.appendFile('\n', 'utf8');
 }
 
 /**
