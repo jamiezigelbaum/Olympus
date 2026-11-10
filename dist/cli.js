@@ -169419,7 +169419,7 @@ function renderBody(options) {
     return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
   }
   if (!local) {
-    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript("", true)}</script>`;
+    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
   }
   if (options?.appsReceivedAvailable !== true) {
     return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
@@ -169441,7 +169441,7 @@ function clientScript(csrfToken, unlockOnly) {
     event.preventDefault();
     var button = unlock.querySelector('button');
     if (button) button.disabled = true;
-    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
       if (response.ok) { window.location.reload(); return; }
       say(copy.failed, true); if (button) button.disabled = false;
     }, function () { say(copy.unreachable, true); if (button) button.disabled = false; });
