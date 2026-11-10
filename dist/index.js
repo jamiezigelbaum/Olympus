@@ -15917,6 +15917,25 @@ function senderAddress(from) {
   }
   return parseAddrSpec(scanned.text);
 }
+function addressSpansIn(text2) {
+  const found = [];
+  for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text2[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text2.length && DOMAIN_CHAR.test(text2[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text2.slice(at + 1, end));
+    if (!domain)
+      continue;
+    const local = text2.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
+  }
+  return found;
+}
 function addressMatches(sender, normalizedRule) {
   if (normalizedRule.startsWith("@")) {
     const domain = normalizedRule.slice(1);
@@ -16070,9 +16089,8 @@ function strongKeysFromText(value) {
   if (!value)
     return [];
   const keys = new Set;
-  for (const match of value.matchAll(ADDRESS)) {
-    const local = match[1];
-    keys.add(`email:${match[0].toLowerCase()}`);
+  for (const { address, local } of addressesIn(value)) {
+    keys.add(`email:${address}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
   }
@@ -16083,9 +16101,10 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
   init_olympus_layout();
+  init_sender_rules();
   init_sqlite_migrations();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
@@ -16096,7 +16115,6 @@ var init_people_index = __esm(() => {
     name_and_shared_group: "Linked by name and shared group chat",
     merged_by_owner: "Merged by you"
   });
-  ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
   PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
 });
 
@@ -22363,6 +22381,7 @@ var COPY_CHUNK_BYTES;
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
+  init_spool();
   COPY_CHUNK_BYTES = 1024 * 1024;
 });
 
@@ -23391,7 +23410,7 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
+      contextual_scopes: ["live linked-device traffic", "the recent history WhatsApp sends at pairing, for the chats you choose", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],

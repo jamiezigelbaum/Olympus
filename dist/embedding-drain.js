@@ -7038,6 +7038,151 @@ var init_worker_transport = __esm(() => {
   init_atomic_file();
 });
 
+// src/core/sender-rules.ts
+function validDomain(raw) {
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
+    end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
+    return;
+  return domain;
+}
+function scanHeader(value) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && index + 1 < value.length) {
+      if (depth === 0)
+        out += char + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && char === '"')
+      quoted = !quoted;
+    if (!quoted && char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (!quoted && char === ")" && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0)
+      continue;
+    if (!quoted && char === "<")
+      angleOpens += 1;
+    if (!quoted && char === ",")
+      comma = true;
+    out += char;
+  }
+  return { text: out, angleOpens, comma };
+}
+function parseAddrSpec(value) {
+  const spec = value.trim();
+  let local;
+  let rest;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"')
+      index += spec[index] === "\\" ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== "@")
+      return;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf("@");
+    if (at <= 0)
+      return;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local)
+      if (!LOCAL_CHAR.test(char))
+        return;
+  }
+  for (const char of rest)
+    if (!DOMAIN_CHAR.test(char))
+      return;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase())
+    return;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
+}
+function senderAddress(from) {
+  if (!from || from.length > MAX_FROM_HEADER_CHARS)
+    return;
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma)
+    return;
+  if (scanned.angleOpens === 1) {
+    const open2 = scanned.text.indexOf("<");
+    const close = scanned.text.indexOf(">", open2 + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
+      return;
+    return parseAddrSpec(scanned.text.slice(open2 + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
+}
+function everyAddressIn(from) {
+  if (!from)
+    return [];
+  return addressSpansIn(from.slice(0, MAX_FROM_HEADER_CHARS)).map(({ address, domain }) => ({ address, domain }));
+}
+function addressSpansIn(text2) {
+  const found = [];
+  for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text2[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text2.length && DOMAIN_CHAR.test(text2[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text2.slice(at + 1, end));
+    if (!domain)
+      continue;
+    const local = text2.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
+  }
+  return found;
+}
+function addressMatches(sender, normalizedRule) {
+  if (normalizedRule.startsWith("@")) {
+    const domain = normalizedRule.slice(1);
+    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
+  }
+  return sender.address === normalizedRule;
+}
+function senderMatchesRule(from, rule) {
+  const normalized = rule.trim().toLowerCase();
+  if (!normalized.includes("@"))
+    return false;
+  const sender = senderAddress(from);
+  return sender !== undefined && addressMatches(sender, normalized);
+}
+function ownerSenderRuleMatches(from, value, raises) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized)
+    return false;
+  if (!normalized.includes("@"))
+    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
+  const sender = senderAddress(from);
+  if (sender)
+    return addressMatches(sender, normalized);
+  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
+}
+var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
+var init_sender_rules = __esm(() => {
+  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+  DOMAIN_CHAR = /[a-z0-9.-]/i;
+});
+
 // src/core/sqlite-migrations.ts
 function currentStoreMigrations() {
   return [
@@ -7167,9 +7312,8 @@ function strongKeysFromText(value) {
   if (!value)
     return [];
   const keys = new Set;
-  for (const match of value.matchAll(ADDRESS)) {
-    const local = match[1];
-    keys.add(`email:${match[0].toLowerCase()}`);
+  for (const { address, local } of addressesIn(value)) {
+    keys.add(`email:${address}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
   }
@@ -7180,9 +7324,10 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
   init_olympus_layout();
+  init_sender_rules();
   init_sqlite_migrations();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
@@ -7193,7 +7338,6 @@ var init_people_index = __esm(() => {
     name_and_shared_group: "Linked by name and shared group chat",
     merged_by_owner: "Merged by you"
   });
-  ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
   PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
 });
 
@@ -9629,147 +9773,6 @@ function* iterateRows(db, sql, ...params) {
     statement.finalize();
   }
 }
-
-// src/core/sender-rules.ts
-function validDomain(raw) {
-  let end = raw.length;
-  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
-    end -= 1;
-  const domain = raw.slice(0, end).toLowerCase();
-  const labels = domain.split(".");
-  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
-    return;
-  return domain;
-}
-function scanHeader(value) {
-  let out = "";
-  let depth = 0;
-  let quoted = false;
-  let angleOpens = 0;
-  let comma = false;
-  for (let index = 0;index < value.length; index += 1) {
-    const char = value[index];
-    if (char === "\\" && index + 1 < value.length) {
-      if (depth === 0)
-        out += char + value[index + 1];
-      index += 1;
-      continue;
-    }
-    if (depth === 0 && char === '"')
-      quoted = !quoted;
-    if (!quoted && char === "(") {
-      depth += 1;
-      continue;
-    }
-    if (!quoted && char === ")" && depth > 0) {
-      depth -= 1;
-      continue;
-    }
-    if (depth > 0)
-      continue;
-    if (!quoted && char === "<")
-      angleOpens += 1;
-    if (!quoted && char === ",")
-      comma = true;
-    out += char;
-  }
-  return { text: out, angleOpens, comma };
-}
-function parseAddrSpec(value) {
-  const spec = value.trim();
-  let local;
-  let rest;
-  if (spec.startsWith('"')) {
-    let index = 1;
-    while (index < spec.length && spec[index] !== '"')
-      index += spec[index] === "\\" ? 2 : 1;
-    if (index >= spec.length || spec[index + 1] !== "@")
-      return;
-    local = spec.slice(0, index + 1);
-    rest = spec.slice(index + 2);
-  } else {
-    const at = spec.indexOf("@");
-    if (at <= 0)
-      return;
-    local = spec.slice(0, at);
-    rest = spec.slice(at + 1);
-    for (const char of local)
-      if (!LOCAL_CHAR.test(char))
-        return;
-  }
-  for (const char of rest)
-    if (!DOMAIN_CHAR.test(char))
-      return;
-  const domain = validDomain(rest);
-  if (!domain || domain !== rest.toLowerCase())
-    return;
-  return { address: `${local.toLowerCase()}@${domain}`, domain };
-}
-function senderAddress(from) {
-  if (!from || from.length > MAX_FROM_HEADER_CHARS)
-    return;
-  const scanned = scanHeader(from);
-  if (scanned.angleOpens > 1 || scanned.comma)
-    return;
-  if (scanned.angleOpens === 1) {
-    const open3 = scanned.text.indexOf("<");
-    const close = scanned.text.indexOf(">", open3 + 1);
-    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
-      return;
-    return parseAddrSpec(scanned.text.slice(open3 + 1, close));
-  }
-  return parseAddrSpec(scanned.text);
-}
-function everyAddressIn(from) {
-  if (!from)
-    return [];
-  const text2 = from.slice(0, MAX_FROM_HEADER_CHARS);
-  const found = [];
-  for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
-    let start = at;
-    while (start > 0 && LOCAL_CHAR.test(text2[start - 1]))
-      start -= 1;
-    let end = at + 1;
-    while (end < text2.length && DOMAIN_CHAR.test(text2[end]))
-      end += 1;
-    if (start === at)
-      continue;
-    const domain = validDomain(text2.slice(at + 1, end));
-    if (domain)
-      found.push({ address: `${text2.slice(start, at).toLowerCase()}@${domain}`, domain });
-  }
-  return found;
-}
-function addressMatches(sender, normalizedRule) {
-  if (normalizedRule.startsWith("@")) {
-    const domain = normalizedRule.slice(1);
-    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
-  }
-  return sender.address === normalizedRule;
-}
-function senderMatchesRule(from, rule) {
-  const normalized = rule.trim().toLowerCase();
-  if (!normalized.includes("@"))
-    return false;
-  const sender = senderAddress(from);
-  return sender !== undefined && addressMatches(sender, normalized);
-}
-function ownerSenderRuleMatches(from, value, raises) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized)
-    return false;
-  if (!normalized.includes("@"))
-    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
-  const sender = senderAddress(from);
-  if (sender)
-    return addressMatches(sender, normalized);
-  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
-}
-var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
-var init_sender_rules = __esm(() => {
-  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
-  DOMAIN_CHAR = /[a-z0-9.-]/i;
-});
 
 // src/core/location-rules.ts
 function normalizeLocationPath(value) {
@@ -28813,6 +28816,12 @@ var init_local_index = __esm(() => {
       }
     }
     peopleNames;
+    peopleVisibilityMarker() {
+      const ledger = this.visibilityLedger();
+      const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
+      const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
+      return `${ledgerCursor}:${storeCursor}`;
+    }
     peopleObservations() {
       const tierHidden = this.tierHiddenItemPks();
       const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
@@ -40332,6 +40341,7 @@ var COPY_CHUNK_BYTES;
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
+  init_spool();
   COPY_CHUNK_BYTES = 1024 * 1024;
 });
 
@@ -41136,7 +41146,7 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
+      contextual_scopes: ["live linked-device traffic", "the recent history WhatsApp sends at pairing, for the chats you choose", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
@@ -44867,105 +44877,6 @@ var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
-});
-
-// src/workers/remote-oauth/consent-page.ts
-var init_consent_page = () => {};
-
-// src/core/email-policy.ts
-var FORBIDDEN_RAW_RESPONSE_KEYS;
-var init_email_policy = __esm(() => {
-  init_operation_error();
-  FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
-    "body",
-    "bodies",
-    "message",
-    "messages",
-    "raw_email",
-    "raw_emails",
-    "raw_message",
-    "raw_messages",
-    "snippet",
-    "snippets",
-    "embedding",
-    "embeddings",
-    "embedding_vector",
-    "embedding_vectors",
-    "vector",
-    "vectors"
-  ]);
-});
-
-// src/core/operation-caller.ts
-var inProcessRemoteRequests;
-var init_operation_caller = __esm(() => {
-  inProcessRemoteRequests = new WeakSet;
-});
-
-// src/core/source-index/selected-item-safety.ts
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
-var init_selected_item_safety = __esm(() => {
-  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-    "body",
-    "boundedtext",
-    "chunk",
-    "chunks",
-    "content",
-    "document",
-    "html",
-    "markdown",
-    "message",
-    "messages",
-    "packet",
-    "passage",
-    "raw",
-    "rawpacket",
-    "rawsource",
-    "rawtext",
-    "snippet",
-    "sourcepacket",
-    "sourcesnippet",
-    "sourcetext",
-    "text"
-  ]);
-});
-
-// src/core/source-watch.ts
-var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
-var init_source_watch = __esm(() => {
-  init_olympus_layout();
-  init_sqlite_migrations();
-  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
-  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
-  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
-  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
-  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
-  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
-  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
-  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
-  CREATE_WATCH_FIELDS = new Set([
-    "watchId",
-    "corpusId",
-    "queryText",
-    "mode",
-    "expiresAt",
-    "maxDeliveryAttempts"
-  ]);
-  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
-  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
-  OUTBOX_STATUS_VALUES = new Set([
-    "pending",
-    "leased",
-    "retry",
-    "delivered",
-    "dead_letter",
-    "cancelled"
-  ]);
-  ownedContexts = new WeakSet;
-  executorCapabilities = new WeakSet;
-  SYSTEM_CLOCK = Object.freeze({
-    now: () => new Date
-  });
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
@@ -51551,6 +51462,105 @@ textarea.text{resize:vertical;min-height:4.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
+});
+
+// src/workers/remote-oauth/consent-page.ts
+var init_consent_page = () => {};
+
+// src/core/email-policy.ts
+var FORBIDDEN_RAW_RESPONSE_KEYS;
+var init_email_policy = __esm(() => {
+  init_operation_error();
+  FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
+    "body",
+    "bodies",
+    "message",
+    "messages",
+    "raw_email",
+    "raw_emails",
+    "raw_message",
+    "raw_messages",
+    "snippet",
+    "snippets",
+    "embedding",
+    "embeddings",
+    "embedding_vector",
+    "embedding_vectors",
+    "vector",
+    "vectors"
+  ]);
+});
+
+// src/core/operation-caller.ts
+var inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  inProcessRemoteRequests = new WeakSet;
+});
+
+// src/core/source-index/selected-item-safety.ts
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
+});
+
+// src/core/source-watch.ts
+var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
+var init_source_watch = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
+  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
+  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
+  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
+  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
+  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
+  CREATE_WATCH_FIELDS = new Set([
+    "watchId",
+    "corpusId",
+    "queryText",
+    "mode",
+    "expiresAt",
+    "maxDeliveryAttempts"
+  ]);
+  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
+  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
+  OUTBOX_STATUS_VALUES = new Set([
+    "pending",
+    "leased",
+    "retry",
+    "delivered",
+    "dead_letter",
+    "cancelled"
+  ]);
+  ownedContexts = new WeakSet;
+  executorCapabilities = new WeakSet;
+  SYSTEM_CLOCK = Object.freeze({
+    now: () => new Date
+  });
 });
 // src/workers/chatgpt/dashboard-resource.ts
 import { createHash as createHash26 } from "node:crypto";
@@ -70293,6 +70303,9 @@ import { createHash as createHash33 } from "node:crypto";
 import { existsSync as existsSync34, lstatSync as lstatSync16, mkdirSync as mkdirSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname40, isAbsolute as isAbsolute14 } from "node:path";
 
+// src/workers/email-source/dashboard-people.ts
+init_people_index();
+
 // src/workers/email-source/server.ts
 init_people_index();
 
@@ -70737,6 +70750,18 @@ if (false)
 init_messaging_capture_grant_file();
 init_provider_account_history();
 
+// src/workers/email-source/dashboard-messaging-service.ts
+init_atomic_file();
+init_file_lease();
+init_messaging_capture_grant_file();
+init_messaging_runtime();
+init_package_root();
+init_pairing_session_paths();
+init_update_check();
+
+// src/workers/email-source/dashboard-messaging-runner.ts
+var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
+
 // src/workers/email-source/server.ts
 init_native_worker_service();
 
@@ -71105,196 +71130,6 @@ init_vlm();
 
 // src/workers/email-source/server.ts
 init_apple_vision_ocr();
-
-// src/workers/email-source/index.ts
-init_source_failure();
-init_google_own_app();
-init_sovereignty();
-init_first_run_privacy();
-
-// src/core/settings-proposal.ts
-init_sovereignty();
-var SETTINGS_PROPOSAL_MODEL_PROVIDERS = ["local", "venice", "zkapi"];
-var SETTINGS_PROPOSAL_SCHEMA = {
-  description: "Write a JSON object with any of these keys, then run olympus settings propose <file>. The owner applies it with one click on the dashboard Settings page. Run olympus settings show for the current values and the allowed model choices.",
-  keys: {
-    private_answer_mode: { type: "string", allowed: [...SOVEREIGNTY_PRESETS] },
-    computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only, while the choice is still open. Propose it on its own." },
-    privacy_judge: {
-      type: "object",
-      fields: {
-        choice: { type: "string", allowed: ["local", "venice"] },
-        spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
-        note: { type: "note", note: "Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately." }
-      }
-    },
-    models: {
-      type: "object",
-      fields: Object.fromEntries(SETTINGS_PROPOSAL_MODEL_PROVIDERS.map((provider) => [provider, {
-        type: "string",
-        note: `One of models.${provider}.options from olympus settings show.`
-      }]))
-    }
-  },
-  example: {
-    private_answer_mode: "local-first",
-    models: { venice: "strongest" }
-  }
-};
-
-// src/workers/settings-proposal-holder.ts
-init_privacy_language();
-
-// src/workers/email-source/index.ts
-init_privacy_language();
-
-// src/workers/email-source/dashboard-messaging-service.ts
-init_atomic_file();
-init_file_lease();
-init_messaging_capture_grant_file();
-init_messaging_runtime();
-init_package_root();
-init_pairing_session_paths();
-init_update_check();
-
-// src/workers/email-source/dashboard-messaging-runner.ts
-var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
-
-// src/workers/email-source/index.ts
-init_source_scope_approval();
-init_release_manifest();
-init_update_check();
-init_google_handle_compatibility();
-init_source_account_binding();
-init_source_registry();
-init_consent_page();
-init_analyst();
-init_types();
-init_file_lease();
-init_email_policy();
-
-// src/core/google-pilot-client.ts
-var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
-  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
-]);
-
-// src/workers/email-source/index.ts
-init_publisher_oauth_client();
-init_oauth_relay();
-init_connect();
-init_operation_error();
-init_operation_caller();
-init_store();
-init_ingestion_throughput();
-init_secret_store();
-init_source_corpus_registry();
-init_selected_item_safety();
-init_venice_models();
-init_public_surface();
-
-// src/workers/archive-import/staging.ts
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-var ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
-var ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
-var SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
-var ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
-
-// src/workers/email-source/index.ts
-init_unpaired_sources();
-init_pairing_session_paths();
-
-// src/core/messaging-account-move.ts
-init_atomic_file();
-init_messaging_capture_grant_file();
-init_olympus_layout();
-init_source_registry();
-init_unpaired_sources();
-
-// src/workers/email-source/index.ts
-init_text();
-init_transcription();
-init_runner();
-
-// src/workers/source-index/answer-latency-log.ts
-init_olympus_layout();
-init_answer_latency_trace();
-var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
-
-// src/workers/email-source/index.ts
-init_answer_latency_trace();
-init_status();
-init_readwise();
-init_x_bookmarks();
-
-// src/workers/local-files/approved-scope-filter.ts
-init_locator_path_scope_codec();
-var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
-
-// src/workers/local-files/locator-result-projector.ts
-init_scope();
-init_paths();
-import { pathToFileURL as pathToFileURL3 } from "node:url";
-var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
-  create(input) {
-    return Object.freeze({
-      project(candidate) {
-        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
-          return;
-        const locator = locatorFromScopePath(candidate.readLocatorUri());
-        return locator ? { locator } : undefined;
-      }
-    });
-  }
-});
-function locatorFromScopePath(value) {
-  if (!value?.startsWith("/"))
-    return;
-  let split;
-  try {
-    split = splitScopePath(value);
-  } catch {
-    return;
-  }
-  if (split.path === "/")
-    return;
-  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
-  const locator = {
-    display_path: split.path,
-    parent_display_path: parent
-  };
-  if (!split.volumeId) {
-    locator.finder_url = pathToFileURL3(split.path).href;
-    locator.parent_finder_url = pathToFileURL3(parent).href;
-  }
-  return locator;
-}
-
-// src/workers/email-source/index.ts
-init_dropbox_files();
-init_telegram_messages();
-init_embeddings();
-
-// src/workers/source-watch-runtime.ts
-init_source_watch();
-init_openclaw_executable();
-init_http_timeout();
-init_worker_auth();
-init_source_corpus_registry();
-init_router();
-var SOURCE_WATCH_DELIVERY_LEASE_MS = Math.max(SOURCE_WATCH_MIN_LEASE_MS, 60000);
-var SOURCE_WATCH_DELIVERY_RETRY_MS = Math.max(SOURCE_WATCH_MIN_RETRY_MS, 60000);
-var SOURCE_WATCH_POLICY = Object.freeze({
-  raw_source_exposed: false,
-  source_text_returned: false,
-  message_bodies_returned: false,
-  evidence_pointers_only: true
-});
-
-// src/workers/email-source/index.ts
-init_corpora();
-
-// src/workers/dashboard/outside-help.ts
-init_zkapi_consult_settings();
 
 // src/workers/dashboard/components.ts
 init_open_targets();
@@ -71757,7 +71592,12 @@ dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; 
 init_vocabulary();
 init_vocabulary();
 
+// src/workers/dashboard/host-page.ts
+init_update_check();
+init_dashboard_contract();
+
 // src/workers/dashboard/outside-help.ts
+init_zkapi_consult_settings();
 init_vocabulary();
 init_vocabulary();
 
@@ -71777,9 +71617,16 @@ var TOOL_BLOCKERS = new Map([
 var OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
 
 // src/workers/dashboard/host-page.ts
-init_update_check();
-init_dashboard_contract();
 init_page();
+
+// src/workers/archive-import/staging.ts
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+var ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+var ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+var SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
+var ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
+
+// src/workers/dashboard/host-page.ts
 init_vocabulary();
 init_open_targets();
 var HOST_CSS = `
@@ -71832,6 +71679,171 @@ var COMPUTER_HOST_PAGE_CSP = [
   "form-action 'none'",
   "frame-ancestors 'none'"
 ].join("; ");
+
+// src/workers/email-source/index.ts
+init_source_failure();
+init_google_own_app();
+init_sovereignty();
+init_first_run_privacy();
+
+// src/core/settings-proposal.ts
+init_sovereignty();
+var SETTINGS_PROPOSAL_MODEL_PROVIDERS = ["local", "venice", "zkapi"];
+var SETTINGS_PROPOSAL_SCHEMA = {
+  description: "Write a JSON object with any of these keys, then run olympus settings propose <file>. The owner applies it with one click on the dashboard Settings page. Run olympus settings show for the current values and the allowed model choices.",
+  keys: {
+    private_answer_mode: { type: "string", allowed: [...SOVEREIGNTY_PRESETS] },
+    computer_use: { type: "string", allowed: ["everyday", "server"], note: "Mac standalone installs only, while the choice is still open. Propose it on its own." },
+    privacy_judge: {
+      type: "object",
+      fields: {
+        choice: { type: "string", allowed: ["local", "venice"] },
+        spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
+        note: { type: "note", note: "Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately." }
+      }
+    },
+    models: {
+      type: "object",
+      fields: Object.fromEntries(SETTINGS_PROPOSAL_MODEL_PROVIDERS.map((provider) => [provider, {
+        type: "string",
+        note: `One of models.${provider}.options from olympus settings show.`
+      }]))
+    }
+  },
+  example: {
+    private_answer_mode: "local-first",
+    models: { venice: "strongest" }
+  }
+};
+
+// src/workers/settings-proposal-holder.ts
+init_privacy_language();
+
+// src/workers/email-source/index.ts
+init_privacy_language();
+init_source_scope_approval();
+init_release_manifest();
+init_update_check();
+init_google_handle_compatibility();
+init_source_account_binding();
+init_source_registry();
+init_consent_page();
+init_analyst();
+init_types();
+init_file_lease();
+init_olympus_layout();
+init_email_policy();
+
+// src/core/google-pilot-client.ts
+var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+]);
+
+// src/workers/email-source/index.ts
+init_publisher_oauth_client();
+init_oauth_relay();
+init_connect();
+init_operation_error();
+init_operation_caller();
+init_store();
+init_ingestion_throughput();
+init_secret_store();
+init_source_corpus_registry();
+init_selected_item_safety();
+init_venice_models();
+init_public_surface();
+init_unpaired_sources();
+init_pairing_session_paths();
+
+// src/core/messaging-account-move.ts
+init_atomic_file();
+init_messaging_capture_grant_file();
+init_olympus_layout();
+init_source_registry();
+init_unpaired_sources();
+
+// src/workers/email-source/index.ts
+init_text();
+init_transcription();
+init_runner();
+
+// src/workers/source-index/answer-latency-log.ts
+init_olympus_layout();
+init_answer_latency_trace();
+var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
+
+// src/workers/email-source/index.ts
+init_answer_latency_trace();
+init_status();
+init_readwise();
+init_x_bookmarks();
+
+// src/workers/local-files/approved-scope-filter.ts
+init_locator_path_scope_codec();
+var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
+
+// src/workers/local-files/locator-result-projector.ts
+init_scope();
+init_paths();
+import { pathToFileURL as pathToFileURL3 } from "node:url";
+var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
+  create(input) {
+    return Object.freeze({
+      project(candidate) {
+        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
+          return;
+        const locator = locatorFromScopePath(candidate.readLocatorUri());
+        return locator ? { locator } : undefined;
+      }
+    });
+  }
+});
+function locatorFromScopePath(value) {
+  if (!value?.startsWith("/"))
+    return;
+  let split;
+  try {
+    split = splitScopePath(value);
+  } catch {
+    return;
+  }
+  if (split.path === "/")
+    return;
+  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
+  const locator = {
+    display_path: split.path,
+    parent_display_path: parent
+  };
+  if (!split.volumeId) {
+    locator.finder_url = pathToFileURL3(split.path).href;
+    locator.parent_finder_url = pathToFileURL3(parent).href;
+  }
+  return locator;
+}
+
+// src/workers/email-source/index.ts
+init_dropbox_files();
+init_telegram_messages();
+init_embeddings();
+
+// src/workers/source-watch-runtime.ts
+init_source_watch();
+init_openclaw_executable();
+init_http_timeout();
+init_worker_auth();
+init_source_corpus_registry();
+init_router();
+var SOURCE_WATCH_DELIVERY_LEASE_MS = Math.max(SOURCE_WATCH_MIN_LEASE_MS, 60000);
+var SOURCE_WATCH_DELIVERY_RETRY_MS = Math.max(SOURCE_WATCH_MIN_RETRY_MS, 60000);
+var SOURCE_WATCH_POLICY = Object.freeze({
+  raw_source_exposed: false,
+  source_text_returned: false,
+  message_bodies_returned: false,
+  evidence_pointers_only: true
+});
+
+// src/workers/email-source/index.ts
+init_corpora();
 
 // src/workers/dashboard/pages/local.ts
 init_judge_spending();
@@ -75723,14 +75735,14 @@ class JudgeBoosts {
   }
   live() {
     const now = this.now();
-    const live = [];
+    const live2 = [];
     for (const [key2, entry] of this.entries) {
       if (entry.expiresAt > now)
-        live.push(entry.identity);
+        live2.push(entry.identity);
       else
         this.entries.delete(key2);
     }
-    return live;
+    return live2;
   }
   drop(identity) {
     this.entries.delete(tierLedgerIdentityKey(identity));
