@@ -58,6 +58,9 @@ describe('people index: strong keys', () => {
     const person = personOf(people, 'sender:mail:123456789@qq.com');
     expect(person.identities).toHaveLength(2);
     expect(person.linkedBy).toEqual(['Linked by email address']);
+    // A chat id with no name reads as its phone number, never as the id.
+    const unnamed = linkPeople({ observations: [obs('chat-a', '351912000444@s.example.net', undefined)] });
+    expect(personOf(unnamed, 'sender:chat-a:351912000444@s.example.net').displayName).toBe('+351912000444');
   });
 
   test('the same phone number links on its own, and says why', () => {

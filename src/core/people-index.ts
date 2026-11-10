@@ -526,7 +526,10 @@ function bestName(members: readonly WorkingIdentity[]): string {
   const handle = (name: string) => Number(name.startsWith('@'));
   const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named) return named;
-  const key = members.flatMap((member) => member.keys).sort()[0];
+  // With no name, a phone number reads better than an all-digit chat id
+  // (351912000444@s.whatsapp.net) that carries the same number.
+  const numericAddress = (key: string) => Number(/^email:\d+@/.test(key));
+  const key = members.flatMap((member) => member.keys).sort((a, b) => numericAddress(a) - numericAddress(b) || a.localeCompare(b))[0];
   if (key) return key.slice(key.indexOf(':') + 1);
   return members[0]!.senderLabel ?? members[0]!.senderId ?? 'Unknown sender';
 }
