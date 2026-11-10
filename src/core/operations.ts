@@ -15,6 +15,7 @@ import {
 } from './source-corpus-registry.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
+import { readSetupStatus } from './setup-status.ts';
 import { OPEN_REMOTE_DESCRIPTION, OPEN_REMOTE_PARAMS, OPEN_REMOTE_TOOL_NAME, openRemote } from './remote-open-tool.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
@@ -634,6 +635,23 @@ export const operations: Operation[] = [
     nativeExposure: 'always',
     cliHints: { name: 'doctor' },
     handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
+  },
+  {
+    // The setup checklist (#1077): the same steps, states and ways forward the
+    // dashboard's Home shows. Read-only; names and states only. A step that
+    // changes what is private, who has access or what Olympus spends comes
+    // back as a dashboard link for the owner, never as something to run.
+    name: 'olympus_setup_status',
+    description: [
+      'Read Olympus\'s setup checklist: each step (installed, Private answers, privacy judge, sources, chat choices, an AI app, first items findable) with its state (done, next, todo, skipped) and exactly one way forward.',
+      'A forward of kind "command" is an olympus command you may run yourself. A forward of kind "owner" is a dashboard link to give the owner: it needs their click because it changes what is private, who has access or what Olympus spends. After they click, call this again and carry on; do not ask what is on screen.',
+      'Read-only. Output contains names and states only, never item content, keys or tokens.',
+    ].join(' '),
+    params: {},
+    mutating: false,
+    nativeExposure: 'always',
+    cliHints: { name: 'setup status' },
+    handler: async (ctx) => readSetupStatus({ config: ctx.config }),
   },
   {
     name: 'ask_anonymously',
