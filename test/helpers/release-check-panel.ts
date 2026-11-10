@@ -14,6 +14,7 @@ import {
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
 } from '../../src/workers/chatgpt/dashboard-contract.ts';
+import { DASHBOARD_ALL_SOURCES_ID, DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, DASHBOARD_SOURCE_LANDING_PREFIX } from '../../src/core/open-targets.ts';
 import { chatgptDashboardPageHtml } from '../../src/workers/dashboard/chatgpt/page.ts';
 import { dashboardImportAttentionSentence } from '../../src/workers/dashboard/vocabulary.ts';
 import type { DashboardImportAttention } from '../../src/workers/source-dashboard.ts';
@@ -33,7 +34,8 @@ export type Message = { jsonrpc?: string; id?: number; method?: string; params?:
 export type Serve = Record<string, (args: any) => unknown>;
 
 /** The product's dashboard panel in a DOM, on a host that answers its tool calls from `serve` (as archive-import-dashboard-ui.test.ts mounts it). */
-export async function mountPanel(serve: Serve): Promise<{ win: Window; sent: Message[] }> {
+export async function mountPanel(serve: Serve, path = '/dashboard'): Promise<{ win: Window; sent: Message[] }> {
+  const landing = landingOf(path);
   const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
@@ -50,7 +52,7 @@ export async function mountPanel(serve: Serve): Promise<{ win: Window; sent: Mes
       if (message.method === 'ui/initialize') {
         reply(message.id, {
           protocolVersion: '2026-01-26',
-          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: {} } },
+          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: {}, ...(landing ? { landing } : {}) } },
         });
       } else if (message.method === 'tools/call') {
         const handler = serve[message.params.name];
@@ -68,6 +70,14 @@ export async function mountPanel(serve: Serve): Promise<{ win: Window; sent: Mes
   return { win, sent };
 }
 
+/** The landing the computer's host page hands the panel for a `#olympus-open=` link (host-page.ts). */
+function landingOf(path: string): { sourceId: string } | undefined {
+  const token = new URLSearchParams(path.split('#')[1] ?? '').get(DASHBOARD_OPEN_FRAGMENT_KEY);
+  if (token === DASHBOARD_ALL_SOURCES_LANDING) return { sourceId: DASHBOARD_ALL_SOURCES_ID };
+  if (token?.startsWith(DASHBOARD_SOURCE_LANDING_PREFIX)) return { sourceId: token.slice(DASHBOARD_SOURCE_LANDING_PREFIX.length) };
+  return undefined;
+}
+
 /** Runs page-side source in a happy-dom window the way Runtime.evaluate does in a browser. */
 export function evalIn(window: Window, code: string): unknown {
   const globals = window as unknown as { __rc?: unknown };
@@ -80,7 +90,7 @@ export class PanelDriver implements JourneyDriver {
   /** The page around the panel, which holds only its frame. */
   host = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
   events: PageEvents = { console: [], requests: [] };
-  constructor(private readonly mount: () => Promise<Window>) { windows.push(this.host); }
+  constructor(private readonly mount: (path?: string) => Promise<Window>) { windows.push(this.host); }
   private frameOf(frame: 'host' | 'panel'): Window { return frame === 'host' ? this.host : this.win; }
   async hasPanel(): Promise<boolean> { return true; }
   async probe(frame: 'host' | 'panel', call: string): Promise<unknown> { return evalIn(this.frameOf(frame), call); }
@@ -102,8 +112,11 @@ export class PanelDriver implements JourneyDriver {
     return true;
   }
   async open(): Promise<void> { await this.go(); }
-  async go(_path?: string): Promise<void> {
-    this.win = await this.mount();
+  /** The address last gone to: a reload opens it again, with its landing. */
+  private path?: string;
+  async go(path?: string): Promise<void> {
+    if (path !== undefined) this.path = path;
+    this.win = await this.mount(this.path);
     const place = function (this: any) {
       const hidden = this.hasAttribute?.('hidden') || /display:\s*none/.test(this.getAttribute?.('style') ?? '');
       return hidden ? { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 } : { left: 10, top: 10, width: 120, height: 24, right: 130, bottom: 34 };
