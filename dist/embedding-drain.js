@@ -76179,13 +76179,11 @@ class SourceScheduler {
     }
   }
   get anyTaskRunning() {
-    return this.states.some((state) => state.running);
+    return this.executingStates.size > 0;
   }
   settleInterruptedAttempts() {
     let settled = 0;
-    for (const state of this.states) {
-      if (!state.running)
-        continue;
+    for (const state of this.executingStates) {
       this.recordShutdownInterruption(state);
       settled += 1;
     }

@@ -1208,7 +1208,9 @@ export class SourceScheduler {
 
   /** Whether any task's pass is running right now. */
   get anyTaskRunning(): boolean {
-    return this.states.some((state) => state.running);
+    // executingStates, not the roster: a task whose source was removed while
+    // it ran is still running.
+    return this.executingStates.size > 0;
   }
 
   /**
@@ -1222,8 +1224,7 @@ export class SourceScheduler {
    */
   settleInterruptedAttempts(): number {
     let settled = 0;
-    for (const state of this.states) {
-      if (!state.running) continue;
+    for (const state of this.executingStates) {
       this.recordShutdownInterruption(state);
       settled += 1;
     }

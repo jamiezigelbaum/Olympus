@@ -8043,9 +8043,11 @@ export async function main(): Promise<void> {
   shutdownSignals.setShutdown(shutdown);
   const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    // Last before the exit: a pass still running is recorded as interrupted,
-    // not left pending for the next process to back off on (#803).
-    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); sourceScheduler?.settleInterruptedAttempts(); },
+    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); },
+    // Last before the exit, even when the drain failed: a pass still running
+    // is recorded as interrupted, not left pending for the next process to
+    // back off on (#803).
+    beforeExit: () => { sourceScheduler?.settleInterruptedAttempts(); },
     exit: (code) => process.exit(code),
   });
   // In the split a model change restarts the background too, and the front

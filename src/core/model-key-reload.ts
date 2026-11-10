@@ -38,6 +38,11 @@ export function createModelKeyReload(options: {
   shutdown: () => void | Promise<void>;
   exit: (code: number) => void;
   schedule?: (run: () => void, delayMs: number) => unknown;
+  /**
+   * The reload's own last step, after every request's hooks and right before
+   * the exit; it runs even when the shutdown failed.
+   */
+  beforeExit?: () => void | Promise<void>;
 }): (request?: ModelKeyReloadRequest) => boolean {
   let requested = false;
   const beforeExit: Array<() => void | Promise<void>> = [];
@@ -50,7 +55,7 @@ export function createModelKeyReload(options: {
     requested = true;
     (options.schedule ?? setTimeout)(() => {
       void Promise.resolve().then(options.shutdown).finally(async () => {
-        for (const hook of beforeExit) {
+        for (const hook of options.beforeExit ? [...beforeExit, options.beforeExit] : beforeExit) {
           // A hook that fails must not keep the worker from restarting.
           try { await hook(); } catch { /* the restart goes ahead */ }
         }

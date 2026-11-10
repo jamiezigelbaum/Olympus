@@ -62,3 +62,21 @@ describe('a reload\'s before-exit hooks', () => {
     expect(r.events).toEqual([]);
   });
 });
+
+describe('the reload\'s own last step', () => {
+  test('runs after every request\'s hooks and before the exit, even when the shutdown fails', async () => {
+    const events: string[] = [];
+    let fire: (() => void) | undefined;
+    const request = createModelKeyReload({
+      managed: true,
+      schedule: (run) => { fire = run; },
+      shutdown: async () => { throw new Error('capture stop failed'); },
+      beforeExit: () => { events.push('settle'); },
+      exit: (code) => { events.push(`exit ${code}`); },
+    });
+    request({ beforeExit: () => { events.push('hook'); } });
+    fire!();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(events).toEqual(['hook', 'settle', 'exit 75']);
+  });
+});

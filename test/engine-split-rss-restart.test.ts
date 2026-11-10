@@ -164,7 +164,8 @@ describe('the background\'s wiring', () => {
     expect(server).toMatch(/rss_restarts: rssRestart\.restarts\(\),/);
     // A task still running at the exit (the wait has a ceiling) is recorded
     // as interrupted before the process goes, not left pending (#803).
-    expect(server).toMatch(/drain: async \(\) => \{[^\n]*sourceScheduler\?\.settleInterruptedAttempts\(\);[^\n]*\},\n\s*exit: \(code\) => process\.exit\(code\),/);
+    // It is the reload's own last step, which runs even when the drain fails.
+    expect(server).toContain('beforeExit: () => { sourceScheduler?.settleInterruptedAttempts(); },');
     expect(server).toMatch(/engineBackground = \{ stop: \(\) => \{ rssRestart\.stop\(\); status\.stop\(\); commands\.stop\(\); \} \};/);
   });
 });

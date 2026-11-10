@@ -154481,7 +154481,7 @@ function createModelKeyReload(options) {
     requested = true;
     (options.schedule ?? setTimeout)(() => {
       Promise.resolve().then(options.shutdown).finally(async () => {
-        for (const hook of beforeExit) {
+        for (const hook of options.beforeExit ? [...beforeExit, options.beforeExit] : beforeExit) {
           try {
             await hook();
           } catch {}
@@ -154522,7 +154522,7 @@ function installWorkerShutdownSignals(options) {
       return createModelKeyReload({ managed: options2.managed, shutdown: async () => {
         stop("SIGTERM", false);
         await options2.drain();
-      }, exit: options2.exit });
+      }, exit: options2.exit, ...options2.beforeExit ? { beforeExit: options2.beforeExit } : {} });
     },
     dispose() {
       process.removeListener("SIGINT", onInt);
@@ -190398,13 +190398,11 @@ class SourceScheduler {
     }
   }
   get anyTaskRunning() {
-    return this.states.some((state) => state.running);
+    return this.executingStates.size > 0;
   }
   settleInterruptedAttempts() {
     let settled = 0;
-    for (const state of this.states) {
-      if (!state.running)
-        continue;
+    for (const state of this.executingStates) {
       this.recordShutdownInterruption(state);
       settled += 1;
     }
@@ -238669,6 +238667,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     drain: async () => {
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
       await server?.stop(true);
+    },
+    beforeExit: () => {
       sourceScheduler?.settleInterruptedAttempts();
     },
     exit: (code) => process.exit(code)

@@ -167,3 +167,27 @@ describe('a pass still running when the process exits to restart itself', () => 
     expect(running.settleInterruptedAttempts()).toBe(0);
   });
 });
+
+describe('a pass whose source left the roster while it ran', () => {
+  test('still counts as running, and is settled as interrupted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-scheduler-interrupt-'));
+    let clock = T0;
+    try {
+      const store = new LocalSourceSchedulerStateStore(join(dir, 'state.sqlite'));
+      const pass = interruptiblePass();
+      const running = scheduler(pass.task, () => clock, store);
+      void quietly(() => running.runDueTasks(new Date(T0)));
+      await pass.started;
+      // The source is removed (disconnected) while its pass is still running.
+      running.updateSources([]);
+      expect(running.anyTaskRunning).toBe(true);
+      clock = T0 + 5_000;
+      running.stop();
+      expect(running.settleInterruptedAttempts()).toBe(1);
+      expect(store.get(KEY)!.attemptPending).toBe(false);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
