@@ -62,7 +62,7 @@ import {
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
 } from '../src/workers/source-index/analyst-answer.ts';
-import type { AnalystResult } from '../src/core/contracts.ts';
+import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -82,7 +82,7 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import type { EvalGrade } from './grade.ts';
+import { answerContainsExpectedValue, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
@@ -185,7 +185,15 @@ async function main(): Promise<void> {
     config,
     env: process.env,
   });
-  const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+  // Each run evaluates one question, so every prompt recorded here is that
+  // question's: the answer-stage audit checks the values against it.
+  const analystPrompts: string[] = [];
+  const analyst = createAnalyst({
+    complete(request) {
+      analystPrompts.push(request.prompt);
+      return model.complete(request);
+    },
+  }, { auditSuspiciousDrafts: true });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
@@ -195,7 +203,8 @@ async function main(): Promise<void> {
   const reranker = builtInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
-  const traces: PrecisionTrace[] = [];
+  const rawResultsByPack = new WeakMap<object, AnalystResult>();
+  const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
   const report = await runEval(dataset, {
     questionTimeoutMs,
     continueOnQuestionError: true,
@@ -216,6 +225,7 @@ async function main(): Promise<void> {
     },
     analyst,
     releaseFor(pack, result) {
+      rawResultsByPack.set(pack, result);
       const detail = detailsByPack.get(pack);
       return detail ? releaseEvalAnswer(detail, result) : undefined;
     },
@@ -225,9 +235,13 @@ async function main(): Promise<void> {
     },
     trace(question, pack, result) {
       const detail = detailsByPack.get(pack);
-      traces.push(classifyPrecisionStage(question, pack, result, {
-        ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
-      }));
+      traces.push({
+        ...classifyPrecisionStage(question, pack, result, {
+          ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
+        }),
+        ...(detail ? { retrieval: evalRetrievalAudit(detail) } : {}),
+        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts),
+      });
     },
     onProgress(event) {
       if (event.type === 'question_started') {
@@ -406,6 +420,108 @@ export function createEvalDropboxLanes(input: {
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
   return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+}
+
+/**
+ * Why a question's pack holds what it holds, counts and codes only (#1233):
+ * every lane's candidates before and after its own filters, the corpora
+ * skipped and why, the lanes that degraded, and the candidates dropped or
+ * left unread. Rides on the question's precision trace into the report, so a
+ * short run separates "retrieval found nothing" from "a filter or policy
+ * removed what it found" without a per-stage diagnostic. The eval builds its
+ * pack with every trust domain allowed, so the Private-exclusion rebuild an
+ * ordinary route can run never applies here; `secureExclusion` says so.
+ */
+export interface EvalRetrievalAudit {
+  packCandidates: number;
+  lanes: Array<{
+    laneName: string;
+    laneType: string;
+    candidateCount: number;
+    returnedCount: number;
+    skippedReason?: string;
+    bestCosine?: number;
+    suppressedBelowBar?: number;
+  }>;
+  skippedCorpora: Array<{ corpusId: string; reason: string }>;
+  degradations: Array<{ laneName: string; reason: string; detail?: string; occurrences: number }>;
+  policyDeniedCandidates: number;
+  unreadCandidates: number;
+  namesOnlyCandidates: number;
+  contentPrivateCandidates: number;
+  corpusReadabilityGaps: number;
+  secureExclusion: 'not_applied';
+}
+
+export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetrievalAudit {
+  return {
+    packCandidates: detail.pack.candidates.length,
+    lanes: detail.laneAudits.map((lane) => ({
+      laneName: lane.laneName,
+      laneType: lane.laneType,
+      candidateCount: lane.candidateCount,
+      returnedCount: lane.returnedCount,
+      ...(lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {}),
+      ...(lane.bestCosine !== undefined ? { bestCosine: lane.bestCosine } : {}),
+      ...(lane.suppressedBelowBar !== undefined ? { suppressedBelowBar: lane.suppressedBelowBar } : {}),
+    })),
+    skippedCorpora: detail.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
+    degradations: detail.degradations.map((degradation) => ({
+      laneName: degradation.laneName,
+      reason: degradation.reason,
+      ...(degradation.detail !== undefined ? { detail: degradation.detail } : {}),
+      occurrences: degradation.occurrences,
+    })),
+    policyDeniedCandidates: detail.policyDeniedCandidates ?? 0,
+    unreadCandidates: detail.unreadCandidates ?? 0,
+    namesOnlyCandidates: detail.namesOnlyCandidateIndexes?.length ?? 0,
+    contentPrivateCandidates: detail.contentPrivateCandidateIndexes?.length ?? 0,
+    corpusReadabilityGaps: detail.corpusReadabilityGaps?.length ?? 0,
+    secureExclusion: 'not_applied',
+  };
+}
+
+/**
+ * Where each expected value was lost after retrieval (#1234), booleans only:
+ * in the pack text the Analyst read, in the Analyst's own answer, and in the
+ * answer the release step let out (what the grader sees). In the pack but not
+ * in the Analyst's answer is an Analyst miss; in the Analyst's answer but not
+ * the released one is the release step removing it.
+ */
+export interface EvalAnswerStageAudit {
+  expected: Array<{
+    inPack: boolean;
+    /** In the prompt the Analyst model was sent; absent when no prompt was recorded. */
+    inAnalystPrompt?: boolean;
+    inAnalystAnswer: boolean;
+    inReleasedAnswer: boolean;
+  }>;
+}
+
+export function evalAnswerStageAudit(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'>,
+  pack: EvidencePack,
+  analystResult: AnalystResult | undefined,
+  releasedResult: AnalystResult,
+  analystPrompts?: readonly string[],
+): EvalAnswerStageAudit {
+  // Every evidence field the Analyst can be shown: citation metadata
+  // (title, locator, dates), chunk text, extracted facts and tables.
+  const packText = pack.candidates.map((candidate) => [
+    JSON.stringify(candidate.provenance.citation ?? {}),
+    ...candidate.chunks,
+    JSON.stringify(candidate.facts ?? []),
+    JSON.stringify(candidate.tables ?? []),
+  ].join('\n')).join('\n');
+  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
+  return {
+    expected: (question.expectedAnswerContains ?? []).map((value) => ({
+      inPack: answerContainsExpectedValue(value, packText).matched,
+      ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
+      inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
+      inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
+    })),
+  };
 }
 
 /** One question's evidence pack, over the eval's lanes, as live Ask builds it. */
