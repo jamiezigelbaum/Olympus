@@ -15,7 +15,8 @@ import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from '
 // - Material carrying a secret finding settles through Secrets, never sent.
 // - Time-bounded passes and `SnifferCallBudget` calls per UTC day; an optional
 //   explicit call cap remains supported. Stop when `shouldYield()` says work needs
-//   the private pool, or after two consecutive transport failures.
+//   the private pool, or after two consecutive transport failures. A cloud
+//   judge's 429 is not one: judge-pacing.ts waits for the reset and retries.
 // - A transport failure leaves the item pending (held Private). An item the
 //   model keeps failing to answer (no or malformed verdict) resolves to
 //   Private after SNIFFER_MAX_ATTEMPTS attempts, and that fail-safe verdict is
@@ -70,8 +71,10 @@ export const DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250_000;
  * stopped after one call). Preemption still stops a pass at once.
  */
 export const DEFAULT_SNIFFER_PASS_TIME_MS = 30_000;
-/** The most sniffer calls a pass keeps in flight at once. */
+/** The most sniffer calls a pass keeps in flight at once on a local model. */
 export const SNIFFER_MAX_CONCURRENT_CALLS = 8;
+/** A cloud judge is network-bound and paced to its provider's request limit instead (#884). */
+export const SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32;
 const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 /** Output budget per item: one short JSON verdict. */
 const OUTPUT_CHARS_PER_ITEM = 110;
@@ -562,7 +565,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       return true;
     });
   }
-  const concurrency = options.lane.snifferMode === 'decision' ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
+  const maxConcurrent = options.lane.kind === 'venice' ? SNIFFER_MAX_CONCURRENT_CLOUD_CALLS : SNIFFER_MAX_CONCURRENT_CALLS;
+  const concurrency = options.lane.snifferMode === 'decision' ? 1 : Math.max(1, Math.min(maxConcurrent, Math.floor(options.concurrentCalls ?? 1)));
 
   // 2. Ask the model, one distinct material (one item's) per call.
   let consecutiveTransportFailures = 0;
