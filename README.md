@@ -4,7 +4,7 @@
 
 **Your machine, your memory. Keep your private things private.**
 
-*A private second brain on your own computer, for ChatGPT, Claude, Grok and any AI app that speaks MCP. On a Mac, and on [Omarchy](https://omarchy.org) and Ubuntu 24.04 LTS Linux. Free and open source.*
+Olympus keeps your email, files and messages on your own computer and decides, item by item, what each AI may see. ChatGPT, Claude, Grok and any app that speaks MCP can use it, while your private things stay private. On a Mac, and on [Omarchy](https://omarchy.org) and Ubuntu 24.04 LTS Linux. Free and open source.
 
 [![version](https://img.shields.io/badge/version-1.4.2-534AB7)](https://github.com/jamiezigelbaum/Olympus/blob/main/CHANGELOG.md) [![license](https://img.shields.io/badge/license-MIT-0F6E56)](https://github.com/jamiezigelbaum/Olympus/blob/main/LICENSE) [![tests](https://img.shields.io/badge/tests-3400%2B%20passing-1D9E75)](https://github.com/jamiezigelbaum/Olympus/blob/main/CONTRIBUTING.md) [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai) [![runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20TypeScript-B45309)](https://bun.sh)
 

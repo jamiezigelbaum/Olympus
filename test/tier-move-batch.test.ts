@@ -470,7 +470,7 @@ test('move note flush uses one durable append per path and retries without dupli
   const original = fs.open;
   let appends = 0;
   const opened = spyOn(fs, 'open').mockImplementation((...args: Parameters<typeof fs.open>) => {
-    if (args[1] === 'a') appends++;
+    if (args[1] === 'a+') appends++;
     return original(...args);
   });
   try { await flushTierMoveNotes(f.f.ledger); await flushTierMoveNotes(f.f.ledger); }
@@ -488,7 +488,7 @@ test('failed grouped note fsync keeps obligations, and malformed notes do not bl
   const original = fs.open;
   const opened = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
     const handle = await original(...args);
-    if (args[1] === 'a') spyOn(handle, 'sync').mockImplementation(async () => { throw new Error('Synthetic fsync failure'); });
+    if (args[1] === 'a+') spyOn(handle, 'sync').mockImplementation(async () => { throw new Error('Synthetic fsync failure'); });
     return handle;
   });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
@@ -548,6 +548,33 @@ for (const state of ['none', 'new', 'ineligible'] as const) test(`timer preempts
     if (state === 'ineligible') expect(raising.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
   }
 }, 15_000);
+
+test('timer preempts only for a raise the next drain takes under the shared budget (#1013)', async () => {
+  const stuck = await fixture(0);
+  const fresh = await fixture(0);
+  const failing = ['stuck-a', 'stuck-b'].map(id => ({ id, name: 'Synthetic', text: body }));
+  await stuck.f.set.sync(fixtureConnector(() => failing), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const raised = { id: 'fresh-raise', name: 'Synthetic', text: body };
+  await fresh.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-fresh' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  for (const spec of failing) stuck.f.ledger.recordRoutedPlacement(identityOf(spec.id), high, stuck.f.set.placementFor(high));
+  const { service } = serviceFor(stuck.f, { maxPerPass: 2 }, [fresh.f]);
+  const runtime = service as unknown as { drainMoves(): Promise<unknown>; newRaisesQueued(): boolean };
+  const copy = spyOn(stuck.f.stores.secure_local!, 'importItemCopy').mockImplementation(() => { throw new Error('Synthetic stuck raise'); });
+  try {
+    // Two drains: the first set leads, then the second; the next leads with the first again.
+    await runtime.drainMoves();
+    await runtime.drainMoves();
+    fresh.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, fresh.f.set.placementFor(high));
+    // The known failures fill the whole budget first, so no preemption.
+    expect(runtime.newRaisesQueued()).toBe(false);
+    await runtime.drainMoves();
+    expect(fresh.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
+    // Rotation now puts the new raise first, and the drain takes it.
+    expect(runtime.newRaisesQueued()).toBe(true);
+    await runtime.drainMoves();
+    expect(fresh.f.ledger.getCurrent(identityOf(raised.id))).toMatchObject({ state: 'current', contentTier: 'secure' });
+  } finally { copy.mockRestore(); }
+});
 
 test('a failed backlog count does not block other ledgers', async () => {
   const first = await fixture();
