@@ -13,7 +13,9 @@ import {
 } from './workers/classification/tier-ledger-path.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -154,11 +156,18 @@ export interface DataExportResult {
   files: string[];
   skipped: string[];
   artifacts: DataExportArtifact[];
+  /**
+   * The prepared pictures the exported stores' chunks reference: how many
+   * travel in the export (`media/<sha256>.jpg`), and how many were referenced
+   * but not on this computer (or not the bytes their name says), so were left
+   * out. A restore points each chunk at its picture in the new install's cache.
+   */
+  media: { exported: number; missing: number };
 }
 
 export interface DataExportArtifact {
   sourceId: string;
-  role: 'legacy_store' | 'connector_store' | 'tier_sidecar' | 'sanitized_config' | 'owner_rules';
+  role: 'legacy_store' | 'connector_store' | 'tier_sidecar' | 'sanitized_config' | 'owner_rules' | 'media';
   relativePath: string;
   /**
    * Version 3: a connector store's place in its account's store list, and
@@ -362,6 +371,9 @@ export function exportOlympusData(options: {
   const files: string[] = [];
   const skipped: string[] = [];
   const artifacts: DataExportArtifact[] = [];
+  // The pictures the exported stores' chunks point at, by digest: the first
+  // source that references one carries it.
+  const mediaRefs = new Map<string, { path: string; sourceId: string }>();
 
   for (const source of selected) {
     const sourceRoot = join(destination, 'sources', safePathSegment(source.sourceId));
@@ -393,7 +405,13 @@ export function exportOlympusData(options: {
         skipped,
         artifacts,
       });
-      if (artifacts.length > before) artifacts[before]!.storeIndex = storeIndex;
+      if (artifacts.length > before) {
+        artifacts[before]!.storeIndex = storeIndex;
+        // Read from the snapshot, so the pictures are the ones the exported rows name.
+        for (const row of readChunkMediaRefs(join(destination, artifacts[before]!.relativePath))) {
+          if (!mediaRefs.has(row.media_sha256)) mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
+        }
+      }
       // The store's privacy judgments, its sniffer queue and its secret
       // locations sit beside it. Without them a restore judges every item
       // again, which on a laptop takes nights (#1065). A ledger can exist
@@ -463,6 +481,8 @@ export function exportOlympusData(options: {
     }
   }
 
+  const media = exportReferencedMedia(mediaRefs, destination, durabilityBoundary, files, artifacts);
+
   const configRoot = join(destination, 'config');
   makeDurableDirectory(configRoot, durabilityBoundary);
   for (const [sourcePath, destinationPath] of [
@@ -517,11 +537,83 @@ export function exportOlympusData(options: {
     secrets_excluded: true,
     files,
     skipped,
+    media,
     artifacts,
   }, null, 2));
   files.push(join(destination, 'manifest.json'));
 
-  return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
+  return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts, media };
+}
+
+/** Where an export keeps a prepared picture: its name in the media cache, under `media/`. */
+export const EXPORT_MEDIA_DIR = 'media';
+
+/** The pictures an exported store's chunks reference (none for a store without picture columns). */
+function readChunkMediaRefs(snapshotPath: string): Array<{ media_path: string; media_sha256: string }> {
+  const db = new Database(snapshotPath, { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const columns = (db.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
+    if (!columns.includes('media_path') || !columns.includes('media_sha256')) return [];
+    return db.query(`
+      SELECT DISTINCT media_path, media_sha256 FROM chunks
+      WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+    `).all() as Array<{ media_path: string; media_sha256: string }>;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Copies each referenced picture into `<export>/media/<sha256>.jpg`, its path
+ * relative to the media cache it came from, durably and owner-only. A picture
+ * that is not on this computer, is not a cache file, or whose bytes are not
+ * the digest it is named by is left out and counted: the export still holds
+ * the rows, which embed as text without it, as they would here.
+ */
+function exportReferencedMedia(
+  refs: ReadonlyMap<string, { path: string; sourceId: string }>,
+  destination: string,
+  durabilityBoundary: string,
+  files: string[],
+  artifacts: DataExportArtifact[],
+): { exported: number; missing: number } {
+  const counts = { exported: 0, missing: 0 };
+  if (refs.size === 0) return counts;
+  const mediaRoot = join(destination, EXPORT_MEDIA_DIR);
+  makeDurableDirectory(mediaRoot, durabilityBoundary);
+  for (const [sha256, { path, sourceId }] of refs) {
+    if (!isMediaCachePath(path, sha256) || !existsSync(path)) {
+      counts.missing += 1;
+      continue;
+    }
+    const target = join(mediaRoot, basename(path));
+    const staging = `${target}.${randomUUID()}.partial`;
+    try {
+      copyFileSync(path, staging);
+      chmodSync(staging, 0o600);
+      if (sha256File(staging) !== sha256) {
+        rmSync(staging, { force: true });
+        counts.missing += 1;
+        continue;
+      }
+      syncFileSync(staging);
+      renameSync(staging, target);
+    } catch (error) {
+      rmSync(staging, { force: true });
+      // Gone between the check and the copy: as missing as one never there.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        counts.missing += 1;
+        continue;
+      }
+      throw error;
+    }
+    files.push(target);
+    artifacts.push(fileArtifact(destination, target, sourceId, 'media'));
+    counts.exported += 1;
+  }
+  syncDirectorySync(mediaRoot);
+  return counts;
 }
 
 export function verifyOlympusDataExport(options: { destination: string }): DataExportVerificationResult {

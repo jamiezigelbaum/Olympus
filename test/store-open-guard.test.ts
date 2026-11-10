@@ -69,6 +69,10 @@ const ALLOWED: Record<string, string> = {
   'scripts/connector-store-locator-index.ts':
     'an operator tool on the --db its command line names (its schema-version read); holds the owner lock for its run',
   'scripts/vector-scan-bench.ts': 'an operator tool on the --db its command line names; holds the owner lock for its run',
+  // A synthetic benchmark: builds its own store set in a temp directory
+  // and opens nothing else.
+  'scripts/engine-split-bench.ts':
+    'a disposable benchmark on a store set it builds itself in a temp directory (seed, then a copy per run); never opens a live store',
   'scripts/whatsapp-identity-backfill.ts':
     'an operator tool on the --db and --session-db its command line names; holds the owner lock for its run',
 };
