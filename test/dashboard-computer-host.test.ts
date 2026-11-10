@@ -41,6 +41,7 @@ import {
   type DashboardViewModelV1,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
+import { CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
 import { dashboardHostBridge, type DashboardHostBridgeConfig } from '../src/workers/dashboard/host-bridge.ts';
 import { COMPUTER_HOST_PAGE_CSP, DASHBOARD_TOOLS_CALL_PATH, computerOpenTargets, renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
 import { DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_HOST_GATE_COPY } from '../src/workers/dashboard/vocabulary.ts';
@@ -831,6 +832,19 @@ describe('See why on the computer', () => {
     expect(page.win.document.activeElement).toBe(why.querySelector('summary') as never);
     // Only once: a later read does not land again.
     expect(page.win.document.querySelectorAll('.landed').length).toBe(1);
+  });
+
+  test('What\'s private › Open lands on the privacy settings once privacy is saved, which Home no longer lists (#1223)', async () => {
+    const saved = model({ sources: [TELEGRAM], privacy: { configured: true, ruleCount: 1, pendingCount: 0 } } as unknown as Partial<DashboardViewModelV1>);
+    const asked = (page: Panel) => page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);
+    const plain = await onHost(COMPUTER, saved);
+    expect(plain.win.document.querySelector('section.privacy-row')).toBeNull();
+    expect(asked(plain)).not.toContain(CHATGPT_PRIVACY_TOOLS.get);
+    const landed = await onHost({ ...COMPUTER, landing: { sourceId: 'privacy.settings' } }, saved);
+    expect(asked(landed)).toContain(CHATGPT_PRIVACY_TOOLS.get);
+    // ChatGPT has no landing: the same id there opens nothing.
+    const chatgpt = await onHost({ kind: 'openclaw', readOnly: false, links: {}, landing: { sourceId: 'privacy.settings' } }, saved);
+    expect(asked(chatgpt)).not.toContain(CHATGPT_PRIVACY_TOOLS.get);
   });
 
   test('a landing in ChatGPT, or on a source that is not there, does nothing', async () => {

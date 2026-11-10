@@ -250,4 +250,11 @@ export function dashboardSourceLandingToken(sourceId: string): string {
  */
 export const DASHBOARD_ALL_SOURCES_LANDING = 'sources';
 export const DASHBOARD_ALL_SOURCES_ID = 'all.sources';
+/**
+ * The panel's own landing on the privacy settings (`#olympus-open=privacy`), linked from Privacy rules ›
+ * What's private: once privacy is saved, Home no longer shows a way back into them (#1223). The panel
+ * reads it as a landing on this id, which no source has, and opens the settings.
+ */
+export const DASHBOARD_PRIVACY_LANDING = 'privacy';
+export const DASHBOARD_PRIVACY_LANDING_ID = 'privacy.settings';
 export const DASHBOARD_LAUNCH_OPEN_KEY = 'olympus_open';

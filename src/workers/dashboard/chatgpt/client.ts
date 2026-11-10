@@ -46,6 +46,8 @@ export interface ChatGptDashboardClientConfig {
   archivesSourceId: string;
   /** The landing id the Sources tab's Archives and details uses: every source's row on Home (#1085). */
   allSourcesId: string;
+  /** The landing id What's private › Open uses: the privacy settings open (#1223). */
+  privacyLandingId: string;
   connection: typeof DASHBOARD_CHATGPT_CONNECTION_COPY;
   page: typeof DASHBOARD_CHATGPT_PAGE_COPY;
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
@@ -190,6 +192,8 @@ export function chatgptDashboardClient(
     landing: string;
     /** The landing opens that card's Import an archive (a Keys link), not its See why. */
     landingImport: boolean;
+    /** An open link asked for the privacy settings; they open once the data is in. */
+    landingPrivacy: boolean;
     /** The source row outlined after landing, until `until` (ms). */
     landed: { id: string; until: number } | null;
     /** What the last failed read got back, for the unreachable banner's See why. */
@@ -224,6 +228,7 @@ export function chatgptDashboardClient(
     unreadablePages: {},
     landing: '',
     landingImport: false,
+    landingPrivacy: false,
     landed: null,
     lastFailure: null,
   };
@@ -331,6 +336,7 @@ export function chatgptDashboardClient(
     const landing = value.landing;
     if (value.kind === 'computer' && landing && typeof landing.sourceId === 'string' && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       if (landing.sourceId === config.allSourcesId) state.open['home-all'] = true;
+      else if (landing.sourceId === config.privacyLandingId) state.landingPrivacy = true;
       else {
         state.landing = landing.sourceId;
         state.landingImport = landing.import === true;
@@ -2391,6 +2397,14 @@ export function chatgptDashboardClient(
     return add(section, list);
   }
 
+  /** What's private › Open: the privacy settings, once the data says what they hold (computer only). */
+  function applyPrivacyLanding(): void {
+    if (!state.data || state.relayDown || editorOpen() || compact() || !onComputer()) return;
+    state.landingPrivacy = false;
+    if (globalReason()) return;
+    openPrivacy('privacy:edit');
+  }
+
   function openPrivacy(returnKey: string): void {
     if (!privacy) return;
     state.notice = '';
@@ -3085,6 +3099,7 @@ export function chatgptDashboardClient(
     }
     reportHeight();
     if (state.landing && !picking && !privacyOpen) applyLanding();
+    if (state.landingPrivacy && !picking && !privacyOpen) applyPrivacyLanding();
   }
 
   function reportHeight(): void {

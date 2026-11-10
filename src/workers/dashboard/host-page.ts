@@ -47,7 +47,7 @@ import {
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
 import {
-  DASHBOARD_IMPORT_LANDING_PREFIX, DASHBOARD_SOURCE_LANDING_PREFIX, DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_ALL_SOURCES_ID,
+  DASHBOARD_IMPORT_LANDING_PREFIX, DASHBOARD_SOURCE_LANDING_PREFIX, DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_ALL_SOURCES_ID, DASHBOARD_PRIVACY_LANDING, DASHBOARD_PRIVACY_LANDING_ID,
   DASHBOARD_OPEN_FRAGMENT_KEY,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
@@ -254,6 +254,8 @@ function hostProgram(input: {
   sourceLanding: string;
   /** `sources`: the Sources tab's Archives and details; the panel shows every source's row. */
   allSourcesLanding: { token: string; id: string };
+  /** Privacy rules › What's private › Open: the privacy settings (#1223). */
+  privacyLanding: { token: string; id: string };
   hasReadToken: boolean;
   toolsCallPath: string;
   /** Where one file of an archive upload goes, and the local tool whose unlock opens the session it needs. */
@@ -485,6 +487,7 @@ function hostProgram(input: {
     const row = wanted.indexOf(input.sourceLanding) === 0 ? wanted.slice(input.sourceLanding.length) : '';
     if (/^[a-z0-9_.]{1,64}$/.test(row)) landing = { sourceId: row };
     if (wanted === input.allSourcesLanding.token) landing = { sourceId: input.allSourcesLanding.id };
+    if (wanted === input.privacyLanding.token) landing = { sourceId: input.privacyLanding.id };
   }
   /** Opens a local-grade session (the messaging routes need one); true once it is. */
   function openLocalSession(): Promise<boolean> {
@@ -779,6 +782,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
     allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
+    privacyLanding: { token: DASHBOARD_PRIVACY_LANDING, id: DASHBOARD_PRIVACY_LANDING_ID },
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
