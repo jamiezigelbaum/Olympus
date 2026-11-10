@@ -40,6 +40,7 @@ import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classifica
 import { classifyItemTiers, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 
 // Built at runtime so the repository's credential-pattern check never sees a
 // literal key in the diff.
@@ -200,7 +201,7 @@ describe('batching, cache and threshold', () => {
           inFlight += 1;
           peak = Math.max(peak, inFlight);
           prompts.push(request.prompt);
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          await flushMicrotasks(5);
           inFlight -= 1;
           const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
           return { text: verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }), modelId: LOCAL_LANE.modelId };
@@ -924,7 +925,7 @@ describe('bounds and the owner-approval gate', () => {
         model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
         approved_by: 'owner', status: 'complete',
       });
-      let clock = Date.parse('2026-11-04T10:00:00Z');
+      const clock = createTestClock(Date.parse('2026-11-04T10:00:00Z'));
       let attempts = 0;
       const service = new TierSnifferService({
         installed,
@@ -932,28 +933,30 @@ describe('bounds and the owner-approval gate', () => {
         model: { complete: () => { attempts += 1; return Promise.reject(new Error('connection refused')); } },
         stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
         classificationLedgerPath: ledgerPath,
-        intervalMs: 10,
-        now: () => new Date(clock),
+        intervalMs: 1_000,
+        now: clock.date,
+        timers: clock,
       });
-      const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+      // Time moves only when the test says so; after each step, wait for any
+      // pass a tick started to finish instead of guessing how long it takes (#911, #992).
+      const step = async (ms: number) => {
+        await clock.advance(ms);
+        await waitFor(() => !service['running'], { description: 'the sniffer pass to finish' });
+      };
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { stoppedBy: 'transport_failures' } });
       const afterFirst = attempts;
       service.start();
-      await settle();
+      await step(0);
       expect(attempts).toBe(afterFirst);
-      clock += 29_000;
-      await settle();
+      await step(29_000);
       expect(attempts).toBe(afterFirst);
-      clock += 2_000;
-      await settle();
+      await step(2_000);
       const afterSecond = attempts;
       expect(afterSecond).toBeGreaterThan(afterFirst);
       // The second failed pass waits the longer time.
-      clock += 31_000;
-      await settle();
+      await step(31_000);
       expect(attempts).toBe(afterSecond);
-      clock += 30_000;
-      await settle();
+      await step(30_000);
       expect(attempts).toBeGreaterThan(afterSecond);
       // A direct pass (Check now, a test) is never held back.
       const beforeDirect = attempts;
@@ -1001,7 +1004,7 @@ describe('bounds and the owner-approval gate', () => {
       answeredThisPass = false;
       service.start();
       // The clock never moves: a held service would ask nothing more.
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await waitFor(() => calls > afterFirst, { description: 'a scheduled pass after a partly answered one' });
       service.stop();
       expect(calls).toBeGreaterThan(afterFirst);
     } finally {
@@ -1201,7 +1204,7 @@ test('independent move drain failures are contained and retried', async () => {
   });
   try {
     service.start();
-    await new Promise(resolve => setTimeout(resolve, 40));
+    await waitFor(() => attempts > 2 && lines.some(line => line.includes('move drain failed (Error)')), { description: 'the move drain to retry past two failures' });
     expect(attempts).toBeGreaterThan(2);
     expect(lines.some(line => line.includes('move drain failed (Error)'))).toBe(true);
   } finally { service.stop(); installed.close(); rmSync(dir, { recursive: true, force: true }); }
@@ -1237,8 +1240,8 @@ test('completed passes continue without waiting for the idle timer', async () =>
     service.start();
     await Promise.race([done, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('idle timer stalled work')), 2_000); })]);
     expect(calls).toBe(12);
-    // Allow the final model result to settle before closing the fixture.
-    await new Promise(resolve => setTimeout(resolve, 5));
+    // Let the final model result settle before closing the fixture.
+    await waitFor(() => !service['running'], { description: 'the last pass to finish' });
   } finally { if (timeout) clearTimeout(timeout); service.stop(); installed.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

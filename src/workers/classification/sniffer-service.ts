@@ -94,6 +94,25 @@ export interface TierSnifferServiceStore {
   tombstoneCopy?: LocalConnectorStore['tombstoneCopy'];
 }
 
+/** The timer functions the service schedules with, so a test can drive them on a fake clock. */
+export interface SnifferTimers {
+  setInterval(callback: () => void, ms: number): unknown;
+  clearInterval(timer: any): void;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(timer: any): void;
+}
+
+const GLOBAL_TIMERS: SnifferTimers = {
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (timer) => clearInterval(timer),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
+function unrefTimer(timer: unknown): void {
+  (timer as { unref?: () => void } | undefined)?.unref?.();
+}
+
 export interface TierSnifferServiceOptions {
   embeddingPrefilterEnabled?: () => boolean;
   installed: InstalledTierClassification;
@@ -132,6 +151,8 @@ export interface TierSnifferServiceOptions {
   /** Where the day's call count is kept across restarts (owner-only JSON). */
   budgetStatePath?: string;
   intervalMs?: number;
+  /** Test seam: the timers behind the tick, wakes and training slices. Default: the global timers. */
+  timers?: SnifferTimers;
   /** A pass still running after this long is aborted at the next tick. Default DEFAULT_TIER_SNIFFER_MAX_PASS_MS. */
   maxPassMs?: number;
   /**
@@ -316,9 +337,9 @@ export type TierSnifferTick =
 export class TierSnifferService {
   private readonly options: TierSnifferServiceOptions;
   private readonly budget: SnifferCallBudget;
-  private timer: ReturnType<typeof setInterval> | undefined;
-  private continuation: ReturnType<typeof setTimeout> | undefined;
-  private trainingTimer: ReturnType<typeof setTimeout> | undefined;
+  private timer: unknown;
+  private continuation: unknown;
+  private trainingTimer: unknown;
   private trainingJob: Promise<void> | undefined;
   private trainingJudge: string | undefined;
   private finalizingTraining = false;
@@ -373,18 +394,22 @@ export class TierSnifferService {
     });
   }
 
+  private timers(): SnifferTimers {
+    return this.options.timers ?? GLOBAL_TIMERS;
+  }
+
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => { void this.drainMoves(); void this.scheduledRun(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
-    this.timer.unref?.();
+    this.timer = this.timers().setInterval(() => { void this.drainMoves(); void this.scheduledRun(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
+    unrefTimer(this.timer);
     this.wake();
   }
 
   /** Real local contention ended: resume immediately, including between idle polls. */
   wake(): void {
     if (this.stopped || this.continuation) return;
-    this.continuation = setTimeout(() => { this.continuation = undefined; void this.scheduledRun(); }, 0);
-    this.continuation.unref?.();
+    this.continuation = this.timers().setTimeout(() => { this.continuation = undefined; void this.scheduledRun(); }, 0);
+    unrefTimer(this.continuation);
   }
 
   /** A pass the timer or a wake asked for: held back while the model is not answering. */
@@ -399,7 +424,7 @@ export class TierSnifferService {
     if (this.stopped || !this.timer || this.trainingTimer || this.trainingJob) return;
     const filters = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.trainingOwner))];
     if (!filters.length) return;
-    this.trainingTimer = setTimeout(() => {
+    this.trainingTimer = this.timers().setTimeout(() => {
       this.trainingTimer = undefined;
       const shouldYield = () => this.stopped || this.trainingJudge !== judge || this.yieldNow();
       const job = (async () => {
@@ -418,12 +443,12 @@ export class TierSnifferService {
         this.scheduleTraining(judge, !this.yieldNow() && filters.some(filter => filter.trainingPending) ? 0 : 1000);
       });
     }, delay);
-    this.trainingTimer.unref?.();
+    unrefTimer(this.trainingTimer);
   }
 
   private pauseTraining(): void {
     this.trainingJudge = undefined;
-    if (this.trainingTimer) clearTimeout(this.trainingTimer);
+    if (this.trainingTimer) this.timers().clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
   }
 
@@ -450,9 +475,9 @@ export class TierSnifferService {
     this.stopped = true;
     this.pauseTraining();
     this.moveAbort.abort();
-    if (this.continuation) clearTimeout(this.continuation);
+    if (this.continuation) this.timers().clearTimeout(this.continuation);
     this.continuation = undefined;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.timers().clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running) this.closeLedgers();
@@ -1385,19 +1410,29 @@ export class TierSnifferService {
     }
   }
 
-  /** New raises interrupt background work; known failures already retry each judge pass. */
+  /**
+   * New raises interrupt background work; known failures already retry each
+   * judge pass. Walks the sets in the next raise drain's rotated order with
+   * its one shared budget, so the timer preempts only for a new raise that
+   * drain will actually take (#1013).
+   */
   private newRaisesQueued(): boolean {
-    return this.ledgerPaths().some(path => {
+    const paths = this.ledgerPaths();
+    let budget = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
+    const offset = this.moveLedgerOffsets.raise % Math.max(1, paths.length);
+    for (const path of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0) return false;
       try {
         const set = tierSetForLedger(path);
-        if (!set || !setEmbedsWithBuiltInOnly(set)) return false;
-        const limit = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
-        return limit > 0 && set.ledger.listMoving({ limit, direction: 'raise' })
-          .some(record => isAutoMoveCandidate(record)
-            && !this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`));
+        if (!set || !setEmbedsWithBuiltInOnly(set)) continue;
+        for (const record of set.ledger.listMoving({ limit: budget, direction: 'raise' }).filter(isAutoMoveCandidate)) {
+          budget--;
+          if (!this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`)) return true;
+        }
       }
       catch { return true; } // An unreadable queue fails safe.
-    });
+    }
+    return false;
   }
 
   private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {

@@ -368,6 +368,23 @@ zkAPI endpoint refusal. No live stores, owner calibration data or model server
 are needed by `test/sniffer-replay.test.ts`; it uses invented SQLite fixtures
 and a loopback fake server only.
 
+## Injection screen hits, by shape
+
+```bash
+bun eval/calibration/injection-screen-shapes.ts --dir ~/.local/share/olympus-calibration/round2 \
+  [--baseline ~/Code/Olympus/src/workers/classification/sniffer.ts] [--json]
+```
+
+Runs the sniffer's injection screen over every item's judge input (built as
+`judge-run.ts` builds it) and prints one row per hit: item id, owner label,
+source, the rule that fired, and shape only: names or excerpt, the length of
+the smallest span that still fires the rule, its position, the lines it covers,
+which of the screen's own fixed keywords it holds, and yes/no markers (quoted
+reply line, header-like line, code punctuation, tag, URL, address, first or
+second person, forwarded item). No item text is printed. `--baseline` loads
+another checkout's `sniffer.ts` (a `main` checkout, say) and lists that
+screen's hits too, each with the rule today's screen fires on it or `clear`.
+
 ## Counts-only embedding pre-filter scorer
 
 From a source checkout with dependencies available, select a SavedModel-format weights file from the offline trainer:
