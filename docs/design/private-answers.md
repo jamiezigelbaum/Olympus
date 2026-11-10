@@ -429,22 +429,30 @@ install in the worker and returns at once. The card re-reads its page every
 
 ### Pins (verified 2026-10-07)
 
-**zkapi-clientd 0.1.6-olympus4** — prepared release `clientd-v0.1.6-olympus4` of
-`jamiezigelbaum/zkapi`, built from fork commit
-`22fffc86ea0b09166530512dba7757bd84388dbc`. The managed route requires the
-fork's supervisor flags and companion custody. Linux x64 additionally
-requires the bundled confinement launcher and passing host and per-session
-checks. Linux x64 is qualified on Omarchy; unsupported hosts refuse.
-Base URL: `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/`.
+**zkapi-clientd 0.1.6-olympus5** — release `clientd-v0.1.6-olympus5` of
+`jamiezigelbaum/zkapi`, built by the fork's release workflow from fork commit
+`2164b23c32c5f7a5507890e3c5a0450aae1b4e0d` (published 2026-11-10). It adds
+one-payment funding and stops asking again when the network fee moves (#914).
+The managed
+route requires the fork's supervisor flags and companion custody. Linux x64
+additionally requires the bundled confinement launcher and passing host and
+per-session checks. Linux x64 is qualified on Omarchy; unsupported hosts refuse.
+Base URL: `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/`.
 
 | Platform | Asset | Bytes | SHA-256 |
 |---|---|---|---|
-| macOS arm64 | `zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz` | 23,233,898 | `c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87` |
-| macOS x86_64 | `zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz` | 23,924,531 | `afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9` |
-| Linux x86_64 | `zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz` | 25,885,185 | `069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a` |
-| Linux arm64 | `zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz` | 23,923,385 | `cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489` |
+| macOS arm64 | `zkapi-clientd_0.1.6-olympus5_darwin_arm64.tar.gz` | 23,234,981 | `a93c602386425bc88d853189fba3018d8e074b9a7878898d176dd39e4de7934e` |
+| macOS x86_64 | `zkapi-clientd_0.1.6-olympus5_darwin_amd64.tar.gz` | 23,925,134 | `329cb09ce4666fd8168a999e3977110df27690d9aa6ed01fdfafc3e4f3b4a19e` |
+| Linux x86_64 | `zkapi-clientd_0.1.6-olympus5_linux_amd64.tar.gz` | 25,886,188 | `77c89ec391bd3e70909d436f56984d9ad49e3c753bc7284f7ff3a8d36bf4268a` |
+| Linux arm64 | `zkapi-clientd_0.1.6-olympus5_linux_arm64.tar.gz` | 23,924,679 | `60f629eff3df44d32cc2899e6fa7449d971349ce27d39bb500d2ef20fd069106` |
 
-Verification, 2026-10-13: all four archives were built from the committed fork
+Verification, 2026-11-10: the hashes are the release's `SHA256SUMS`; the Linux
+x64 download matched it, and its `bin/zkapi-confine` hashes to
+`875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215`, matching
+`zkapi_confine_sha256` in its `share/zkapi-clientd/olympus-build.json`. The
+olympus4 record below is kept for history.
+
+olympus4 (superseded): Verification, 2026-10-13: all four archives were built from the committed fork
 on Sparta with the official Go 1.27.1 Linux amd64 toolchain; each daemon and
 the Linux launcher matched a clean HEAD rebuild. Owner publication is still
 required before these URLs are usable. Mac moves from main's olympus2 pin to

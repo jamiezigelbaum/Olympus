@@ -485,9 +485,10 @@ export class TierSnifferService {
 
   /**
    * An answer needs the private pool (the worker calls this when answers in
-   * flight go from 0 to 1): abort the sniffer's in-flight call at once. The
-   * pass stops as `preempted`; nothing is counted against any item, and the
-   * sniffer never records anything in the answer pool's breakers.
+   * flight go from 0 to 1, and when an answer is queued behind a running
+   * call): abort the sniffer's in-flight call at once. The pass stops as
+   * `preempted`; nothing is counted against any item, and the sniffer never
+   * records anything in the answer pool's breakers.
    */
   preempt(): void {
     // The owner's own answer ends a fair turn too, lowering slice included:
@@ -1607,7 +1608,7 @@ export class TierSnifferService {
       }
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60_000;
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.rechecked > 0 || logSkipped) {
       if (total.builtinPromptSkipped > 0) this.lastBuiltinPromptSkipLogMs = this.clockMs();
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
@@ -1616,7 +1617,7 @@ export class TierSnifferService {
         + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
         + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}`
         + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}`
-        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`,
+        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}; owner_recheck=${total.rechecked}.`,
       );
     }
     return total;

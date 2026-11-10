@@ -200,6 +200,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'data restore',
   'tier set',
   'tier explain',
+  'tier recheck',
   'tier rules',
   'tier classifier',
   'tier migrate',
