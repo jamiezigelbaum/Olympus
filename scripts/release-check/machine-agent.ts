@@ -45,7 +45,8 @@ import { findBrowser, openBrowser, type Cdp, type OpenedBrowser } from './browse
 import { capturePlants, captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { runJourney, type JourneyTrace } from './journey.ts';
-import { selectJourneys } from './journeys.ts';
+import { selectJourneys, type JourneyMachine } from './journeys.ts';
+import { startUpdateStandIn, type UpdateStandIn } from './update-stand-in.ts';
 import { explore, pagesAccessibilityAudit, withPageAudits, type Accessibility, type Seed } from './explore.ts';
 import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import { explorePages, inboxAnswers } from './explore-pages.ts';
@@ -1207,7 +1208,12 @@ const JOURNEY_DEBUG_PORT = 9335;
  * a screenshot after each step. The screens are taken first, while the install is as the run left it; the journeys that change the
  * install run last.
  */
-async function journeysCommand(outDir: string, only: string[], skip: string[], skipScreens: boolean, plants: boolean): Promise<never> {
+function journeyMachine(value: string): JourneyMachine {
+  if (value === 'main' || value === 'restore-from' || value === 'restore-to') return value;
+  throw new Error(`--machine must be main, restore-from or restore-to, not ${value}`);
+}
+
+async function journeysCommand(outDir: string, only: string[], skip: string[], skipScreens: boolean, plants: boolean, machine: JourneyMachine = 'main'): Promise<never> {
   const browser = findBrowser();
   if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
   rmSync(outDir, { recursive: true, force: true });
@@ -1215,6 +1221,7 @@ async function journeysCommand(outDir: string, only: string[], skip: string[], s
   let stopBridge: () => void = () => undefined;
   let bridgeStarted = false;
   let opened: OpenedBrowser | undefined;
+  let standIn: UpdateStandIn | undefined;
   const traces: JourneyTrace[] = [];
   let screens: CapturedScreen[] = [];
   let planted: PlantedPicture[] = [];
@@ -1226,6 +1233,7 @@ async function journeysCommand(outDir: string, only: string[], skip: string[], s
       debugPort: JOURNEY_DEBUG_PORT,
       outDir,
       mintLink: async (place) => {
+        if (place === 'update') return (standIn ??= startUpdateStandIn()).url;
         const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
         const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
         if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
@@ -1234,16 +1242,22 @@ async function journeysCommand(outDir: string, only: string[], skip: string[], s
       onOrigin: (origin) => {
         if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
       },
+      // A journey's Terminal step: the owner's own olympus, with ~ as the owner's home.
+      command: async ({ argv, stdin, timeoutMs }) => {
+        const done = olympus(argv.map((arg) => arg.startsWith('~/') ? join(homedir(), arg.slice(2)) : arg), { ...(stdin !== undefined ? { input: stdin } : {}), timeoutMs: timeoutMs ?? 300_000 });
+        return { code: done.code, output: `${done.stdout}\n${done.stderr}` };
+      },
     });
     await driver.start();
-    if (!skipScreens) {
+    // The restore leg's machines walk only their journey: the screens are the run's own machine's.
+    if (!skipScreens && machine === 'main') {
       try { screens = await captureScreens(driver, outDir); } catch (error) { failure = `the screens could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
     }
     // A qualification run for the AI reviewer: the same screens with planted bugs (reviewer-plants.ts), before any journey changes the install.
     if (plants) {
       try { planted = await capturePlants(driver, outDir); } catch (error) { failure = `the planted pictures could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
     }
-    for (const journey of selectJourneys(only, skip)) {
+    for (const journey of selectJourneys(only, skip, machine)) {
       try {
         traces.push(await runJourney(driver, journey));
       } catch (error) {
@@ -1256,6 +1270,7 @@ async function journeysCommand(outDir: string, only: string[], skip: string[], s
   } finally {
     opened?.close();
     stopBridge();
+    standIn?.stop();
   }
   writeFileSync(join(outDir, 'traces.json'), JSON.stringify(traces));
   const archive = join(WORKDIR, 'journeys.tgz');
@@ -2050,7 +2065,7 @@ async function main(): Promise<void> {
     }
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
-    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), flag('--skip', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'), process.argv.includes('--plants'));
+    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), flag('--skip', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'), process.argv.includes('--plants'), journeyMachine(flag('--machine', 'main')));
     case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'), process.argv.includes('--pages-inventory') ? flag('--pages-inventory') : undefined);
     case 'archive-import': return await archiveImportCommand({
       role: flag('--role'), format: flag('--format', STRESS_FORMAT), via: flag('--via'), seed: flag('--seed'),

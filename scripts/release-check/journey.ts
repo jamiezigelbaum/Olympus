@@ -37,19 +37,37 @@ export async function screenshotWithin(driver: Pick<JourneyDriver, 'screenshot'>
 
 export type FrameName = 'auto' | 'host' | 'panel';
 
-/** A place the owner opens with an opening link (`olympus dashboard --no-open --target <place>`): the dashboard, or the Inbox page. */
-export type OpenPlace = 'dashboard' | 'private';
+/**
+ * A place the owner opens with an opening link (`olympus dashboard --no-open --target <place>`): the dashboard, or the Inbox page.
+ * `update` is the release check's update stand-in (update-stand-in.ts): the dashboard's update notice with the engine's own updater
+ * behind it, because the candidate ships no release key and its site is the live one.
+ */
+export type OpenPlace = 'dashboard' | 'private' | 'update';
 
 /** What an expectation compares against; a function reads what an earlier step remembered. */
 export type Matcher = string | RegExp | ((vars: Vars) => string | RegExp);
 
 export type Vars = Record<string, string | number>;
 
+/** A target named by what an earlier step remembered (one item's row, by its id). */
+export type TargetOf = Target | ((vars: Vars) => Target);
+
+/** What the owner types in Terminal: an `olympus` command on the machine. Its exit status and output are the step's `exit` and `output`. */
+export interface Command {
+  /** The arguments after `olympus`. */
+  argv: string[];
+  /** Typed in when the command asks (a backup passphrase); never shown in the trace. */
+  stdin?: string;
+  timeoutMs?: number;
+}
+
 export type Action =
   /** The owner's way in: a one-time opening link signs the browser in, and Unlock opens the controls where the page offers it. */
   | { open: OpenPlace }
   /** `optional`: nothing to press is not a failure (a fold the page already opened on its own). */
-  | { click: Target; frame?: FrameName; optional?: true }
+  | { click: TargetOf; frame?: FrameName; optional?: true }
+  /** An `olympus` command, as the owner runs it in Terminal (a journey that crosses between the dashboard and Terminal). */
+  | { run: Command }
   | { type: { into: Target; text: string }; frame?: FrameName }
   /** Files chosen in a file input, as the system's file dialog would hand them (paths on the machine the browser runs on). */
   | { attach: { into: Target; paths: string[] }; frame?: FrameName }
@@ -75,6 +93,10 @@ export type Expectation =
   | { noOverflow: true }
   /** The dashboard opened its page here: no new window or tab appeared. */
   | { noNewWindow: true }
+  /** The step's command exited with this status. */
+  | { exit: number }
+  /** The step's command printed this (stdout and stderr together). */
+  | { output: Matcher }
   | { custom: (context: StepContext) => Promise<{ ok: boolean; expected: string; actual: string }> };
 
 export type Remember = { countOf: Target; frame?: FrameName } | { textOf: Target; frame?: FrameName } | { attrOf: Target; attr: string; frame?: FrameName };
@@ -105,6 +127,12 @@ export interface Journey {
    * that skips one of them (`--skip-suite`, `--skip-inbox`) skips the journey and says why, rather than failing it.
    */
   needs?: Array<'suite' | 'inbox'>;
+  /**
+   * Walked only by the restore leg (run.ts runRestoreLeg), not with the other journeys: `restore-from` on the run's machine when the
+   * backup is made, `restore-to` on a second, freshly provisioned machine, which has the candidate and the backup the leg put at
+   * RESTORE_BACKUP_PATH (restore.ts) and nothing else.
+   */
+  machine?: 'restore-from' | 'restore-to';
   allowConsole?: RegExp[];
   allowRequests?: Array<{ url: RegExp; status?: number }>;
 }
@@ -195,6 +223,8 @@ export interface JourneyDriver {
   pages(): Promise<number>;
   screenshot(relativeFile: string): Promise<boolean>;
   drainEvents(): PageEvents;
+  /** Runs `olympus <argv>` on the machine the browser runs on; absent where there is no machine (a DOM in the tests). */
+  command?(command: Command): Promise<{ code: number; output: string }>;
 }
 
 export interface StepContext {
@@ -221,6 +251,11 @@ const frames = (frame: FrameName | undefined, panel: boolean): Array<'host' | 'p
   return panel ? ['host', 'panel'] : ['host'];
 };
 
+/** Where a step's command leaves its exit status and output, for its outcomes and later steps. */
+export const COMMAND_EXIT = 'commandExit';
+export const COMMAND_OUTPUT = 'commandOutput';
+
+const targetOf = (target: TargetOf, vars: Vars): Target => (typeof target === 'function' ? target(vars) : target);
 const resolve = (matcher: Matcher, vars: Vars): string | RegExp => (typeof matcher === 'function' ? matcher(vars) : matcher);
 const matches = (value: string, want: string | RegExp): boolean => (typeof want === 'string' ? value.toLowerCase().includes(want.toLowerCase()) : want.test(value));
 const show = (want: string | RegExp): string => (typeof want === 'string' ? `"${want}"` : String(want));
@@ -308,6 +343,16 @@ async function evaluate(expectation: Expectation, context: StepContext, state: {
     const wide = Math.max(0, ...audits.map((audit) => audit.overflowX));
     return { ok: wide === 0, expected: 'nothing scrolls sideways', actual: wide === 0 ? 'nothing does' : `the page is ${wide} px too wide` };
   }
+  if ('exit' in expectation) {
+    const code = vars[COMMAND_EXIT];
+    return { ok: code === expectation.exit, expected: `the command exits ${expectation.exit}`, actual: code === undefined ? 'no command ran' : `it exited ${code}` };
+  }
+  if ('output' in expectation) {
+    const want = resolve(expectation.output, vars);
+    const output = vars[COMMAND_OUTPUT];
+    const ok = typeof output === 'string' && matches(output, want);
+    return { ok, expected: `the command prints ${show(want)}`, actual: typeof output !== 'string' ? 'no command ran' : ok ? 'it does' : `it printed "${squash(output).slice(-160)}"` };
+  }
   if ('noNewWindow' in expectation) {
     const now = await context.driver.pages();
     return { ok: now === state.pagesBefore, expected: 'the page opened here, in the same window', actual: now === state.pagesBefore ? 'no new window or tab' : `${now - state.pagesBefore} new window or tab(s)` };
@@ -347,7 +392,8 @@ const allowed = (list: Array<{ url: RegExp; status?: number }>, request: { url: 
 
 function describeAction(action: Action): string {
   if ('open' in action) return `open the ${action.open} page the owner's way (opening link, then Unlock where it is offered)`;
-  if ('click' in action) return `click ${describeTarget(action.click)}`;
+  if ('click' in action) return `click ${typeof action.click === 'function' ? 'the remembered control' : describeTarget(action.click)}`;
+  if ('run' in action) return `run "olympus ${action.run.argv.join(' ')}"${action.run.stdin !== undefined ? ', typing what it asks for' : ''}`;
   if ('type' in action) return `type "${action.type.text}" into ${describeTarget(action.type.into)}`;
   if ('attach' in action) return `choose ${action.attach.paths.length === 1 ? 'a file' : `${action.attach.paths.length} files`} in ${describeTarget(action.attach.into)}`;
   if ('go' in action) return `go to ${action.go}`;
@@ -358,7 +404,14 @@ function describeAction(action: Action): string {
 
 const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'step';
 
-async function perform(action: Action, driver: JourneyDriver, clock: { now: () => number; sleep: (ms: number) => Promise<void> }): Promise<{ ok: boolean; detail: string; waitedMs?: number }> {
+async function perform(action: Action, driver: JourneyDriver, clock: { now: () => number; sleep: (ms: number) => Promise<void> }, vars: Vars): Promise<{ ok: boolean; detail: string; waitedMs?: number }> {
+  if ('run' in action) {
+    if (!driver.command) return { ok: false, detail: 'this browser has no machine to run a command on' };
+    const done = await driver.command(action.run);
+    vars[COMMAND_EXIT] = done.code;
+    vars[COMMAND_OUTPUT] = done.output.slice(-4_000);
+    return { ok: true, detail: `it exited ${done.code}` };
+  }
   if ('open' in action) { await driver.open(action.open); return { ok: true, detail: 'opened' }; }
   if ('go' in action) { await driver.go(action.go); return { ok: true, detail: 'went there' }; }
   if ('reload' in action) { await driver.reload(); return { ok: true, detail: 'reloaded' }; }
@@ -366,6 +419,7 @@ async function perform(action: Action, driver: JourneyDriver, clock: { now: () =
   if ('observe' in action) return { ok: true, detail: 'looked' };
   const panel = await driver.hasPanel();
   if ('click' in action) {
+    const click = targetOf(action.click, vars);
     // The first frame that has the control: the page, then the framed panel.
     // A control the page disables while Olympus reloads its search model after an engine restart ("Available once Olympus is
     // set up", a few seconds, longer on a slow machine) is waited for, because the page enables it on its own poll, as an owner
@@ -375,14 +429,14 @@ async function perform(action: Action, driver: JourneyDriver, clock: { now: () =
     for (;;) {
       let disabled: ElementInfoLike | undefined;
       for (const name of frames(action.frame, panel)) {
-        const info = await driver.click(name, wireTarget(action.click));
+        const info = await driver.click(name, wireTarget(click));
         if (!info) continue;
         if (!info.disabled) return { ok: true, detail: `pressed ${info.role || info.tag} "${info.name.slice(0, 50)}"`, waitedMs: clock.now() - began };
         disabled = info;
         break;
       }
-      if (!disabled) return action.optional ? { ok: true, detail: `${describeTarget(action.click)} is not there; nothing to press` } : { ok: false, detail: `${describeTarget(action.click)} is not on the page` };
-      if (clock.now() >= until) return { ok: false, detail: `${describeTarget(action.click)} is there but disabled` };
+      if (!disabled) return action.optional ? { ok: true, detail: `${describeTarget(click)} is not there; nothing to press` } : { ok: false, detail: `${describeTarget(click)} is not on the page` };
+      if (clock.now() >= until) return { ok: false, detail: `${describeTarget(click)} is there but disabled` };
       await clock.sleep(1_000);
     }
   }
@@ -438,7 +492,7 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
           vars[name] = text;
         }
       }
-      actionResult = await perform(step.do, driver, { now, sleep });
+      actionResult = await perform(step.do, driver, { now, sleep }, vars);
     } catch (caught) {
       actionResult = { ok: false, detail: `the action failed: ${caught instanceof Error ? caught.message.slice(0, 200) : String(caught)}` };
     }

@@ -42,6 +42,12 @@
  * archive, and a file changed during an import stops it visibly (archive-leg.ts, archive-stages.ts). Each later format adds one entry to
  * ARCHIVE_FORMATS in archive-fixtures.ts and nothing here.
  *
+ * Restore leg (1.5, on by default for a fresh install; `--skip-restore` leaves it out for a candidate with no backup and restore): last,
+ * the journey `backup-for-restore` makes a passphrase backup on the run's machine, a second machine is provisioned fresh with the same
+ * candidate, the backup is put on it, and `restore-clean-machine` restores it into that empty install and looks for the sources and the
+ * item the owner corrected (fix-one-item) on the dashboard. The two installs' states are then compared (restore.ts): sources, the
+ * owner's rules and privacy settings, and every stored item with its tier and judgments. The second machine is always destroyed.
+ *
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
@@ -75,7 +81,8 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
-import { JOURNEYS } from './journeys.ts';
+import { JOURNEYS, type JourneyMachine } from './journeys.ts';
+import { evaluateRestore, RESTORE_BACKUP_FOLDER, RESTORE_BACKUP_PATH } from './restore.ts';
 import { carryInto, copyCarriedFiles, loadCarryBase } from './carry.ts';
 import { harnessReach, planImpact, readChangedFiles, type ImpactPlan, type Leg } from './impact.ts';
 import { layoutChecks, layoutFindings, layoutQualificationCheck, scoreLayoutRules } from './layout-rules.ts';
@@ -140,6 +147,8 @@ export interface RunOptions {
   skipSuite?: boolean;
   /** Leave out the archive-import leg. For a candidate that has no archive import. */
   skipArchive?: boolean;
+  /** Leave out the restore leg (a backup restored on a second, clean machine). For a candidate that has no backup and restore. */
+  skipRestore?: boolean;
   /** Run only these journeys (by id); omitted runs them all. */
   onlyJourneys?: string[];
   /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
@@ -219,6 +228,8 @@ export function legPartial(leg: Leg, options: RunOptions): boolean {
       || JOURNEYS.some((journey) => journey.needs?.some((need) => legPartial(need, options)));
     case 'explore': return options.skipExplore === true;
     case 'archive': return options.skipArchive === true;
+    // Its clean machine checks the item fix-one-item changed on the first one.
+    case 'restore': return options.skipRestore === true || legPartial('journeys', options);
   }
 }
 
@@ -1237,6 +1248,67 @@ const tarballVersion = (dir: string): string | undefined => {
 };
 
 /** The snapshot of the install's state, or undefined (with the run's error recorded) when it cannot be read. */
+/**
+ * The restore leg (restore.ts): `backup-for-restore` is walked on the run's machine and its state read; a second machine is
+ * provisioned fresh with the candidate, the backup is put on it, `restore-clean-machine` is walked there and its state read; then
+ * the two are compared. The second machine is destroyed at the end, whatever happened, unless the run keeps its machines.
+ */
+async function runRestoreLeg(run: Run, workDir: string, bundlePath: string, outDir: string): Promise<void> {
+  const options = run.options;
+  if (options.skipRestore) return;
+  const first = run.machine!;
+  // Walks one restore journey on the current machine and records its trace; true when it passed.
+  const walk = async (machine: JourneyMachine, label: string): Promise<boolean> => {
+    const done = await run.phase(`restore-${machine}`, () => run.agent('journeys', `--out ~/rc/journeys-${machine} --machine ${machine} --skip-screens`, 1_800_000));
+    const traces = Array.isArray(done.result?.traces) ? done.result!.traces as JourneyTrace[] : [];
+    if (traces.length === 0) {
+      run.add({ id: `restore.${machine}`, title: `The ${label} journey was walked`, status: 'fail', detail: `no result from the machine (exit ${done.code}): ${String(done.result?.detail ?? done.stderr.slice(-200))}` });
+      return false;
+    }
+    const scratch = join(outDir, `_restore-${machine}`);
+    rmSync(scratch, { recursive: true, force: true });
+    mkdirSync(scratch, { recursive: true });
+    try {
+      await run.machine!.get(String(done.result!.archive), join(scratch, 'journeys.tgz'));
+      if (spawnSync('tar', ['-xzf', join(scratch, 'journeys.tgz'), '-C', scratch], { encoding: 'utf8' }).status === 0 && existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
+    } catch { /* the pictures are evidence; the trace itself came back in the result */ }
+    rmSync(scratch, { recursive: true, force: true });
+    (run.stage.traces ??= []).push(...traces);
+    for (const check of journeyChecks(traces)) run.add(check);
+    return traces.every((trace) => trace.ok);
+  };
+
+  if (!(await walk('restore-from', 'backup'))) return;
+  const before = await takeSnapshot(run, 'when the backup was made');
+  if (!before) return;
+  const listed = await first.exec(`ls -1 ${RESTORE_BACKUP_FOLDER}/*.olympusbackup | tail -1\n`, { timeoutMs: 30_000 });
+  const remote = listed.stdout.trim().split('\n').pop() ?? '';
+  if (listed.code !== 0 || !remote) { run.add({ id: 'restore.backup-file', title: 'The backup file was found on the first machine', status: 'fail', detail: listed.stderr.slice(-200) || 'no .olympusbackup file' }); return; }
+  const local = join(workDir, 'restore.olympusbackup');
+  await first.get(remote, local);
+
+  let second: Machine | undefined;
+  try {
+    second = await run.phase('restore-provision', () => run.driver.provision({ runId: `${options.runId}-restore`, candidateDir: options.candidateDir, workdir: workDir, timeoutMs: 25 * 60_000 }));
+    run.add({ id: 'restore.provision', title: 'A second, clean machine was created and the candidate installed on it', status: 'pass', detail: second.label });
+    run.machine = second;
+    await second.exec(`mkdir -p ~/rc ${RESTORE_BACKUP_FOLDER} && chmod 700 ~/rc ${RESTORE_BACKUP_FOLDER}\n`, { timeoutMs: 30_000 });
+    await second.put(bundlePath, '~/rc/agent.js');
+    await second.put(local, RESTORE_BACKUP_PATH);
+    if (!(await walk('restore-to', 'restore'))) return;
+    const after = await takeSnapshot(run, 'after the restore');
+    if (!after) return;
+    for (const check of evaluateRestore(before, after)) run.add(check);
+  } catch (error) {
+    run.add({ id: 'restore.provision', title: 'A second, clean machine was created and the candidate installed on it', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+  } finally {
+    run.machine = first;
+    rmSync(local, { force: true });
+    if (options.keepMachine) run.errors.push(`the restore leg's machine ${second?.handle ?? `of run ${options.runId}-restore`} was kept for debugging (--keep-machine)`);
+    else await run.driver.destroy(second ? { handle: second.handle } : { runId: `${options.runId}-restore` }).catch((error: unknown) => run.errors.push(`the restore leg's machine was not destroyed: ${error instanceof Error ? error.message : String(error)}`));
+  }
+}
+
 async function takeSnapshot(run: Run, what: string): Promise<StateSnapshot | undefined> {
   const out = await run.agent('snapshot-state', '', 90_000);
   if (out.result?.ok !== true || !out.result.state) {
@@ -1368,6 +1440,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+        if (Date.now() < deadline) await run.inLeg('restore', () => runRestoreLeg(run, workDir, bundlePath, options.outDir)); else run.errors.push('the run exceeded its time budget before the restore leg');
       }
       await collectEvidence(run, options.outDir);
     }
@@ -1490,7 +1563,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1529,7 +1602,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   let carry: RunOptions['carry'];
   if ((carryFrom === undefined) !== (changedFiles === undefined)) throw new Error('--carry-from and --changed-files go together');
   if (carryFrom !== undefined && changedFiles !== undefined) {
-    const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--only-journeys', '--agents',
+    const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--skip-restore', '--only-journeys', '--agents',
       '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine'].filter(has);
     if (conflicts.length > 0) throw new Error(`--carry-from lets the change decide what runs; drop ${conflicts.join(', ')}`);
     if (!existsSync(resolve(changedFiles))) throw new Error(`--changed-files ${changedFiles} does not exist`);
@@ -1561,6 +1634,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     skipJourneys: skip('--skip-journeys'),
     skipExplore: skip('--skip-explore'),
     skipArchive: skip('--skip-archive'),
+    skipRestore: skip('--skip-restore'),
     skipSuite: skip('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
