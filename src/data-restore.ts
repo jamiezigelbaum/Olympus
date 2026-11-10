@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import {
   lifecycleAccountFiles,
   lifecycleEnv,
+  lifecycleStoreLayouts,
   verifyOlympusDataExport,
   type DataExportArtifact,
   type LifecyclePathContext,
@@ -90,10 +91,13 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
       const target = stores[artifact.storeIndex];
       if (target) return target;
     } else {
-      // A version 2 export names a store only by its file name.
+      // A version 2 export names a store only by its file name, as the
+      // install that made it kept it (legacy or folder layout).
       const name = artifact.relativePath.split('/').pop();
-      const target = stores.find((path) => path.split('/').pop() === name);
-      if (target) return target;
+      for (const layout of lifecycleStoreLayouts(artifact.sourceId, context)) {
+        const index = layout.findIndex((path) => path.split('/').pop() === name);
+        if (index >= 0 && stores[index]) return stores[index]!;
+      }
     }
     throw new OperationError(
       'invalid_params',
@@ -155,9 +159,19 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
 
   // A restore never writes over data: an install that already holds a store
   // is not a fresh one, and merging two histories is not what was asked.
-  const occupied = plan.filter((entry) => entry.kind !== 'owner_settings' && existsSync(entry.to) && statSync(entry.to).size > 0);
-  if (occupied.length > 0) {
-    const sources = [...new Set(occupied.map((entry) => entry.sourceId))];
+  // Every store and sidecar a restored source owns counts, not only the ones
+  // in the backup: a backup with one tier's store must not land beside
+  // another tier's store and ledger already here.
+  const holds = (path: string): boolean => existsSync(path) && statSync(path).size > 0;
+  const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== 'owner_settings').map((entry) => entry.sourceId))];
+  const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
+    store,
+    tierLedgerPathForStore(store),
+    tierSnifferPathForStore(store),
+    secretLocationsPathForStore(store),
+  ].some(holds)));
+  if (occupiedSources.length > 0) {
+    const sources = occupiedSources;
     throw new OperationError(
       'invalid_params',
       `This computer already holds Olympus data for ${sources.join(', ')}, so nothing was restored.`,

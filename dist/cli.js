@@ -101747,9 +101747,8 @@ function exportOlympusData(options) {
         skipped: skipped2,
         artifacts
       });
-      if (artifacts.length === before)
-        return;
-      artifacts[before].storeIndex = storeIndex;
+      if (artifacts.length > before)
+        artifacts[before].storeIndex = storeIndex;
       for (const [sidecar, path, storeId] of [
         ["tier_ledger", tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
         ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
@@ -103033,6 +103032,16 @@ function envForHome(homeDir) {
     XDG_DATA_HOME: join92(homeDir, ".local", "share"),
     XDG_STATE_HOME: join92(homeDir, ".local", "state")
   };
+}
+function lifecycleStoreLayouts(sourceId, context2 = {}) {
+  const env = envForContext(context2);
+  return ["legacy", "folder"].map((layout) => {
+    try {
+      return accountFiles({ source_id: sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout }, { env, ...context2.homeDir ? { homeDir: context2.homeDir } : {} }).stores;
+    } catch {
+      return [];
+    }
+  });
 }
 function lifecycleEnv(context2) {
   return envForContext(context2);
@@ -226690,9 +226699,11 @@ function restoreOlympusData(options) {
         return target;
     } else {
       const name = artifact.relativePath.split("/").pop();
-      const target = stores.find((path) => path.split("/").pop() === name);
-      if (target)
-        return target;
+      for (const layout of lifecycleStoreLayouts(artifact.sourceId, context2)) {
+        const index = layout.findIndex((path) => path.split("/").pop() === name);
+        if (index >= 0 && stores[index])
+          return stores[index];
+      }
     }
     throw new OperationError("invalid_params", `This backup holds a ${artifact.sourceId} store this version of Olympus does not keep (${artifact.relativePath}).`, "Restore with the Olympus version that made the backup, then update.");
   };
@@ -226739,9 +226750,16 @@ function restoreOlympusData(options) {
   if (manifest2.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
-  const occupied = plan.filter((entry) => entry.kind !== "owner_settings" && existsSync84(entry.to) && statSync37(entry.to).size > 0);
-  if (occupied.length > 0) {
-    const sources = [...new Set(occupied.map((entry) => entry.sourceId))];
+  const holds2 = (path) => existsSync84(path) && statSync37(path).size > 0;
+  const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== "owner_settings").map((entry) => entry.sourceId))];
+  const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
+    store,
+    tierLedgerPathForStore(store),
+    tierSnifferPathForStore(store),
+    secretLocationsPathForStore(store)
+  ].some(holds2)));
+  if (occupiedSources.length > 0) {
+    const sources = occupiedSources;
     throw new OperationError("invalid_params", `This computer already holds Olympus data for ${sources.join(", ")}, so nothing was restored.`, "Restore onto a fresh install, or delete that data first with olympus data delete --source <id>.");
   }
   for (const entry of plan) {

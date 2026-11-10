@@ -85,3 +85,45 @@ describe('data restore', () => {
     }
   });
 });
+
+describe('data restore across tier stores', () => {
+  const storesOf = (homeDir: string) => lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({ homeDir });
+
+  test('a ledger beside a store that was never created still travels, and lands beside the same store', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-lane-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      const [secureA, otherA] = storesOf(homeA);
+      expect(otherA).toBeDefined();
+      seed(otherA!, 'rows', 'a routed bookmark');
+      seed(tierLedgerPathForStore(secureA!), 'judgments', 'Personal');
+      expect(existsSync(secureA!)).toBe(false);
+      exportOlympusData({ destination: backup, homeDir: homeA });
+      restoreOlympusData({ input: backup, homeDir: homeB });
+      const [secureB, otherB] = storesOf(homeB);
+      expect(rows(otherB!, 'rows')).toEqual([{ value: 'a routed bookmark' }]);
+      expect(rows(tierLedgerPathForStore(secureB!), 'judgments')).toEqual([{ value: 'Personal' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses when this computer holds another of the source\'s stores, even one the backup lacks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-other-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      seed(storesOf(homeA)[1]!, 'rows', 'from the backup');
+      exportOlympusData({ destination: backup, homeDir: homeA });
+      const secureB = storesOf(homeB)[0]!;
+      seed(secureB, 'rows', 'already here');
+      expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('already holds Olympus data for x.bookmarks');
+      expect(existsSync(storesOf(homeB)[1]!)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
