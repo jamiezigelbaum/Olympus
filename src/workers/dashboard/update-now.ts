@@ -265,7 +265,14 @@ function updateNoticeProgram(config: {
   // the address as soon as the reloaded page reads it.
   const resumeKey = 'olympus-update-now';
   const followKey = 'olympus-update-follow';
-  const here = () => window.location.pathname + window.location.search;
+  // The address without a launch token: a reload with ?token= would be read
+  // as a bearer page again and lose the local session it just took.
+  const here = () => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('token');
+    const rest = params.toString();
+    return window.location.pathname + (rest ? '?' + rest : '');
+  };
   function take(key: string): string {
     try {
       if (window.location.hash !== '#' + key) return '';

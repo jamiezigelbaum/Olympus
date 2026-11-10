@@ -420,7 +420,7 @@ describe('the notice on Home and Settings', () => {
     const calls: { url: string; csrf: string | null }[] = [];
     let healthReads = 0;
     const open = (html: string, resume?: string) => {
-      const window = new Window({ url: resume ? 'http://localhost/dashboard#olympus-update-now' : 'http://localhost/dashboard', settings: { enableJavaScriptEvaluation: true } });
+      const window = new Window({ url: resume ? 'http://localhost/dashboard#olympus-update-now' : 'http://localhost/dashboard?token=dash_t&tab=home', settings: { enableJavaScriptEvaluation: true } });
       let reloads = 0;
       Object.defineProperty(window.location, 'reload', { value: () => { reloads++; } });
       Object.defineProperty(window, 'setInterval', { value: () => 1 });
@@ -441,6 +441,8 @@ describe('the notice on Home and Settings', () => {
       expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: null }]);
       // The one-shot mark rides on the address's fragment, never in browser storage.
       expect(before.window.location.hash).toBe('#olympus-update-now');
+      // A launch token in the address is dropped, so the reload takes the new local session.
+      expect(before.window.location.search).toBe('?tab=home');
       expect(before.window.sessionStorage.length).toBe(0);
     } finally { await before.window.happyDOM.close(); }
     // The reloaded page holds the local session everywhere and carries on.
