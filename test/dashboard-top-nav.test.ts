@@ -46,17 +46,17 @@ describe('the top bar', () => {
 });
 
 describe('Settings', () => {
-  test('a side list that shows one section at a time: agents and access, models on this computer, zkAPI, updates and help', () => {
+  test('a side list that shows one section at a time: agents and access, models on this computer, zkAPI, back up and restore, updates and help', () => {
     expect(dashboardHtmlRoutePage(new URL(`${ORIGIN}/dashboard?settings`))).toBe('settings');
     const html = renderDashboardLocalPage('settings', { url: new URL(`${ORIGIN}/dashboard?settings`), options: {
       controlSessionCsrfToken: 'c',
       settings: { models: [{ name: 'Search model', state: 'Ready', detail: 'Finds matching passages', downloadBytes: 600_000_000 }], update: { version: '1.4.1', command: 'curl -fsSL https://olympusplugin.ai/install | sh' } },
     } });
     const doc = new Window().document; doc.write(html);
-    expect([...doc.querySelectorAll('.setside a')].map(link => link.textContent)).toEqual(['Agents and access', 'Models on this computer', 'zkAPI', 'Updates', 'Help']);
+    expect([...doc.querySelectorAll('.setside a')].map(link => link.textContent)).toEqual(['Agents and access', 'Models on this computer', 'zkAPI', 'Back up and restore', 'Updates', 'Help']);
     // Each side link opens its own section; the rest stay hidden (owner, 2026-11-10).
-    expect([...doc.querySelectorAll('.setside a')].map(link => link.getAttribute('href'))).toEqual(['#agents', '#models', '#zkapi', '#updates', '#help']);
-    expect([...doc.querySelectorAll('.setmain > section.setpane')].map(pane => pane.id)).toEqual(['agents', 'models', 'zkapi', 'updates', 'help']);
+    expect([...doc.querySelectorAll('.setside a')].map(link => link.getAttribute('href'))).toEqual(['#agents', '#models', '#zkapi', '#backup', '#updates', '#help']);
+    expect([...doc.querySelectorAll('.setmain > section.setpane')].map(pane => pane.id)).toEqual(['agents', 'models', 'zkapi', 'backup', 'updates', 'help']);
     expect(html).toContain('.setmain > .setpane { display: none;');
     expect(html).toContain('.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }');
     expect(doc.getElementById('models')!.textContent).toContain('Search model');

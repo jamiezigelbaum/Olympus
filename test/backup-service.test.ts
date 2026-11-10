@@ -59,7 +59,8 @@ describe('backup schedule', () => {
     expect(backupDue(base({ schedule: 'weekly', last_attempt_at: at(10, 3).toISOString() }), at(16, 9))).toBe(false);
     expect(backupDue(base({ schedule: 'weekly', last_attempt_at: at(10, 3).toISOString() }), at(17, 3))).toBe(true);
     expect(backupDue(base({ schedule: 'manual' }), at(10, 9))).toBe(false);
-    expect(backupDue(base({ folder: undefined }), at(10, 9))).toBe(false);
+    const { folder: _none, ...noFolder } = base({});
+    expect(backupDue(noFolder, at(10, 9))).toBe(false);
     // A failure is tried again an hour later, not the next night.
     const failed = base({ last_attempt_at: at(10, 3).toISOString(), last_error: { at: at(10, 3).toISOString(), message: 'disk gone' } });
     expect(backupDue(failed, new Date(2026, 10, 10, 3, 30))).toBe(false);
