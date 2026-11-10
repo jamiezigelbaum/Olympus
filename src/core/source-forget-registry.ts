@@ -418,6 +418,11 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
     reason: 'The global cloud-judge choice, dollar cap, spend/reservations and terminal stop, with no source or item data. It must survive source deletion and reconnects so they cannot reset the spending limit.',
   },
   {
+    file: 'judge-second-round.sqlite',
+    modules: ['src/workers/classification/judge-second-round.ts'],
+    reason: 'One-way SHA-256 digests of the questions Venice already kept Private, so a resumed double-check never pays for them twice. No source, account, item id or text; a digest only stops a repeat Venice call, and the item stays Private.',
+  },
+  {
     file: 'tier-sniffer-budget.json',
     modules: [],
     reason: 'One global counter of the day\'s sniffer calls ({ day, used }).',

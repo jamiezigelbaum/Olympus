@@ -19,7 +19,9 @@
 // `JudgeObservations` records what the local judge measured on this install
 // (items a minute, and the share it held Private) for the setup estimates.
 
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
@@ -45,6 +47,29 @@ export function judgeObservationsPath(env: Record<string, string | undefined>): 
 }
 export function judgeSecondRoundStatePath(env: Record<string, string | undefined>): string {
   return join(dirname(resolveClassificationLedgerPath(env)), 'judge-second-round.json');
+}
+export function judgeSecondRoundConfirmedPath(env: Record<string, string | undefined>): string {
+  return join(dirname(resolveClassificationLedgerPath(env)), 'judge-second-round.sqlite');
+}
+
+/**
+ * Questions Venice already answered Private, by a digest of the exact question
+ * (never its text). A stop makes the sweep start over once the limit is raised
+ * or credit is added (judge-setup.ts); these are not sent, or paid for, again.
+ */
+export class SecondRoundConfirmed {
+  private readonly db: Database;
+  constructor(path: string) {
+    this.db = new Database(path, { create: true });
+    try { chmodSync(path, 0o600); } catch { /* Best effort, as the other judge records. */ }
+    this.db.run('CREATE TABLE IF NOT EXISTS confirmed (digest TEXT PRIMARY KEY)');
+  }
+  static digest(request: SnifferModelRequest): string {
+    return createHash('sha256').update(`${request.system}\n${request.prompt}`).digest('hex');
+  }
+  has(digest: string): boolean { return this.db.query('SELECT 1 FROM confirmed WHERE digest = ?').get(digest) !== null; }
+  add(digest: string): void { this.db.query('INSERT OR IGNORE INTO confirmed (digest) VALUES (?)').run(digest); }
+  close(): void { this.db.close(); }
 }
 
 interface ObservedRow { calls: number; busyMs: number; personal: number; held: number }
@@ -113,10 +138,12 @@ export interface SecondRoundCounts { asked: number; released: number; kept: numb
  * The local answer stands unless it held the item Private and Venice answers
  * Personal. A Venice stop or failure keeps the local answer: Private.
  */
-export function secondRoundJudge<T extends SnifferModel>(local: T, venice: AnalystModel, counts: SecondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }): T & { secondRound: SecondRoundCounts } {
+export function secondRoundJudge<T extends SnifferModel>(local: T, venice: AnalystModel, counts: SecondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed?: Pick<SecondRoundConfirmed, 'has' | 'add'>): T & { secondRound: SecondRoundCounts } {
   return { ...local, secondRound: counts, complete: async (request: SnifferModelRequest) => {
     const first = await local.complete(request) as SnifferModelCompletion;
     if (completionTier(first) !== 'held' || request.signal?.aborted) return first;
+    const digest = SecondRoundConfirmed.digest(request);
+    if (confirmed?.has(digest)) return first;
     counts.asked += 1;
     try {
       // The same one-item question; a cloud model reads the text, never local decoder state.
@@ -126,7 +153,9 @@ export function secondRoundJudge<T extends SnifferModel>(local: T, venice: Analy
         return { text: second.text, modelId: second.modelId };
       }
       counts.kept += 1;
+      confirmed?.add(digest);
     } catch (error) {
+      // A stop keeps the local Private; the sweep re-opens it once the limit is raised or credit added.
       if (error instanceof JudgeCloudStopped) counts.stopped += 1; else counts.failed += 1;
     }
     return first;

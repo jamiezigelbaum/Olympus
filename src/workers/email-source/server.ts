@@ -1,6 +1,6 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
-import { JudgeObservations, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
@@ -7330,7 +7330,8 @@ export async function main(): Promise<void> {
   }) : undefined;
   const secondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
   let lastSecondRoundLog = '';
-  const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts) : model;
+  const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
+  const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed) : model;
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,

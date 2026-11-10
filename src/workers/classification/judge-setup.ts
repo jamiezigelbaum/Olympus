@@ -75,8 +75,10 @@ export function createJudgeSetup(options: {
       if (fallback.source !== 'off') await approveClassifier(options.ledgerPath, fallback.lane, options.promptVersion(), choice === 'local-then-venice'
         ? 'Owner chose free local judging on this computer, double-checked by Venice.'
         : 'Owner chose cloud judging with free local judging when the spending limit stops cloud calls.');
-      // A new choice of the second round re-asks everything held so far; a new limit continues where it was.
-      if (choice === 'local-then-venice' && current.choice !== 'local-then-venice' && options.secondRoundStatePath) SecondRoundSweep.reset(options.secondRoundStatePath);
+      // A new choice of the second round re-asks everything held so far, and so does resuming after a
+      // cap or payment stop: what the stop left gets its turn, and what Venice already kept Private is skipped.
+      // A new limit with no stop continues where it was.
+      if (choice === 'local-then-venice' && (current.choice !== 'local-then-venice' || current.stop) && options.secondRoundStatePath) SecondRoundSweep.reset(options.secondRoundStatePath);
       options.spending.choose(choice, capDollars);
       return { ok: true, status_message: options.requestReload() ? 'Choice saved. Olympus is applying it.' : 'Choice saved. Restart Olympus to resume or change privacy judging. A lower spending limit blocks further calls immediately.' };
     },

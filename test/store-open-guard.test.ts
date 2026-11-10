@@ -78,6 +78,7 @@ const ALLOWED: Record<string, string> = {
 // is declared to hold none. The list only shrinks, like the one above.
 const SHARED_FILES: Record<string, string> = {
   'src/core/source-watch.ts': 'the shared source-watches database',
+  'src/workers/classification/judge-second-round.ts': 'the shared record of questions Venice already kept Private (digests only)',
   'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
   'src/core/remote-connections.ts': 'the shared remote-connections database',
   'src/workers/source-dashboard.ts': 'the shared dashboard history database',

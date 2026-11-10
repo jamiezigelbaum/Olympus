@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
-import { JudgeObservations, SecondRoundSweep, observedJudge, secondRoundJudge, OBSERVED_MIN_CALLS, OBSERVED_MIN_VERDICTS } from '../src/workers/classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, observedJudge, secondRoundJudge, OBSERVED_MIN_CALLS, OBSERVED_MIN_VERDICTS } from '../src/workers/classification/judge-second-round.ts';
 import { createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { JudgeCloudStopped, JudgeSpending, judgeArchiveEstimate, judgeDefaultCapDollars, SECOND_ROUND_HELD_ASSUMPTION } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
@@ -120,6 +120,47 @@ test('choosing the second round later picks up what the local judge already held
   expect(await sweep.run(['ledger'], () => true)).toBe(0);
   SecondRoundSweep.reset(statePath);
   expect(existsSync(statePath)).toBe(false);
+});
+
+test('a cap stop leaves held items for a raised limit to double-check, without paying twice for confirmed ones (#1136 review)', async () => {
+  const f = lane();
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'confirmed', name: 'Orchid notes', text: 'Laterheld one: patient follow-up and glucose results.' },
+    { id: 'stopped', name: 'Quince notes', text: 'Laterheld two: patient follow-up and glucose results.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await f.pass(localJudge(/Laterheld/));
+  await f.settle('confirmed', 'stopped');
+  const budget = new JudgeSpending(join(f.dir, 'budget.json'));
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const statePath = join(f.dir, 'judge-second-round.json');
+  const confirmed = new SecondRoundConfirmed(join(f.dir, 'judge-second-round.sqlite')); cleanups.push(() => confirmed.close());
+  const setup = createJudgeSetup({ spending: budget, cloud: resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 1 }),
+    local: () => resolveJudgeChoiceRuntime({ engine }, { choice: 'local', stop: null, remainingDollars: 0 }), ledgerPath: join(f.dir, 'classification.ledger'),
+    promptVersion: () => snifferPromptVersions().approval, credentialReady: () => true, requestReload: () => true, secondRoundStatePath: statePath });
+  await setup.save('local-then-venice', 1);
+  const sweep = new SecondRoundSweep({ statePath, setFor: () => f.set, unanswered: () => 0 });
+  expect(await sweep.run(['ledger'], () => true)).toBe(2);
+  // Venice keeps one Private; the limit stops it on the other.
+  const sent: string[] = [];
+  const venice: AnalystModel = { complete: async request => {
+    if (request.prompt.includes('Laterheld two')) { budget.lowerCap(0); throw new JudgeCloudStopped('cap'); }
+    sent.push(request.prompt); return { text: verdict('private'), modelId: 'synthetic-venice' };
+  } };
+  await f.pass(secondRoundJudge(localJudge(/Laterheld/), venice, undefined, confirmed));
+  await f.settle('confirmed', 'stopped');
+  expect(budget.status().stop).toBe('cap');
+  expect(f.tier('confirmed')).toBe('secure');
+  expect(f.tier('stopped')).toBe('secure');
+  expect(await sweep.run(['ledger'], () => true)).toBe(0);
+  // Raising the limit double-checks what the stop left, and never re-sends what Venice already kept Private.
+  await setup.save('local-then-venice', 5);
+  expect(await sweep.run(['ledger'], () => true)).toBe(2);
+  const after: string[] = [];
+  await f.pass(secondRoundJudge(localJudge(/Laterheld/), veniceJudge(after), undefined, confirmed));
+  expect(after.length).toBe(1);
+  expect(after[0]).toContain('Laterheld two');
+  expect(f.tier('stopped')).toBe('private');
+  expect(f.tier('confirmed')).toBe('secure');
 });
 
 test('the sweep waits while the judge already has enough open questions', async () => {
