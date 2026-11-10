@@ -13,7 +13,7 @@ import { appendClassificationLedgerEntry } from '../src/workers/classification-l
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION } from '../src/workers/classification/sniffer.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
-import { completeAfterSlot, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import { completeAfterSlot, runSnifferPass, slotWaitOf } from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -164,4 +164,33 @@ test('the service breaks time between verdicts into waiting, yielding, steps, di
   const passLine = lines.find(line => line.includes(' call(s), '))!;
   expect(passLine).toContain('wait_before=yield');
   expect(passLine).toContain(`slot_wait_ms=${4 * SLOT_WAIT_MS} model_ms=${4 * MODEL_MS} pass_switches=3`);
+});
+
+test('a call that fails or is preempted after waiting for the slot still counts that wait as waiting', async () => {
+  const clock = createTestClock();
+  // The queue holds the call 45 ms, then the call is aborted once it has the slot.
+  const aborted: AnalystModel = { async complete() { clock.set(clock.now() + 5); throw new Error('aborted'); } };
+  const failure = await completeAfterSlot(aborted, async (timed) => {
+    clock.set(clock.now() + 45);
+    return timed.complete({ system: 's', prompt: 'p', localOnly: true });
+  }, () => clock.now()).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect(slotWaitOf(failure)).toBe(45);
+  // Rejected before it ever got the slot: the whole time was waiting.
+  const refused = await completeAfterSlot(aborted, async () => { clock.set(clock.now() + 30); throw new Error('aborted in queue'); }, () => clock.now())
+    .catch((error: unknown) => error);
+  expect(slotWaitOf(refused)).toBe(30);
+
+  // The pass counts a failed call's wait as slot wait, not model time.
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  cleanup.push(() => { store.close(); ledger.close(); });
+  recordNamesAndExcerpt(ledger, store, 1);
+  const model: AnalystModel = { complete: (request) => completeAfterSlot<AnalystModel>(
+    { async complete() { clock.set(clock.now() + MODEL_MS); throw new Error('transport'); } },
+    async (timed) => { clock.set(clock.now() + SLOT_WAIT_MS); return timed.complete(request); }, () => clock.now()) };
+  const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LANE, model, monotonicNow: () => clock.now() });
+  expect(report.failedCalls).toBeGreaterThan(0);
+  expect(report.timing.slotWaitMs).toBe(report.calls * SLOT_WAIT_MS);
+  expect(report.timing.modelMs).toBe(report.calls * MODEL_MS);
 });

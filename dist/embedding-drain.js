@@ -76103,6 +76103,10 @@ class SnifferCallBudget {
     }
   }
 }
+var failedSlotWaits = new WeakMap;
+function slotWaitOf(error2) {
+  return typeof error2 === "object" && error2 !== null ? failedSlotWaits.get(error2) ?? 0 : 0;
+}
 var SECRET_SCREEN_CACHE_LIMIT = 20000;
 var secretScreenCache = new Map;
 function materialCarriesSecret(question) {
@@ -76481,6 +76485,7 @@ async function runSnifferPass(options) {
           decisionVerdict = completion.decisionVerdict;
           slotWaitMs = typeof completion.slotWaitMs === "number" && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;
         } catch (error2) {
+          slotWaitMs = slotWaitOf(error2);
           if (error2 instanceof JudgeCloudStopped) {
             report.stoppedBy = "cloud_stopped";
             return;

@@ -195608,12 +195608,23 @@ class SnifferCallBudget {
 async function completeAfterSlot(model, enqueue, now = () => performance.now()) {
   const queuedAt = now();
   let startedAt;
+  const waited = () => Math.max(0, (startedAt ?? now()) - queuedAt);
   const timed2 = { ...model, complete: (request) => {
     startedAt ??= now();
     return model.complete(request);
   } };
-  const completion = await enqueue(timed2);
-  return { ...completion, slotWaitMs: Math.max(0, (startedAt ?? now()) - queuedAt) };
+  let completion;
+  try {
+    completion = await enqueue(timed2);
+  } catch (error2) {
+    if (typeof error2 === "object" && error2 !== null)
+      failedSlotWaits.set(error2, waited());
+    throw error2;
+  }
+  return { ...completion, slotWaitMs: waited() };
+}
+function slotWaitOf(error2) {
+  return typeof error2 === "object" && error2 !== null ? failedSlotWaits.get(error2) ?? 0 : 0;
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
@@ -195991,6 +196002,7 @@ async function runSnifferPass(options) {
           decisionVerdict = completion.decisionVerdict;
           slotWaitMs = typeof completion.slotWaitMs === "number" && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;
         } catch (error2) {
+          slotWaitMs = slotWaitOf(error2);
           if (error2 instanceof JudgeCloudStopped) {
             report.stoppedBy = "cloud_stopped";
             return;
@@ -196095,7 +196107,7 @@ function finish(report, monotonicNow, passStarted) {
     report.timing.setupMs = report.timing.passMs;
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, failedSlotWaits, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_answer_activity();
   init_atomic_file();
@@ -196104,6 +196116,7 @@ var init_sniffer_resolver = __esm(() => {
   init_sniffer_store();
   init_tier_classifier();
   init_tier_ledger();
+  failedSlotWaits = new WeakMap;
   secretScreenCache = new Map;
 });
 

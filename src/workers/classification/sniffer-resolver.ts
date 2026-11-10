@@ -268,9 +268,26 @@ export async function completeAfterSlot<M extends AnalystModel>(
 ): Promise<SnifferModelCompletion & SnifferSlotTimed> {
   const queuedAt = now();
   let startedAt: number | undefined;
+  const waited = () => Math.max(0, (startedAt ?? now()) - queuedAt);
   const timed: M = { ...model, complete: (request: AnalystModelRequest) => { startedAt ??= now(); return model.complete(request); } };
-  const completion = await enqueue(timed) as SnifferModelCompletion;
-  return { ...completion, slotWaitMs: Math.max(0, (startedAt ?? now()) - queuedAt) };
+  let completion: SnifferModelCompletion;
+  try {
+    completion = await enqueue(timed) as SnifferModelCompletion;
+  } catch (error) {
+    // A call aborted or failed after its wait (preemption aborts it once it
+    // has the slot) still waited: the error carries that wait too.
+    if (typeof error === 'object' && error !== null) failedSlotWaits.set(error, waited());
+    throw error;
+  }
+  return { ...completion, slotWaitMs: waited() };
+}
+
+/** Slot waits of calls that failed, by their error; the error itself is never changed. */
+const failedSlotWaits = new WeakMap<object, number>();
+
+/** How long a failed call waited for the model slot before failing (0 when unknown). */
+export function slotWaitOf(error: unknown): number {
+  return typeof error === 'object' && error !== null ? failedSlotWaits.get(error) ?? 0 : 0;
 }
 
 interface WorkItem {
@@ -701,6 +718,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         decisionVerdict = completion.decisionVerdict;
         slotWaitMs = typeof completion.slotWaitMs === 'number' && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;
       } catch (error) {
+        slotWaitMs = slotWaitOf(error);
         if (error instanceof JudgeCloudStopped) {
           report.stoppedBy = 'cloud_stopped';
           return;
