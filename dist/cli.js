@@ -103484,6 +103484,7 @@ var init_source_forget_registry = __esm(() => {
       id: "judge-second-round-cursors",
       file: "judge-second-round.json",
       modules: [],
+      repeatBeforeRestart: true,
       forget(account, context2, { dryRun }) {
         const path = judgeSecondRoundStatePath(context2.env);
         const placed = placedAccount(account.source_id, context2.env, account.slot);

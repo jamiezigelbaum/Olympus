@@ -350,6 +350,8 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     id: 'judge-second-round-cursors',
     file: 'judge-second-round.json',
     modules: [],
+    // A sweep between awaits can write its old positions back after the first forget.
+    repeatBeforeRestart: true,
     forget(account, context, { dryRun }) {
       const path = judgeSecondRoundStatePath(context.env);
       const placed = placedAccount(account.source_id, context.env, account.slot);
