@@ -1476,11 +1476,60 @@ export function chatgptDashboardClient(
     state.confirming = '';
     const A = H.copy.archives;
     const own = sourceId ? archiveSourceMeta(sourceId) : null;
+    // A source's own picker offers only the export guides of its formats
+    // (#660); the plain one offers every guide. Each step's page comes from
+    // the computer meta, never from the page's own words.
+    const links = own ? guideLinksOf([own]) : allGuideLinks();
+    const guides = linkedGuides(A.pick.guides, links, !!own);
     const words = own
-      ? { ...A.pick, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
-      : { ...A.pick, account: A.account };
+      ? { ...A.pick, guides, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
+      : { ...A.pick, guides, account: A.account };
     // Names in the line are the person's own files, shown only on this computer.
     picker!.pickArchive(words, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key), own ? String(own.sourceId) : '');
+  }
+
+  /** Every source whose card imports its own exports, from the computer meta (computer only). */
+  function allArchiveSourceMetas(): Any[] {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.archiveSources)) return [];
+    return meta.archiveSources.filter((entry: Any) => !!entry);
+  }
+
+  /** Every export guide's step pages, for Import another archive: the computer meta's full list, and what the source cards carry. */
+  function allGuideLinks(): Record<string, Any[]> {
+    const meta = state.computerMeta;
+    const full = onComputer() && meta && meta.archiveGuideLinks && typeof meta.archiveGuideLinks === 'object' ? meta.archiveGuideLinks : {};
+    return guideLinksOf([...allArchiveSourceMetas(), { guideLinks: full }]);
+  }
+
+  /** The export guides' step pages these sources carry, by format id (#660). */
+  function guideLinksOf(sources: Any[]): Record<string, Any[]> {
+    const out: Record<string, Any[]> = {};
+    for (const source of sources) {
+      const links = source && source.guideLinks;
+      if (!links || typeof links !== 'object') continue;
+      for (const id of Object.keys(links)) if (Array.isArray(links[id])) out[id] = links[id];
+    }
+    return out;
+  }
+
+  /**
+   * The guides with each step's page put back from `links`; `only` keeps just
+   * the guides `links` names. A page that is not https is left off.
+   */
+  function linkedGuides(guides: Any, links: Record<string, Any[]>, only: boolean): Any[] {
+    const list = Array.isArray(guides) ? guides : [];
+    return list.filter((guide: Any) => !only || Object.prototype.hasOwnProperty.call(links, guide.id)).map((guide: Any) => {
+      const pages = links[guide.id] || [];
+      return {
+        ...guide,
+        steps: guide.steps.map((step: Any, index: number) => {
+          const { link, ...rest } = step;
+          const url = pages[index];
+          return link && typeof url === 'string' && url.slice(0, 6) === 'https:' ? { ...rest, link: { label: link.label, url } } : rest;
+        }),
+      };
+    });
   }
 
   /** The source whose card imports its own exports, from the computer meta (computer only). */

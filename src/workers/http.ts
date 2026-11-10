@@ -58,6 +58,9 @@ export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-
  * which controls this session reaches. Stripped from every incoming request.
  */
 export const DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = 'X-Olympus-Control-Session-Grade';
+/** Update now (core/self-update.ts): a local-grade session only, never the bearer. */
+export const DASHBOARD_SELF_UPDATE_PATHS = { start: '/dashboard/engine/update', status: '/dashboard/engine/update/status' } as const;
+export const DASHBOARD_SELF_UPDATE_LOCAL_ONLY = 'Olympus updates itself only from the dashboard on this computer, in an unlocked browser.';
 /**
  * Internal context carried from the native Gateway bridge to the worker.
  *
@@ -649,6 +652,22 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
   '/dashboard/archive-import/stop',
 ];
 
+/**
+ * The owner's one-item privacy change on the Privacy tab
+ * (classification/tier-owner-items.ts): finding any item, with its names, and
+ * setting it Personal or Private or back to the judge. Lowering an item is
+ * the person's call at this computer, so these take the consult routes'
+ * grade too; an agent raises through its own route on the worker bearer.
+ */
+export const DASHBOARD_PRIVACY_ITEM_PATHS: readonly string[] = [
+  '/dashboard/privacy/items/find',
+  '/dashboard/privacy/items/set',
+];
+
+function isDashboardPrivacyItemRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_PRIVACY_ITEM_PATHS.includes(new URL(request.url).pathname);
+}
+
 export const DASHBOARD_MESSAGING_PATHS: readonly string[] = [
   '/dashboard/messaging/start', '/dashboard/messaging/status', '/dashboard/messaging/respond',
   '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
@@ -672,21 +691,37 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request)
+    || isDashboardSelfUpdateRoute(request)
+    || isDashboardPrivacyItemRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
+function isDashboardSelfUpdateRoute(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return request.method === 'POST' && (path === DASHBOARD_SELF_UPDATE_PATHS.start || path === DASHBOARD_SELF_UPDATE_PATHS.status);
+}
+
 function dashboardLocalGradeRefusal(request: Request): Response {
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request) && !isDashboardPeopleRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (isDashboardSelfUpdateRoute(request)) {
+    return new Response(JSON.stringify({ ok: false, error: { code: 'mac_dashboard_only', message: DASHBOARD_SELF_UPDATE_LOCAL_ONLY } }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    });
+  }
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)
+    && !isDashboardPrivacyItemRoute(request) && !isDashboardPeopleRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
         ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
-        : isDashboardAppsReceivedRoute(request)
-          ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
-        : isDashboardPeopleRoute(request)
-          ? 'People opens only in the dashboard on this computer, in an unlocked browser.'
+        : isDashboardPrivacyItemRoute(request)
+          ? 'One item\'s privacy label is changed only in the dashboard on this computer, in an unlocked browser.'
+          : isDashboardAppsReceivedRoute(request)
+            ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
+            : isDashboardPeopleRoute(request)
+              ? 'People opens only in the dashboard on this computer, in an unlocked browser.'
           : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {

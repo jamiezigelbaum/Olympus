@@ -15,6 +15,7 @@ import { agentAnswerReceipt, recordAgentAnswerReceipt, type AgentAnswerReceipt }
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
+import type { SelfUpdateStart, SelfUpdateStatus } from '../../core/self-update.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBindings } from '../../core/source-account-binding.ts';
 import { sourceStorageNotices, type SourceStorageNoticeKind } from '../../core/source-registry.ts';
@@ -64,6 +65,7 @@ import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
 import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
+import type { OwnerItemChoice, OwnerTierItems } from '../classification/tier-owner-items.ts';
 import { ArchiveUploadError } from '../archive-import/staging.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
@@ -199,7 +201,7 @@ import {
 import { dashboardResourceHtml } from '../chatgpt/dashboard-resource.ts';
 import { DASHBOARD_TOOL_NAME } from '../chatgpt/dashboard-contract.ts';
 import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard-panel-tools.ts';
-import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
+import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine, DASHBOARD_UPDATE_COPY } from '../dashboard/vocabulary.ts';
 import { sourceFailureKind, type SourceFailureKind } from '../dashboard/source-failure.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 import type { LocalPrivateAnswers } from './local-private-answers.ts';
@@ -219,6 +221,8 @@ import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   DASHBOARD_APPS_RECEIVED_ROUTE,
   DASHBOARD_PRIVATE_ANSWERS_PATH,
+  DASHBOARD_SELF_UPDATE_LOCAL_ONLY,
+  DASHBOARD_SELF_UPDATE_PATHS,
 } from '../http.ts';
 import {
   readEmbeddingRuntime,
@@ -447,6 +451,12 @@ export interface EmailSourceConnector {
 export interface EmailSourceWorkerOptions {
   /** Content-free, in-memory installer version; local surfaces only. */
   updateAvailable?: () => UpdateAvailable | undefined;
+  /**
+   * Update now (core/self-update.ts): the standalone engine updates itself.
+   * Reached only by a local-grade dashboard session (workers/http.ts), never
+   * by the bearer, a remote browser or an agent, and never as a tool.
+   */
+  selfUpdate?: { start(): SelfUpdateStart; status(): SelfUpdateStatus };
   platform?: string;
   /** Local Linux notices, outside the frozen ChatGPT panel bundle. */
   localModelReadiness?: () => readonly import('../../core/linux-model-readiness.ts').LocalModelReadiness[];
@@ -472,6 +482,14 @@ export interface EmailSourceWorkerOptions {
    * `/archive-import/*` answers 501.
    */
   archiveImportAgent?: ArchiveImportAgent;
+  /**
+   * The owner's one-item privacy change (classification/tier-owner-items.ts).
+   * An agent finds items whose names are Personal and raises one to Private
+   * (`/privacy-item/*`); the dashboard on this computer finds any item and
+   * sets it Personal or Private, or back to the judge
+   * (`/dashboard/privacy/items/*`). Absent: those routes answer 501.
+   */
+  ownerTierItems?: OwnerTierItems;
   // Optional content-free latency ledger. When present, one JSON line per
   // answered source_answer request is appended (phase timings, corpus ids, skip
   // reasons, analyst backend/fallback, release decision — never query/content).
@@ -958,6 +976,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   };
   const consultAsk = options.consultAsk;
   const archiveImportAgent = options.archiveImportAgent;
+  const ownerTierItems = options.ownerTierItems;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync
@@ -1186,6 +1205,35 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (action === 'status') return json(archiveImportAgent.status(record.archive_id));
           if (action === 'remove') return json(archiveImportAgent.remove(record.archive_id));
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
+        }
+
+        // An agent's side of the one-item privacy change (tier-owner-items.ts):
+        // find items whose names are Personal, and raise one to Private. It
+        // never lowers: Personal and the judge's label are the dashboard's
+        // local routes below.
+        if (request.method === 'POST' && url.pathname.startsWith(`${basePath}/privacy-item/`)) {
+          if (!ownerTierItems) {
+            throw new EmailSourceWorkerError(501, 'privacy_items_not_supported', 'Changing one item\'s privacy is not set up in this engine.');
+          }
+          const record = await parseObjectBody(request);
+          const action = url.pathname.slice(`${basePath}/privacy-item/`.length);
+          if (action === 'find') {
+            const query = asOptionalString(record.query);
+            const recent = asOptionalBoolean(record.recent);
+            const limit = asOptionalNumber(record.limit, 'limit');
+            return json(ownerTierItems.find({
+              ...(query !== undefined ? { query } : {}),
+              ...(recent !== undefined ? { recent } : {}),
+              ...(limit !== undefined ? { limit } : {}),
+              personalNamesOnly: true,
+            }));
+          }
+          if (action === 'raise') {
+            const itemId = asOptionalString(record.item_id);
+            if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
+            return json(ownerTierItems.set({ itemId, choice: 'private', allowLower: false }));
+          }
+          throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }
 
         // An agent on this computer received this answer (its tool result,
@@ -1595,6 +1643,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             return new Response(renderComputerHostPage({
               panelHtml: dashboardResourceHtml(),
               updateAvailable: options.updateAvailable?.(),
+              ...(options.selfUpdate ? { selfUpdate: true, updateStatus: options.selfUpdate.status() } : {}),
               platform: options.platform ?? process.platform,
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
@@ -1655,6 +1704,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     ...(options.localModelReadiness ? { readiness: options.localModelReadiness() } : {}),
                   }),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
+                  ...(installer ? { updater: { command: installer.command, selfUpdate: options.selfUpdate !== undefined, ...(options.selfUpdate ? { status: options.selfUpdate.status() } : {}) } } : {}),
                 },
               },
             }));
@@ -2403,6 +2453,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
           try { return json(await sourceDashboard.judgeSetup.save(input.choice, input.cap_dollars)); }
           catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
+        }
+
+        if (request.method === 'POST' && (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start || url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: DASHBOARD_SELF_UPDATE_LOCAL_ONLY } }, 403);
+          }
+          if (!options.selfUpdate) return json({ ok: false, error: { code: 'not_available', message: DASHBOARD_UPDATE_COPY.refusals.not_available } }, 409);
+          if (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status) return json({ ok: true, update: options.selfUpdate.status() });
+          const started = options.selfUpdate.start();
+          return started.ok
+            ? json({ ok: true, update: started.status })
+            : json({ ok: false, error: { code: started.refusal, message: DASHBOARD_UPDATE_COPY.refusals[started.refusal] } }, 409);
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/engine/computer-use') {
@@ -3454,6 +3516,45 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             });
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
+        }
+
+        // The owner's one-item privacy change on the dashboard's Privacy tab
+        // (tier-owner-items.ts): find any item, and set it Personal or
+        // Private, or back to the judge's label. Control routes held to a
+        // local-grade session (workers/http.ts), never the worker bearer: only
+        // the person at this computer lowers an item.
+        if (request.method === 'POST' && url.pathname.startsWith('/dashboard/privacy/items/')) {
+          if (!ownerTierItems) {
+            throw new EmailSourceWorkerError(501, 'privacy_items_not_supported', 'Changing one item\'s privacy is not set up in this engine.');
+          }
+          if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            throw new EmailSourceWorkerError(
+              403,
+              'mac_dashboard_only',
+              'One item\'s privacy label is changed only in the dashboard on this computer, in an unlocked browser.',
+            );
+          }
+          const record = await parseObjectBody(request);
+          if (url.pathname === '/dashboard/privacy/items/find') {
+            const query = asOptionalString(record.query);
+            const recent = asOptionalBoolean(record.recent);
+            const limit = asOptionalNumber(record.limit, 'limit');
+            return json({ ok: true, ...ownerTierItems.find({
+              ...(query !== undefined ? { query } : {}),
+              ...(recent !== undefined ? { recent } : {}),
+              ...(limit !== undefined ? { limit } : {}),
+            }) });
+          }
+          if (url.pathname === '/dashboard/privacy/items/set') {
+            const itemId = asOptionalString(record.item_id);
+            const tier = asOptionalString(record.tier);
+            if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
+            if (tier !== 'personal' && tier !== 'private' && tier !== 'judge') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'tier must be "personal", "private" or "judge".');
+            }
+            return json(ownerTierItems.set({ itemId, choice: tier satisfies OwnerItemChoice, allowLower: true }));
+          }
+          throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }
 
         // The Background page's embedding-priority toggle.

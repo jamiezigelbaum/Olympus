@@ -54,7 +54,9 @@ import { DASHBOARD_SETTINGS_ZKAPI_ID, dashboardPrivacyTabs, PRIVACY_TABS_CSS } f
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
 import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
-import { dashboardActionLabel, DASHBOARD_DISCONNECTED_DATA_KEPT, DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
+import { dashboardActionLabel, DASHBOARD_DISCONNECTED_DATA_KEPT } from '../vocabulary.ts';
+import { renderUpdateNotice, UPDATE_NOTICE_CSS } from '../update-now.ts';
+import type { SelfUpdateStatus } from '../../../core/self-update.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outside-help.ts';
@@ -94,6 +96,8 @@ export interface DashboardPageOptions {
     /** Settings › Models on this computer (#1043, #1085). */
     models?: import('../models-on-computer.ts').DashboardModelsOnComputer;
     update?: { version: string; command: string };
+    /** Update now (#1063): this platform's Terminal command, whether the engine updates itself, and its current record. */
+    updater?: { command: string; selfUpdate: boolean; status?: SelfUpdateStatus | undefined };
   };
   /** OPENER supplies the current desktop/headless approval handoff. */
   agentConnectHost?: AgentConnectHost;
@@ -678,16 +682,28 @@ export function renderDashboardSettingsPage(options?: DashboardPageOptions): str
       : `<p class="pnote" data-outside-unavailable>${escapeHtml(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`)
     + '</section>';
   const update = settings?.update;
+  const updater = settings?.updater;
+  const notice = updater && (update || (updater.status && updater.status.state !== 'idle'))
+    ? renderUpdateNotice({
+      command: updater.command,
+      available: update ? { version: update.version } : undefined,
+      selfUpdate: updater.selfUpdate,
+      status: updater.status,
+      csrfToken: options?.controlSessionCsrfToken,
+      localSession: options?.outsideHelpLocalSession === true,
+      idPrefix: 'settings-update',
+    })
+    : update
+      ? renderUpdateNotice({ command: update.command, available: { version: update.version }, selfUpdate: false, idPrefix: 'settings-update' })
+      : '';
   const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>'
-    + (update
-      ? `<p>${escapeHtml(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>`
-      : '<p class="pnote">Olympus is up to date.</p>')
+    + (notice || '<p class="pnote">Olympus is up to date.</p>')
     + '</section>';
   const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
     + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref('help', token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const proposal = renderSettingsProposal(options?.settingsProposal);
   const body = lockedGate(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
-  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS], options });
+  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS, UPDATE_NOTICE_CSS], options });
 }
 
 /**
