@@ -637,7 +637,7 @@ function bestName(members: readonly WorkingIdentity[]): string {
   for (const member of members) {
     for (const [name, count] of member.publicNames) counts.set(name, (counts.get(name) ?? 0) + count);
   }
-  // A real name before a handle ("Mark Alexander" before "@xandoru"), then the most used.
+  // A real name before a handle ("Theo Lindqvist" before "@lindqvist_t"), then the most used.
   const handle = (name: string) => Number(name.startsWith('@'));
   const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named) return named;

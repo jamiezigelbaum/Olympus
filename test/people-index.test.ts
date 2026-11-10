@@ -135,9 +135,9 @@ describe('people index: names', () => {
 
   test('a name and a group chat with the same third person link across sources', () => {
     const people = linkPeople({ observations: [
-      // Mark is one person on both sources (same email).
-      obs('chat-a', 'mark@example.com', 'Mark', { conversationIds: ['trip'] }),
-      obs('chat-b', 'mark@example.com', 'Mark', { conversationIds: ['crew'] }),
+      // Theo is one person on both sources (same email).
+      obs('chat-a', 'theo@example.com', 'Theo', { conversationIds: ['trip'] }),
+      obs('chat-b', 'theo@example.com', 'Theo', { conversationIds: ['crew'] }),
       obs('chat-a', 'a1', 'Brianna Reyes', { conversationIds: ['trip'] }),
       obs('chat-b', 'b1', 'Brianna Reyes', { conversationIds: ['crew'] }),
     ] });
