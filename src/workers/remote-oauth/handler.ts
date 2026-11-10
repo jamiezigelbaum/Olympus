@@ -329,8 +329,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   const ownerProof = (request: Request): boolean =>
     requestFromOwnerSocket(request) || (options.ownerSession?.(request, new URL(request.url).origin) ?? false);
   /** Where this browser's approval form posts: the dashboard path carries the session cookie, the socket needs none. */
-  const approvalAction = (request: Request): string =>
-    requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.authorize : REMOTE_OAUTH_PATHS.ownerAuthorize;
+  // Relay mode only: a tunnel's page (pairing code) always posts to /connect/authorize.
+  const approvalAction = (request: Request, u: RemotePublicUrls): string =>
+    u.installId && !requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.ownerAuthorize : REMOTE_OAUTH_PATHS.authorize;
   const linux = (options.platform ?? process.platform) === 'linux';
   const notOnThisComputer = (): Response =>
     errorPage(403, linux
@@ -391,7 +392,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         if (entry.demo || entry.transaction !== transaction) continue;
         // The form is served again with a fresh cookie, so it is valid as long.
         entry.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
-        return consentPage(id, entry, u, undefined, true, approvalAction(request));
+        return consentPage(id, entry, u, undefined, true, approvalAction(request, u));
       }
     }
     admitPending();
@@ -412,7 +413,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       demo,
     };
     pending.set(requestId, entry);
-    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request));
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request, u));
   };
 
   const demoPage = (requestId: string, entry: PendingConsent, error?: string): Response => {
@@ -591,7 +592,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     // is spent, so the owner's next click, with the session, approves.
     if (u.installId) {
       if (ownerProof(request)) return approve();
-      return consentPage(requestId, entry, u, undefined, true, approvalAction(request), true);
+      return consentPage(requestId, entry, u, undefined, true, approvalAction(request, u), true);
     }
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {

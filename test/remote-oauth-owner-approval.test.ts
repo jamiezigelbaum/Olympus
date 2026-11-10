@@ -261,3 +261,28 @@ describe('relay mode over the Linux owner socket', () => {
     expect(approved.status).toBe(303);
   });
 });
+
+describe('a tunnel the owner runs (pairing code, no relay)', () => {
+  test('the consent cookie goes where the form posts, so the pairing-code approval completes', async () => {
+    const resolved = parseRemotePublicBaseUrl(base);
+    if (!resolved.enabled) throw new Error('tunnel urls');
+    const oauth = createRemoteOAuthHandler({
+      publicUrls: resolved.urls,
+      connections: () => store,
+      ownerSession: dashboardOwnerSessionCheck({ authToken: TOKEN, sessionSecret: SESSION_SECRET }),
+    });
+    handle = async (request) => oauth(request);
+    const browser = new Jar();
+    const page = await openPage(browser, authorizePath(CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI).replace(/&resource=[^&]*/, ''));
+    expect(page.status).toBe(200);
+    expect(page.action).toBe('/connect/authorize');
+    expect(browser.header(page.action)).toContain('olympus_consent_');
+    const approved = await browse(browser, page.action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...NAVIGATION },
+      body: new URLSearchParams({ request_id: page.requestId, csrf: page.csrf, action: 'approve', pairing_code: store.oauth.mintPairingCode().code }).toString(),
+    });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.get('location')!).searchParams.get('code')).toBeTruthy();
+  });
+});

@@ -217654,7 +217654,7 @@ function createRemoteOAuthHandler(options) {
   };
   const directLoopback = (request) => !isRelayed(request) && loopbackHost(request) && (requestFromOwnerSocket(request) || !options.requireOwnerSocket && isLoopbackAddress(peerAddress(request)));
   const ownerProof = (request) => requestFromOwnerSocket(request) || (options.ownerSession?.(request, new URL(request.url).origin) ?? false);
-  const approvalAction = (request) => requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.authorize : REMOTE_OAUTH_PATHS.ownerAuthorize;
+  const approvalAction = (request, u) => u.installId && !requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.ownerAuthorize : REMOTE_OAUTH_PATHS.authorize;
   const linux = (options.platform ?? process.platform) === "linux";
   const notOnThisComputer = () => errorPage(403, linux ? "Approve on this computer through the owner's approval route. On a headless host, configure the owner-only SSH socket forward first." : "Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.");
   const authorizeGet = async (request, u, demo = false) => {
@@ -217708,7 +217708,7 @@ function createRemoteOAuthHandler(options) {
         if (entry2.demo || entry2.transaction !== transaction)
           continue;
         entry2.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
-        return consentPage(id, entry2, u, undefined, true, approvalAction(request));
+        return consentPage(id, entry2, u, undefined, true, approvalAction(request, u));
       }
     }
     admitPending();
@@ -217728,7 +217728,7 @@ function createRemoteOAuthHandler(options) {
       demo
     };
     pending.set(requestId, entry);
-    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request));
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request, u));
   };
   const demoPage = (requestId, entry, error2) => {
     const page2 = renderDemoSignInPage({
@@ -217883,7 +217883,7 @@ function createRemoteOAuthHandler(options) {
     if (u.installId) {
       if (ownerProof(request))
         return approve();
-      return consentPage(requestId, entry, u, undefined, true, approvalAction(request), true);
+      return consentPage(requestId, entry, u, undefined, true, approvalAction(request, u), true);
     }
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
