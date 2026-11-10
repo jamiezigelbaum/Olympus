@@ -21657,14 +21657,6 @@ function busy(reader) {
 function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
-function readerThread() {
-  if (!runtimeHasWorkers())
-    return;
-  const idle = live().reduce((best, reader) => !best || busy(reader) < busy(best) ? reader : best, undefined);
-  if (idle && busy(idle) === 0)
-    return idle;
-  return startThread() ?? idle;
-}
 function startThread() {
   if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
     return;
@@ -21719,9 +21711,6 @@ function retire(stopped, error) {
 }
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
-}
-function offThreadReadsAvailable(dbPath) {
-  return offThreadReadsSupported(dbPath) && readerThread() !== undefined;
 }
 function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
   if (reader.retired)
@@ -32944,7 +32933,7 @@ var init_local_index = __esm(() => {
       return step.value;
     }
     async statusOffThread(scope, options = {}) {
-      if (!offThreadReadsAvailable(this.dbPath))
+      if (!offThreadReadsSupported(this.dbPath))
         return this.status(scope, options);
       return withOffThreadSnapshot(this.dbPath, async (read) => {
         const steps = this.statusSteps(scope, options);

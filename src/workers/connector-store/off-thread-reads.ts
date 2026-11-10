@@ -205,14 +205,6 @@ function runtimeHasWorkers(): boolean {
   return typeof Worker === 'function' && typeof Blob === 'function' && Boolean((globalThis as { Bun?: unknown }).Bun);
 }
 
-/** The least busy live thread, starting another while the pool has room and every thread is busy. */
-function readerThread(): ReaderThread | undefined {
-  if (!runtimeHasWorkers()) return undefined;
-  const idle = live().reduce<ReaderThread | undefined>((best, reader) => (!best || busy(reader) < busy(best) ? reader : best), undefined);
-  if (idle && busy(idle) === 0) return idle;
-  return startThread() ?? idle;
-}
-
 // A failed start is not remembered: the next request tries again.
 function startThread(): ReaderThread | undefined {
   if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers()) return undefined;
@@ -270,11 +262,6 @@ function retire(stopped: ReaderThread, error: Error): void {
  */
 export function offThreadReadsSupported(dbPath: string): boolean {
   return dbPath !== ':memory:' && !dbPath.startsWith('file::memory:') && runtimeHasWorkers();
-}
-
-/** Whether `dbPath` can be read on the pool now (a supported store, and a thread to read it). */
-export function offThreadReadsAvailable(dbPath: string): boolean {
-  return offThreadReadsSupported(dbPath) && readerThread() !== undefined;
 }
 
 // `timeoutMs` undefined: the caller owns the deadline (a pool query).

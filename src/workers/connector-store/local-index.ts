@@ -6,7 +6,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsAvailable, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -12829,13 +12829,17 @@ export class LocalConnectorStore {
    * status() with its whole-store counts read on the second thread
    * (off-thread-reads.ts): the same queries, so the same counts, without
    * holding this thread for the seconds they take on a large store (#870).
-   * Where that thread cannot read this store, it is status() itself.
+   * Where the pool never reads this store (in memory, no Bun Worker), it is
+   * status() itself; a pool that is full for now is waited for.
    */
   async statusOffThread(
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<ConnectorStoreStatus> {
-    if (!offThreadReadsAvailable(this.dbPath)) return this.status(scope, options);
+    // A pool that is full for now (threads still stopping after a missed
+    // deadline) is waited for: only a store the pool never reads is counted
+    // on this thread.
+    if (!offThreadReadsSupported(this.dbPath)) return this.status(scope, options);
     return withOffThreadSnapshot(this.dbPath, async (read) => {
       const steps = this.statusSteps(scope, options);
       let step = steps.next();

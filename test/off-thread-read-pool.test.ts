@@ -194,4 +194,36 @@ describe('read pool', () => {
     expect(await store.searchItemsDetailedOffThread('orchard', 10).then(() => 'answered', (error) => error)).toBeInstanceOf(OffThreadReadBusyError);
     expect(sent.filter((dbPath) => dbPath === path)).toEqual([]);
   });
+
+  test('with every pool place held by stopping threads, a store status waits for the pool and reads nothing on the request thread', async () => {
+    const busyPath = storeFile();
+    const root = mkdtempSync(join(tmpdir(), 'olympus-read-pool-status-'));
+    roots.push(root);
+    const store = new LocalConnectorStore({ dbPath: join(root, 'files.sqlite'), corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
+    try {
+      const clock = createTestClock();
+      setReadPoolClockForTests(clock);
+      const started: string[] = [];
+      setReadPoolObserverForTests((_, read) => started.push(read.sql));
+      const stuck = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(busyPath, SLOW, { deadlineAtMs: clock.now() + 1_000 }).then(() => 'answered', (error) => error));
+      await waitFor(() => started.length === READ_POOL_SIZE, { description: 'both slow queries running' });
+      await clock.advance(1_000);
+      for (const outcome of await Promise.all(stuck)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
+      expect(readPoolThreadsForTests()).toEqual({ live: 0, stopping: READ_POOL_SIZE });
+      const db = (store as unknown as { db: { query: (sql: string) => unknown } }).db;
+      const original = db.query;
+      let here = 0;
+      // The store's whole-store counts (statusSteps): read on the pool, never here.
+      db.query = (sql: string) => {
+        if (sql.includes('WITH flags AS MATERIALIZED')) here += 1;
+        return original.call(db, sql);
+      };
+      const status = await store.statusOffThread();
+      db.query = original;
+      expect(status.counts.items).toBe(0);
+      expect(here).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
 });
