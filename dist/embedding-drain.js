@@ -1075,6 +1075,7 @@ var init_olympus_layout = __esm(() => {
     "waiting-private-questions": "waiting-private-questions.sqlite",
     "app-release-log": "app-release-log.sqlite",
     "tier-migration": "tier-migration",
+    "backup-staging": "backup-staging",
     "people-index": "people-index.sqlite",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -12938,6 +12939,17 @@ class SecretLocationsIndex {
     `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
     return true;
   }
+  rebindScopeGenerations(input) {
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const generation of input.fromGenerations) {
+        if (generation === input.accountGeneration)
+          continue;
+        changed += this.db.query("UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?").run(input.accountGeneration, input.revision, input.provider, generation).changes;
+      }
+      return changed;
+    }).immediate();
+  }
   remove(identity) {
     return this.db.query(`
       DELETE FROM secret_locations
@@ -17134,6 +17146,60 @@ var init_off_thread_reads = __esm(() => {
   turns = [];
   snapshotWaiters = [];
   releases = new Map;
+});
+
+// src/core/provider-account-identity.ts
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function compareProviderAccounts(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim() ? "same" : "different";
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return "different";
+    shared = true;
+  }
+  if (shared)
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, IMMUTABLE_LABEL_KINDS, LABEL;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
 });
 
 // src/core/classification-signals.ts
@@ -21992,7 +22058,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -22006,6 +22072,7 @@ var init_local_index = __esm(() => {
   init_keyword_expansion();
   init_control_path_headroom();
   init_off_thread_reads();
+  init_provider_account_identity();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -22115,7 +22182,7 @@ var init_local_index = __esm(() => {
     metadataLayerContentUnread: 16,
     moving: 32
   };
-  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
+  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -22385,6 +22452,40 @@ var init_local_index = __esm(() => {
           return this.tierLedgerHandle.dbPath;
       } catch {}
       return findTierSetLedger(this.dbPath, binding);
+    }
+    rebindRestoredSourceScope(input) {
+      const generations = this.restoredScopeGenerations(input.provider, input.providerAccountId);
+      if (generations === undefined)
+        return 0;
+      return this.db.transaction(() => {
+        let changed = 0;
+        for (const generation of generations) {
+          if (generation === input.accountGeneration)
+            continue;
+          changed += this.db.query(`
+          UPDATE items SET source_scope_generation = ?, source_scope_revision = ?
+          WHERE provider = ? AND source_scope_generation = ?
+        `).run(input.accountGeneration, input.revision, input.provider, generation).changes;
+        }
+        this.db.query("DELETE FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+        return changed;
+      }).immediate();
+    }
+    restoredScopeGenerations(provider, providerAccountId) {
+      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+      if (!row?.cursor)
+        return;
+      let record;
+      try {
+        record = JSON.parse(row.cursor);
+      } catch {
+        return;
+      }
+      if (record.provider !== provider || typeof record.providerAccountId !== "string")
+        return;
+      if (compareProviderAccounts(record.providerAccountId, providerAccountId) !== "same")
+        return;
+      return Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
     }
     tierSetBinding() {
       const row = this.db.query(`
@@ -29421,20 +29522,6 @@ var init_local_index = __esm(() => {
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
-// src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-});
-
 // src/core/source-storage.ts
 function openConnectorStore(account, options, env = process.env) {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
@@ -30996,18 +31083,23 @@ function connectedMailSourceAccountGeneration(registry, pinnedHandle) {
 }
 function readMailSourceScopeApproval(input) {
   const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
-  if (!account)
-    return pendingSnapshot2("not-connected", undefined, "not_connected");
   const read = readState2(input.statePath);
+  const carried = read.kind === "valid" ? read.state.carried_owner_rules?.always_private_senders : undefined;
+  const pending = (revision, reason) => ({
+    ...pendingSnapshot2(revision, account?.generation, reason),
+    ...carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}
+  });
+  if (!account)
+    return pending("not-connected", "not_connected");
   if (read.kind === "missing")
-    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
+    return pending(`missing:${account.generation}`, "missing");
   if (read.kind === "malformed")
-    return pendingSnapshot2(`malformed:${read.digest}`, account.generation, "malformed");
+    return pending(`malformed:${read.digest}`, "malformed");
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
   if (!approval)
-    return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
+    return pending(`missing:${account.generation}`, "missing");
   if (approval.account_generation !== account.generation) {
-    return pendingSnapshot2(`stale:${approval.revision}:${account.generation}`, account.generation, "account_changed");
+    return pending(`stale:${approval.revision}:${account.generation}`, "account_changed");
   }
   return {
     sourceId: MAIL_SOURCE_SCOPE_ID,
@@ -31197,10 +31289,19 @@ function readState2(path) {
     const approvals = record.approvals.map(parseApproval2);
     if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length)
       throw new Error("duplicate");
-    return { kind: "valid", state: { version: 1, approvals } };
+    const carried = record.carried_owner_rules === undefined ? undefined : parseCarriedOwnerRules(record.carried_owner_rules);
+    return { kind: "valid", state: { version: 1, approvals, ...carried ? { carried_owner_rules: carried } : {} } };
   } catch {
     return { kind: "malformed", digest };
   }
+}
+function parseCarriedOwnerRules(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("carried");
+  const record = value;
+  if (record.source_id !== MAIL_SOURCE_SCOPE_ID)
+    throw new Error("carried");
+  return { source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: normalizeSenders(record.always_private_senders, "always Private") };
 }
 function parseApproval2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -43513,6 +43614,148 @@ var init_source_forget_registry = __esm(() => {
   init_tier_migration_reports();
 });
 
+// src/workers/classification/tier-rules.ts
+function defaultTierRulesPath(env = process.env) {
+  return defaultOwnerConfigPath("tier-rules.json", env);
+}
+function resolveTierRulesPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
+}
+function loadOwnerTierRules(options = {}) {
+  const path = resolveTierRulesPath(options);
+  const read = readOwnerConfigFile(path);
+  if (read.status === "missing") {
+    if (options.allowMissing)
+      return [];
+    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
+  }
+  if (read.status === "refused") {
+    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
+  }
+  let raw;
+  try {
+    raw = JSON.parse(read.text);
+  } catch {
+    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
+  }
+  return parseOwnerTierRules(raw, path);
+}
+function tierRulesFileStamp(options = {}) {
+  return ownerConfigStamp(resolveTierRulesPath(options));
+}
+function parseOwnerTierRules(raw, label = "tier rules") {
+  const root = asRecord8(raw);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be a JSON object.`);
+  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
+  }
+  if (!Array.isArray(root.rules))
+    throw new OperationError("config_error", `${label}.rules must be an array.`);
+  if (root.rules.length > MAX_RULES) {
+    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
+  }
+  const unknownKeys = Object.keys(root).filter((key2) => key2 !== "schemaVersion" && key2 !== "rules");
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const seen = new Set;
+  return root.rules.map((entry, index) => {
+    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
+    if (seen.has(rule.id))
+      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
+    seen.add(rule.id);
+    return rule;
+  });
+}
+function parseOwnerTierRule(raw, label = "tier rule") {
+  const record = asRecord8(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  if (!RULE_ID_PATTERN.test(id)) {
+    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
+  }
+  let source;
+  if (record.source !== undefined) {
+    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
+      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
+    }
+    source = record.source.trim();
+  }
+  const match = parseMatch(record.match, `${label}.match`);
+  const tier = record.tier;
+  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
+    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
+  }
+  const strength = record.strength ?? "prior";
+  if (strength !== "prior" && strength !== "force") {
+    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
+  }
+  return { id, ...source ? { source } : {}, match, tier, strength };
+}
+function parseMatch(raw, label) {
+  const record = asRecord8(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
+    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
+  }
+  const kind = keys[0];
+  const value = record[kind];
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
+    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
+  }
+  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
+    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
+  }
+  return { kind, value: value.trim() };
+}
+function tierRulesRemedy(path) {
+  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
+}
+function asRecord8(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
+var init_tier_rules = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_classifier();
+  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
+  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
+  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+});
+
+// src/workers/classification/privacy-profile.ts
+var init_privacy_profile = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_rules();
+});
+
+// src/core/source-disposition-tree.ts
+var init_source_disposition_tree = __esm(() => {
+  init_source_ingestion_exclusions();
+});
+
+// src/workers/source-dispositions.ts
+var init_source_dispositions = __esm(() => {
+  init_atomic_file();
+  init_source_disposition_tree();
+  init_operation_error();
+  init_source_ingestion_exclusions();
+});
+
 // src/workers/credential-broker/unpaired-sources.ts
 import { closeSync as closeSync11, constants as constants5, fstatSync as fstatSync3, lstatSync as lstatSync12, openSync as openSync11, readFileSync as readFileSync23 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
@@ -43699,6 +43942,9 @@ var init_data_lifecycle = __esm(() => {
   init_source_forget_registry();
   init_source_registry();
   init_sovereignty();
+  init_tier_rules();
+  init_privacy_profile();
+  init_source_dispositions();
   init_pairing_session_paths();
   init_unpaired_sources();
   init_source_corpus_registry();
@@ -43706,136 +43952,9 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  init_mail_source_scope();
+  init_source_account_binding();
   backgroundTrashRemovals = new Set;
-});
-
-// src/workers/classification/tier-rules.ts
-function defaultTierRulesPath(env = process.env) {
-  return defaultOwnerConfigPath("tier-rules.json", env);
-}
-function resolveTierRulesPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
-}
-function loadOwnerTierRules(options = {}) {
-  const path = resolveTierRulesPath(options);
-  const read = readOwnerConfigFile(path);
-  if (read.status === "missing") {
-    if (options.allowMissing)
-      return [];
-    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
-  }
-  if (read.status === "refused") {
-    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
-  }
-  let raw;
-  try {
-    raw = JSON.parse(read.text);
-  } catch {
-    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
-  }
-  return parseOwnerTierRules(raw, path);
-}
-function tierRulesFileStamp(options = {}) {
-  return ownerConfigStamp(resolveTierRulesPath(options));
-}
-function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord8(raw);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be a JSON object.`);
-  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
-  }
-  if (!Array.isArray(root.rules))
-    throw new OperationError("config_error", `${label}.rules must be an array.`);
-  if (root.rules.length > MAX_RULES) {
-    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
-  }
-  const unknownKeys = Object.keys(root).filter((key2) => key2 !== "schemaVersion" && key2 !== "rules");
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const seen = new Set;
-  return root.rules.map((entry, index) => {
-    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
-    if (seen.has(rule.id))
-      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
-    seen.add(rule.id);
-    return rule;
-  });
-}
-function parseOwnerTierRule(raw, label = "tier rule") {
-  const record = asRecord8(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const id = typeof record.id === "string" ? record.id.trim() : "";
-  if (!RULE_ID_PATTERN.test(id)) {
-    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
-  }
-  let source;
-  if (record.source !== undefined) {
-    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
-      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
-    }
-    source = record.source.trim();
-  }
-  const match = parseMatch(record.match, `${label}.match`);
-  const tier = record.tier;
-  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
-    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
-  }
-  const strength = record.strength ?? "prior";
-  if (strength !== "prior" && strength !== "force") {
-    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
-  }
-  return { id, ...source ? { source } : {}, match, tier, strength };
-}
-function parseMatch(raw, label) {
-  const record = asRecord8(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const keys = Object.keys(record);
-  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
-    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
-  }
-  const kind = keys[0];
-  const value = record[kind];
-  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
-    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
-  }
-  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
-    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
-  }
-  return { kind, value: value.trim() };
-}
-function tierRulesRemedy(path) {
-  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
-}
-function asRecord8(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
-var init_tier_rules = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_classifier();
-  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
-  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
-  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
-  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
-});
-
-// src/workers/classification/privacy-profile.ts
-var init_privacy_profile = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_rules();
 });
 
 // src/core/analyst-built-in.ts
@@ -53406,9 +53525,13 @@ var init_dashboard_resource = __esm(() => {
   DASHBOARD_RESOURCE_VERSIONED_URI = versionedResourceUri(DASHBOARD_RESOURCE_URI, DASHBOARD_HTML);
 });
 
+// src/workers/dashboard/backup-paths.ts
+var init_backup_paths = () => {};
+
 // src/workers/http.ts
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
 var init_http = __esm(() => {
+  init_backup_paths();
   init_session_marker();
   init_request_peer();
   init_worker_auth();
@@ -53551,6 +53674,284 @@ var init_source_ingestion_ledger = __esm(() => {
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
   corpusPopulations = new WeakMap;
+});
+
+// src/workers/local-files/mac-permissions.ts
+import { existsSync as existsSync31, mkdirSync as mkdirSync18, opendirSync, readFileSync as readFileSync26 } from "node:fs";
+import { opendir } from "node:fs/promises";
+import { dirname as dirname40, join as join39 } from "node:path";
+function folderAccessMemoryPath() {
+  return join39(olympusDataDir(), "local-files", "folder-access.json");
+}
+function permissionHostKind(env) {
+  if (env[ENGINE_HELPER_ENV])
+    return "engine_helper";
+  if (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1")
+    return "engine_without_helper";
+  if (env.OLYMPUS_MANAGED_WORKER === "1")
+    return "managed_worker";
+  return "other";
+}
+function permissionHostPresent(env) {
+  const kind = permissionHostKind(env);
+  return kind === "engine_helper" || kind === "other";
+}
+
+class MacPermissions {
+  platform;
+  home;
+  serverMode;
+  helperPresent;
+  hostKind;
+  memoryPath;
+  askTimeoutMs;
+  list;
+  listProtected;
+  now;
+  inFlight = new Map;
+  memory;
+  constructor(options) {
+    this.platform = options.platform ?? process.platform;
+    this.home = options.home;
+    this.serverMode = options.serverMode ?? (() => this.active && ["engine_helper", "engine_without_helper"].includes(this.hostKind()) && macEngineManager(this.home) === "daemon");
+    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
+    this.hostKind = options.hostKind ?? (options.helperPresent ? () => options.helperPresent() ? "engine_helper" : "engine_without_helper" : () => permissionHostKind(process.env));
+    this.memoryPath = options.memoryPath;
+    this.askTimeoutMs = options.askTimeoutMs ?? 8000;
+    this.list = options.list ?? (async (path) => {
+      const dir = await opendir(path);
+      try {
+        await dir.read();
+      } finally {
+        await dir.close().catch(() => {
+          return;
+        });
+      }
+    });
+    this.listProtected = options.listProtected ?? ((path) => {
+      const dir = opendirSync(path);
+      try {
+        dir.readSync();
+      } finally {
+        dir.closeSync();
+      }
+    });
+    this.now = options.now ?? Date.now;
+  }
+  get active() {
+    return this.platform === "darwin";
+  }
+  hasHelper() {
+    return this.helperPresent();
+  }
+  appName() {
+    return this.hostKind() === "engine_helper" ? ENGINE_APP : OTHER_APP;
+  }
+  helperNeededCopy(wholeComputer = false) {
+    if (this.serverMode())
+      return MAC_ACCESS_COPY.serverMode;
+    if (this.hostKind() === "managed_worker") {
+      return wholeComputer ? MAC_ACCESS_COPY.needsHelperManagedWorkerWholeComputer : MAC_ACCESS_COPY.needsHelperManagedWorker;
+    }
+    return wholeComputer ? MAC_ACCESS_COPY.needsHelperWholeComputer : MAC_ACCESS_COPY.needsHelper;
+  }
+  isPrivacyRefusal(realPath, errno, volume) {
+    if (!this.active)
+      return false;
+    if (errno === "EACCES")
+      return false;
+    return errno === "EPERM" || this.guardOf(realPath, volume) !== undefined;
+  }
+  unreadableCopy() {
+    return this.active ? MAC_ACCESS_COPY.unreadable : MAC_ACCESS_COPY.unreadableLinux;
+  }
+  guardOf(realPath, volume) {
+    if (!this.active)
+      return;
+    const tops = [
+      ["desktop", join39(this.home, "Desktop")],
+      ["documents", join39(this.home, "Documents")],
+      ["downloads", join39(this.home, "Downloads")],
+      ["icloud", join39(this.home, "Library", "Mobile Documents")]
+    ];
+    for (const [kind, root] of tops) {
+      if (isWithinScopePath(realPath, root))
+        return { kind, root };
+    }
+    if (volume && !volume.primary && (volume.kind === "removable" || volume.kind === "network")) {
+      return { kind: volume.kind, root: volume.mountPoint };
+    }
+    return;
+  }
+  blocksReadWithoutHelper(realPath, volume) {
+    if (!this.active || this.hasHelper())
+      return false;
+    if (this.guardOf(realPath, volume))
+      return true;
+    if (realPath === "/" || realPath === "/Volumes")
+      return true;
+    return [join39(this.home, "Desktop"), join39(this.home, "Documents"), join39(this.home, "Downloads"), join39(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+  }
+  nodeAccess(guard) {
+    if (this.serverMode())
+      return this.hasFullDiskAccess() ? undefined : this.serverAccess();
+    if (this.recall(guard) === "granted")
+      return;
+    return {
+      state: this.hasHelper() ? "needs_permission" : "needs_helper",
+      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : this.helperNeededCopy()
+    };
+  }
+  async open(guard) {
+    if (this.serverMode() && !this.hasFullDiskAccess())
+      return this.serverAccess();
+    if (!this.hasHelper()) {
+      return { state: "needs_helper", message: this.helperNeededCopy() };
+    }
+    const answer = await this.ask(guard);
+    if (answer === "granted")
+      return;
+    if (answer === "waiting")
+      return { state: "waiting", message: this.serverMode() ? "This folder is taking longer to open. Check that it is available on this Mac, then choose Try again, or drag files onto the dashboard." : MAC_ACCESS_COPY.waiting };
+    if (answer === "unreadable")
+      return { state: "denied", message: this.unreadableCopy() };
+    if (this.serverMode())
+      return this.serverAccess();
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
+  }
+  noteGranted(guard) {
+    this.remember(guard, "granted");
+  }
+  serverAccess() {
+    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.serverMode, settings_url: FULL_DISK_ACCESS_URL };
+  }
+  noteDenied(guard) {
+    if (this.serverMode())
+      return this.serverAccess();
+    this.remember(guard, "denied");
+    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
+  }
+  fullDiskAccessNote() {
+    if (!this.active || this.hasFullDiskAccess())
+      return;
+    if (this.serverMode())
+      return this.serverAccess();
+    if (!this.hasHelper())
+      return { state: "needs_helper", message: this.helperNeededCopy(true) };
+    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
+  }
+  hasFullDiskAccess() {
+    for (const path of [join39(this.home, "Library", "Safari"), join39(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+      try {
+        this.listProtected(path);
+        return true;
+      } catch (error) {
+        if (error.code === "ENOENT")
+          continue;
+        return false;
+      }
+    }
+    return false;
+  }
+  ask(guard) {
+    let pending = this.inFlight.get(guard.root);
+    if (!pending) {
+      pending = this.list(guard.root).then(() => {
+        this.remember(guard, "granted");
+        return "granted";
+      }, (error) => {
+        if (error.code === "EACCES")
+          return "unreadable";
+        if (error.code === "EPERM") {
+          this.remember(guard, "denied");
+          return "denied";
+        }
+        throw error;
+      }).finally(() => {
+        this.inFlight.delete(guard.root);
+      });
+      this.inFlight.set(guard.root, pending);
+    }
+    const waiting = new Promise((resolve11) => {
+      const timer = setTimeout(() => resolve11("waiting"), this.askTimeoutMs);
+      timer.unref?.();
+      pending.finally(() => clearTimeout(timer)).catch(() => {
+        return;
+      });
+    });
+    return Promise.race([pending, waiting]);
+  }
+  key(guard) {
+    return guard.root;
+  }
+  recall(guard) {
+    return this.load()[this.key(guard)]?.answer;
+  }
+  remember(guard, answer) {
+    const memory = this.load();
+    if (memory[this.key(guard)]?.answer === answer)
+      return;
+    memory[this.key(guard)] = { answer, at: new Date(this.now()).toISOString() };
+    if (!this.memoryPath)
+      return;
+    try {
+      mkdirSync18(dirname40(this.memoryPath), { recursive: true, mode: 448 });
+      writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
+`);
+    } catch {}
+  }
+  load() {
+    if (this.memory && !this.memoryPath)
+      return this.memory;
+    let loaded = {};
+    if (this.memoryPath && existsSync31(this.memoryPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync26(this.memoryPath, "utf8"));
+        if (parsed && typeof parsed === "object")
+          loaded = parsed;
+      } catch {
+        loaded = {};
+      }
+    }
+    this.memory = loaded;
+    return loaded;
+  }
+}
+var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, ENGINE_APP = "Olympus Engine", OTHER_APP = "the app that runs Olympus (the one your Mac named when it asked)", MAC_ACCESS_COPY;
+var init_mac_permissions = __esm(() => {
+  init_mac_engine_daemon();
+  init_atomic_file();
+  init_remote_access();
+  init_paths();
+  SETTINGS_NAMES = {
+    desktop: "Desktop Folder",
+    documents: "Documents Folder",
+    downloads: "Downloads Folder",
+    icloud: "iCloud Drive",
+    removable: "Removable Volumes",
+    network: "Network Volumes"
+  };
+  PLACE_WORDS = {
+    desktop: "your Desktop",
+    documents: "your Documents",
+    downloads: "your Downloads",
+    icloud: "iCloud Drive",
+    removable: "a USB drive or memory card",
+    network: "a network drive"
+  };
+  MAC_ACCESS_COPY = {
+    serverMode: "Olympus runs while no one is signed in, so your Mac cannot show a folder question. Using Screen Sharing, open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine once. Then choose Try again, or drag files onto the dashboard.",
+    needsPermission: "Your Mac will ask before Olympus opens this folder.",
+    waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
+    needsHelper: "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.",
+    needsHelperWholeComputer: "Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.",
+    needsHelperManagedWorker: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
+    needsHelperManagedWorkerWholeComputer: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
+    denied: (kind, app = ENGINE_APP) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
+    fullDiskAccess: (app = ENGINE_APP) => app === ENGINE_APP ? "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save." : `To search your whole computer, ${app} needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch it on. If it is not in the list, add it with the plus button.`,
+    unreadable: "Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.",
+    unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
+  };
 });
 
 // src/core/consult-gate.ts
@@ -54926,284 +55327,6 @@ var init_file_mime = __esm(() => {
     "conf",
     "env"
   ]);
-});
-
-// src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync30, mkdirSync as mkdirSync17, opendirSync, readFileSync as readFileSync26 } from "node:fs";
-import { opendir } from "node:fs/promises";
-import { dirname as dirname40, join as join39 } from "node:path";
-function folderAccessMemoryPath() {
-  return join39(olympusDataDir(), "local-files", "folder-access.json");
-}
-function permissionHostKind(env) {
-  if (env[ENGINE_HELPER_ENV])
-    return "engine_helper";
-  if (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1")
-    return "engine_without_helper";
-  if (env.OLYMPUS_MANAGED_WORKER === "1")
-    return "managed_worker";
-  return "other";
-}
-function permissionHostPresent(env) {
-  const kind = permissionHostKind(env);
-  return kind === "engine_helper" || kind === "other";
-}
-
-class MacPermissions {
-  platform;
-  home;
-  serverMode;
-  helperPresent;
-  hostKind;
-  memoryPath;
-  askTimeoutMs;
-  list;
-  listProtected;
-  now;
-  inFlight = new Map;
-  memory;
-  constructor(options) {
-    this.platform = options.platform ?? process.platform;
-    this.home = options.home;
-    this.serverMode = options.serverMode ?? (() => this.active && ["engine_helper", "engine_without_helper"].includes(this.hostKind()) && macEngineManager(this.home) === "daemon");
-    this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
-    this.hostKind = options.hostKind ?? (options.helperPresent ? () => options.helperPresent() ? "engine_helper" : "engine_without_helper" : () => permissionHostKind(process.env));
-    this.memoryPath = options.memoryPath;
-    this.askTimeoutMs = options.askTimeoutMs ?? 8000;
-    this.list = options.list ?? (async (path) => {
-      const dir = await opendir(path);
-      try {
-        await dir.read();
-      } finally {
-        await dir.close().catch(() => {
-          return;
-        });
-      }
-    });
-    this.listProtected = options.listProtected ?? ((path) => {
-      const dir = opendirSync(path);
-      try {
-        dir.readSync();
-      } finally {
-        dir.closeSync();
-      }
-    });
-    this.now = options.now ?? Date.now;
-  }
-  get active() {
-    return this.platform === "darwin";
-  }
-  hasHelper() {
-    return this.helperPresent();
-  }
-  appName() {
-    return this.hostKind() === "engine_helper" ? ENGINE_APP : OTHER_APP;
-  }
-  helperNeededCopy(wholeComputer = false) {
-    if (this.serverMode())
-      return MAC_ACCESS_COPY.serverMode;
-    if (this.hostKind() === "managed_worker") {
-      return wholeComputer ? MAC_ACCESS_COPY.needsHelperManagedWorkerWholeComputer : MAC_ACCESS_COPY.needsHelperManagedWorker;
-    }
-    return wholeComputer ? MAC_ACCESS_COPY.needsHelperWholeComputer : MAC_ACCESS_COPY.needsHelper;
-  }
-  isPrivacyRefusal(realPath, errno, volume) {
-    if (!this.active)
-      return false;
-    if (errno === "EACCES")
-      return false;
-    return errno === "EPERM" || this.guardOf(realPath, volume) !== undefined;
-  }
-  unreadableCopy() {
-    return this.active ? MAC_ACCESS_COPY.unreadable : MAC_ACCESS_COPY.unreadableLinux;
-  }
-  guardOf(realPath, volume) {
-    if (!this.active)
-      return;
-    const tops = [
-      ["desktop", join39(this.home, "Desktop")],
-      ["documents", join39(this.home, "Documents")],
-      ["downloads", join39(this.home, "Downloads")],
-      ["icloud", join39(this.home, "Library", "Mobile Documents")]
-    ];
-    for (const [kind, root] of tops) {
-      if (isWithinScopePath(realPath, root))
-        return { kind, root };
-    }
-    if (volume && !volume.primary && (volume.kind === "removable" || volume.kind === "network")) {
-      return { kind: volume.kind, root: volume.mountPoint };
-    }
-    return;
-  }
-  blocksReadWithoutHelper(realPath, volume) {
-    if (!this.active || this.hasHelper())
-      return false;
-    if (this.guardOf(realPath, volume))
-      return true;
-    if (realPath === "/" || realPath === "/Volumes")
-      return true;
-    return [join39(this.home, "Desktop"), join39(this.home, "Documents"), join39(this.home, "Downloads"), join39(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
-  }
-  nodeAccess(guard) {
-    if (this.serverMode())
-      return this.hasFullDiskAccess() ? undefined : this.serverAccess();
-    if (this.recall(guard) === "granted")
-      return;
-    return {
-      state: this.hasHelper() ? "needs_permission" : "needs_helper",
-      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : this.helperNeededCopy()
-    };
-  }
-  async open(guard) {
-    if (this.serverMode() && !this.hasFullDiskAccess())
-      return this.serverAccess();
-    if (!this.hasHelper()) {
-      return { state: "needs_helper", message: this.helperNeededCopy() };
-    }
-    const answer = await this.ask(guard);
-    if (answer === "granted")
-      return;
-    if (answer === "waiting")
-      return { state: "waiting", message: this.serverMode() ? "This folder is taking longer to open. Check that it is available on this Mac, then choose Try again, or drag files onto the dashboard." : MAC_ACCESS_COPY.waiting };
-    if (answer === "unreadable")
-      return { state: "denied", message: this.unreadableCopy() };
-    if (this.serverMode())
-      return this.serverAccess();
-    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
-  }
-  noteGranted(guard) {
-    this.remember(guard, "granted");
-  }
-  serverAccess() {
-    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.serverMode, settings_url: FULL_DISK_ACCESS_URL };
-  }
-  noteDenied(guard) {
-    if (this.serverMode())
-      return this.serverAccess();
-    this.remember(guard, "denied");
-    return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
-  }
-  fullDiskAccessNote() {
-    if (!this.active || this.hasFullDiskAccess())
-      return;
-    if (this.serverMode())
-      return this.serverAccess();
-    if (!this.hasHelper())
-      return { state: "needs_helper", message: this.helperNeededCopy(true) };
-    return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
-  }
-  hasFullDiskAccess() {
-    for (const path of [join39(this.home, "Library", "Safari"), join39(this.home, "Library", "Application Support", "com.apple.TCC")]) {
-      try {
-        this.listProtected(path);
-        return true;
-      } catch (error) {
-        if (error.code === "ENOENT")
-          continue;
-        return false;
-      }
-    }
-    return false;
-  }
-  ask(guard) {
-    let pending = this.inFlight.get(guard.root);
-    if (!pending) {
-      pending = this.list(guard.root).then(() => {
-        this.remember(guard, "granted");
-        return "granted";
-      }, (error) => {
-        if (error.code === "EACCES")
-          return "unreadable";
-        if (error.code === "EPERM") {
-          this.remember(guard, "denied");
-          return "denied";
-        }
-        throw error;
-      }).finally(() => {
-        this.inFlight.delete(guard.root);
-      });
-      this.inFlight.set(guard.root, pending);
-    }
-    const waiting = new Promise((resolve10) => {
-      const timer = setTimeout(() => resolve10("waiting"), this.askTimeoutMs);
-      timer.unref?.();
-      pending.finally(() => clearTimeout(timer)).catch(() => {
-        return;
-      });
-    });
-    return Promise.race([pending, waiting]);
-  }
-  key(guard) {
-    return guard.root;
-  }
-  recall(guard) {
-    return this.load()[this.key(guard)]?.answer;
-  }
-  remember(guard, answer) {
-    const memory = this.load();
-    if (memory[this.key(guard)]?.answer === answer)
-      return;
-    memory[this.key(guard)] = { answer, at: new Date(this.now()).toISOString() };
-    if (!this.memoryPath)
-      return;
-    try {
-      mkdirSync17(dirname40(this.memoryPath), { recursive: true, mode: 448 });
-      writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
-`);
-    } catch {}
-  }
-  load() {
-    if (this.memory && !this.memoryPath)
-      return this.memory;
-    let loaded = {};
-    if (this.memoryPath && existsSync30(this.memoryPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync26(this.memoryPath, "utf8"));
-        if (parsed && typeof parsed === "object")
-          loaded = parsed;
-      } catch {
-        loaded = {};
-      }
-    }
-    this.memory = loaded;
-    return loaded;
-  }
-}
-var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, ENGINE_APP = "Olympus Engine", OTHER_APP = "the app that runs Olympus (the one your Mac named when it asked)", MAC_ACCESS_COPY;
-var init_mac_permissions = __esm(() => {
-  init_mac_engine_daemon();
-  init_atomic_file();
-  init_remote_access();
-  init_paths();
-  SETTINGS_NAMES = {
-    desktop: "Desktop Folder",
-    documents: "Documents Folder",
-    downloads: "Downloads Folder",
-    icloud: "iCloud Drive",
-    removable: "Removable Volumes",
-    network: "Network Volumes"
-  };
-  PLACE_WORDS = {
-    desktop: "your Desktop",
-    documents: "your Documents",
-    downloads: "your Downloads",
-    icloud: "iCloud Drive",
-    removable: "a USB drive or memory card",
-    network: "a network drive"
-  };
-  MAC_ACCESS_COPY = {
-    serverMode: "Olympus runs while no one is signed in, so your Mac cannot show a folder question. Using Screen Sharing, open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine once. Then choose Try again, or drag files onto the dashboard.",
-    needsPermission: "Your Mac will ask before Olympus opens this folder.",
-    waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
-    needsHelper: "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.",
-    needsHelperWholeComputer: "Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.",
-    needsHelperManagedWorker: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
-    needsHelperManagedWorkerWholeComputer: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
-    denied: (kind, app = ENGINE_APP) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
-    fullDiskAccess: (app = ENGINE_APP) => app === ENGINE_APP ? "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save." : `To search your whole computer, ${app} needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch it on. If it is not in the list, add it with the plus button.`,
-    unreadable: "Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.",
-    unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
-  };
 });
 
 // src/workers/archive-import/notes/note.ts
@@ -63213,7 +63336,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
+        await new Promise((resolve11) => setTimeout(resolve11, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -63225,7 +63348,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve11, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -63303,7 +63426,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve10(parseResult.data);
+            resolve11(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -63494,12 +63617,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve11, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve10, interval);
+      const timeoutId = setTimeout(resolve11, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -66484,7 +66607,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve10.call(this, root, ref);
+    let _sch = resolve11.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a5 = root.localRefs) === null || _a5 === undefined ? undefined : _a5[ref];
       const { schemaId } = this.opts;
@@ -66511,7 +66634,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve10(root, ref) {
+  function resolve11(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -67041,7 +67164,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve10(baseURI, relativeURI, options) {
+  function resolve11(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse7(baseURI, schemelessOptions), parse7(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -67269,7 +67392,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize5,
-    resolve: resolve10,
+    resolve: resolve11,
     resolveComponent,
     equal: equal2,
     serialize,
@@ -71280,7 +71403,7 @@ class McpCallPacer {
       throw new TypeError("An MCP pacer interval must be a non-negative number of milliseconds.");
     this.minIntervalMs = interval;
     this.now = options.now ?? Date.now;
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
   }
   turn() {
     const mine = this.tail.then(async () => {
@@ -71749,8 +71872,8 @@ init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
 import { createHash as createHash33 } from "node:crypto";
-import { existsSync as existsSync35, lstatSync as lstatSync17, mkdirSync as mkdirSync20, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname42, isAbsolute as isAbsolute16 } from "node:path";
+import { existsSync as existsSync36, lstatSync as lstatSync18, mkdirSync as mkdirSync21, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname43, isAbsolute as isAbsolute16 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_people_index();
@@ -73274,6 +73397,38 @@ var COMPUTER_HOST_PAGE_CSP = [
 
 // src/workers/dashboard/pages/local.ts
 init_judge_spending();
+
+// src/workers/dashboard/backup-section.ts
+var DASHBOARD_SETTINGS_BACKUP_ID = "backup";
+var BACKUP_COPY = {
+  title: "Back up and restore",
+  intro: "A backup holds everything Olympus can't fetch again: captured WhatsApp and Telegram messages, your privacy rules and decisions, and every privacy judgment. Sign-ins aren't included.",
+  lastBackup: "Last backup",
+  none: "none yet",
+  backUpNow: "Back up now",
+  backingUp: "Backing up…",
+  where: "Where",
+  noFolder: "No folder chosen yet. Choose one on another disk, so a backup outlives this computer.",
+  chooseFolder: "Choose folder",
+  when: "When",
+  manual: "Only when I press Back up now",
+  nightly: "Every night",
+  weekly: "Every week",
+  keep: "Olympus keeps the 7 newest backups in this folder and deletes older ones.",
+  passphrase: "Passphrase",
+  passphraseLine: "Your backup holds Private and Secret items. With a passphrase they're encrypted; without one, anyone with the files can read them. Olympus can't recover a lost passphrase.",
+  passphraseKept: "A key made from it is kept on this computer so nightly backups can run.",
+  set: "Set",
+  notSet: "Not set",
+  change: "Change",
+  setOne: "Set a passphrase",
+  restore: "Restore",
+  restoreLine: "On a new computer, restore before you connect sources. Nothing is judged or indexed again when the models match. Afterwards you sign in to each source once.",
+  restoreButton: "Restore from a backup…",
+  locked: "Open dashboard controls on this computer to back up or restore."
+};
+
+// src/workers/dashboard/pages/local.ts
 init_source_failure();
 init_source_dashboard();
 init_open_targets();
@@ -73360,6 +73515,7 @@ var SETTINGS_SECTIONS = [
   { id: "agents", label: "Agents and access" },
   { id: "models", label: "Models on this computer" },
   { id: DASHBOARD_SETTINGS_ZKAPI_ID, label: "zkAPI" },
+  { id: DASHBOARD_SETTINGS_BACKUP_ID, label: BACKUP_COPY.title },
   { id: "updates", label: "Updates" },
   { id: "help", label: "Help" }
 ];
@@ -73408,18 +73564,7 @@ var REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
 // src/workers/email-source/index.ts
 init_source_dashboard();
 init_credential_health();
-
-// src/workers/source-dispositions.ts
-init_atomic_file();
-
-// src/core/source-disposition-tree.ts
-init_source_ingestion_exclusions();
-
-// src/workers/source-dispositions.ts
-init_operation_error();
-init_source_ingestion_exclusions();
-
-// src/workers/email-source/index.ts
+init_source_dispositions();
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
@@ -73552,6 +73697,923 @@ init_data_lifecycle();
 init_cli_via_worker();
 init_remote_access();
 
+// src/data-backup.ts
+import { closeSync as closeSync13, existsSync as existsSync29, lstatSync as lstatSync14, mkdirSync as mkdirSync17, openSync as openSync13, readdirSync as readdirSync4, readSync, renameSync as renameSync6, rmSync as rmSync9, statSync as statSync13, unlinkSync as unlinkSync2, writeSync as writeSync3, chmodSync as chmodSync8, fsyncSync as fsyncSync3 } from "node:fs";
+init_operation_error();
+init_atomic_file();
+init_olympus_layout();
+init_data_lifecycle();
+import { basename as basename7, dirname as dirname39, join as join38, resolve as resolve10, sep as sep6 } from "node:path";
+
+// src/data-restore.ts
+init_data_lifecycle();
+init_operation_error();
+init_atomic_file();
+init_sovereignty();
+init_tier_ledger_path();
+init_tier_rules();
+init_privacy_profile();
+init_source_dispositions();
+init_media_cache();
+init_source_account_binding();
+init_provider_account_identity();
+init_source_registry();
+init_source_storage();
+init_mail_source_scope();
+init_local_index();
+init_file_scope_sources();
+init_tier_ledger();
+init_tier_ledger_path();
+
+// src/data-backup.ts
+var MAGIC = Buffer.from(`OLYMPUS-BACKUP
+`, "ascii");
+var CHUNK = 1024 * 1024;
+var MAX_HEADER_BYTES = 64 * 1024;
+class TarExtractor {
+  root;
+  pending = Buffer.alloc(0);
+  file;
+  skip = 0;
+  ended = false;
+  constructor(root) {
+    this.root = root;
+  }
+  target(name) {
+    if (name === "" || name.startsWith("/") || name.includes("\x00") || name.includes("\\"))
+      throw this.bad();
+    const parts = name.split("/").filter((part) => part !== "");
+    if (parts.length === 0 || parts.some((part) => part === "." || part === ".."))
+      throw this.bad();
+    const path = join38(this.root, ...parts);
+    if (!path.startsWith(this.root + sep6))
+      throw this.bad();
+    return path;
+  }
+  bad() {
+    return new OperationError("invalid_params", "This backup holds something Olympus will not restore.");
+  }
+  push(chunk) {
+    let data2 = this.pending.length ? Buffer.concat([this.pending, chunk]) : chunk;
+    this.pending = Buffer.alloc(0);
+    while (data2.length > 0) {
+      if (this.file) {
+        const take = Math.min(this.file.left, data2.length);
+        if (take > 0) {
+          let written = 0;
+          while (written < take)
+            written += writeSync3(this.file.fd, data2, written, take - written);
+          this.file.left -= take;
+          data2 = data2.subarray(take);
+        }
+        if (this.file.left === 0) {
+          fsyncSync3(this.file.fd);
+          closeSync13(this.file.fd);
+          this.skip = this.file.pad;
+          this.file = undefined;
+        }
+        continue;
+      }
+      if (this.skip > 0) {
+        const take = Math.min(this.skip, data2.length);
+        this.skip -= take;
+        data2 = data2.subarray(take);
+        continue;
+      }
+      if (this.ended) {
+        if (data2.some((byte) => byte !== 0))
+          throw this.bad();
+        return;
+      }
+      if (data2.length < 512) {
+        this.pending = Buffer.from(data2);
+        return;
+      }
+      const block = data2.subarray(0, 512);
+      data2 = data2.subarray(512);
+      if (block.every((byte) => byte === 0)) {
+        this.ended = true;
+        continue;
+      }
+      const field = (start, length) => {
+        const raw = block.subarray(start, start + length);
+        const end = raw.indexOf(0);
+        return (end >= 0 ? raw.subarray(0, end) : raw).toString("utf8");
+      };
+      let sum = 0;
+      for (let i2 = 0;i2 < 512; i2 += 1)
+        sum += i2 >= 148 && i2 < 156 ? 32 : block[i2];
+      if (Number.parseInt(field(148, 8).trim(), 8) !== sum || field(257, 6) !== "ustar")
+        throw this.bad();
+      const prefix = field(345, 155);
+      const name = prefix ? `${prefix}/${field(0, 100)}` : field(0, 100);
+      const size = Number.parseInt(field(124, 12).trim() || "0", 8);
+      const type = field(156, 1) || "0";
+      if (!Number.isSafeInteger(size) || size < 0)
+        throw this.bad();
+      const path = this.target(name);
+      if (type === "5") {
+        mkdirSync17(path, { recursive: true, mode: 448 });
+        continue;
+      }
+      if (type !== "0")
+        throw this.bad();
+      mkdirSync17(dirname39(path), { recursive: true, mode: 448 });
+      const fd2 = openSync13(path, "wx", 384);
+      this.file = { fd: fd2, left: size, pad: (512 - size % 512) % 512 };
+      if (size === 0) {
+        closeSync13(fd2);
+        this.file = undefined;
+      }
+    }
+  }
+  finish() {
+    if (this.file || this.pending.length > 0 || !this.ended)
+      throw new OperationError("invalid_params", "This backup is incomplete: it ends early.");
+  }
+  abort() {
+    if (this.file) {
+      try {
+        closeSync13(this.file.fd);
+      } catch {}
+      this.file = undefined;
+    }
+  }
+}
+
+// src/workers/dashboard/backup-routes.ts
+init_operation_error();
+
+// src/workers/backup-service.ts
+init_atomic_file();
+init_operation_error();
+init_owner_config_read();
+init_olympus_layout();
+
+// src/workers/local-files/locations.ts
+init_paths();
+function realPathOfScopePath(volumes, scopePath) {
+  const { volumeId, path } = splitScopePath(scopePath);
+  if (!volumeId)
+    return path;
+  const volume = volumes.mountedVolume(volumeId);
+  if (!volume)
+    return;
+  return path === "/" ? volume.mountPoint : `${volume.mountPoint === "/" ? "" : volume.mountPoint}${path}`;
+}
+function scopePathOfRealPath(volumes, realPath) {
+  const volume = volumes.volumeOf(realPath);
+  if (volume.primary)
+    return scopePathFor(realPath);
+  const inside = realPath === volume.mountPoint ? "/" : realPath.slice(volume.mountPoint.length) || "/";
+  return scopePathFor(inside, volume.id);
+}
+
+// src/workers/backup-service.ts
+init_paths();
+
+// src/workers/local-files/volume-identity.ts
+init_paths();
+import { createHash as createHash29 } from "node:crypto";
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { existsSync as existsSync30, lstatSync as lstatSync15, readFileSync as readFileSync25, readdirSync as readdirSync5, realpathSync as realpathSync7 } from "node:fs";
+import { homedir as homedir16 } from "node:os";
+var NETWORK_FS_TYPES = new Set([
+  "nfs",
+  "nfs4",
+  "cifs",
+  "smbfs",
+  "smb3",
+  "afpfs",
+  "webdav",
+  "fuse.sshfs",
+  "sshfs",
+  "ceph",
+  "glusterfs",
+  "9p",
+  "davfs"
+]);
+var IGNORED_FS_TYPES = new Set([
+  "autofs",
+  "devfs",
+  "devtmpfs",
+  "proc",
+  "sysfs",
+  "tmpfs",
+  "cgroup",
+  "cgroup2",
+  "overlay",
+  "squashfs",
+  "fdescfs",
+  "securityfs",
+  "debugfs",
+  "tracefs",
+  "pstore",
+  "bpf",
+  "configfs",
+  "fusectl",
+  "mqueue",
+  "hugetlbfs",
+  "binfmt_misc",
+  "ramfs",
+  "rpc_pipefs",
+  "nsfs",
+  "efivarfs",
+  "autofs",
+  "fuse.portal",
+  "fuse.gvfsd-fuse"
+]);
+var CACHE_TTL_MS = 15000;
+
+class VolumeResolver {
+  deps;
+  cache;
+  caseByVolume = new Map;
+  constructor(deps = {}) {
+    this.deps = {
+      ...deps,
+      platform: deps.platform ?? process.platform,
+      home: deps.home ?? homedir16(),
+      now: deps.now ?? Date.now
+    };
+  }
+  volumes() {
+    const now = this.deps.now();
+    if (this.cache && now - this.cache.at < CACHE_TTL_MS)
+      return this.cache.volumes;
+    const volumes = this.scan();
+    this.cache = { at: now, volumes };
+    return volumes;
+  }
+  refresh() {
+    this.cache = undefined;
+  }
+  ignoresCase(volumeId, path) {
+    const home = this.deps.home;
+    const volume = volumeId === undefined ? this.volumeOf(path ?? home) : this.mountedVolume(volumeId);
+    if (!volume)
+      return;
+    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
+    if (this.caseByVolume.has(cacheKey))
+      return this.caseByVolume.get(cacheKey);
+    const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
+    const homeHere = volume.primary && isWithinScopePath(home, volume.mountPoint) && this.volumeOf(home).mountPoint === volume.mountPoint;
+    const places = homeHere ? [home, volume.mountPoint] : [volume.mountPoint];
+    let answer;
+    for (const place of places) {
+      answer = probe(place);
+      if (answer !== undefined)
+        break;
+    }
+    if (answer !== undefined)
+      this.caseByVolume.set(cacheKey, answer);
+    return answer;
+  }
+  volumeOf(realPath) {
+    let best;
+    for (const volume of this.volumes()) {
+      if (!isWithinScopePath(realPath, volume.mountPoint))
+        continue;
+      if (!best || volume.mountPoint.length > best.mountPoint.length)
+        best = volume;
+    }
+    return best ?? this.primaryFallback();
+  }
+  mountedVolume(id) {
+    return this.volumes().find((volume) => volume.id === id);
+  }
+  locations() {
+    return this.volumes().filter((volume) => !volume.primary);
+  }
+  primaryFallback() {
+    return { id: "primary", mountPoint: "/", label: "Macintosh HD", kind: "internal", primary: true };
+  }
+  scan() {
+    let raw = [];
+    try {
+      const text3 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
+      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text3) : parseLinuxMountinfo(text3);
+    } catch {
+      raw = [];
+    }
+    const uuids = this.deps.platform === "linux" ? (this.deps.uuidsByDevice ?? defaultUuidsByDevice)() : undefined;
+    const homeMount = this.homeMountPoint(raw);
+    const volumes = [];
+    for (const mount of raw) {
+      if (IGNORED_FS_TYPES.has(mount.fsType) && mount.mountPoint !== "/")
+        continue;
+      if (mount.mountPoint !== "/" && /^\/(proc|sys|dev|run|snap|boot)(\/|$)/.test(mount.mountPoint))
+        continue;
+      if (this.deps.platform === "darwin" && /^\/System\/Volumes\/(?!Data$)/.test(mount.mountPoint))
+        continue;
+      if (this.deps.platform === "darwin" && mount.mountPoint.startsWith("/private/var/"))
+        continue;
+      const network = NETWORK_FS_TYPES.has(mount.fsType);
+      const primary = mount.mountPoint === "/" || mount.mountPoint === "/System/Volumes/Data" || mount.mountPoint === homeMount;
+      const id = primary ? "primary" : this.idFor(mount, network, uuids);
+      if (!id)
+        continue;
+      volumes.push({
+        id,
+        mountPoint: mount.mountPoint,
+        label: labelFor2(mount.mountPoint),
+        kind: network ? "network" : primary ? "internal" : "removable",
+        primary
+      });
+    }
+    if (!volumes.some((volume) => volume.mountPoint === "/"))
+      volumes.push(this.primaryFallback());
+    return volumes;
+  }
+  homeMountPoint(mounts) {
+    let best;
+    for (const mount of mounts) {
+      if (!isWithinScopePath(this.deps.home, mount.mountPoint))
+        continue;
+      if (!best || mount.mountPoint.length > best.mountPoint.length)
+        best = mount;
+    }
+    return best?.mountPoint;
+  }
+  idFor(mount, network, uuids) {
+    if (network)
+      return `net-${shortHash(normalizeNetworkSource(mount.source))}`;
+    if (this.deps.platform === "darwin") {
+      const plist = (this.deps.diskutilPlist ?? defaultDiskutilPlist)(mount.mountPoint);
+      const uuid2 = plist ? plistString(plist, "VolumeUUID") : undefined;
+      if (uuid2)
+        return `mac-${uuid2.toLowerCase()}`;
+      return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+    }
+    const uuid = uuids?.get(mount.source);
+    if (uuid)
+      return `lin-${uuid.toLowerCase()}`;
+    return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+  }
+}
+function probeIgnoresCaseIn(dir) {
+  let names;
+  try {
+    names = readdirSync5(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const swapped = name.replace(/[a-zA-Z]/g, (letter) => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
+    if (swapped === name)
+      continue;
+    try {
+      const own3 = lstatSync15(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
+      try {
+        const other = lstatSync15(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
+        return other.ino === own3.ino && other.dev === own3.dev;
+      } catch (error) {
+        if (error.code === "ENOENT")
+          return false;
+        return;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return;
+}
+function labelFor2(mountPoint) {
+  if (mountPoint === "/")
+    return "Macintosh HD";
+  return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
+}
+function shortHash(value) {
+  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
+}
+function normalizeNetworkSource(source) {
+  return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
+}
+function defaultReadMounts(platform2) {
+  if (platform2 === "darwin")
+    return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
+  return readFileSync25("/proc/self/mountinfo", "utf8");
+}
+function defaultDiskutilPlist(mountPoint) {
+  try {
+    return execFileSync2("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
+      encoding: "utf8",
+      timeout: 8000,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+  } catch {
+    return;
+  }
+}
+function defaultUuidsByDevice() {
+  const result = new Map;
+  const dir = "/dev/disk/by-uuid";
+  try {
+    if (!existsSync30(dir))
+      return result;
+    for (const name of readdirSync5(dir)) {
+      try {
+        result.set(realpathSync7(`${dir}/${name}`), name);
+      } catch {}
+    }
+  } catch {}
+  return result;
+}
+function parseDarwinMounts(text3) {
+  const mounts = [];
+  for (const line of text3.split(`
+`)) {
+    const match = /^(.+?) on (\/.*?) \(([^,)]+)/.exec(line);
+    if (!match)
+      continue;
+    mounts.push({ source: match[1], mountPoint: match[2], fsType: match[3].trim() });
+  }
+  return mounts;
+}
+function parseLinuxMountinfo(text3) {
+  const mounts = [];
+  for (const line of text3.split(`
+`)) {
+    const separator = line.indexOf(" - ");
+    if (separator < 0)
+      continue;
+    const head = line.slice(0, separator).split(" ");
+    const tail = line.slice(separator + 3).split(" ");
+    if (head.length < 6 || tail.length < 2)
+      continue;
+    mounts.push({
+      mountPoint: unescapeMountinfo(head[4]),
+      fsType: tail[0],
+      source: unescapeMountinfo(tail[1])
+    });
+  }
+  return mounts;
+}
+function unescapeMountinfo(value) {
+  return value.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+}
+function plistString(plist, key2) {
+  const match = new RegExp(`<key>${key2}</key>\\s*<string>([^<]+)</string>`).exec(plist);
+  return match?.[1]?.trim();
+}
+
+// src/workers/backup-service.ts
+var RETRY_AFTER_FAILURE_MS2 = 60 * 60 * 1000;
+
+// src/workers/local-files/scope-browser.ts
+import { lstatSync as lstatSync16, readdirSync as readdirSync6, realpathSync as realpathSync8 } from "node:fs";
+import { homedir as homedir18 } from "node:os";
+import { join as join41 } from "node:path";
+
+// src/workers/source-scope-browser.ts
+init_credential_broker();
+init_drive();
+init_provider_client();
+var GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+var BROWSE_PAGE_SIZE = 100;
+function createGoogleDriveFolderScopeBrowser(options) {
+  const connector = new GoogleDriveSourceConnector({
+    credentialHandle: options.credentialHandle,
+    ...options.account ? { account: options.account } : {},
+    ...options.credentialBroker ? { credentialBroker: options.credentialBroker } : {},
+    ...options.fetch ? { fetch: options.fetch } : {},
+    ...options.apiClient ? { apiClient: options.apiClient } : {},
+    ...options.requestBudget ? { requestBudget: options.requestBudget } : {},
+    provenance: "operator"
+  });
+  return {
+    sourceId: "google_drive.docs",
+    async browse(request) {
+      const parent = normalizeDriveParent(request.parentKey);
+      const providerCursor = decodeCursor("google_drive.docs", parent, request.cursor);
+      const client = await connector.apiClientForTooling();
+      const page2 = await client.listFiles({
+        pageSize: BROWSE_PAGE_SIZE,
+        ...providerCursor ? { pageToken: providerCursor } : {},
+        query: `trashed = false and mimeType = '${GOOGLE_FOLDER_MIME_TYPE}' and '${parent}' in parents`
+      });
+      return {
+        nodes: page2.files.filter((file) => file.id && file.mimeType === GOOGLE_FOLDER_MIME_TYPE).map((file) => ({
+          key: file.id,
+          ...request.parentKey ? { parent_key: parent } : {},
+          name: file.name?.trim() || "Untitled folder",
+          kind: "folder",
+          has_children: true,
+          selectable: true
+        })),
+        ...page2.nextPageToken ? { nextCursor: encodeCursor("google_drive.docs", parent, page2.nextPageToken) } : {}
+      };
+    },
+    async validateSelections(selections) {
+      const client = await connector.apiClientForTooling();
+      if (!client.getFolder)
+        throw new Error("Google Drive folder validation is unavailable.");
+      const ancestry = new GoogleDriveFolderAncestry(client);
+      const ancestorsByKey = new Map;
+      for (const selection of selections) {
+        const key2 = normalizeDriveParent(selection.key);
+        if (key2 === "root")
+          throw new Error("Whole-account access requires explicit confirmation.");
+        const folder = await client.getFolder(key2);
+        if (folder.id !== key2 || !folder.parents || folder.parents.length === 0) {
+          throw new Error("A selected Google Drive folder could not be verified below the account root.");
+        }
+        const ancestors = await ancestry.resolve({ parents: folder.parents });
+        if (!ancestors)
+          throw new Error("A selected Google Drive folder ancestry could not be verified.");
+        ancestorsByKey.set(key2, ancestors);
+      }
+      return effectiveSelections(selections, (key2) => ancestorsByKey.get(key2) ?? []);
+    }
+  };
+}
+function createDropboxFolderScopeBrowser(options) {
+  const broker = options.credentialBroker ?? createEnvCredentialBroker({
+    ...options.fetch ? { fetch: options.fetch } : {}
+  });
+  let client = options.metadataClient;
+  const metadataClient = async () => {
+    if (client)
+      return client;
+    const session = requireBearerTokenCredentialSession(await broker.issueSession({
+      handle: options.credentialHandle,
+      provider: "dropbox",
+      capability: "dropbox.files.sync",
+      trustDomain: "secure_local",
+      purpose: "Browse Dropbox folders before source-scope approval."
+    }), options.credentialHandle);
+    client = new DropboxApiMetadataClient({
+      token: session.token,
+      ...options.fetch ? { fetch: options.fetch } : {}
+    });
+    return client;
+  };
+  return {
+    sourceId: "dropbox.files",
+    async browse(request) {
+      const parent = normalizeDropboxParent(request.parentKey);
+      const providerCursor = decodeCursor("dropbox.files", parent, request.cursor);
+      const api = await metadataClient();
+      const nodes = [];
+      let cursor = providerCursor;
+      const seenCursors = new Set;
+      for (let pages = 0;pages < 10; pages += 1) {
+        const page2 = cursor ? await api.listFolderContinue({ cursor, limit: BROWSE_PAGE_SIZE }) : await api.listFolder({
+          path: parent === "/" ? "" : parent,
+          recursive: false,
+          limit: BROWSE_PAGE_SIZE,
+          includeDeleted: false
+        });
+        for (const entry of page2.entries) {
+          if (entry.tag !== "folder")
+            continue;
+          const key2 = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
+          if (!nodes.some((node) => node.key === key2))
+            nodes.push({
+              key: key2,
+              ...request.parentKey ? { parent_key: parent } : {},
+              name: entry.name,
+              kind: "folder",
+              has_children: true,
+              selectable: true
+            });
+        }
+        if (!page2.hasMore) {
+          cursor = undefined;
+          break;
+        }
+        if (!page2.cursor || seenCursors.has(page2.cursor) || page2.cursor === cursor) {
+          throw new Error("Dropbox folder listing did not advance. Update folders to retry.");
+        }
+        cursor = page2.cursor;
+        seenCursors.add(cursor);
+        if (nodes.length >= 20)
+          break;
+      }
+      return { nodes, ...cursor ? { nextCursor: encodeCursor("dropbox.files", parent, cursor) } : {} };
+    },
+    async validateSelections(selections) {
+      const api = await metadataClient();
+      for (const selection of selections) {
+        const key2 = normalizeDropboxNodeKey(selection.key);
+        if (key2 === "/")
+          throw new Error("Whole-account access requires explicit confirmation.");
+        await api.listFolder({ path: key2, recursive: false, limit: 1, includeDeleted: false });
+      }
+      return effectiveSelections(selections.map((selection) => ({ ...selection, key: normalizeDropboxNodeKey(selection.key) })), (key2) => dropboxAncestorPaths(normalizeDropboxNodeKey(key2)));
+    }
+  };
+}
+function effectiveSelections(selections, ancestorsFor) {
+  const states = new Map(selections.map((selection) => [selection.key, selection.state]));
+  return selections.map((selection) => {
+    const ancestorKeys = [...ancestorsFor(selection.key)];
+    const ancestorStates = ancestorKeys.map((key2) => states.get(key2)).filter((state2) => state2 !== undefined);
+    const state = ancestorStates.includes("exclude") ? "exclude" : ancestorStates.includes("metadata_only") && selection.state === "ingest" ? "metadata_only" : selection.state;
+    return { key: selection.key, state, ancestorKeys };
+  });
+}
+function dropboxAncestorPaths(path) {
+  const parts = path.split("/").filter(Boolean);
+  const ancestors = [];
+  for (let index = 1;index < parts.length; index += 1) {
+    ancestors.push(`/${parts.slice(0, index).join("/")}`);
+  }
+  return ancestors;
+}
+function encodeCursor(source, parent, providerCursor) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    source,
+    parent,
+    provider_cursor: providerCursor
+  })).toString("base64url");
+}
+function decodeCursor(source, parent, value) {
+  if (value === undefined)
+    return;
+  if (!value || value.length > 8192)
+    throw new Error("Folder browse cursor is invalid.");
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (parsed.version !== 1 || parsed.source !== source || parsed.parent !== parent || typeof parsed.provider_cursor !== "string" || !parsed.provider_cursor || parsed.provider_cursor.length > 6000)
+      throw new Error("shape");
+    return parsed.provider_cursor;
+  } catch {
+    throw new Error("Folder browse cursor is invalid for this source and parent.");
+  }
+}
+function normalizeDriveParent(value) {
+  if (value === undefined)
+    return "root";
+  const parent = value.trim();
+  if (!parent || parent.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(parent)) {
+    throw new Error("Google Drive folder key is invalid.");
+  }
+  return parent;
+}
+function normalizeDropboxParent(value) {
+  if (value === undefined)
+    return "/";
+  return normalizeDropboxNodeKey(value);
+}
+function normalizeDropboxNodeKey(value) {
+  const trimmed = value.trim().replace(/\/{2,}/g, "/");
+  if (!trimmed.startsWith("/") || trimmed.length > 4096 || trimmed.includes("\x00")) {
+    throw new Error("Dropbox folder key is invalid.");
+  }
+  return trimmed.length > 1 && trimmed.endsWith("/") ? trimmed.slice(0, -1).toLowerCase() : trimmed.toLowerCase();
+}
+function requireCredentialHandle(context2) {
+  if (!context2.credentialHandle)
+    throw new Error("This folder source needs a connected credential.");
+  return context2.credentialHandle;
+}
+var browserFactories = new Map([
+  ["google_drive.docs", (context2) => createGoogleDriveFolderScopeBrowser({
+    credentialHandle: requireCredentialHandle(context2),
+    ...context2.account ? { account: context2.account } : {},
+    ...context2.googleDriveRequestBudget ? { requestBudget: context2.googleDriveRequestBudget } : {}
+  })],
+  ["dropbox.files", (context2) => createDropboxFolderScopeBrowser({
+    credentialHandle: requireCredentialHandle(context2)
+  })]
+]);
+var builtInBrowserIds = new Set(browserFactories.keys());
+function registerFileScopeBrowserFactory(sourceId, factory) {
+  if (browserFactories.has(sourceId))
+    throw new Error(`A folder browser is already registered for ${sourceId}.`);
+  browserFactories.set(sourceId, factory);
+}
+
+// src/workers/local-files/scope-browser.ts
+init_mac_permissions();
+init_paths();
+init_scope();
+
+// src/workers/local-files/mac-settings.ts
+init_mac_permissions();
+import { spawn as spawn3 } from "node:child_process";
+import { existsSync as existsSync32 } from "node:fs";
+import { homedir as homedir17 } from "node:os";
+import { join as join40 } from "node:path";
+function helperAppPathForHome(home = homedir17()) {
+  return join40(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+}
+function revealHelperAndOpenFullDiskAccess(deps = {}) {
+  const run = deps.run ?? ((command, args) => {
+    spawn3(command, args, { stdio: "ignore", detached: true }).unref();
+  });
+  const helper = deps.helperApp ?? helperAppPathForHome();
+  if ((deps.exists ?? existsSync32)(helper))
+    run("/usr/bin/open", ["-R", helper]);
+  run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
+}
+
+// src/workers/local-files/scope-browser.ts
+var BROWSE_PAGE_SIZE2 = 100;
+
+class AccessRefused extends Error {
+  access;
+  constructor(access) {
+    super(access.message);
+    this.access = access;
+  }
+}
+function safeRealpath(path) {
+  try {
+    return realpathSync8.native(path);
+  } catch {
+    return path;
+  }
+}
+function ancestorScopePaths(scopePath) {
+  const { volumeId, path } = splitScopePath(scopePath);
+  const parts = path.split("/").filter(Boolean);
+  const out = [];
+  if (volumeId)
+    out.push(scopePathFor("/", volumeId));
+  for (let length = 1;length < parts.length; length += 1) {
+    out.push(scopePathFor(`/${parts.slice(0, length).join("/")}`, volumeId));
+  }
+  return out;
+}
+function localFilesListing(options) {
+  const volumes = options.volumes ?? new VolumeResolver;
+  const home = safeRealpath(options.home ?? options.context?.home ?? homedir18());
+  const context2 = options.context ?? {
+    ...defaultExclusionContext(),
+    home,
+    volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
+  };
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync6(realPath, { withFileTypes: true }));
+  const permissions = options.permissions ?? new MacPermissions({
+    home,
+    memoryPath: folderAccessMemoryPath()
+  });
+  const node = (scopePath, name, parentKey2, access) => {
+    const own3 = isInsideOwnRoot(scopePath, context2);
+    const reason = own3 ? "olympus_data" : defaultExclusionForFolder(scopePath, context2);
+    return {
+      key: scopePath,
+      ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
+      name: name.normalize("NFC"),
+      kind: "folder",
+      has_children: !own3,
+      selectable: !own3,
+      ...reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {},
+      ...access ? { access } : {}
+    };
+  };
+  const childFolders = (realPath, parentKey2) => {
+    let entries;
+    try {
+      entries = readDirectory(realPath);
+    } catch (error) {
+      const code = error.code;
+      if (code === "EACCES" || code === "EPERM") {
+        const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
+        if (guard && code !== "EACCES")
+          throw new AccessRefused(permissions.noteDenied(guard));
+        if (permissions.isPrivacyRefusal(realPath, code, volumes.volumeOf(realPath))) {
+          const fda = !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+          if (fda)
+            throw new AccessRefused(fda);
+        }
+        throw new Error(permissions.unreadableCopy());
+      }
+      throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
+    }
+    const offered = (entry) => !entry.isSymbolicLink() && entry.isDirectory();
+    return entries.filter(offered).map((entry) => {
+      const childReal = join41(realPath, entry.name);
+      const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
+      const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
+      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
+    }).sort((a, b) => {
+      const aHidden = a.name.startsWith(".");
+      const bHidden = b.name.startsWith(".");
+      if (aHidden !== bHidden)
+        return aHidden ? 1 : -1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  };
+  const browse = async (request) => {
+    const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
+    const cursorScope = LOCAL_FILES_SOURCE_ID;
+    const offsetText = decodeCursor(cursorScope, parent ?? "", request.cursor);
+    const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
+    if (!Number.isInteger(offset) || offset < 0)
+      throw new Error("Folder browse cursor is invalid.");
+    let all;
+    let access;
+    if (parent === undefined) {
+      volumes.refresh();
+      all = [
+        ...childFolders(home, undefined),
+        ...volumes.locations().map((volume) => {
+          const guard = permissions.guardOf(volume.mountPoint, volume);
+          const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
+          return {
+            key: scopePathFor("/", volume.id),
+            name: volume.label,
+            kind: "folder",
+            has_children: true,
+            selectable: true,
+            is_disk: true,
+            ...diskAccess ? { access: diskAccess } : {}
+          };
+        })
+      ];
+      access = permissions.fullDiskAccessNote();
+    } else {
+      const real = realPathOfScopePath(volumes, parent);
+      if (!real)
+        throw new Error("That disk is not connected right now.");
+      const guard = permissions.guardOf(real, volumes.volumeOf(real));
+      const refused = guard ? await permissions.open(guard) : undefined;
+      if (refused)
+        return { nodes: [], access: refused };
+      try {
+        all = childFolders(real, parent);
+      } catch (error) {
+        if (error instanceof AccessRefused)
+          return { nodes: [], access: error.access };
+        throw error;
+      }
+    }
+    const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
+    const next = offset + BROWSE_PAGE_SIZE2;
+    return {
+      nodes: page2,
+      ...next < all.length ? { nextCursor: encodeCursor(cursorScope, parent ?? "", String(next)) } : {},
+      ...access ? { access } : {}
+    };
+  };
+  return { volumes, permissions, context: context2, browse };
+}
+function createLocalFilesFolderScopeBrowser(options = {}) {
+  const { volumes, permissions, context: context2, browse } = localFilesListing(options);
+  return {
+    sourceId: LOCAL_FILES_SOURCE_ID,
+    browse,
+    checkApproval({ selections, wholeAccount }) {
+      if (!permissions.active || permissions.hasHelper())
+        return;
+      const blocked = wholeAccount || selections.some((selection) => {
+        if (selection.state === "exclude")
+          return false;
+        const key2 = normalizeScopePath(selection.key);
+        if (key2 === "/")
+          return true;
+        const real = realPathOfScopePath(volumes, key2);
+        return real !== undefined && permissions.blocksReadWithoutHelper(real, volumes.volumeOf(real));
+      });
+      if (blocked)
+        throw new Error(permissions.helperNeededCopy());
+    },
+    async validateSelections(selections) {
+      const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));
+      for (const selection of normalized) {
+        if (selection.key === "/")
+          throw new Error("Whole-computer access requires explicit confirmation.");
+        const real = realPathOfScopePath(volumes, selection.key);
+        if (!real)
+          throw new Error("A selected disk is not connected right now.");
+        let isFolder = false;
+        try {
+          isFolder = lstatSync16(real).isDirectory();
+        } catch {
+          isFolder = false;
+        }
+        if (!isFolder)
+          throw new Error("A selected folder could not be verified. It may have moved.");
+        const canonical = realpathSync8.native(real);
+        if (canonical !== real) {
+          if (canonical.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
+            throw new Error("A selected folder is reached through a link. Choose the folder itself.");
+          }
+          selection.key = scopePathOfRealPath(volumes, canonical);
+        }
+        if (selection.state !== "exclude" && isInsideOwnRoot(selection.key, context2)) {
+          throw new Error(`${DEFAULT_EXCLUSION_LABELS.olympus_data} is never indexed. Choose a different folder.`);
+        }
+      }
+      return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
+    },
+    async afterApproval({ wholeAccount }) {
+      if (wholeAccount && permissions.active && permissions.hasHelper() && !permissions.hasFullDiskAccess()) {
+        (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
+      }
+    }
+  };
+}
+registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocalFilesFolderScopeBrowser());
+
+// src/workers/dashboard/backup-routes.ts
+init_paths();
+init_backup_paths();
+
 // src/workers/cli-operations.ts
 init_cli_via_worker();
 init_config();
@@ -73672,34 +74734,13 @@ init_tiered_store_set();
 init_file_extraction_source();
 init_file_mime();
 init_scope_safe_fs();
-
-// src/workers/local-files/locations.ts
-init_paths();
-function realPathOfScopePath(volumes, scopePath) {
-  const { volumeId, path } = splitScopePath(scopePath);
-  if (!volumeId)
-    return path;
-  const volume = volumes.mountedVolume(volumeId);
-  if (!volume)
-    return;
-  return path === "/" ? volume.mountPoint : `${volume.mountPoint === "/" ? "" : volume.mountPoint}${path}`;
-}
-function scopePathOfRealPath(volumes, realPath) {
-  const volume = volumes.volumeOf(realPath);
-  if (volume.primary)
-    return scopePathFor(realPath);
-  const inside = realPath === volume.mountPoint ? "/" : realPath.slice(volume.mountPoint.length) || "/";
-  return scopePathFor(inside, volume.id);
-}
-
-// src/workers/local-files/connector.ts
 init_paths();
 init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync29, readFileSync as readFileSync25 } from "node:fs";
-import { dirname as dirname39, join as join38 } from "node:path";
+import { existsSync as existsSync33, readFileSync as readFileSync27 } from "node:fs";
+import { dirname as dirname41, join as join42 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
   constructor(detail) {
@@ -73758,7 +74799,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync29(snapshotPath))
+    if (!existsSync33(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -73871,7 +74912,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value = Number.parseInt(readFileSync25("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value = Number.parseInt(readFileSync27("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return;
@@ -73887,11 +74928,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join38(dir, "node_modules");
-    if (!existsSync29(join38(candidate, "@parcel", "watcher")))
+    const candidate = join42(dir, "node_modules");
+    if (!existsSync33(join42(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join38(dirname39(candidate), "package.json"));
+      const requireFrom = createRequire8(join42(dirname41(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -73941,7 +74982,7 @@ init_google_connectors();
 init_readwise();
 init_x_bookmarks();
 init_live_control2();
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 
 // src/workers/whatsapp/index.ts
 init_live_connector();
@@ -74028,7 +75069,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -74923,7 +75964,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash30("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -76233,747 +77274,8 @@ init_paths();
 // src/workers/email-source/server.ts
 init_paths();
 init_source_ingestion_policy();
-
-// src/workers/local-files/volume-identity.ts
-init_paths();
-import { createHash as createHash30 } from "node:crypto";
-import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync31, lstatSync as lstatSync14, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
-import { homedir as homedir16 } from "node:os";
-var NETWORK_FS_TYPES = new Set([
-  "nfs",
-  "nfs4",
-  "cifs",
-  "smbfs",
-  "smb3",
-  "afpfs",
-  "webdav",
-  "fuse.sshfs",
-  "sshfs",
-  "ceph",
-  "glusterfs",
-  "9p",
-  "davfs"
-]);
-var IGNORED_FS_TYPES = new Set([
-  "autofs",
-  "devfs",
-  "devtmpfs",
-  "proc",
-  "sysfs",
-  "tmpfs",
-  "cgroup",
-  "cgroup2",
-  "overlay",
-  "squashfs",
-  "fdescfs",
-  "securityfs",
-  "debugfs",
-  "tracefs",
-  "pstore",
-  "bpf",
-  "configfs",
-  "fusectl",
-  "mqueue",
-  "hugetlbfs",
-  "binfmt_misc",
-  "ramfs",
-  "rpc_pipefs",
-  "nsfs",
-  "efivarfs",
-  "autofs",
-  "fuse.portal",
-  "fuse.gvfsd-fuse"
-]);
-var CACHE_TTL_MS = 15000;
-
-class VolumeResolver {
-  deps;
-  cache;
-  caseByVolume = new Map;
-  constructor(deps = {}) {
-    this.deps = {
-      ...deps,
-      platform: deps.platform ?? process.platform,
-      home: deps.home ?? homedir16(),
-      now: deps.now ?? Date.now
-    };
-  }
-  volumes() {
-    const now = this.deps.now();
-    if (this.cache && now - this.cache.at < CACHE_TTL_MS)
-      return this.cache.volumes;
-    const volumes = this.scan();
-    this.cache = { at: now, volumes };
-    return volumes;
-  }
-  refresh() {
-    this.cache = undefined;
-  }
-  ignoresCase(volumeId, path) {
-    const home = this.deps.home;
-    const volume = volumeId === undefined ? this.volumeOf(path ?? home) : this.mountedVolume(volumeId);
-    if (!volume)
-      return;
-    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
-    if (this.caseByVolume.has(cacheKey))
-      return this.caseByVolume.get(cacheKey);
-    const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
-    const homeHere = volume.primary && isWithinScopePath(home, volume.mountPoint) && this.volumeOf(home).mountPoint === volume.mountPoint;
-    const places = homeHere ? [home, volume.mountPoint] : [volume.mountPoint];
-    let answer;
-    for (const place of places) {
-      answer = probe(place);
-      if (answer !== undefined)
-        break;
-    }
-    if (answer !== undefined)
-      this.caseByVolume.set(cacheKey, answer);
-    return answer;
-  }
-  volumeOf(realPath) {
-    let best;
-    for (const volume of this.volumes()) {
-      if (!isWithinScopePath(realPath, volume.mountPoint))
-        continue;
-      if (!best || volume.mountPoint.length > best.mountPoint.length)
-        best = volume;
-    }
-    return best ?? this.primaryFallback();
-  }
-  mountedVolume(id) {
-    return this.volumes().find((volume) => volume.id === id);
-  }
-  locations() {
-    return this.volumes().filter((volume) => !volume.primary);
-  }
-  primaryFallback() {
-    return { id: "primary", mountPoint: "/", label: "Macintosh HD", kind: "internal", primary: true };
-  }
-  scan() {
-    let raw = [];
-    try {
-      const text3 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
-      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text3) : parseLinuxMountinfo(text3);
-    } catch {
-      raw = [];
-    }
-    const uuids = this.deps.platform === "linux" ? (this.deps.uuidsByDevice ?? defaultUuidsByDevice)() : undefined;
-    const homeMount = this.homeMountPoint(raw);
-    const volumes = [];
-    for (const mount of raw) {
-      if (IGNORED_FS_TYPES.has(mount.fsType) && mount.mountPoint !== "/")
-        continue;
-      if (mount.mountPoint !== "/" && /^\/(proc|sys|dev|run|snap|boot)(\/|$)/.test(mount.mountPoint))
-        continue;
-      if (this.deps.platform === "darwin" && /^\/System\/Volumes\/(?!Data$)/.test(mount.mountPoint))
-        continue;
-      if (this.deps.platform === "darwin" && mount.mountPoint.startsWith("/private/var/"))
-        continue;
-      const network = NETWORK_FS_TYPES.has(mount.fsType);
-      const primary = mount.mountPoint === "/" || mount.mountPoint === "/System/Volumes/Data" || mount.mountPoint === homeMount;
-      const id = primary ? "primary" : this.idFor(mount, network, uuids);
-      if (!id)
-        continue;
-      volumes.push({
-        id,
-        mountPoint: mount.mountPoint,
-        label: labelFor2(mount.mountPoint),
-        kind: network ? "network" : primary ? "internal" : "removable",
-        primary
-      });
-    }
-    if (!volumes.some((volume) => volume.mountPoint === "/"))
-      volumes.push(this.primaryFallback());
-    return volumes;
-  }
-  homeMountPoint(mounts) {
-    let best;
-    for (const mount of mounts) {
-      if (!isWithinScopePath(this.deps.home, mount.mountPoint))
-        continue;
-      if (!best || mount.mountPoint.length > best.mountPoint.length)
-        best = mount;
-    }
-    return best?.mountPoint;
-  }
-  idFor(mount, network, uuids) {
-    if (network)
-      return `net-${shortHash(normalizeNetworkSource(mount.source))}`;
-    if (this.deps.platform === "darwin") {
-      const plist = (this.deps.diskutilPlist ?? defaultDiskutilPlist)(mount.mountPoint);
-      const uuid2 = plist ? plistString(plist, "VolumeUUID") : undefined;
-      if (uuid2)
-        return `mac-${uuid2.toLowerCase()}`;
-      return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
-    }
-    const uuid = uuids?.get(mount.source);
-    if (uuid)
-      return `lin-${uuid.toLowerCase()}`;
-    return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
-  }
-}
-function probeIgnoresCaseIn(dir) {
-  let names;
-  try {
-    names = readdirSync4(dir);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    const swapped = name.replace(/[a-zA-Z]/g, (letter) => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
-    if (swapped === name)
-      continue;
-    try {
-      const own3 = lstatSync14(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
-      try {
-        const other = lstatSync14(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
-        return other.ino === own3.ino && other.dev === own3.dev;
-      } catch (error) {
-        if (error.code === "ENOENT")
-          return false;
-        return;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return;
-}
-function labelFor2(mountPoint) {
-  if (mountPoint === "/")
-    return "Macintosh HD";
-  return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
-}
-function shortHash(value) {
-  return createHash30("sha256").update(value).digest("hex").slice(0, 16);
-}
-function normalizeNetworkSource(source) {
-  return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
-}
-function defaultReadMounts(platform2) {
-  if (platform2 === "darwin")
-    return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync27("/proc/self/mountinfo", "utf8");
-}
-function defaultDiskutilPlist(mountPoint) {
-  try {
-    return execFileSync2("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
-      encoding: "utf8",
-      timeout: 8000,
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-  } catch {
-    return;
-  }
-}
-function defaultUuidsByDevice() {
-  const result = new Map;
-  const dir = "/dev/disk/by-uuid";
-  try {
-    if (!existsSync31(dir))
-      return result;
-    for (const name of readdirSync4(dir)) {
-      try {
-        result.set(realpathSync7(`${dir}/${name}`), name);
-      } catch {}
-    }
-  } catch {}
-  return result;
-}
-function parseDarwinMounts(text3) {
-  const mounts = [];
-  for (const line of text3.split(`
-`)) {
-    const match = /^(.+?) on (\/.*?) \(([^,)]+)/.exec(line);
-    if (!match)
-      continue;
-    mounts.push({ source: match[1], mountPoint: match[2], fsType: match[3].trim() });
-  }
-  return mounts;
-}
-function parseLinuxMountinfo(text3) {
-  const mounts = [];
-  for (const line of text3.split(`
-`)) {
-    const separator = line.indexOf(" - ");
-    if (separator < 0)
-      continue;
-    const head = line.slice(0, separator).split(" ");
-    const tail = line.slice(separator + 3).split(" ");
-    if (head.length < 6 || tail.length < 2)
-      continue;
-    mounts.push({
-      mountPoint: unescapeMountinfo(head[4]),
-      fsType: tail[0],
-      source: unescapeMountinfo(tail[1])
-    });
-  }
-  return mounts;
-}
-function unescapeMountinfo(value) {
-  return value.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
-}
-function plistString(plist, key2) {
-  const match = new RegExp(`<key>${key2}</key>\\s*<string>([^<]+)</string>`).exec(plist);
-  return match?.[1]?.trim();
-}
-
-// src/workers/email-source/server.ts
 init_local_open();
 init_connector_source();
-
-// src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync15, readdirSync as readdirSync5, realpathSync as realpathSync8 } from "node:fs";
-import { homedir as homedir18 } from "node:os";
-import { join as join41 } from "node:path";
-
-// src/workers/source-scope-browser.ts
-init_credential_broker();
-init_drive();
-init_provider_client();
-var GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
-var BROWSE_PAGE_SIZE = 100;
-function createGoogleDriveFolderScopeBrowser(options) {
-  const connector = new GoogleDriveSourceConnector({
-    credentialHandle: options.credentialHandle,
-    ...options.account ? { account: options.account } : {},
-    ...options.credentialBroker ? { credentialBroker: options.credentialBroker } : {},
-    ...options.fetch ? { fetch: options.fetch } : {},
-    ...options.apiClient ? { apiClient: options.apiClient } : {},
-    ...options.requestBudget ? { requestBudget: options.requestBudget } : {},
-    provenance: "operator"
-  });
-  return {
-    sourceId: "google_drive.docs",
-    async browse(request) {
-      const parent = normalizeDriveParent(request.parentKey);
-      const providerCursor = decodeCursor("google_drive.docs", parent, request.cursor);
-      const client = await connector.apiClientForTooling();
-      const page2 = await client.listFiles({
-        pageSize: BROWSE_PAGE_SIZE,
-        ...providerCursor ? { pageToken: providerCursor } : {},
-        query: `trashed = false and mimeType = '${GOOGLE_FOLDER_MIME_TYPE}' and '${parent}' in parents`
-      });
-      return {
-        nodes: page2.files.filter((file) => file.id && file.mimeType === GOOGLE_FOLDER_MIME_TYPE).map((file) => ({
-          key: file.id,
-          ...request.parentKey ? { parent_key: parent } : {},
-          name: file.name?.trim() || "Untitled folder",
-          kind: "folder",
-          has_children: true,
-          selectable: true
-        })),
-        ...page2.nextPageToken ? { nextCursor: encodeCursor("google_drive.docs", parent, page2.nextPageToken) } : {}
-      };
-    },
-    async validateSelections(selections) {
-      const client = await connector.apiClientForTooling();
-      if (!client.getFolder)
-        throw new Error("Google Drive folder validation is unavailable.");
-      const ancestry = new GoogleDriveFolderAncestry(client);
-      const ancestorsByKey = new Map;
-      for (const selection of selections) {
-        const key2 = normalizeDriveParent(selection.key);
-        if (key2 === "root")
-          throw new Error("Whole-account access requires explicit confirmation.");
-        const folder = await client.getFolder(key2);
-        if (folder.id !== key2 || !folder.parents || folder.parents.length === 0) {
-          throw new Error("A selected Google Drive folder could not be verified below the account root.");
-        }
-        const ancestors = await ancestry.resolve({ parents: folder.parents });
-        if (!ancestors)
-          throw new Error("A selected Google Drive folder ancestry could not be verified.");
-        ancestorsByKey.set(key2, ancestors);
-      }
-      return effectiveSelections(selections, (key2) => ancestorsByKey.get(key2) ?? []);
-    }
-  };
-}
-function createDropboxFolderScopeBrowser(options) {
-  const broker = options.credentialBroker ?? createEnvCredentialBroker({
-    ...options.fetch ? { fetch: options.fetch } : {}
-  });
-  let client = options.metadataClient;
-  const metadataClient = async () => {
-    if (client)
-      return client;
-    const session = requireBearerTokenCredentialSession(await broker.issueSession({
-      handle: options.credentialHandle,
-      provider: "dropbox",
-      capability: "dropbox.files.sync",
-      trustDomain: "secure_local",
-      purpose: "Browse Dropbox folders before source-scope approval."
-    }), options.credentialHandle);
-    client = new DropboxApiMetadataClient({
-      token: session.token,
-      ...options.fetch ? { fetch: options.fetch } : {}
-    });
-    return client;
-  };
-  return {
-    sourceId: "dropbox.files",
-    async browse(request) {
-      const parent = normalizeDropboxParent(request.parentKey);
-      const providerCursor = decodeCursor("dropbox.files", parent, request.cursor);
-      const api = await metadataClient();
-      const nodes = [];
-      let cursor = providerCursor;
-      const seenCursors = new Set;
-      for (let pages = 0;pages < 10; pages += 1) {
-        const page2 = cursor ? await api.listFolderContinue({ cursor, limit: BROWSE_PAGE_SIZE }) : await api.listFolder({
-          path: parent === "/" ? "" : parent,
-          recursive: false,
-          limit: BROWSE_PAGE_SIZE,
-          includeDeleted: false
-        });
-        for (const entry of page2.entries) {
-          if (entry.tag !== "folder")
-            continue;
-          const key2 = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
-          if (!nodes.some((node) => node.key === key2))
-            nodes.push({
-              key: key2,
-              ...request.parentKey ? { parent_key: parent } : {},
-              name: entry.name,
-              kind: "folder",
-              has_children: true,
-              selectable: true
-            });
-        }
-        if (!page2.hasMore) {
-          cursor = undefined;
-          break;
-        }
-        if (!page2.cursor || seenCursors.has(page2.cursor) || page2.cursor === cursor) {
-          throw new Error("Dropbox folder listing did not advance. Update folders to retry.");
-        }
-        cursor = page2.cursor;
-        seenCursors.add(cursor);
-        if (nodes.length >= 20)
-          break;
-      }
-      return { nodes, ...cursor ? { nextCursor: encodeCursor("dropbox.files", parent, cursor) } : {} };
-    },
-    async validateSelections(selections) {
-      const api = await metadataClient();
-      for (const selection of selections) {
-        const key2 = normalizeDropboxNodeKey(selection.key);
-        if (key2 === "/")
-          throw new Error("Whole-account access requires explicit confirmation.");
-        await api.listFolder({ path: key2, recursive: false, limit: 1, includeDeleted: false });
-      }
-      return effectiveSelections(selections.map((selection) => ({ ...selection, key: normalizeDropboxNodeKey(selection.key) })), (key2) => dropboxAncestorPaths(normalizeDropboxNodeKey(key2)));
-    }
-  };
-}
-function effectiveSelections(selections, ancestorsFor) {
-  const states = new Map(selections.map((selection) => [selection.key, selection.state]));
-  return selections.map((selection) => {
-    const ancestorKeys = [...ancestorsFor(selection.key)];
-    const ancestorStates = ancestorKeys.map((key2) => states.get(key2)).filter((state2) => state2 !== undefined);
-    const state = ancestorStates.includes("exclude") ? "exclude" : ancestorStates.includes("metadata_only") && selection.state === "ingest" ? "metadata_only" : selection.state;
-    return { key: selection.key, state, ancestorKeys };
-  });
-}
-function dropboxAncestorPaths(path) {
-  const parts = path.split("/").filter(Boolean);
-  const ancestors = [];
-  for (let index = 1;index < parts.length; index += 1) {
-    ancestors.push(`/${parts.slice(0, index).join("/")}`);
-  }
-  return ancestors;
-}
-function encodeCursor(source, parent, providerCursor) {
-  return Buffer.from(JSON.stringify({
-    version: 1,
-    source,
-    parent,
-    provider_cursor: providerCursor
-  })).toString("base64url");
-}
-function decodeCursor(source, parent, value) {
-  if (value === undefined)
-    return;
-  if (!value || value.length > 8192)
-    throw new Error("Folder browse cursor is invalid.");
-  try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-    if (parsed.version !== 1 || parsed.source !== source || parsed.parent !== parent || typeof parsed.provider_cursor !== "string" || !parsed.provider_cursor || parsed.provider_cursor.length > 6000)
-      throw new Error("shape");
-    return parsed.provider_cursor;
-  } catch {
-    throw new Error("Folder browse cursor is invalid for this source and parent.");
-  }
-}
-function normalizeDriveParent(value) {
-  if (value === undefined)
-    return "root";
-  const parent = value.trim();
-  if (!parent || parent.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(parent)) {
-    throw new Error("Google Drive folder key is invalid.");
-  }
-  return parent;
-}
-function normalizeDropboxParent(value) {
-  if (value === undefined)
-    return "/";
-  return normalizeDropboxNodeKey(value);
-}
-function normalizeDropboxNodeKey(value) {
-  const trimmed = value.trim().replace(/\/{2,}/g, "/");
-  if (!trimmed.startsWith("/") || trimmed.length > 4096 || trimmed.includes("\x00")) {
-    throw new Error("Dropbox folder key is invalid.");
-  }
-  return trimmed.length > 1 && trimmed.endsWith("/") ? trimmed.slice(0, -1).toLowerCase() : trimmed.toLowerCase();
-}
-function requireCredentialHandle(context2) {
-  if (!context2.credentialHandle)
-    throw new Error("This folder source needs a connected credential.");
-  return context2.credentialHandle;
-}
-var browserFactories = new Map([
-  ["google_drive.docs", (context2) => createGoogleDriveFolderScopeBrowser({
-    credentialHandle: requireCredentialHandle(context2),
-    ...context2.account ? { account: context2.account } : {},
-    ...context2.googleDriveRequestBudget ? { requestBudget: context2.googleDriveRequestBudget } : {}
-  })],
-  ["dropbox.files", (context2) => createDropboxFolderScopeBrowser({
-    credentialHandle: requireCredentialHandle(context2)
-  })]
-]);
-var builtInBrowserIds = new Set(browserFactories.keys());
-function registerFileScopeBrowserFactory(sourceId, factory) {
-  if (browserFactories.has(sourceId))
-    throw new Error(`A folder browser is already registered for ${sourceId}.`);
-  browserFactories.set(sourceId, factory);
-}
-
-// src/workers/local-files/scope-browser.ts
-init_mac_permissions();
-init_paths();
-init_scope();
-
-// src/workers/local-files/mac-settings.ts
-init_mac_permissions();
-import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync32 } from "node:fs";
-import { homedir as homedir17 } from "node:os";
-import { join as join40 } from "node:path";
-function helperAppPathForHome(home = homedir17()) {
-  return join40(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
-}
-function revealHelperAndOpenFullDiskAccess(deps = {}) {
-  const run = deps.run ?? ((command, args) => {
-    spawn3(command, args, { stdio: "ignore", detached: true }).unref();
-  });
-  const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync32)(helper))
-    run("/usr/bin/open", ["-R", helper]);
-  run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
-}
-
-// src/workers/local-files/scope-browser.ts
-var BROWSE_PAGE_SIZE2 = 100;
-
-class AccessRefused extends Error {
-  access;
-  constructor(access) {
-    super(access.message);
-    this.access = access;
-  }
-}
-function safeRealpath(path) {
-  try {
-    return realpathSync8.native(path);
-  } catch {
-    return path;
-  }
-}
-function ancestorScopePaths(scopePath) {
-  const { volumeId, path } = splitScopePath(scopePath);
-  const parts = path.split("/").filter(Boolean);
-  const out = [];
-  if (volumeId)
-    out.push(scopePathFor("/", volumeId));
-  for (let length = 1;length < parts.length; length += 1) {
-    out.push(scopePathFor(`/${parts.slice(0, length).join("/")}`, volumeId));
-  }
-  return out;
-}
-function localFilesListing(options) {
-  const volumes = options.volumes ?? new VolumeResolver;
-  const home = safeRealpath(options.home ?? options.context?.home ?? homedir18());
-  const context2 = options.context ?? {
-    ...defaultExclusionContext(),
-    home,
-    volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
-  };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
-  const permissions = options.permissions ?? new MacPermissions({
-    home,
-    memoryPath: folderAccessMemoryPath()
-  });
-  const node = (scopePath, name, parentKey2, access) => {
-    const own3 = isInsideOwnRoot(scopePath, context2);
-    const reason = own3 ? "olympus_data" : defaultExclusionForFolder(scopePath, context2);
-    return {
-      key: scopePath,
-      ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
-      name: name.normalize("NFC"),
-      kind: "folder",
-      has_children: !own3,
-      selectable: !own3,
-      ...reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {},
-      ...access ? { access } : {}
-    };
-  };
-  const childFolders = (realPath, parentKey2) => {
-    let entries;
-    try {
-      entries = readDirectory(realPath);
-    } catch (error) {
-      const code = error.code;
-      if (code === "EACCES" || code === "EPERM") {
-        const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
-        if (guard && code !== "EACCES")
-          throw new AccessRefused(permissions.noteDenied(guard));
-        if (permissions.isPrivacyRefusal(realPath, code, volumes.volumeOf(realPath))) {
-          const fda = !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
-          if (fda)
-            throw new AccessRefused(fda);
-        }
-        throw new Error(permissions.unreadableCopy());
-      }
-      throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
-    }
-    const offered = (entry) => !entry.isSymbolicLink() && entry.isDirectory();
-    return entries.filter(offered).map((entry) => {
-      const childReal = join41(realPath, entry.name);
-      const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
-      const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
-      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
-    }).sort((a, b) => {
-      const aHidden = a.name.startsWith(".");
-      const bHidden = b.name.startsWith(".");
-      if (aHidden !== bHidden)
-        return aHidden ? 1 : -1;
-      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-    });
-  };
-  const browse = async (request) => {
-    const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
-    const cursorScope = LOCAL_FILES_SOURCE_ID;
-    const offsetText = decodeCursor(cursorScope, parent ?? "", request.cursor);
-    const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
-    if (!Number.isInteger(offset) || offset < 0)
-      throw new Error("Folder browse cursor is invalid.");
-    let all;
-    let access;
-    if (parent === undefined) {
-      volumes.refresh();
-      all = [
-        ...childFolders(home, undefined),
-        ...volumes.locations().map((volume) => {
-          const guard = permissions.guardOf(volume.mountPoint, volume);
-          const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
-          return {
-            key: scopePathFor("/", volume.id),
-            name: volume.label,
-            kind: "folder",
-            has_children: true,
-            selectable: true,
-            is_disk: true,
-            ...diskAccess ? { access: diskAccess } : {}
-          };
-        })
-      ];
-      access = permissions.fullDiskAccessNote();
-    } else {
-      const real = realPathOfScopePath(volumes, parent);
-      if (!real)
-        throw new Error("That disk is not connected right now.");
-      const guard = permissions.guardOf(real, volumes.volumeOf(real));
-      const refused = guard ? await permissions.open(guard) : undefined;
-      if (refused)
-        return { nodes: [], access: refused };
-      try {
-        all = childFolders(real, parent);
-      } catch (error) {
-        if (error instanceof AccessRefused)
-          return { nodes: [], access: error.access };
-        throw error;
-      }
-    }
-    const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
-    const next = offset + BROWSE_PAGE_SIZE2;
-    return {
-      nodes: page2,
-      ...next < all.length ? { nextCursor: encodeCursor(cursorScope, parent ?? "", String(next)) } : {},
-      ...access ? { access } : {}
-    };
-  };
-  return { volumes, permissions, context: context2, browse };
-}
-function createLocalFilesFolderScopeBrowser(options = {}) {
-  const { volumes, permissions, context: context2, browse } = localFilesListing(options);
-  return {
-    sourceId: LOCAL_FILES_SOURCE_ID,
-    browse,
-    checkApproval({ selections, wholeAccount }) {
-      if (!permissions.active || permissions.hasHelper())
-        return;
-      const blocked = wholeAccount || selections.some((selection) => {
-        if (selection.state === "exclude")
-          return false;
-        const key2 = normalizeScopePath(selection.key);
-        if (key2 === "/")
-          return true;
-        const real = realPathOfScopePath(volumes, key2);
-        return real !== undefined && permissions.blocksReadWithoutHelper(real, volumes.volumeOf(real));
-      });
-      if (blocked)
-        throw new Error(permissions.helperNeededCopy());
-    },
-    async validateSelections(selections) {
-      const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));
-      for (const selection of normalized) {
-        if (selection.key === "/")
-          throw new Error("Whole-computer access requires explicit confirmation.");
-        const real = realPathOfScopePath(volumes, selection.key);
-        if (!real)
-          throw new Error("A selected disk is not connected right now.");
-        let isFolder = false;
-        try {
-          isFolder = lstatSync15(real).isDirectory();
-        } catch {
-          isFolder = false;
-        }
-        if (!isFolder)
-          throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical = realpathSync8.native(real);
-        if (canonical !== real) {
-          if (canonical.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
-            throw new Error("A selected folder is reached through a link. Choose the folder itself.");
-          }
-          selection.key = scopePathOfRealPath(volumes, canonical);
-        }
-        if (selection.state !== "exclude" && isInsideOwnRoot(selection.key, context2)) {
-          throw new Error(`${DEFAULT_EXCLUSION_LABELS.olympus_data} is never indexed. Choose a different folder.`);
-        }
-      }
-      return effectiveSelections(normalized, (key2) => ancestorScopePaths(key2));
-    },
-    async afterApproval({ wholeAccount }) {
-      if (wholeAccount && permissions.active && permissions.hasHelper() && !permissions.hasFullDiskAccess()) {
-        (options.openFullDiskAccess ?? revealHelperAndOpenFullDiskAccess)();
-      }
-    }
-  };
-}
-registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocalFilesFolderScopeBrowser());
-
-// src/workers/email-source/server.ts
 init_tiered_extraction();
 init_source_ingestion_exclusions();
 init_telegram_messages();
@@ -76995,7 +77297,7 @@ init_manifest3();
 
 // src/workers/archive-import/mbox/gmail-account.ts
 var DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
-var MAX_HEADER_BYTES = 256 * 1024;
+var MAX_HEADER_BYTES2 = 256 * 1024;
 var MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
 
 // src/workers/archive-import/mbox/gmail-input.ts
@@ -77004,7 +77306,7 @@ init_state();
 
 // src/workers/archive-import/mbox/mime-parts.ts
 init_gmail_mail_record();
-var MAX_HEADER_BYTES2 = 256 * 1024;
+var MAX_HEADER_BYTES3 = 256 * 1024;
 
 // src/workers/archive-import/mbox/gmail-input.ts
 var MAX_GMAIL_ID = (1n << 64n) - 1n;
@@ -77221,7 +77523,7 @@ init_file_scope_sources();
 init_this_computer();
 init_connected_handles();
 init_mail_source_scope();
-import { statSync as statSync13 } from "node:fs";
+import { statSync as statSync14 } from "node:fs";
 function isMailSourceScopePolicyRef(ref) {
   return ref.sourceId === "gmail.email";
 }
@@ -77318,6 +77620,16 @@ class FileSourceScopeAuthority {
       statePath: this.statePath
     });
   }
+  approvedProviderAccount(approval) {
+    if (approval.status !== "approved" || !approval.accountGeneration)
+      return;
+    try {
+      const account = connectedFileSourceAccountGeneration(approval.sourceId, this.fileScopeRegistry());
+      return account?.generation === approval.accountGeneration ? account.handle.providerAccountId : undefined;
+    } catch {
+      return;
+    }
+  }
   assertCurrent(ref) {
     const key2 = this.approvalFilesKey(ref);
     const reused = key2 === undefined ? undefined : this.approvedByFiles.get(ref.sourceId);
@@ -77339,7 +77651,7 @@ class FileSourceScopeAuthority {
       return;
     try {
       const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat4 = statSync13(path, { throwIfNoEntry: false });
+        const stat4 = statSync14(path, { throwIfNoEntry: false });
         return stat4 ? [stat4.ino, stat4.mtimeMs, stat4.size] : null;
       });
       return JSON.stringify([ref.accountGeneration, ref.revision, files]);
@@ -77505,8 +77817,8 @@ init_control_path_headroom();
 init_sniffer();
 init_tier_ledger();
 init_tier_classifier();
-import { chmodSync as chmodSync8, existsSync as existsSync33, lstatSync as lstatSync16, mkdirSync as mkdirSync18, readFileSync as readFileSync28 } from "node:fs";
-import { join as join42 } from "node:path";
+import { chmodSync as chmodSync9, existsSync as existsSync34, lstatSync as lstatSync17, mkdirSync as mkdirSync19, readFileSync as readFileSync28 } from "node:fs";
+import { join as join43 } from "node:path";
 import { createHash as createHash31, randomUUID as randomUUID12 } from "node:crypto";
 
 // src/workers/classification/embedding-logistic.ts
@@ -77879,7 +78191,7 @@ class EmbeddingPrefilter {
     this.options = options;
     this.owner = options.sharedWith?.owner ?? this;
     this.owner.members.add(this);
-    this.path = join42(embeddingPrefilterDirectory(this.control.dbPath), "weights.json");
+    this.path = join43(embeddingPrefilterDirectory(this.control.dbPath), "weights.json");
     try {
       const audit = this.control.readMeta(`${PREFIX}audit`);
       this.auditState = audit ? JSON.parse(audit) : { misses: [], stopped: false };
@@ -77903,9 +78215,9 @@ class EmbeddingPrefilter {
       this.control.deleteMeta(TRAINING);
     }
     try {
-      if (existsSync33(this.path) && !lstatSync16(this.path).isSymbolicLink() && lstatSync16(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync16(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
-        chmodSync8(embeddingPrefilterDirectory(this.control.dbPath), 448);
-        chmodSync8(this.path, 384);
+      if (existsSync34(this.path) && !lstatSync17(this.path).isSymbolicLink() && lstatSync17(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync17(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
+        chmodSync9(embeddingPrefilterDirectory(this.control.dbPath), 448);
+        chmodSync9(this.path, 384);
         this.saved = JSON.parse(readFileSync28(this.path, "utf8"));
       }
     } catch {
@@ -78053,8 +78365,8 @@ class EmbeddingPrefilter {
     let stage = "scan_failed";
     try {
       const revisions = this.revisions();
-      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync33(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
-        if (existsSync33(this.path))
+      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync34(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
+        if (existsSync34(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
         if (attempt?.outcome === "trained")
@@ -78224,10 +78536,10 @@ class EmbeddingPrefilter {
                 if (this.control.dbPath === ":memory:")
                   throw new Error;
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
-                if (existsSync33(directory) && (!lstatSync16(directory).isDirectory() || lstatSync16(directory).isSymbolicLink()))
+                if (existsSync34(directory) && (!lstatSync17(directory).isDirectory() || lstatSync17(directory).isSymbolicLink()))
                   throw new Error;
-                mkdirSync18(directory, { recursive: true, mode: 448 });
-                chmodSync8(directory, 448);
+                mkdirSync19(directory, { recursive: true, mode: 448 });
+                chmodSync9(directory, 448);
                 const saved = { model: run.model, judge: judge2, revisions, trainedAt: this.now(), version: randomUUID12() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
                 this.saved = saved;
@@ -78239,7 +78551,7 @@ class EmbeddingPrefilter {
         }
       }
       if (attempt.revisions !== this.revisions()) {
-        if (existsSync33(this.path))
+        if (existsSync34(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
@@ -78308,7 +78620,7 @@ class EmbeddingPrefilter {
       return skip("model_missing");
     if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt))
       return skip("model_invalid");
-    if (!existsSync33(this.path))
+    if (!existsSync34(this.path))
       return skip("weights_missing");
     if (this.saved.revisions !== this.revisions())
       return skip("revisions_changed");
@@ -78464,8 +78776,8 @@ init_answer_activity();
 init_atomic_file();
 init_sniffer();
 import { createHash as createHash32 } from "node:crypto";
-import { mkdirSync as mkdirSync19, readFileSync as readFileSync29 } from "node:fs";
-import { dirname as dirname41 } from "node:path";
+import { mkdirSync as mkdirSync20, readFileSync as readFileSync29 } from "node:fs";
+import { dirname as dirname42 } from "node:path";
 init_sniffer_lane();
 init_sniffer_store();
 init_tier_classifier();
@@ -78513,7 +78825,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync19(dirname41(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync20(dirname42(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -79050,7 +79362,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync34 } from "node:fs";
+import { existsSync as existsSync35 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
@@ -79332,7 +79644,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync34(path);
+      const hasQueue = existsSync35(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -79723,14 +80035,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync34(bound)) {
+        if (bound && bound !== ":memory:" && existsSync35(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync34(own3))
+      if (existsSync35(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -80790,7 +81102,7 @@ async function runSourceEmbeddingDrain(options) {
   const progressHeartbeatMs = nonNegativeIntOption(options.progressHeartbeatMs, 0, "progressHeartbeatMs");
   const maxConsecutiveFailures = positiveIntOrUnboundedOption(options.maxConsecutiveFailures, DEFAULT_MAX_CONSECUTIVE_FAILURES, "maxConsecutiveFailures");
   const stopWhenIdle = options.stopWhenIdle ?? false;
-  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms)));
+  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
   const startedAt = Date.now();
   const deadlineMs = startedAt + maxRuntimeSeconds * 1000;
   let runs = 0;
@@ -81024,7 +81336,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config2) => {
-    if (!config2.dbPath || !existsSync35(config2.dbPath))
+    if (!config2.dbPath || !existsSync36(config2.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config2), { ...config2, dbPath: config2.dbPath, readOnly: true }, env);
     try {
@@ -81376,9 +81688,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute16(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname42(readinessPath);
-  mkdirSync20(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync17(directory);
+  const directory = dirname43(readinessPath);
+  mkdirSync21(directory, { recursive: true, mode: 448 });
+  const parent = lstatSync18(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -81407,7 +81719,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync20(dirname42(args.reportPath), { recursive: true });
+      mkdirSync21(dirname43(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -81417,7 +81729,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync20(dirname42(args.reportPath), { recursive: true });
+      mkdirSync21(dirname43(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
