@@ -1,0 +1,7 @@
+{
+ "split": "test",
+ "privatePrecisionMin": 0.95,
+ "privateRecallMin": 0.99,
+ "importantMissesMax": 0,
+ "confidence": 0.95
+}
