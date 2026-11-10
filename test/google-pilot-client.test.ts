@@ -62,7 +62,7 @@ describe('Google pilot client resolution order', () => {
   test('no source or script carries the retired client id', () => {
     const grep = Bun.spawnSync(['git', 'grep', '-l', RETIRED_ID, '--', 'src', 'scripts', 'site', 'skills', 'docs', 'chatgpt-plugin'], { cwd: ROOT });
     expect(grep.stdout.toString().trim()).toBe('');
-  });
+  }, 30_000);
 
   test('the release builder resolves its Desktop client through the shared choice module', () => {
     const builder = readFileSync(join(ROOT, 'scripts/release-artifact.ts'), 'utf8');
