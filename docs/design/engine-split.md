@@ -79,6 +79,58 @@ So neither a thread nor a process fixes the dashboard by itself. The
 split works only with two changes that also help today's single process:
 visibility kept in SQLite, and store queries run off the request thread.
 
+### Re-measured after parts 1 and 2 (2026-11-10)
+
+Main `8a9e2a8` (parts 1 and 2 on, part 3 present but switched off), same
+container and Bun, a fresh 500,000-item seed with half its items pending a
+move, every fifth item an attachment of the one before, and a current vector
+on every chunk. Requests now arrive on a fixed schedule whatever the layout
+(an open loop; latency counts from the scheduled arrival, at most 8 wait at
+once, and arrivals past that or after the window are shed), every layout
+measures the same 56 s window, and each layout ran 3 times, interleaved.
+The request's vector-lane check is `vectorLaneServable`, which the search
+path calls on main. Median (range) of the 3 runs; RSS is the measuring
+process's peak, plus the writer's for the second process. Other sessions'
+tests shared the 4 cores at times.
+
+One request every 2 s (all 28 served in every run):
+
+| Layout | Request p50 / max | Vector-lane check p50 | Keyword p50 | Longest freeze | Import rate | RSS |
+|---|---|---|---|---|---|---|
+| one process, keyword on the request thread | 1.9 s (1.8–1.9) / 2.1 s (2.0–2.4) | 0 ms | 1.8 s | 2.1 s (2.0–2.1) | 5,500 (4,000–6,000)/min | 762 MB |
+| one process, parts 1+2 (main today) | 2.3 s (2.3–2.4) / 2.7 s (2.5–2.7) | 0 ms | 2.2 s | 0.92 s (0.90–0.92) | 32,800 (32,500–37,100)/min | 1,015 MB |
+| writer in a Bun Worker, read pool | 1.9 s (1.9–1.9) / 2.5 s (2.5–2.7) | 0 ms | 1.9 s | 0.95 s (0.89–0.97) | 36,800 (35,400–39,100)/min | 1,270 MB (one process) |
+| split: writer in a second process, read pool | 1.8 s (1.8–1.9) / 2.5 s (2.5–3.1) | 0 ms | 1.8 s | 0.95 s (0.87–0.98) | 35,800 (31,300–35,900)/min | 406 MB front + 950 MB writer |
+
+One request every 250 ms, more than any layout can serve (224 offered; 31,
+about 58, about 65 and about 64 served):
+
+| Layout | Request p50 / max | Keyword p50 | Longest freeze | Import rate | RSS |
+|---|---|---|---|---|---|
+| one process, keyword on the request thread | 25.4 s / 49.4 s | 1.8 s | 2.7 s (2.6–2.7) | 2,400 (2,200–2,500)/min | 712 MB |
+| one process, parts 1+2 | 7.6 s (7.3–7.8) / 21.9 s (17.0–22.4) | 7.6 s, mostly waiting for the pool | 0.89 s | 39,500 (37,300–40,000)/min | 1,054 MB |
+| writer in a Bun Worker, read pool | 6.7 s (6.5–7.1) / 16.7 s (8.5–17.3) | 6.7 s | 0.91 s (0.88–0.94) | 33,400 (33,100–38,700)/min | 1,261 MB |
+| split, read pool | 7.1 s (7.0–7.1) / 17.3 s (8.4–17.6) | 7.1 s | 0.99 s (0.84–1.0) | 36,200 (33,500–37,500)/min | 348 MB front + 960–1,145 MB writer |
+
+Reproduce: `bun scripts/engine-split-bench.ts seed --items 500000`, then
+`bun scripts/engine-split-bench.ts run --mode same|thread|process --reads here|pool [--every-ms 2000]`.
+
+What changed. The vector-lane check the search path makes now
+(`vectorLaneServable`, which keeps a `true` for a while and reads part 1's
+visibility) takes under 1 ms in every layout, against 4.9 to 6.2 s for the
+per-request rebuild in the separate-reader layouts before, so a separate
+writer no longer makes requests slower. (An unmemoised `hasEmbeddings` on
+this seed, now with vectors, still took about 2.7 s in one 20 s probe.) Part 2 took the longest freeze from 2.1 to
+2.7 s down to about 0.9 s and let the import run 6 to 16 times faster in a
+single process; with both parts the single process now matches the split on
+request latency, freeze and import rate, and what the split still adds here
+is a smaller front (350 to 400 MB against about 1 GB) and a writer that can
+restart on its own, at more memory in all. Two things are left that no
+layout fixes: a keyword query is still about 1.8 s per store at this size,
+so requests queue as soon as more than about one a second arrive, and the
+request thread still stops for about 0.9 s in every pool layout, from work
+these runs did not isolate.
+
 ## Decision
 
 **A second process for all writing, plus a small pool of read threads in
@@ -98,8 +150,9 @@ the front.** Not "stay as is", and not worker threads alone.
 Why a process and not a Worker thread for the writer: latency was the
 same in both here, so the measurement does not choose between them; a
 process can be restarted on its own, which a thread cannot do without
-the dashboard. The choice is re-measured after parts 1 and 2 under equal
-offered load before part 3 is switched on anywhere.
+the dashboard. Re-measured after parts 1 and 2 under equal offered load
+(above, 2026-11-10): latency is still the same in both, so the restart
+and the smaller front decide it.
 That makes #957 (memory growing during long judging runs) a supervised
 restart instead of a leak hunt under deadline, and #803 (a restart counted
 as a task failure) stops touching the dashboard at all. A crash or out of
@@ -342,9 +395,9 @@ leak in shipped code; all are about the design. Where they landed:
 6. Boot, lock and acknowledgement semantics (40): background entry and
    commands above.
 7. Read pool fairness and WAL growth (49): Part 2 above.
-8. Benchmark limits (54): stated above; layouts are re-measured after
-   parts 1 and 2 with equal offered load, children, vectors and repeated
-   runs before part 3 is switched on.
+8. Benchmark limits (54): stated above; re-measured after parts 1 and 2
+   with equal offered load, children, vectors and repeated runs
+   (2026-11-10, above).
 9. Memory on 8 GB unproven (48): measured on a real machine before
    default-on.
 10. Owner preemption is not event-loop yielding (49): kept.
