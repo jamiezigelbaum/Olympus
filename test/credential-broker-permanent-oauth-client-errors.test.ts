@@ -40,6 +40,8 @@ afterEach(() => {
 describe('a permanent OAuth client refusal leaves the retry lane', () => {
   for (const [status, providerError] of [
     [401, 'invalid_client'],
+    // Google, for a client whose Cloud project was deleted (#765).
+    [401, 'deleted_client'],
     [403, 'unauthorized_client'],
     [403, 'access_denied'],
   ] as const) {

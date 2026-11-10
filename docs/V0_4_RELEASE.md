@@ -777,6 +777,18 @@ testers have exercised the normal product journey without custom engineering.
   (matching photos 0.73 to 0.78, non-matching queries at most 0.695 on 116 of
   the owner's photos). Design: `docs/design/photo-embeddings.md`.
 
+- **2026-11-10 (superseding the two entries below) — no build ships the
+  beta.11 Google Desktop client (#765).** Its Google Cloud project was shut
+  down on 2026-11-03 and is deleted for good about 30 days later; the owner
+  let it go. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` is now empty, a release built
+  with `OLYMPUS_GOOGLE_PILOT_CLIENT_ID` unset packages no Desktop client (the
+  builder no longer refuses by omission), and the builder refuses the retired
+  id outright. Only its SHA-256 ships, so an install whose Gmail or Drive
+  connection still names it is treated as connected through Olympus's app:
+  once Google refuses the refresh (`deleted_client`, now a permanent refusal
+  that marks the connection for reconnect), the card offers one-click
+  Reconnect through the current publisher client. No known install still uses
+  it.
 - **2026-10-03 (superseding the entry below) — 1.0 ships the beta.11 Google
   Desktop client as the source default.** An independent review found that
   installs which connected Gmail or Drive through the Desktop client that

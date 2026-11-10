@@ -799,14 +799,16 @@ async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
  * An Olympus 1.0 release build: no Google Desktop pilot client anywhere — not
  * in the environment, not substituted into the bundle, not in source.
  */
+/** The 0.4.0-beta.11 Desktop client; only its hash ships (#765). */
+const RETIRED_BETA11_PILOT_CLIENT_ID = '604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com';
+
 async function withoutPilotClient(run: () => Promise<void>): Promise<void> {
   const previous = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
   const previousWeb = process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
   delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
   delete process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
-  // Source now ships the beta.11 Desktop client as its default; a release
-  // built with the explicit `none` choice has no Desktop client at all. Stand
-  // that build in by making the packaged resolution return nothing.
+  // Source ships no Desktop client (#765); the spy also stands in for a
+  // release bundle built with the `none` choice.
   const pilotModule = await import('../src/core/google-pilot-client.ts');
   const packaged = spyOn(pilotModule, 'packagedGooglePilotClientId').mockReturnValue(undefined);
   try {
@@ -1581,6 +1583,22 @@ describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 rele
           expect(handles.some((handle) => handle.oauth2Refresh?.exchangeVia === 'publisher_endpoint')).toBe(true);
         }
       }
+    });
+  });
+
+  test('a connection made through the retired beta.11 pilot client reconnects through the publisher client (#765)', async () => {
+    await withoutPilotClient(async () => {
+      // No provenance field: beta.11 never wrote one. Without the retired-id
+      // check this id reads as the owner's own app, and Connect would go out
+      // through a client whose Google project is deleted.
+      const instance = fixture({ 'gmail.personal.oauth.client_id': RETIRED_BETA11_PILOT_CLIENT_ID });
+      const card = (await dashboardJson(instance)).sources
+        .find((source: { source_id: string }) => source.source_id === 'gmail.email');
+      expect(card.connection.action).toMatchObject({ kind: 'oauth', publisher_client: true });
+      expect(card.connection.action.known_client_id).toBeUndefined();
+      const started = await authorizationUrl(await startConnect(instance, { source: 'gmail' }));
+      expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+      expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
     });
   });
 

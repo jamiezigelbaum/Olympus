@@ -2607,6 +2607,9 @@ function isTerminalServiceAccountAssertionError(error: unknown): error is OAuth2
  */
 function isPermanentOAuthClientError(providerError: string | undefined): boolean {
   return providerError === 'invalid_client'
+    // Google's answer for a client whose Cloud project was deleted, as the
+    // beta.11 Desktop pilot client's was (#765): reconnect, never retry.
+    || providerError === 'deleted_client'
     || providerError === 'unauthorized_client'
     || providerError === 'access_denied';
 }
