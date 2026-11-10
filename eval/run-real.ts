@@ -82,7 +82,7 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import { answerContainsExpectedValue, type EvalGrade } from './grade.ts';
+import { acceptableForms, answerContainsExpectedValue, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
@@ -205,7 +205,7 @@ async function main(): Promise<void> {
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
   const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
-  const report = await runEval(dataset, {
+  const evaluated = await runEval(dataset, {
     questionTimeoutMs,
     continueOnQuestionError: true,
     stopOnQuestionTimeout: true,
@@ -274,6 +274,14 @@ async function main(): Promise<void> {
     },
   });
   opened.close();
+  // A question whose search lost a store or a lane to a deadline measured a
+  // different system than the one under test: it fails, loudly (#1242).
+  const report = failIncompleteRetrieval(evaluated, traces);
+  for (const grade of report.grades) {
+    for (const line of grade.detail.filter((entry) => entry.startsWith('retrieval_incomplete'))) {
+      console.error(`EVAL RETRIEVAL INCOMPLETE ${grade.questionId}: ${line}`);
+    }
+  }
   writeEvalReport(reportPath, datasetPath, report, traces, {
     ...reportConfig,
     retrieval,
@@ -490,7 +498,15 @@ export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetriev
  */
 export interface EvalAnswerStageAudit {
   expected: Array<{
+    /** In the pack by the grader's rules (whole token, not negated): what an answer would need. */
     inPack: boolean;
+    /**
+     * In the pack as a plain substring of any accepted form, the looser test
+     * the precision trace uses. True here with inPack false means the value
+     * only appears inside a longer token or number, or right after a negation
+     * such as "no" or "not".
+     */
+    inPackAsSubstring: boolean;
     /** In the prompt the Analyst model was sent; absent when no prompt was recorded. */
     inAnalystPrompt?: boolean;
     inAnalystAnswer: boolean;
@@ -517,11 +533,49 @@ export function evalAnswerStageAudit(
   return {
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
+      inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),
       ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
       inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
       inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
     })),
   };
+}
+
+/**
+ * Why a question's retrieval did not run whole, if it did not: a store
+ * dropped at the lane deadline, or a lane inside a store that stopped at its
+ * deadline. Empty when every searched store and lane completed.
+ */
+export function incompleteRetrievalReasons(audit: EvalRetrievalAudit): string[] {
+  const reasons = new Set<string>();
+  for (const skip of audit.skippedCorpora) {
+    if (skip.reason === 'lane_timeout') reasons.add(`${skip.corpusId} store dropped: lane_timeout`);
+  }
+  for (const lane of audit.lanes) {
+    if (lane.skippedReason && /deadline|timeout|timed_out/.test(lane.skippedReason)) {
+      reasons.add(`${lane.laneName} lane skipped: ${lane.skippedReason}`);
+    }
+  }
+  return [...reasons];
+}
+
+/** Fails each question whose retrieval was incomplete, naming why, and recounts. */
+export function failIncompleteRetrieval<R extends EvalReport>(
+  report: R,
+  traces: ReadonlyArray<{ questionId: string; retrieval?: EvalRetrievalAudit }>,
+): R {
+  const grades = report.grades.map((grade) => {
+    const audit = traces.find((trace) => trace.questionId === grade.questionId)?.retrieval;
+    const reasons = audit ? incompleteRetrievalReasons(audit) : [];
+    if (reasons.length === 0) return grade;
+    return {
+      ...grade,
+      passed: false,
+      detail: [...grade.detail, ...reasons.map((reason) => `retrieval_incomplete: ${reason}`)],
+    };
+  });
+  const passed = grades.filter((grade) => grade.passed).length;
+  return { ...report, grades, passed, failed: report.total - passed };
 }
 
 /** One question's evidence pack, over the eval's lanes, as live Ask builds it. */
