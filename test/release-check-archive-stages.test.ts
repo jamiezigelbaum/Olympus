@@ -19,7 +19,7 @@ import {
 import { archivesOpenTarget, createArchiveImportAgent } from '../src/workers/archive-import/agent.ts';
 import { FIXTURE_FOLDER, legFixture, writeFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
+  ARCHIVE_BOUNDS, changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
   type StoreView,
 } from '../scripts/release-check/archive-leg.ts';
 import {
@@ -62,6 +62,8 @@ interface World {
   panelUnreadable: boolean;
   /** The page shows the archive gone but the engine still lists it. */
   engineKeepsRemoved: boolean;
+  /** This many of the next navigations throw, as a page that times out loading does. */
+  goFails?: number;
 }
 
 /** A stand-in machine: the product's state, the agent's CLI over it, the stores, the engine restart, the private model. */
@@ -156,6 +158,10 @@ class FakeMachine implements ArchiveHost {
       override async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
         if (world.panelUnreadable) throw new Error('the page is not there');
         return super.probe(frame, call);
+      }
+      override async go(path?: string): Promise<void> {
+        if (world.goFails && path === '/dashboard') { world.goFails -= 1; throw new Error('navigation timed out'); }
+        return super.go(path);
       }
     }
     const driver = new Driver(async () => (await mountPanel(this.serve())).win);
@@ -455,6 +461,56 @@ describe('importing with the private model off', () => {
     fake.readStores = (spec, archiveId, token) => stores(spec, archiveId, token).map((store) => (store.tier === 'personal' ? { ...store, tokenRows: 1 } : store));
     const observation = await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, search: true, watchEgress: true, settleS: PASS_S, startS: PASS_S });
     expect(failing(heldOffChecks(observation, fx.held!))).toEqual(['archive.held.mbox.stores']);
+  });
+
+  /** An archive held while the model was off, with the model back on: what a drain stage then reads. */
+  async function heldThenOn() {
+    const { machine: fake, fx } = machine('held');
+    await modelStage(fake, 'off');
+    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: 5, startS: 5 });
+    await modelStage(fake, 'on');
+    return { fake, held: fx.held! };
+  }
+
+  test('a navigation that throws after the drain is tried once more, and the row read then passes the check', async () => {
+    const { fake, held } = await heldThenOn();
+    fake.world.goFails = 1;
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux', rowS: 60 });
+    expect(drained.drain?.row).toBeDefined();
+    expect(drained.drain?.rowProblem).toContain('navigation 1 to the dashboard threw: navigation timed out');
+    expect(failing(drainChecks('d', drained.drain, held, 'linux', 'restored'))).toEqual([]);
+  });
+
+  test('a navigation that throws both times fails the check and says the navigation failed', async () => {
+    const { fake, held } = await heldThenOn();
+    fake.world.goFails = 2;
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux', rowS: 60 });
+    expect(drained.drain).toMatchObject({ drained: true });
+    const checks = drainChecks('d', drained.drain, held, 'linux', 'restored');
+    expect(failing(checks)).toEqual(['d']);
+    expect(checks[0]!.detail).toContain('navigation 1 to the dashboard threw');
+    expect(checks[0]!.detail).toContain('navigation 2 to the dashboard threw');
+  });
+
+  test('a row still missing at the settle bound is read again after a second navigation before the check fails, and says the row was missing', async () => {
+    const { fake, held } = await heldThenOn();
+    fake.world.panelUnreadable = true;
+    const before = fake.now();
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux', rowS: 60 });
+    const checks = drainChecks('d', drained.drain, held, 'linux', 'restored');
+    expect(failing(checks)).toEqual(['d']);
+    expect(checks[0]!.detail).toContain('after navigation 1 the row was still missing at 60 s');
+    expect(checks[0]!.detail).toContain('after navigation 2 the row was still missing at 30 s');
+    expect(checks[0]!.detail).not.toContain('threw');
+    // The read waited the settle bound and the retry's floor, not the old 30 s alone.
+    expect(fake.now() - before).toBeGreaterThanOrEqual(90_000);
+  });
+
+  test('the post-drain row read defaults to the import\'s own settle bound', async () => {
+    const { fake } = await heldThenOn();
+    fake.world.panelUnreadable = true;
+    const drained = await drainStage(fake, { role: 'held', format: 'mbox', seed: SEED, os: 'linux' });
+    expect(drained.drain?.rowProblem).toContain(`after navigation 1 the row was still missing at ${ARCHIVE_BOUNDS.settleS} s`);
   });
 
   test('a drain that never finishes within its bound fails with the count still waiting', async () => {
