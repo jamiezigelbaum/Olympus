@@ -8034,7 +8034,10 @@ export async function main(): Promise<void> {
   void modelChoices.refreshStrongest().catch(() => false);
   setInterval(() => { void modelChoices.refreshStrongest().catch(() => false); }, 24 * 60 * 60 * 1000).unref();
   // Nightly or weekly backups: checked every quarter hour, run when due (backup-service.ts).
-  setInterval(() => { void backupService.tick().catch(() => false); }, 15 * 60 * 1000).unref();
+  // Scheduled backups run in the process that serves Back up now (the front, or
+  // the single worker), so one exporter keeps one running state; the export
+  // reads every store read-only.
+  if (engineRole !== 'background') setInterval(() => { void backupService.tick().catch(() => false); }, 15 * 60 * 1000).unref();
 
   if (listens) console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

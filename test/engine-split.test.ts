@@ -596,6 +596,15 @@ describe('the private-answer queue has one consumer', () => {
   });
 });
 
+describe('scheduled backups have one exporter', () => {
+  test('the background does not run the backup tick beside the front', () => {
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const ticks = server.match(/^.*backupService\.tick\(\).*$/gm) ?? [];
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toContain("if (engineRole !== 'background') setInterval(");
+  });
+});
+
 describe('configured mounts are governed by their ledgers', () => {
   test('a ledger-backed configured store (Reflect, Roam) is registered, in the front as in the single worker', () => {
     const root = tempRoot();
