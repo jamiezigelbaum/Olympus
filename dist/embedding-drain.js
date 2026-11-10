@@ -76632,7 +76632,7 @@ var BACKLOG_EXACT_ROWS = 20000;
 var BACKLOG_REFRESH_MS = 60000;
 var BACKLOG_SLICE_ROWS = 5000;
 function emptyThroughput() {
-  return { cycles: 0, verdicts: 0, calls: 0, wallMs: 0, idleMs: 0, yieldedMs: 0, slotWaitMs: 0, stepsMs: 0, setupMs: 0, dispatchMs: 0, modelMs: 0, passSwitches: 0, verdictsPerMinute: 0 };
+  return { cycles: 0, verdicts: 0, calls: 0, wallMs: 0, idleMs: 0, yieldedMs: 0, slotWaitMs: 0, stepsMs: 0, passMs: 0, setupMs: 0, dispatchMs: 0, modelMs: 0, passSwitches: 0, verdictsPerMinute: 0 };
 }
 
 class TierSnifferService {
@@ -76997,12 +76997,11 @@ class TierSnifferService {
     cycle.setupMs = timing?.setupMs ?? 0;
     cycle.dispatchMs = timing?.dispatchMs ?? 0;
     cycle.slotWaitMs = timing?.slotWaitMs ?? 0;
-    cycle.yieldedMs += cycle.slotWaitMs;
     cycle.modelMs = timing?.modelMs ?? 0;
     cycle.passSwitches = timing?.passSwitches ?? 0;
-    const passParts = cycle.setupMs + cycle.dispatchMs + cycle.slotWaitMs + cycle.modelMs;
-    cycle.stepsMs = Math.max(0, tickMs - passParts);
-    cycle.wallMs = waitBeforeMs + Math.max(tickMs, passParts);
+    cycle.passMs = Math.min(timing?.passMs ?? 0, tickMs);
+    cycle.stepsMs = tickMs - cycle.passMs;
+    cycle.wallMs = waitBeforeMs + tickMs;
     cycle.verdictsPerMinute = cycle.wallMs > 0 ? cycle.verdicts * 60000 / cycle.wallMs : 0;
     const totals = this.cycleTotals;
     for (const key2 of Object.keys(cycle)) {

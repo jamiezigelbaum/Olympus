@@ -329,15 +329,20 @@ export interface TierSnifferWaiting {
 
 /**
  * Where the sniffer's time went between verdicts (#893), in monotonic
- * milliseconds. A cycle runs from the end of one tick to the end of the next,
- * and its parts add up to it:
+ * milliseconds. A cycle runs from the end of one tick to the end of the next;
+ * wallMs is the time that passed, and idleMs + yieldedMs + stepsMs + passMs
+ * add up to it:
  * - idleMs: waiting for the next tick to start (the timer or a wake);
  * - yieldedMs: that wait, when the tick before stopped to give the model to
- *   other work, plus slotWaitMs, the calls' own wait for the model slot;
+ *   other work;
  * - stepsMs: the tick's work around the pass (settling, recovery, approval,
  *   re-judge, moves, training validation);
- * - setupMs and dispatchMs: the pass's own work outside its model calls;
- * - modelMs: the model calls themselves.
+ * - passMs: the pass itself.
+ * The pass divides into setupMs and dispatchMs (its own work outside model
+ * calls), slotWaitMs (calls waiting for the shared model slot, which is
+ * yielding too) and modelMs. These are summed per call, so with one call in
+ * flight they add up to passMs; with several in flight they overlap and sum
+ * past it. Verdicts a minute are always over wallMs.
  * Content-free numbers, a fixed set of them.
  */
 export interface TierSnifferThroughput {
@@ -349,6 +354,7 @@ export interface TierSnifferThroughput {
   yieldedMs: number;
   slotWaitMs: number;
   stepsMs: number;
+  passMs: number;
   setupMs: number;
   dispatchMs: number;
   modelMs: number;
@@ -357,7 +363,7 @@ export interface TierSnifferThroughput {
 }
 
 function emptyThroughput(): TierSnifferThroughput {
-  return { cycles: 0, verdicts: 0, calls: 0, wallMs: 0, idleMs: 0, yieldedMs: 0, slotWaitMs: 0, stepsMs: 0, setupMs: 0, dispatchMs: 0, modelMs: 0, passSwitches: 0, verdictsPerMinute: 0 };
+  return { cycles: 0, verdicts: 0, calls: 0, wallMs: 0, idleMs: 0, yieldedMs: 0, slotWaitMs: 0, stepsMs: 0, passMs: 0, setupMs: 0, dispatchMs: 0, modelMs: 0, passSwitches: 0, verdictsPerMinute: 0 };
 }
 
 export type TierSnifferTick =
@@ -774,13 +780,12 @@ export class TierSnifferService {
     cycle.setupMs = timing?.setupMs ?? 0;
     cycle.dispatchMs = timing?.dispatchMs ?? 0;
     cycle.slotWaitMs = timing?.slotWaitMs ?? 0;
-    cycle.yieldedMs += cycle.slotWaitMs;
     cycle.modelMs = timing?.modelMs ?? 0;
     cycle.passSwitches = timing?.passSwitches ?? 0;
-    // The pass's own parts are counted above; the rest of the tick is its steps.
-    const passParts = cycle.setupMs + cycle.dispatchMs + cycle.slotWaitMs + cycle.modelMs;
-    cycle.stepsMs = Math.max(0, tickMs - passParts);
-    cycle.wallMs = waitBeforeMs + Math.max(tickMs, passParts);
+    // Measured wall time only: per-call sums overlap when several calls run at once.
+    cycle.passMs = Math.min(timing?.passMs ?? 0, tickMs);
+    cycle.stepsMs = tickMs - cycle.passMs;
+    cycle.wallMs = waitBeforeMs + tickMs;
     cycle.verdictsPerMinute = cycle.wallMs > 0 ? cycle.verdicts * 60_000 / cycle.wallMs : 0;
     const totals = this.cycleTotals;
     for (const key of Object.keys(cycle) as (keyof TierSnifferThroughput)[]) {

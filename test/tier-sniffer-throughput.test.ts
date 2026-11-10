@@ -19,7 +19,7 @@ import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
 const LANE: SnifferLane = {
   kind: 'local',
@@ -102,7 +102,8 @@ test('a completion through a shared slot says how long it waited there', async (
   expect(completion).toMatchObject({ text: 'answer', slotWaitMs: 45 });
 });
 
-test('the service breaks time between verdicts into waiting, yielding, steps, dispatch and model, and it adds up', async () => {
+/** A service over one store with `items` flagged items, on the test clock (performance.now too). */
+async function serviceFixture(items: number, model: AnalystModel, extra: { answersInFlight?: () => boolean; concurrentCalls?: number } = {}) {
   const clock = createTestClock();
   const now = spyOn(performance, 'now').mockImplementation(() => clock.now());
   cleanup.push(() => now.mockRestore());
@@ -112,7 +113,7 @@ test('the service breaks time between verdicts into waiting, yielding, steps, di
   const ledgerPath = tierLedgerPathForStore(storePath);
   const ledger = new TierLedger({ dbPath: ledgerPath });
   cleanup.push(() => { installed.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); });
-  for (let n = 1; n <= 2; n++) recordNamesAndExcerpt(ledger, installed.snifferStoreForLedger(ledgerPath), n);
+  for (let n = 1; n <= items; n++) recordNamesAndExcerpt(ledger, installed.snifferStoreForLedger(ledgerPath), n);
   const classificationLedgerPath = join(dir, 'classification.jsonl');
   await appendClassificationLedgerEntry(classificationLedgerPath, {
     recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Synthetic fixture approval',
@@ -122,15 +123,22 @@ test('the service breaks time between verdicts into waiting, yielding, steps, di
   // The store the excerpts are read from for their secret screen; each read costs time.
   const store = { dbPath: storePath, tierSetBinding: () => ({ ledgerPath }),
     exportItemCopy: (() => { clock.set(clock.now() + SCREEN_MS); return { chunks: [{ boundedText: 'Lunch plans for Saturday.' }] }; }) as never };
-  let answering = true;
-  const model = timedModel(clock);
   const lines: string[] = [];
   const service = new TierSnifferService({ installed, lane: LANE, model, classificationLedgerPath,
     // Each read of the stores costs the tick time around its pass.
     stores: () => { clock.set(clock.now() + 3); return [store]; },
-    answersInFlight: () => answering, log: line => lines.push(line), rejudgePerPass: 0,
+    log: line => lines.push(line), rejudgePerPass: 0, ...extra,
   });
   cleanup.push(() => service.stop());
+  return { clock, service, lines };
+}
+
+test('the service breaks time between verdicts into waiting, yielding, steps, dispatch and model, and it adds up', async () => {
+  let answering = true;
+  let clockRef: ReturnType<typeof createTestClock> | undefined;
+  const model: AnalystModel = { complete: request => timedModel(clockRef!).complete(request) };
+  const { clock, service, lines } = await serviceFixture(2, model, { answersInFlight: () => answering });
+  clockRef = clock;
 
   // 1. An answer holds the model: the pass yields before asking anything.
   const yielded = await service.runOnce();
@@ -151,14 +159,16 @@ test('the service breaks time between verdicts into waiting, yielding, steps, di
   expect(total.calls).toBe(4);
   expect(total.verdicts).toBe(ran.state === 'ran' ? ran.report.verdictsApplied : -1);
   expect(total.verdicts).toBeGreaterThan(0);
-  // The wait after the yield is yielding; the calls' slot wait is too.
+  // The wait after the yield is yielding; the calls' own slot wait is counted beside it.
   expect(total.slotWaitMs).toBe(4 * SLOT_WAIT_MS);
-  expect(total.yieldedMs).toBe(5_000 + total.slotWaitMs);
+  expect(total.yieldedMs).toBe(5_000);
   expect(total.idleMs).toBe(2_000);
   expect(total.modelMs).toBe(4 * MODEL_MS);
   expect(total.stepsMs).toBeGreaterThan(0);
   expect(total.passSwitches).toBe(3);
-  expect(total.idleMs + total.yieldedMs + total.stepsMs + total.setupMs + total.dispatchMs + total.modelMs).toBe(total.wallMs);
+  // Wall time is waiting, steps and the pass; with one call in flight the pass is its parts.
+  expect(total.idleMs + total.yieldedMs + total.stepsMs + total.passMs).toBe(total.wallMs);
+  expect(total.setupMs + total.dispatchMs + total.slotWaitMs + total.modelMs).toBe(total.passMs);
   expect(total.verdictsPerMinute).toBeCloseTo(total.verdicts * 60_000 / total.wallMs);
   // The pass's log line carries the same breakdown.
   const passLine = lines.find(line => line.includes(' call(s), '))!;
@@ -193,4 +203,35 @@ test('a call that fails or is preempted after waiting for the slot still counts 
   expect(report.failedCalls).toBeGreaterThan(0);
   expect(report.timing.slotWaitMs).toBe(report.calls * SLOT_WAIT_MS);
   expect(report.timing.modelMs).toBe(report.calls * MODEL_MS);
+});
+
+test('with several calls in flight, wall time stays the time that passed and summed call time is reported beside it', async () => {
+  let clockRef: ReturnType<typeof createTestClock> | undefined;
+  let inFlight = 0;
+  let peak = 0;
+  const model: AnalystModel = { async complete(request) {
+    // Calls dispatched together start together and each ends MODEL_MS after its start.
+    const start = clockRef!.now();
+    inFlight++; peak = Math.max(peak, inFlight);
+    await flushMicrotasks();
+    inFlight--;
+    clockRef!.set(Math.max(clockRef!.now(), start + MODEL_MS));
+    const items = request.prompt.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line) as { i: number });
+    return { text: JSON.stringify({ verdicts: items.map(item => ({ i: item.i, tier: 'personal', category: 'ordinary', confidence: 0.96, ownRecord: false, privateKind: 'none' })) }), modelId: LANE.modelId };
+  } };
+  // Four items with their names questions alone in flight two at a time.
+  const { clock, service } = await serviceFixture(4, model, { concurrentCalls: 2 });
+  clockRef = clock;
+  const started = clock.now();
+  const tick = await service.runOnce();
+  const elapsed = clock.now() - started;
+  expect(peak).toBe(2);
+  expect(tick.state === 'ran' && tick.report.calls).toBeGreaterThanOrEqual(4);
+  const { last } = service.status().throughput!;
+  // Summed call time is longer than the pass that held the calls...
+  expect(last.modelMs).toBeGreaterThan(last.passMs);
+  // ...but wall time is what passed, and the verdict rate is taken over it.
+  expect(last.wallMs).toBe(elapsed);
+  expect(last.idleMs + last.yieldedMs + last.stepsMs + last.passMs).toBe(last.wallMs);
+  expect(last.verdictsPerMinute).toBeCloseTo(last.verdicts * 60_000 / elapsed);
 });
