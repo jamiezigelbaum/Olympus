@@ -552,13 +552,19 @@ export function openBackupFile(options: { file: string; into: string; passphrase
 
 // ---- a backup folder ----------------------------------------------------------
 
-/** The Olympus backups in a folder, newest first (by the time each says it was made). */
-export function listBackups(folder: string): BackupFileInfo[] {
+/**
+ * The Olympus backups in a folder, newest first (by the time each says it was
+ * made). By default only files named as Olympus names its backups, which is
+ * what retention may delete. `anyName` lists every `.olympusbackup` file whose
+ * header reads as a backup, whatever it was renamed to (a copy downloaded
+ * twice is `... (1).olympusbackup`): what a restore can open.
+ */
+export function listBackups(folder: string, options: { anyName?: boolean } = {}): BackupFileInfo[] {
   let names: string[];
   try { names = readdirSync(folder); } catch { return []; }
   const out: BackupFileInfo[] = [];
   for (const name of names) {
-    if (!BACKUP_NAME.test(name)) continue;
+    if (options.anyName === true ? !name.endsWith(BACKUP_FILE_EXTENSION) : !BACKUP_NAME.test(name)) continue;
     const path = join(folder, name);
     try {
       const stat = lstatSync(path);

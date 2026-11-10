@@ -278,6 +278,27 @@ describe('backup routes', () => {
     expect(page).toContain('cursor: cursor');
   });
 
+  test('the restore picker lists a renamed or duplicated backup the restore can open', async () => {
+    const dir = tempDir();
+    const home = join(dir, 'a');
+    const { service } = install(home, () => new Date(2026, 10, 1, 4, 0));
+    const folder = join(dir, 'Backups');
+    mkdirSync(folder);
+    service.saveSettings({ folder });
+    await service.runNow();
+    const [made] = listBackups(folder);
+    const bytes = readFileSync(made!.path);
+    writeFileSync(join(folder, `${made!.name.replace('.olympusbackup', '')} (1).olympusbackup`), bytes);
+    writeFileSync(join(folder, 'renamed.olympusbackup'), bytes);
+    writeFileSync(join(folder, 'notes.olympusbackup'), 'hello');
+    const volumes = new VolumeResolver();
+    const listed = await handleDashboardBackupRoute('/dashboard/backup/browse', { parent_key: scopePathOfRealPath(volumes, folder), files: true }, { backup: service, volumes });
+    expect(listed.status).toBe(200);
+    expect((listed.body.files as Array<{ name: string }>).map((file) => file.name).sort()).toEqual(
+      [made!.name, `${made!.name.replace('.olympusbackup', '')} (1).olympusbackup`, 'renamed.olympusbackup'].sort(),
+    );
+  });
+
   test('a scheduled backup that fails is reported, and nothing half-written is left', async () => {
     const dir = tempDir();
     const home = join(dir, 'a');

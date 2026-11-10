@@ -121,7 +121,8 @@ export async function handleDashboardBackupRoute(
           path = realPathOfScopePath(volumes, normalizeScopePath(parentKey)) ?? null;
           // Backup files come with a level's first page only; a later page adds folders.
           if (path && body.files === true && !cursor) {
-            files = listBackups(path).map((backup) => ({
+            // Any backup a restore can open, renamed ones included; retention keeps to its own names.
+            files = listBackups(path, { anyName: true }).map((backup) => ({
               key: scopePathOfRealPath(volumes, backup.path),
               name: backup.name,
               bytes: backup.bytes,

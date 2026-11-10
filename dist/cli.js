@@ -125983,7 +125983,7 @@ function openBackupFile(options) {
     closeSync32(fd2);
   }
 }
-function listBackups(folder) {
+function listBackups(folder, options = {}) {
   let names;
   try {
     names = readdirSync26(folder);
@@ -125992,7 +125992,7 @@ function listBackups(folder) {
   }
   const out = [];
   for (const name of names) {
-    if (!BACKUP_NAME.test(name))
+    if (options.anyName === true ? !name.endsWith(BACKUP_FILE_EXTENSION) : !BACKUP_NAME.test(name))
       continue;
     const path = join115(folder, name);
     try {
@@ -169726,7 +169726,7 @@ async function handleDashboardBackupRoute(path, body, deps) {
         if (parentKey2) {
           path2 = realPathOfScopePath(volumes, normalizeScopePath(parentKey2)) ?? null;
           if (path2 && body.files === true && !cursor) {
-            files = listBackups(path2).map((backup) => ({
+            files = listBackups(path2, { anyName: true }).map((backup) => ({
               key: scopePathOfRealPath(volumes, backup.path),
               name: backup.name,
               bytes: backup.bytes,

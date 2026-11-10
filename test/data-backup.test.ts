@@ -143,6 +143,28 @@ describe('data backup', () => {
     expect(existsSync(join(folder, 'holiday.jpg'))).toBe(true);
   }));
 
+  test('a renamed or duplicated backup is offered for restore, but retention keeps to its own names', withHomes(async (dir, _homeA, _homeB, folder) => {
+    const exportDir = join(dir, 'export');
+    mkdirSync(exportDir, { recursive: true });
+    writeFileSync(join(exportDir, 'manifest.json'), '{}');
+    const original = await writeBackupFile({ exportDir, folder, now: new Date(2026, 10, 10, 3, 10) });
+    const bytes = readFileSync(original.path);
+    // A second download of the same file, and a copy the owner renamed.
+    writeFileSync(join(folder, 'olympus-backup-2026-11-10-0310 (1).olympusbackup'), bytes);
+    writeFileSync(join(folder, 'before the move.olympusbackup'), bytes);
+    // Not a backup, whatever its name says.
+    writeFileSync(join(folder, 'notes.olympusbackup'), 'hello');
+    expect(listBackups(folder, { anyName: true }).map((backup) => backup.name).sort()).toEqual([
+      'before the move.olympusbackup',
+      'olympus-backup-2026-11-10-0310 (1).olympusbackup',
+      original.name,
+    ].sort());
+    expect(listBackups(folder).map((backup) => backup.name)).toEqual([original.name]);
+    expect(pruneBackups(folder, 0)).toEqual([original.name]);
+    expect(existsSync(join(folder, 'before the move.olympusbackup'))).toBe(true);
+    expect(existsSync(join(folder, 'olympus-backup-2026-11-10-0310 (1).olympusbackup'))).toBe(true);
+  }));
+
   test('a second backup in the same minute gets its own name', withHomes(async (dir, _homeA, _homeB, folder) => {
     const exportDir = join(dir, 'export');
     mkdirSync(exportDir, { recursive: true });
