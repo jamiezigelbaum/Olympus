@@ -451,7 +451,8 @@ for (const [passMs, fail, backlog] of [[18_000, false, 300], [18_000, true, 300]
     expect(options.passTimeMs).toBe(passMs);
     expect(imports).toBe(0);
     time.spend(passMs);
-    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0,
+      timing: { passMs, setupMs: passMs, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 } } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
   // Each copy costs one synthetic second, so the slice is a handful of real
   // copies: at 100 ms each the 300 s case ran 100 real lowering batches,

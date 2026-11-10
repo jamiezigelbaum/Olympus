@@ -38,6 +38,12 @@ import {
 } from '../source-index/local-answer.ts';
 
 export const LOCAL_AGENT_INBOX_ID = '@local:agents';
+
+/** A kept answer names every source it could not search, busy ones included, as it always has. */
+function storedLeftOut(result: { leftOut: string[]; busy?: string[] }): string[] {
+  return result.busy?.length ? [...new Set([...result.leftOut, ...result.busy])].sort() : result.leftOut;
+}
+
 export function anonymousInboxConnectionId(caller?: { connection_id?: string; display_name?: string }) {
   return caller?.connection_id ?? LOCAL_AGENT_INBOX_ID;
 }
@@ -304,7 +310,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   };
   const answerBody = (result: LocalAnswerResult | StoredPrivateAnswer, session: string, q?: WaitingQuestion): Record<string, unknown> => {
     if (result.status === 'withdrawn') return { status: 'withdrawn', sent_items: result.sentItems, reason: result.reason };
-    if (result.status !== 'answered') return { status: result.status, ...(result.status === 'failed' ? failureReason(q) : {}), ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
+    if (result.status !== 'answered') return { status: result.status, ...(result.status === 'failed' ? failureReason(q) : {}), ...('leftOut' in result ? { left_out: result.leftOut } : {}), ...('busy' in result && result.busy?.length ? { busy: result.busy } : {}) };
     sweep();
     const secretSources = q && result.secretLocations?.length
       ? options.secretSources?.({ question: q.question, selectors: q.selectors }, result.secretLocations) ?? [] : [];
@@ -323,7 +329,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       }
       return view;
     });
-    return { status: 'answered', answer: result.answer, citations, ...('sentItems' in result && result.sentItems ? { sent_items: result.sentItems } : {}), unanswered: result.unanswered, left_out: result.leftOut };
+    return { status: 'answered', answer: result.answer, citations, ...('sentItems' in result && result.sentItems ? { sent_items: result.sentItems } : {}), unanswered: result.unanswered, left_out: result.leftOut, ...('busy' in result && result.busy?.length ? { busy: result.busy } : {}) };
   };
   const api: LocalPrivateAnswers = {
     start() {
@@ -355,8 +361,8 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           if ((result.status === 'answered' && check === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
             const saved: StoredPrivateAnswer = result.status === 'answered'
-              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity), secretLocations: result.secretLocations ?? [] }
-              : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
+              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: storedLeftOut(result), read: result.read.map(inboxEvidenceIdentity), secretLocations: result.secretLocations ?? [] }
+              : { status: 'not_found', citations: [], unanswered: [], leftOut: storedLeftOut(result), read: [] };
             if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q), 'save_refused');
           } else currentStore.retry?.(refOf(q), check === 'unknown' ? 'eligibility_unavailable'
             : check === 'ineligible' || result.status === 'changed' ? 'evidence_changed'
@@ -442,8 +448,8 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
             }
             if (ref && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) {
               retained = currentStore?.saveAnswer?.(ref, result.status === 'answered'
-                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity), ...(!venice ? { secretLocations: result.secretLocations ?? [] } : {}) }
-                : result.status === 'withdrawn' ? { ...result, citations: [], unanswered: [], leftOut: [], read: [] } : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
+                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: storedLeftOut(result), read: result.read.map(inboxEvidenceIdentity), ...(!venice ? { secretLocations: result.secretLocations ?? [] } : {}) }
+                : result.status === 'withdrawn' ? { ...result, citations: [], unanswered: [], leftOut: [], read: [] } : { status: 'not_found', citations: [], unanswered: [], leftOut: storedLeftOut(result), read: [] }) === true;
             }
             if (ref && !retained && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) return refused(410, 'gone', W.deleted);
             return { status: 200, body: { ok: true, ...answerBody(result, session, ref ? currentStore?.get(ref.id) : undefined) } };
