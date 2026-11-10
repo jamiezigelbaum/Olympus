@@ -68,6 +68,18 @@ Ask and `source answer` searched no source because every lane timed out while
 the worker thread was held (#1079, with #1056). It does not change the 1.5
 scope.
 
+Held-out eval, first run for 1.5 (#707, 2026-11-10): 0 of 7 on main at
+`05455ae`, run on the owner's install against a copy of the Dropbox Private
+store with the owner's 7-question set from 7 Oct (answers from the local
+model on Delphi, literal-query retrieval, top 5). Failures: answer 5,
+evidence 6, gap 1, privacy 0, error 0. One miss is dataset drift (the item
+is gone since the 26 Oct reinstall); in the other five the expected item is
+still indexed but not in the top 5, and the coverage-negative question did
+not report its gap. Seven questions is a thin set, so read this as a
+direction, not a score. The retrieval miss goes to the Findable fast lane;
+#707 stays open until the eval is rerun after that fix, ideally on a broader
+fresh set. The counts are on #707.
+
 Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
 Moved to 1.6: #672, #920. Waiting on the owner: fresh calibration labels
 (#883) and, optionally, #581.

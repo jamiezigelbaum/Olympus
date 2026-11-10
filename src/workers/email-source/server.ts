@@ -1,4 +1,5 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
@@ -538,7 +539,7 @@ import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudg
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
-import { SNIFFER_MAX_CONCURRENT_CALLS } from '../classification/sniffer-resolver.ts';
+import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
@@ -4778,6 +4779,8 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+      // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
+      const sourceReranker = builtInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
@@ -4786,6 +4789,7 @@ export async function main(): Promise<void> {
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
+        ...(sourceReranker ? { reranker: sourceReranker } : {}),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
           const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');
@@ -6096,6 +6100,9 @@ export async function main(): Promise<void> {
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
     ),
+    // Local callers read Private, so only items still waiting for their
+    // judgment (found by words, not yet by meaning) are counted for them.
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
     // Bound late: the consult block below sets askAnonymouslyNow.
@@ -6843,7 +6850,13 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      // An agent outside this computer reads no Private store: an item
+      // waiting for its judgment, and one judged lower whose move out of
+      // Private is still queued, are both out of its reach until then.
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
       ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
@@ -7319,7 +7332,8 @@ export async function main(): Promise<void> {
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request)),
+          // The completion says how long it waited for the model slot (#893).
+          complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),

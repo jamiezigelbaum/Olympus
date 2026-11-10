@@ -320,6 +320,8 @@ export interface SearchView {
   ok: boolean;
   isError: boolean;
   evidence: Array<{ source: string; hasToken: boolean }>;
+  /** The result said Olympus is still checking new items for privacy (the privacy-backlog note). */
+  stillChecking?: boolean;
   error?: string;
 }
 
@@ -330,6 +332,8 @@ export interface DrainView {
   last: { messages?: number; judged?: number; waiting?: number };
   privateModel?: string;
   row?: RowView;
+  /** What went wrong reading the row after the drain: the navigation, or the row still missing at the bound. */
+  rowProblem?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -753,7 +757,7 @@ export function searchChecks(
     return [check(`${prefix}.search`, title, withToken.length > 0,
       withToken.length > 0
         ? `${withToken.length} cited item(s) carry the word, labelled "${fx.expect.citationLabel}" (${search.evidence.length} item(s) in all)`
-        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}`)];
+        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}${search.stillChecking ? ' (the result said items were still being checked for privacy)' : ''}`)];
   }
   const leaked = search.evidence.filter((item) => item.hasToken);
   return [check(`${prefix}.search`, title, leaked.length === 0,
@@ -833,7 +837,7 @@ export function drainChecks(id: string, drain: DrainView | undefined, fx: LegFix
   if (drain.drained && (drain.last.waiting !== 0 || drain.last.messages !== fx.expect.messages)) {
     problems.push(`the agent reports ${drain.last.waiting ?? '?'} of ${drain.last.messages ?? '?'} messages waiting, expected 0 of ${fx.expect.messages}`);
   }
-  if (drain.drained && !drain.row) problems.push('the dashboard row could not be read, so the judged count is unproven');
+  if (drain.drained && !drain.row) problems.push(`the dashboard row could not be read (${drain.rowProblem ?? 'no detail'}), so the judged count is unproven`);
   if (drain.drained && drain.row) {
     if (!judged) problems.push('the dashboard row has no judged line');
     else if (judged.held !== 0 || judged.judged !== fx.expect.messages) problems.push(`the dashboard row reads ${judged.judged} judged · ${judged.held} waiting, expected ${fx.expect.messages} judged · 0 waiting`);

@@ -622,7 +622,7 @@ describe('bounds and the owner-approval gate', () => {
       const inputTokens = model.requests.reduce((sum, request) => sum + Math.ceil(((request.system?.length ?? 0) + request.prompt.length) / 4), 0);
       expect(passLine).toContain(`promptChars=${promptChars} mean_promptChars=${Math.round(promptChars / model.requests.length)} estimatedInputTokens=${inputTokens} mean_estimatedInputTokens=${Math.round(inputTokens / model.requests.length)};`);
       expect(passLine).toMatch(/promptChars=\d+ mean_promptChars=\d+ estimatedInputTokens=\d+ mean_estimatedInputTokens=\d+;/);
-      expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ targets=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ pass=\d+ moves=\d+ idle_before=\d+\.$/);
+      expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ targets=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ pass=\d+ moves=\d+ idle_before=\d+ wait_before=(idle|yield) after_prev_ms=\d+; pass_ms=\d+ setup_ms=\d+ dispatch_ms=\d+ slot_wait_ms=\d+ model_ms=\d+ pass_switches=\d+\.$/);
 
       // A pass whose model call never returns: the next tick past the bound aborts it.
       recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
