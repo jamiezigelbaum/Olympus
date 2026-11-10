@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { renderDashboardConnectPage } from '../src/workers/dashboard/pages/local.ts';
+import { CONNECTOR_PROMPT, renderDashboardConnectPage } from '../src/workers/dashboard/pages/local.ts';
 import { sourceLogoTile } from '../src/workers/dashboard/source-logos.ts';
 
 type View = Parameters<typeof renderDashboardConnectPage>[0];
@@ -78,6 +78,22 @@ describe('Sources page', () => {
     expect(doc.body.textContent).toContain('Build a connector');
   });
 
+  test('Build a connector is a dialog over Sources, offered from the bar and from Add a source (#1087)', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
+    const dialog = doc.querySelector('dialog#build-connector.adddialog[data-closable][data-open-hash]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.querySelector('h3')!.textContent).toBe('Build a connector with your agent');
+    expect(dialog.querySelector('.adddialoghead [data-dialog-close][aria-label="Close"]')!.textContent).toBe('✕');
+    expect(dialog.querySelector('.promptbox')!.textContent).toBe(CONNECTOR_PROMPT);
+    expect([...dialog.querySelectorAll('.pickbar button')].map((button) => [button.textContent, button.className])).toEqual([['Copy prompt', 'btn primary'], ['Close', 'btn']]);
+    expect(dialog.querySelector('[data-copy-target="#build-connector-prompt"]')).not.toBeNull();
+    // No separate page any more: both openers are buttons for the dialog.
+    expect(doc.querySelector('a[href*="connector"]')).toBeNull();
+    expect(doc.querySelector('.srcbar [data-dialog-open="build-connector"]')!.textContent).toBe('Build a connector');
+    expect(doc.querySelector('dialog#add-source [data-dialog-open="build-connector"]')).not.toBeNull();
+  });
+
   test('locked, the actions are disabled', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), {} as Parameters<typeof renderDashboardConnectPage>[1]);
@@ -146,6 +162,45 @@ describe('Sources in the browser', () => {
       ]);
       // A refusal is said inside the confirmation, which stays open.
       expect(root.querySelector('dialog#disconnect-gmail-email [data-action-message]')!.textContent).not.toBe('');
+    } finally {
+      dispose(); browser.close();
+      for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }
+    }
+  });
+
+  test('Build a connector opens from ?connect#build-connector and from its link, and ✕ or Close closes it (#1087)', async () => {
+    const { mountDashboardController } = await import('../src/control-ui/browser-controller.ts');
+    const browser = new Window({ url: 'http://localhost/dashboard?connect#build-connector' });
+    const keys = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'HTMLDialogElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'] as const;
+    const previous = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    for (const key of keys) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value: browser[key] });
+    let dispose = () => {};
+    try {
+      const html = renderDashboardConnectPage(view(), unlockedOptions);
+      const root = document.createElement('div'); root.innerHTML = html; document.body.append(root);
+      const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, pollIntervalMs: -1, returnUrl: 'http://localhost/dashboard?connect', navigate() {},
+        refresh: async () => ({ status: 200, title: 'Sources', body: html, controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }),
+        transport: { control: async () => ({ status: 200, body: { ok: true } }) },
+      }); dispose = () => controller.dispose();
+      const dialog = root.querySelector<HTMLDialogElement>('dialog#build-connector')!;
+      // The old page's address lands here with the dialog open, and the fragment is cleared.
+      expect(dialog.open).toBe(true);
+      expect(browser.location.hash).toBe('');
+      expect(browser.location.search).toBe('?connect');
+      dialog.querySelector<HTMLButtonElement>('.adddialoghead [data-dialog-close]')!.click();
+      expect(dialog.open).toBe(false);
+      root.querySelector<HTMLButtonElement>('.srcbar [data-dialog-open="build-connector"]')!.click();
+      expect(dialog.open).toBe(true);
+      dialog.querySelector<HTMLButtonElement>('.pickbar [data-dialog-close]')!.click();
+      expect(dialog.open).toBe(false);
+      // From inside Add a source it opens over the sheet; closing it leaves the sheet open.
+      const sheet = root.querySelector<HTMLDialogElement>('dialog#add-source')!;
+      root.querySelector<HTMLButtonElement>('.srcbar [data-dialog-open="add-source"]')!.click();
+      sheet.querySelector<HTMLButtonElement>('[data-dialog-open="build-connector"]')!.click();
+      expect(dialog.open).toBe(true);
+      dialog.querySelector<HTMLButtonElement>('.pickbar [data-dialog-close]')!.click();
+      expect(dialog.open).toBe(false);
+      expect(sheet.open).toBe(true);
     } finally {
       dispose(); browser.close();
       for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }

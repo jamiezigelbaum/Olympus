@@ -745,7 +745,7 @@ describe('multi-source source dashboard', () => {
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: workerBearerToken });
     const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(workerBearerToken);
 
-    for (const page of ['keys', 'agents', 'private-answers', 'connector']) {
+    for (const page of ['keys', 'agents', 'private-answers']) {
       const response = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&${page}`));
       expect(response.status).toBe(200);
       const html = await response.text();
@@ -753,6 +753,10 @@ describe('multi-source source dashboard', () => {
       // Internal links keep carrying the token the reader arrived with.
       expect(html).toContain(`token=${dashboardToken}`);
     }
+    // Build a connector is a dialog on Sources now (#1087): its old address lands there, token kept.
+    const connector = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&connector`));
+    expect(connector.status).toBe(302);
+    expect(connector.headers.get('location')).toBe(`/dashboard?connect&token=${dashboardToken}#build-connector`);
     const read = await fetch(new Request(`http://worker.test/dashboard?panel-read&token=${dashboardToken}`));
     // No panel tools in this fixture: the read is refused plainly, not with a 401.
     expect(read.status).toBe(501);

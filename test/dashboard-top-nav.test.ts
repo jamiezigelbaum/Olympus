@@ -22,7 +22,6 @@ describe('the top bar', () => {
     expect(settings.active).toBe('Settings');
     expect(nav(renderDashboardLocalPage('private_answers', { url })).active).toBe('Privacy');
     expect(nav(renderDashboardLocalPage('agents', { url })).active).toBe('Settings');
-    expect(nav(renderDashboardLocalPage('connector', { url })).active).toBe('Sources');
     expect(nav(renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN })).active).toBe('Home');
   });
 
