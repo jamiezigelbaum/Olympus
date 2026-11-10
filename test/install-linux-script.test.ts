@@ -127,7 +127,9 @@ esac
   const bridgeFile = join(root, 'whatsapp-bridge');
   if (bridge !== undefined) writeFileSync(bridgeFile, bridge);
   executable(join(bin, 'curl'), `#!/bin/sh
-while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; --proto|--retry) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; --proto|--retry|--retry-delay|-w) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
+if [ -n "$FAKE_HTTP_STATUS" ]; then printf '%s' "$FAKE_HTTP_STATUS"; exit 22; fi
+printf 200
 case "$url" in
  *bun-linux-x64-baseline.zip) [ -z "$FAKE_ARCHIVE_CORRUPT" ] || { echo corrupt > "$out"; exit 0; }; cp '${zip}' "$out" ;;
  *-linux-x64) cp '${bridgeFile}' "$out" ;;
@@ -333,6 +335,8 @@ for (const [env, message] of [
   [{ FAKE_LOGIND_FAIL: '1' }, 'logind is unavailable'],
   [{ XDG_DATA_HOME: 'relative' }, 'absolute path'],
   [{ FAKE_ARCHIVE_CORRUPT: '1' }, 'Bun archive checksum/size mismatch'],
+  [{ FAKE_HTTP_STATUS: '504' }, 'Bun download failed; the download server returned an error (HTTP 504); try again in a few minutes.'],
+  [{ FAKE_HTTP_STATUS: '000' }, 'Bun download failed; check HTTPS connectivity and CA certificates.'],
 ] as Array<[Record<string, string>, string]>) {
   test(`preflight fault refuses before lifecycle: ${message}`, () => {
     const h = fixture();
@@ -839,3 +843,9 @@ for (const scenario of ['owned', 'unrecorded', 'nonempty', 'replacement', 'symli
   for(const path of parents){expect(existsSync(path)).toBe(scenario!=='owned');if(scenario==='nonempty')expect(text(join(path,'unrelated'))).toBe('keep');}
  }, 30_000);
 }
+
+test('downloads retry a dropped connection or a 5xx answer for about half a minute (#1038)', () => {
+  const script = text(join(REPO, 'scripts/install-linux.sh'));
+  expect(script).toContain("--retry 6 --retry-delay 5");
+  expect(script).not.toContain('--retry 2');
+});
