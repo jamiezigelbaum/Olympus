@@ -76,6 +76,8 @@ export type LocalAnswerResult =
       unanswered: string[];
       /** Sources that could not be searched on this computer, by name. */
       leftOut: string[];
+      /** Sources whose search ran out of time because Olympus was busy, by name. */
+      busy?: string[];
       /**
        * The items the answer read, kept on this computer for the re-check
        * before a cited item opens. Never sent to the page.
@@ -84,7 +86,12 @@ export type LocalAnswerResult =
       secretLocations?: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[];
     }
   /** Nothing on this computer matched (or nothing that matched may be read now). */
-  | { status: 'not_found'; leftOut: string[] }
+  | { status: 'not_found'; leftOut: string[]; busy?: string[] }
+  /**
+   * No source was searched at all: each one timed out (`busy`) or cannot be
+   * searched here (`leftOut`). Not "not found": nothing was looked at.
+   */
+  | { status: 'not_searched'; leftOut: string[]; busy: string[] }
   /** The built-in private model is not on this computer, or still downloading. */
   | { status: 'no_model' }
   | { status: 'model_downloading'; percent?: number }
@@ -117,6 +124,27 @@ export interface LocalAnswerOptions {
   /** A source's name for a corpus id, for "left out"; undefined names it generically. */
   sourceName?: (corpusId: string) => string | undefined;
   laneTimeoutMs?: number;
+  /**
+   * The content-free retrieval line for each ask (latency, searched and
+   * skipped corpus ids with reasons). Defaults to the worker log.
+   */
+  logRetrieval?: (line: LocalAnswerRetrievalLog) => void;
+}
+
+/** One ask's retrieval, content-free: no question, answer, item or name. */
+export interface LocalAnswerRetrievalLog {
+  latencyMs: number;
+  searchedCorpora: readonly string[];
+  skippedCorpora: ReadonlyArray<{ corpusId: string; reason: string }>;
+  candidates: number;
+}
+
+function logRetrievalToWorkerLog(line: LocalAnswerRetrievalLog): void {
+  const skipped = line.skippedCorpora.map((skip) => `${skip.corpusId}:${skip.reason}`).join(',');
+  console.error(
+    `[local-answer] retrieval latency_ms=${line.latencyMs} candidates=${line.candidates}`
+    + ` searched=${line.searchedCorpora.join(',') || '-'} skipped=${skipped || '-'}`,
+  );
 }
 
 /**
@@ -152,6 +180,7 @@ export async function answerOnThisComputer(
   const corpusIds = sourceAnswerCorpusIds(request);
   const selectedItems = selectedEvidenceItemsFromRequest(request);
   const explicitQuery = request.query?.trim();
+  const retrievalStartedAt = Date.now();
   const detail = await buildEvidencePackDetailed({
     question,
     ...(explicitQuery ? { searchQuery: explicitQuery } : {}),
@@ -175,13 +204,32 @@ export async function answerOnThisComputer(
     ...(lanes.secretLocations ? { secretLocations: lanes.secretLocations } : {}),
   });
   assertEvidencePackModelEligible(detail.pack);
-  const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
+  const searchedCorpora = detail.pack.coverage.searchedCorpora;
+  try {
+    (options.logRetrieval ?? logRetrievalToWorkerLog)({
+      latencyMs: Date.now() - retrievalStartedAt,
+      searchedCorpora,
+      skippedCorpora: detail.skippedCorpora.map(({ corpusId, reason }) => ({ corpusId, reason })),
+      candidates: detail.pack.candidates.length,
+    });
+  } catch {
+    // A log line never fails an answer.
+  }
+  const { leftOut, busy } = leftOutSources(
+    [...detail.skippedCorpora, ...cutShortCorpora(detail.laneAudits)],
+    lanes.excludedCorpusIds,
+    lanes.unmountedCorpusIds,
+    options.sourceName,
+  );
+  const busyField = busy.length > 0 ? { busy } : {};
   // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
   const notFound = (): LocalAnswerResult => (secrets
-    ? { status: 'answered', answer: secrets, citations: [], unanswered: [], leftOut, read: [], secretLocations }
-    : { status: 'not_found', leftOut });
+    ? { status: 'answered', answer: secrets, citations: [], unanswered: [], leftOut, ...busyField, read: [], secretLocations }
+    : searchedCorpora.length === 0 && leftOut.length + busy.length > 0
+      ? { status: 'not_searched', leftOut, busy }
+      : { status: 'not_found', leftOut, ...busyField });
   // Items kept as names only, and Personal names whose contents are Private
   // (read from their Private copy instead), carry no text to answer from.
   const skip = new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]);
@@ -239,6 +287,7 @@ export async function answerOnThisComputer(
     citations: result.citations,
     unanswered: result.unanswered ?? [],
     leftOut,
+    ...busyField,
     read,
     secretLocations,
   };
@@ -252,29 +301,51 @@ function secretWhere(location: SecretLocationNote): string {
 }
 
 /**
- * The sources this answer could not search here: a corpus that needs a cloud
- * query, a registered corpus with no adapter on this computer (not one the
- * owner's scope or the request left out on purpose), or one that timed out
- * or failed. Named by source, once each.
+ * Corpora searched by keyword alone because their search by meaning ran out
+ * of time (a held thread spends the vector scan's own deadline even when the
+ * lane is given a grace, #1091 review). What they would have matched by
+ * meaning is unknown, so they count as busy: asking again can find more.
+ */
+function cutShortCorpora(audits: readonly { laneName: string; skippedReason?: string }[]): { corpusId: string; reason: string }[] {
+  const corpora = new Set<string>();
+  for (const audit of audits) {
+    if (audit.skippedReason !== 'vector_scan_deadline_exceeded') continue;
+    const corpusId = audit.laneName.split(':')[0];
+    if (corpusId) corpora.add(corpusId);
+  }
+  return [...corpora].map((corpusId) => ({ corpusId, reason: 'lane_timeout' }));
+}
+
+/**
+ * The sources this answer could not search here, named by source, once each.
+ * `busy`: a search that ran out of time (Olympus was busy; asking again can
+ * work). `leftOut`: a corpus that needs a cloud query, one with a store on
+ * this computer but no adapter (not one the owner's scope or the request left
+ * out on purpose), or one whose search failed. A registered corpus with no
+ * store here is not a source on this computer, so it is not named (#1079).
+ * A source both busy and left out (two stores) is named as left out.
  */
 function leftOutSources(
   skipped: readonly { corpusId: string; reason: string }[],
   excluded: ReadonlySet<string> | undefined,
+  unmounted: ReadonlySet<string> | undefined,
   sourceName: ((corpusId: string) => string | undefined) | undefined,
-): string[] {
-  const names = new Set<string>();
+): { leftOut: string[]; busy: string[] } {
+  const leftOut = new Set<string>();
+  const busy = new Set<string>();
   for (const skip of skipped) {
     if (IN_SCOPE_SKIPS.has(skip.reason)) continue;
-    if (skip.reason === 'no_adapter' && excluded?.has(skip.corpusId)) continue;
+    if (skip.reason === 'no_adapter' && (excluded?.has(skip.corpusId) || unmounted?.has(skip.corpusId))) continue;
     let name: string | undefined;
     try {
       name = sourceName?.(skip.corpusId);
     } catch {
       name = undefined;
     }
-    names.add(name ?? 'One source');
+    (skip.reason === 'lane_timeout' ? busy : leftOut).add(name ?? 'One source');
   }
-  return [...names].sort();
+  for (const name of leftOut) busy.delete(name);
+  return { leftOut: [...leftOut].sort(), busy: [...busy].sort() };
 }
 
 /**

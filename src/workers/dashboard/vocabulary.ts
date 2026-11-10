@@ -3420,6 +3420,9 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   sources: 'Sources',
   open: 'Open',
   leftOut: 'Left out: {sources}. Olympus cannot search them on this computer.',
+  // A search that ran out of time (#1079): Olympus was busy, not unable.
+  busy: 'Olympus was too busy to search {sources} in time. Ask again in a moment.',
+  notSearched: 'Olympus could not search your sources this time, so it cannot say whether the answer is here.',
   unanswered: 'Not found here: {parts}.',
   notFound: 'Nothing on this computer answers this.',
   noModel: 'The model built into Olympus is not set up yet.',
