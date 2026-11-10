@@ -202360,6 +202360,7 @@ function secretLocationsFromRules(rules) {
   const pathPrefixes = [];
   const labelIds = new Set;
   const senders = [];
+  const chatKeys = new Set;
   for (const rule of rules) {
     if (rule.tier !== "secrets")
       continue;
@@ -202378,11 +202379,14 @@ function secretLocationsFromRules(rules) {
       case "sender":
         senders.push(value2.trim().toLowerCase());
         break;
+      case "chat":
+        chatKeys.add(value2.trim().toLowerCase());
+        break;
       default:
         break;
     }
   }
-  return { folderKeys, pathPrefixes, labelIds, senders };
+  return { folderKeys, pathPrefixes, labelIds, senders, chatKeys };
 }
 function loadSecretLocations(env = process.env) {
   return secretLocationsFromRules(loadOwnerTierRules({ env, allowMissing: true }));
@@ -202402,6 +202406,10 @@ function isSecretLabel(locations, labelId) {
       return true;
   return false;
 }
+function isSecretChat(locations, chatKey) {
+  const key2 = chatKey.trim().toLowerCase();
+  return key2 !== "" && locations.chatKeys.has(key2);
+}
 function isSecretSender(locations, sender) {
   return locations.senders.some((rule) => ownerSenderRuleMatches(sender, rule, true));
 }
@@ -202413,7 +202421,8 @@ var init_scope_privacy = __esm(() => {
     folderKeys: new Set,
     pathPrefixes: [],
     labelIds: new Set,
-    senders: []
+    senders: [],
+    chatKeys: new Set
   };
 });
 
@@ -202440,6 +202449,8 @@ function isSecretPrivacyRule(secrets, rule) {
     return isSecretFolder(secrets, rule.key ?? "");
   if (rule.kind === "label")
     return isSecretLabel(secrets, rule.key ?? "");
+  if (rule.kind === "chat")
+    return isSecretChat(secrets, rule.key ?? "");
   return isSecretSender(secrets, rule.value ?? "");
 }
 function visiblePrivacy(settings, secrets) {

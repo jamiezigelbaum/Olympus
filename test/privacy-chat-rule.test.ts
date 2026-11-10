@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { privacyToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { readChatGptPrivacySettings } from '../src/workers/chatgpt/setup-backend.ts';
-import { lowersPrivacy } from '../src/workers/dashboard/shared-privacy.ts';
+import { loadSecretLocations } from '../src/workers/chatgpt/scope-privacy.ts';
+import { isSecretPrivacyRule, lowersPrivacy, visiblePrivacy } from '../src/workers/dashboard/shared-privacy.ts';
 import { parsePrivacyProfileInput, readPrivacyProfile, writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { loadOwnerTierRules, writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
@@ -67,6 +68,21 @@ test('the panel reads a saved chat rule back, so a save that drops it counts as 
   expect(meta.rules).toEqual([doctor]);
   expect(lowersPrivacy({ rules: [] }, settings)).toBe(true);
   expect(lowersPrivacy({ rules: [doctor] }, settings)).toBe(false);
+});
+
+test('a chat rule on a Secrets chat never leaves the computer', () => {
+  const { env } = home();
+  writeOwnerTierRules([{ id: 'cli.vault', source: 'telegram', match: { kind: 'chat', value: 'DR-LEE' }, tier: 'secrets', strength: 'force' }], { env });
+  const other = { kind: 'chat', source_id: 'whatsapp.personal.messages', key: 'tiago' } as const;
+  writePrivacyProfile({ rules: [doctor, other] }, { env });
+  const secrets = loadSecretLocations(env);
+  expect(isSecretPrivacyRule(secrets, doctor)).toBe(true);
+  expect(isSecretPrivacyRule(secrets, other)).toBe(false);
+  const visible = visiblePrivacy(readChatGptPrivacySettings(env, 0), secrets);
+  expect(visible.rules).toEqual([other]);
+  const meta = JSON.stringify(privacyToolResult(visible, 'current'));
+  expect(meta).not.toContain('dr-lee');
+  expect(meta).not.toContain('Dr. Lee');
 });
 
 const personal: TierSniffer = { id: 'personal-content', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) };

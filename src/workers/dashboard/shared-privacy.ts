@@ -8,7 +8,7 @@
  * Pure: values in, values out. Nothing here reads or writes the profile.
  */
 import type { PrivacySettings } from '../chatgpt/dashboard-contract.ts';
-import { isSecretFolder, isSecretLabel, isSecretSender, type SecretLocations } from '../chatgpt/scope-privacy.ts';
+import { isSecretChat, isSecretFolder, isSecretLabel, isSecretSender, type SecretLocations } from '../chatgpt/scope-privacy.ts';
 import { privacyRuleId } from '../classification/privacy-profile.ts';
 import type { PrivacyRuleLike } from './shared-privacy-logic.ts';
 
@@ -50,6 +50,7 @@ export function lowersPrivacy(
 export function isSecretPrivacyRule(secrets: SecretLocations, rule: { kind: string; key?: string; value?: string }): boolean {
   if (rule.kind === 'folder') return isSecretFolder(secrets, rule.key ?? '');
   if (rule.kind === 'label') return isSecretLabel(secrets, rule.key ?? '');
+  if (rule.kind === 'chat') return isSecretChat(secrets, rule.key ?? '');
   return isSecretSender(secrets, rule.value ?? '');
 }
 
