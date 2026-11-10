@@ -39,6 +39,7 @@ import {
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
+import { forgetJudgeCheckItems, judgeCheckPath } from '../workers/classification/judge-check.ts';
 import { accountExtractionSpoolRoot, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
 import { placedAccount } from './source-placement.ts';
 import { xBookmarksApiUsageDbPath } from './olympus-layout.ts';
@@ -77,6 +78,12 @@ export interface ForgetContext {
    * source gets new ids, so the old claims could never be retired again.
    */
   tierLedgerIds?: readonly string[] | undefined;
+  /**
+   * The (provider, account scope) pairs the source's tier ledgers hold items
+   * under, read with the ledger ids: the item ids the dashboard gave out for
+   * the source's items name these.
+   */
+  tierItemScopes?: readonly (readonly [string, string])[] | undefined;
   /**
    * Tier ledgers that exist but whose id could not be read. Their claims stay
    * (nothing is guessed) and the extraction step says so in its report.
@@ -358,6 +365,16 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const path = tierMigrationStatePath(context.env);
       return line(path, 'migration batch selectors', forgetTierMigrationSelectors(path, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The judge check's saved round and the items earlier rounds asked about: item ids, which name the item's provider, chat and id.
+    id: 'judge-check',
+    file: 'judge-check.json',
+    modules: [],
+    forget(_account, context, { dryRun }) {
+      const path = judgeCheckPath(context.env);
+      return line(path, 'judge check items', forgetJudgeCheckItems(path, context.tierItemScopes ?? [], { dryRun }));
     },
   },
   {

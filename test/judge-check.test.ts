@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   createJudgeCheck,
+  forgetJudgeCheckItems,
   JUDGE_CHECK_RANDOM_PICKS,
   JUDGE_CHECK_RANGE_MIN_ANSWERS,
   JUDGE_CHECK_ROUND_SIZE,
@@ -345,5 +346,35 @@ describe('the numbers', () => {
     expect(judgeConfidence('unresolved:0.00')).toBe(0);
     expect(judgeConfidence(null)).toBe(1);
     expect(judgeConfidence('garbled')).toBe(1);
+  });
+});
+
+describe('deleting a source', () => {
+  const idOf = (provider: string, n: number) => `oti_${Buffer.from(JSON.stringify([provider, 'acct', '', `i${n}`])).toString('base64url')}`;
+
+  test('forgets the deleted source\'s ids, keeps the rest of the round and its answers, and keeps the counts', () => {
+    const path = join(root, 'judge-check.json');
+    writeFileSync(path, JSON.stringify({
+      v: 1,
+      round: { started_at: '2026-11-01T00:00:00.000Z', items: [
+        { item_id: idOf('gmail', 1), judge: 'Private', answer: 'Private', random: true },
+        { item_id: idOf('dropbox', 2), judge: 'Personal', answer: 'Private', random: true, changed: true },
+        { item_id: idOf('gmail', 3), judge: 'Personal' },
+      ] },
+      seen: [idOf('gmail', 4), idOf('dropbox', 5)],
+      random_tally: { compared: 6, agreed: 5 },
+    }));
+    expect(forgetJudgeCheckItems(path, [['gmail', 'acct']], { dryRun: true })).toBe(3);
+    expect(forgetJudgeCheckItems(path, [['gmail', 'acct']])).toBe(3);
+    const left = JSON.parse(readFileSync(path, 'utf8'));
+    expect(left.round.items.map((saved: { item_id: string }) => saved.item_id)).toEqual([idOf('dropbox', 2)]);
+    expect(left.round.items[0].answer).toBe('Private');
+    expect(left.seen).toEqual([idOf('dropbox', 5)]);
+    // The forgotten random answer (gmail 1, agreed) still counts.
+    expect(left.random_tally).toEqual({ compared: 7, agreed: 6 });
+    expect(forgetJudgeCheckItems(path, [['gmail', 'acct']])).toBe(0);
+    expect(forgetJudgeCheckItems(path, [['dropbox', 'other-acct']])).toBe(0);
+    expect(forgetJudgeCheckItems(path, [['dropbox', 'acct']])).toBe(2);
+    expect(JSON.parse(readFileSync(path, 'utf8')).round).toBeUndefined();
   });
 });

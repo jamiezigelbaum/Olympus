@@ -24259,6 +24259,12 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/classification/judge-check.ts
+var init_judge_check = __esm(() => {
+  init_atomic_file();
+  init_owner_config_read();
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -24284,6 +24290,7 @@ var init_source_forget_registry = __esm(() => {
   init_source_scheduler_state();
   init_job_names();
   init_spool();
+  init_judge_check();
   init_olympus_layout();
   init_source_placement();
   init_olympus_layout();

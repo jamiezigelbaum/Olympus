@@ -43524,6 +43524,12 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/classification/judge-check.ts
+var init_judge_check = __esm(() => {
+  init_atomic_file();
+  init_owner_config_read();
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -43549,6 +43555,7 @@ var init_source_forget_registry = __esm(() => {
   init_source_scheduler_state();
   init_job_names();
   init_spool();
+  init_judge_check();
   init_olympus_layout();
   init_source_placement();
   init_olympus_layout();
@@ -71811,9 +71818,8 @@ init_tier_classifier();
 init_tier_ledger();
 init_tier_rules();
 
-// src/workers/classification/judge-check.ts
-init_atomic_file();
-init_owner_config_read();
+// src/workers/email-source/server.ts
+init_judge_check();
 
 // src/workers/source-index/built-in-reranker.ts
 init_evidence_reranker();
@@ -72717,6 +72723,7 @@ init_source_corpus_registry();
 init_selected_item_safety();
 init_venice_models();
 init_public_surface();
+init_judge_check();
 
 // src/workers/archive-import/staging.ts
 var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;

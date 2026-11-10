@@ -361,3 +361,62 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     },
   };
 }
+
+/** An item id's (provider, account scope), decoded as tier-owner-items encodes it; undefined for one it did not give. */
+function itemScope(itemId: string): string | undefined {
+  if (!itemId.startsWith('oti_')) return undefined;
+  try {
+    const parts = JSON.parse(Buffer.from(itemId.slice(4), 'base64url').toString('utf8')) as unknown;
+    return Array.isArray(parts) && typeof parts[0] === 'string' && typeof parts[1] === 'string'
+      ? JSON.stringify([parts[0], parts[1]])
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Deleting a source forgets the judge check's item ids from it: in the round
+ * (the rest of the round and its answers stay) and in the list of items
+ * earlier rounds asked about. `scopes` are the (provider, account scope)
+ * pairs the source's tier ledgers hold items under. A forgotten random answer
+ * still counts toward the overall range: the count holds no item id.
+ * Returns how many ids were forgotten.
+ */
+export function forgetJudgeCheckItems(
+  path: string,
+  scopes: readonly (readonly [string, string])[],
+  { dryRun = false }: { dryRun?: boolean } = {},
+): number {
+  if (scopes.length === 0 || !existsSync(path)) return 0;
+  let state: StoredJudgeCheck | undefined;
+  try {
+    state = JSON.parse(readFileSync(path, 'utf8')) as StoredJudgeCheck;
+  } catch {
+    state = undefined;
+  }
+  // A file the judge check cannot read is one it starts over from; nothing in it is used.
+  if (!state || state.v !== 1) return 0;
+  const gone = new Set(scopes.map(([provider, accountScope]) => JSON.stringify([provider, accountScope])));
+  const isGone = (itemId: string) => { const scope = itemScope(itemId); return scope !== undefined && gone.has(scope); };
+  const roundGone = state.round?.items.filter((item) => isGone(item.item_id)) ?? [];
+  const seenGone = (state.seen ?? []).filter(isGone);
+  const count = new Set([...roundGone.map((item) => item.item_id), ...seenGone]).size;
+  if (count === 0 || dryRun) return count;
+  const next: StoredJudgeCheck = { ...state };
+  if (state.round) {
+    const kept = state.round.items.filter((item) => !isGone(item.item_id));
+    if (kept.length > 0) next.round = { ...state.round, items: kept };
+    else delete next.round;
+  }
+  if (state.seen) next.seen = state.seen.filter((itemId) => !isGone(itemId));
+  const counted = randomTally(roundGone);
+  if (counted.compared > 0) {
+    next.random_tally = {
+      compared: (state.random_tally?.compared ?? 0) + counted.compared,
+      agreed: (state.random_tally?.agreed ?? 0) + counted.agreed,
+    };
+  }
+  writePrivateFileAtomicSync(path, `${JSON.stringify(next)}\n`);
+  return count;
+}
