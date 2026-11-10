@@ -106751,53 +106751,70 @@ function exportOlympusData(options) {
   for (const source of selected) {
     const sourceRoot = join96(destination, "sources", safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
-    const legacyIndex = source.files.preCutoverIndex;
-    if (legacyIndex) {
-      exportSqliteStore({
-        sqlitePath: legacyIndex.path,
-        destinationRoot: sourceRoot,
-        exportRoot: destination,
-        sourceId: source.sourceId,
-        role: "legacy_store",
-        expectedStoreId: legacyIndex.storeId,
-        files,
-        skipped: skipped2,
-        artifacts
-      });
-    }
-    source.files.stores.forEach((storePath, storeIndex) => {
-      const before = artifacts.length;
-      exportSqliteStore({
-        sqlitePath: storePath,
-        destinationRoot: sourceRoot,
-        exportRoot: destination,
-        sourceId: source.sourceId,
-        role: "connector_store",
-        expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-        files,
-        skipped: skipped2,
-        artifacts
-      });
-      if (artifacts.length > before) {
-        artifacts[before].storeIndex = storeIndex;
-        for (const row of readChunkMediaRefs(join96(destination, artifacts[before].relativePath))) {
-          if (!mediaRefs.has(row.media_sha256))
-            mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
+    const stored = snapshotAtOneLedgerGeneration({
+      ledgerPaths: source.files.stores.filter((store) => store !== ":memory:").map(tierLedgerPathForStore),
+      discard: (attempt) => {
+        for (const path of attempt.files)
+          rmSync27(path, { force: true });
+      },
+      attempt: () => {
+        const local = { files: [], skipped: [], artifacts: [] };
+        const legacyIndex = source.files.preCutoverIndex;
+        if (legacyIndex) {
+          exportSqliteStore({
+            sqlitePath: legacyIndex.path,
+            destinationRoot: sourceRoot,
+            exportRoot: destination,
+            sourceId: source.sourceId,
+            role: "legacy_store",
+            expectedStoreId: legacyIndex.storeId,
+            files: local.files,
+            skipped: local.skipped,
+            artifacts: local.artifacts
+          });
         }
-      }
-      for (const [sidecar, path, storeId] of [
-        ["tier_ledger", tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
-        ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
-        ["secret_locations", secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID]
-      ]) {
-        if (!existsSync71(path))
-          continue;
-        const at = artifacts.length;
-        exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: "tier_sidecar", expectedStoreId: storeId, files, skipped: skipped2, artifacts });
-        if (artifacts.length > at)
-          Object.assign(artifacts[at], { storeIndex, sidecar });
+        source.files.stores.forEach((storePath, storeIndex) => {
+          const before = local.artifacts.length;
+          exportSqliteStore({
+            sqlitePath: storePath,
+            destinationRoot: sourceRoot,
+            exportRoot: destination,
+            sourceId: source.sourceId,
+            role: "connector_store",
+            expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+            files: local.files,
+            skipped: local.skipped,
+            artifacts: local.artifacts
+          });
+          if (local.artifacts.length > before)
+            local.artifacts[before].storeIndex = storeIndex;
+          for (const [sidecar, path, storeId] of [
+            ["tier_ledger", tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
+            ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
+            ["secret_locations", secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID]
+          ]) {
+            if (!existsSync71(path))
+              continue;
+            const at = local.artifacts.length;
+            exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: "tier_sidecar", expectedStoreId: storeId, files: local.files, skipped: local.skipped, artifacts: local.artifacts });
+            if (local.artifacts.length > at)
+              Object.assign(local.artifacts[at], { storeIndex, sidecar });
+          }
+        });
+        return local;
       }
     });
+    files.push(...stored.files);
+    skipped2.push(...stored.skipped);
+    artifacts.push(...stored.artifacts);
+    for (const artifact of stored.artifacts) {
+      if (artifact.role !== "connector_store")
+        continue;
+      for (const row of readChunkMediaRefs(join96(destination, artifact.relativePath))) {
+        if (!mediaRefs.has(row.media_sha256))
+          mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
+      }
+    }
     for (const policyPath of source.files.settings) {
       const destinationPath = join96(sourceRoot, basename13(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped2)) {
@@ -107718,6 +107735,30 @@ function requireSource(sourceId) {
 }
 function requireAccount5(sourceId, context2) {
   return lifecycleAccountOf(requireSource(sourceId).sourceId, context2);
+}
+function snapshotAtOneLedgerGeneration(input) {
+  const paths = [...new Set(input.ledgerPaths)].filter((path) => existsSync71(path));
+  const attempts = input.attempts ?? 3;
+  for (let tried = 0;tried < attempts; tried += 1) {
+    const watches = paths.map((path) => {
+      const db = new Database25(path, { readonly: true });
+      db.exec("PRAGMA busy_timeout = 10000;");
+      return { db, start: ledgerDataVersion(db) };
+    });
+    try {
+      const result = input.attempt();
+      if (watches.every((watch) => ledgerDataVersion(watch.db) === watch.start))
+        return result;
+      input.discard(result);
+    } finally {
+      for (const watch of watches)
+        closeSqliteStore(watch.db);
+    }
+  }
+  throw new OperationError("source_index_error", `Olympus kept changing privacy decisions while this source was exported, ${attempts} times over, so its stores and ledgers never matched; nothing was published for it.`, "Export again in a few minutes, or once the privacy judge has caught up.");
+}
+function ledgerDataVersion(db) {
+  return db.query("PRAGMA data_version").get().data_version;
 }
 function exportSqliteStore(options) {
   const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped: skipped2, artifacts } = options;
@@ -205023,6 +205064,24 @@ function registerGovernedStore(lanes, store, newLane, log = () => {}) {
   lanes.push(newLane(ledger));
   return "registered";
 }
+function createPendingGovernance(lanes, newLane, log = () => {}) {
+  const waiting = new Map;
+  const attempt = (store) => {
+    const outcome = registerGovernedStore(lanes, store, (ledger) => newLane(store, ledger), log);
+    if (outcome === "no_ledger" || outcome === "unavailable")
+      waiting.set(store.corpusId, store);
+    else
+      waiting.delete(store.corpusId);
+  };
+  return {
+    add: attempt,
+    retry() {
+      for (const store of [...waiting.values()])
+        attempt(store);
+    },
+    waiting: () => [...waiting.keys()]
+  };
+}
 var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -210002,7 +210061,9 @@ function parseEngineCommandEnvelope(value2) {
     case "capture":
     case "embed_chunks":
     case "source_watch":
-    case "extraction_queue": {
+    case "extraction_queue":
+    case "people":
+    case "source_sync": {
       const frontPid = command2.frontPid;
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
@@ -210219,7 +210280,9 @@ var init_commands = __esm(() => {
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_FORWARDED_ROUTES = {
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
-    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise"],
+    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
+    people: ["/dashboard/people"],
+    source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
     storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
     capture: [
       "/dashboard/messaging/start",
@@ -210675,7 +210738,7 @@ function createEngineFrontRoutes(input) {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
     } catch (error2) {
       return { unanswered: error2 instanceof Error ? error2.message : "The background engine is not answering." };
     }
@@ -210689,6 +210752,9 @@ function createEngineFrontRoutes(input) {
       return Response.json({ error: { code: "engine_background_unavailable", message: outcome.unanswered } }, { status: 503 });
     if ("failed" in outcome)
       return Response.json({ error: { code: "engine_background_failed", message: outcome.failed } }, { status: 502 });
+    try {
+      input.afterAnswer?.(kind);
+    } catch {}
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
   };
   return (request) => {
@@ -210767,6 +210833,16 @@ class OwnerBusyMarks {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
   }
 }
+function restartAfterFront(input) {
+  input.markStopping();
+  (input.waitForExit ?? waitForProcessExit)(input.frontPid).then((ended) => {
+    if (!ended)
+      input.log?.("[engine-split] the front did not end within a minute; restarting anyway.");
+    input.restart();
+  });
+  return true;
+}
+var SOURCE_SYNC_WAIT_MS;
 var init_runtime4 = __esm(() => {
   init_engine_split();
   init_olympus_layout();
@@ -210775,6 +210851,7 @@ var init_runtime4 = __esm(() => {
   init_client3();
   init_commands();
   init_snapshot();
+  SOURCE_SYNC_WAIT_MS = 35 * 60000;
 });
 
 // src/workers/engine-split/front-state.ts
@@ -210869,6 +210946,12 @@ function frontModelReload(options) {
       options.restartSelf(request);
     });
     return true;
+  };
+}
+function frontCaptureRuntime(local, snapshot2) {
+  return () => {
+    const captures = current2(snapshot2)?.snapshot.captures;
+    return captures && typeof captures === "object" && !Array.isArray(captures) ? captures : local();
   };
 }
 var init_front_state = __esm(() => {
@@ -234649,7 +234732,8 @@ async function main() {
       return false;
     }
   }));
-  const tierScopes = () => tierLanes.map((lane) => ({
+  const pendingGovernance = createPendingGovernance(tierLanes, (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line2) => console.warn(line2));
+  const tierScopes = () => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
@@ -235242,9 +235326,7 @@ ${key2}`;
   });
   const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
-  const registerConfiguredTierStore = (store) => {
-    registerGovernedStore(tierLanes, store, (ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line2) => console.warn(line2));
-  };
+  const registerConfiguredTierStore = (store) => pendingGovernance.add(store);
   for (const store of configuredConnectorStores)
     registerConfiguredTierStore(store);
   const connectorStores = mergeConnectorStores([
@@ -237188,7 +237270,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         stopMessagingCapture,
         unlinkWhatsAppDevice,
         withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
-        captureRuntime: dashboardCaptureRuntime,
+        captureRuntime: engineFront ? frontCaptureRuntime(dashboardCaptureRuntime, () => engineFront.status()) : dashboardCaptureRuntime,
         workerRestart: {
           canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
           request: (reload) => restartForDelete(reload)
@@ -237968,6 +238050,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     restartFront: () => {
       if (!restartFrontOnly())
         console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
+    },
+    afterAnswer: (kind) => {
+      if (kind === "people")
+        refreshPeople(true);
     }
   }) : undefined;
   const frontWorkerFetch = frontRoutes ? async (request) => await frontRoutes(request) ?? worker.fetch(request) : worker.fetch;
@@ -238245,10 +238331,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
               return { reloaded: target, restarting: false };
             if (frontPid === undefined)
               return { reloaded: target, restarting: requestModelReload() };
-            waitForProcessExit(frontPid).then(() => {
-              requestModelReload();
-            });
-            return { reloaded: target, restarting: true };
+            return { reloaded: target, restarting: restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(), log: (line2) => console.warn(line2) }) };
           }
           const invalidated = target === "scope" && fileExtractionRuntime ? (corpora ?? []).reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0) : 0;
           refreshSchedulerSources();
@@ -238324,6 +238407,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         embed_chunks: ({ request }) => runForwarded(request),
         source_watch: ({ request }, { id }) => runForwarded(request, id),
         extraction_queue: ({ request }) => runForwarded(request),
+        people: ({ request }) => runForwarded(request),
+        source_sync: ({ request }) => runForwarded(request),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };
@@ -238365,13 +238450,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const frontPid = deleteFromFront;
       if (frontPid === undefined)
         return requestModelReload(request);
-      commands.markStopping();
-      waitForProcessExit(frontPid).then((ended) => {
-        if (!ended)
-          console.warn("[engine-split] the front did not end within a minute of a source-data delete; restarting to delete anyway.");
-        requestModelReload(request);
-      });
-      return true;
+      return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line2) => console.warn(line2) });
     };
     commands.markReady();
     engineBackground = { stop: () => {

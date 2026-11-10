@@ -81618,6 +81618,7 @@ class OwnerBusyRelay {
 init_atomic_file();
 
 // src/workers/engine-split/runtime.ts
+var SOURCE_SYNC_WAIT_MS = 35 * 60000;
 class OwnerBusyMarks {
   marks = new Map;
   lapseMs;
