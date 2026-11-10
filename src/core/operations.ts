@@ -1,6 +1,6 @@
 import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { DelphiClient } from './delphi.ts';
-import { recordLocalAgentAnswer } from './app-release-agent.ts';
+import { noteLocalAgentAnswer } from './app-release-agent.ts';
 import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
 import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
@@ -363,7 +363,7 @@ export const operations: Operation[] = [
       const jobs = ctx.sourceAnswerJobs;
       const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
       const released = await revalidateStdioSourceAnswer(ctx, result);
-      await recordLocalAgentAnswer({ caller: ctx.caller, operation: 'source_answer', args: params, result: released });
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
       return released;
     },
   },
@@ -391,7 +391,7 @@ export const operations: Operation[] = [
       const released = await revalidateStdioSourceAnswer(ctx, result);
       // What the owner sees each AI app received (#1061) is recorded here, at
       // the tool result, after collection and release validation.
-      await recordLocalAgentAnswer({ caller: ctx.caller, operation: 'source_answer_result', args: params, result: released });
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
       return released;
     },
   },

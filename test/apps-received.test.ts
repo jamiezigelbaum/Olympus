@@ -19,10 +19,9 @@ import {
   type AppRequestRecord,
 } from '../src/core/app-release-capture.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems, openAppReleaseLog } from '../src/core/app-release-log.ts';
-import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { findOperationByName } from '../src/core/operations.ts';
-import { withheldSourceAnswer } from '../src/core/release-manifest.ts';
 import { SourceAnswerJobRegistry, type SourceAnswerPending } from '../src/core/source-answer-jobs.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { remoteOperationOutput } from '../src/core/remote-result.ts';
@@ -31,7 +30,9 @@ import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { APPS_RECEIVED_ITEM_GONE, createAppsReceived } from '../src/workers/apps-received.ts';
-import { recordLocalAgentAnswer } from '../src/core/app-release-agent.ts';
+import { agentAnswerReceipt, recordAgentAnswerReceipt } from '../src/core/app-release-agent.ts';
+import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
+import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { clearInstalledTierClassification, configureInstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { runTierSetOnRecordedItem } from '../src/workers/classification/tier-cli.ts';
@@ -151,7 +152,7 @@ describe('the release exits record each request', () => {
 
   test('an agent on this computer is recorded at its tool result', async () => {
     const records = capture();
-    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Which invoices are unpaid?' }, result: { answer: 'Two.', evidence: [PERSONAL, PRIVATE] } });
+    recordAgentAnswerReceipt(agentAnswerReceipt('Which invoices are unpaid?', { surface: 'native', display_name: 'Muse' }, { answer: 'Two.', evidence: [PERSONAL, PRIVATE] })!, false);
     expect(records[0]).toMatchObject({ connection: { name: 'Muse', kind: 'agent' }, question: 'Which invoices are unpaid?' });
     expect(records[0]!.items.map((item) => [item.title, item.tier])).toEqual([['Appointment confirmed: Leo', 'personal'], ['SENTINEL_PRIVATE_TITLE', 'private']]);
   });
@@ -264,7 +265,7 @@ describe('the dashboard route', () => {
 
   test('lists, sets retention, clears, and marks the recorded item Private by its full identity', async () => {
     const { apps, changed } = setup();
-    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Which invoices are unpaid?' }, result: { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1', provider_conversation_id: 'thread-9' }] } });
+    recordAgentAnswerReceipt(agentAnswerReceipt('Which invoices are unpaid?', { surface: 'native', display_name: 'Muse' }, { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1', provider_conversation_id: 'thread-9' }] })!, false);
     const listed = await apps.handle({ action: 'list' });
     const requests = listed.body.requests as Array<{ id: string; items: Array<{ position: number; madePrivate: boolean }> }>;
     expect(requests).toHaveLength(1);
@@ -283,7 +284,7 @@ describe('the dashboard route', () => {
 
   test('when the full locator no longer resolves, the correction is refused plainly with no bare-id retry', async () => {
     const { apps, changed } = setup(true);
-    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Which invoices are unpaid?' }, result: { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1' }] } });
+    recordAgentAnswerReceipt(agentAnswerReceipt('Which invoices are unpaid?', { surface: 'native', display_name: 'Muse' }, { answer: 'Two.', evidence: [{ ...PERSONAL, uri: 'gmail://msg-1' }] })!, false);
     const [request] = (await apps.handle({ action: 'list' })).body.requests as Array<{ id: string }>;
     const refused = await apps.handle({ action: 'make_private', request: request!.id, item: 0 });
     expect(refused).toEqual({ status: 409, body: { ok: false, error: { code: 'item_gone', message: APPS_RECEIVED_ITEM_GONE } } });
@@ -292,7 +293,7 @@ describe('the dashboard route', () => {
     const after = (await apps.handle({ action: 'list' })).body.requests as Array<{ items: Array<{ madePrivate: boolean }> }>;
     expect(after[0]!.items[0]!.madePrivate).toBe(false);
     // An item recorded without a locator is refused without any attempt.
-    await recordLocalAgentAnswer({ caller: { surface: 'native', displayName: 'Muse' }, operation: 'source_answer', args: { question: 'Anything else?' }, result: { answer: 'No.', evidence: [PERSONAL] } });
+    recordAgentAnswerReceipt(agentAnswerReceipt('Anything else?', { surface: 'native', display_name: 'Muse' }, { answer: 'No.', evidence: [PERSONAL] })!, false);
     const [latest] = (await apps.handle({ action: 'list' })).body.requests as Array<{ id: string }>;
     expect((await apps.handle({ action: 'make_private', request: latest!.id, item: 0 })).status).toBe(409);
     expect(changed).toHaveLength(1);
@@ -409,6 +410,44 @@ describe('a Private match is not a Private answer', () => {
     expect((result._meta as Record<string, { count: number; state: string }>)['olympus/privateAnswer']).toMatchObject({ count: 2, state: 'no_model' });
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ heldBack: 2, answeredPrivately: false });
+  });
+
+  test('a handed-off ChatGPT answer keeps its waiting question when collected', async () => {
+    const records = capture();
+    const { openWaitingPrivateQuestionStore } = await import('../src/core/waiting-private-questions.ts');
+    const waiting = openWaitingPrivateQuestionStore(join(tempDir(), 'data', 'waiting.sqlite'));
+    cleanups.push(() => waiting.close());
+    const refs: string[] = [];
+    let finish!: (value: unknown) => void;
+    const finished = new Promise((resolve) => { finish = resolve; });
+    const config = defaultConfig();
+    config.email.enabled = true;
+    config.sourceIndex.enabled = true;
+    const jobs = new SourceAnswerJobRegistry({ limits: { handoffMs: 1, resultWaitMs: 30 } });
+    const ctx = {
+      config,
+      caller: { surface: 'remote', connectionId: 'conn-gpt', provider: 'openai' },
+      email: { sourceAnswer: () => finished },
+      sourceAnswerJobs: { registry: jobs, owner: 'remote:conn-gpt' },
+    } as unknown as OperationContext;
+    const options = {
+      dashboardView: async () => ({ sources: [] }) as never,
+      answerModelAvailable: () => true,
+      privateMatchProbe: async () => ({ count: 1, evidence: [] }),
+      waitingQuestions: () => ({
+        ticket: (connectionId: string) => waiting.ticket(connectionId),
+        record: (...args: Parameters<typeof waiting.record>) => { const ref = waiting.record(...args); if (ref) refs.push(ref.id); return ref; },
+      }),
+    } as unknown as ChatGptSurfaceOptions;
+    const handedOff = await callChatGptTool('source_answer', { question: 'When is Leo\'s dentist appointment?' }, ctx, options);
+    const jobId = (handedOff.structuredContent as { job_id: string }).job_id;
+    expect(jobId).toBeString();
+    expect(records).toEqual([]);
+    finish({ answer: 'Saturday.', evidence: [PERSONAL] });
+    await callChatGptTool('source_answer_result', { job_id: jobId }, ctx, options);
+    expect(records).toHaveLength(1);
+    expect(refs).toHaveLength(1);
+    expect(records[0]!.privateQuestionId).toBe(refs[0]);
   });
 
   test('the row says answered privately only once its waiting question\'s answer completes', async () => {
@@ -528,22 +567,48 @@ describe('the worker serves the list only inside a local control session', () =>
       if (/openAppReleaseLog\(|createAppsReceived\(|sourceDashboard\??\.appsReceived\b/.test(text)) readers.push(file);
     }
     expect(readers.sort()).toEqual([
-      'src/core/app-release-agent.ts',
       'src/core/app-release-log.ts',
       'src/workers/apps-received.ts',
       'src/workers/email-source/index.ts',
       'src/workers/email-source/server.ts',
     ]);
-    // A local agent's tool result only appends its own record to the log; it never reads it.
-    const agent = readFileSync(join(import.meta.dir, '..', 'src/core/app-release-agent.ts'), 'utf8');
-    expect(agent).not.toMatch(/\.(list|item|retentionDays)\(/);
   });
 });
 
 describe('a local agent\'s answer is recorded only at its tool result', () => {
-  function context(surface: 'mcp' | 'native' | 'cli', email: Record<string, unknown>, jobs?: SourceAnswerJobRegistry): OperationContext {
+  // The real path: the operation, the agent's EmailClient, and the worker that keeps the log.
+  // A worker answer as the agent's client accepts it.
+  const answered = (evidence: unknown[]) => ({
+    answer: 'Two.',
+    evidence,
+    audit: { raw_source_exposed: false, searched_corpora: [], skipped_corpora: [], lane_audits: [], latency_ms: 1 },
+    policy: { raw_source_exposed: false, source_packets_exposed: false, secure_local_content_exposed: false, castor_safe_bridge: true },
+  });
+  function engine(answer: () => Promise<unknown>, options: { withhold?: boolean } = {}) {
+    const worker = createEmailSourceWorker({
+      // An answer from no source item: its (empty) manifest passes the release check.
+      sourceAnswer: { answer: async () => {
+        recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
+        return answer();
+      } } as never,
+      sourceAnswerReleaseCheck: { inputs: () => [], secureDerivativeDefault: () => 'allow' } as never,
+    });
+    const config = defaultConfig();
+    config.email.enabled = true;
+    config.sourceIndex.enabled = true;
+    const posted: string[] = [];
+    const transport = new DirectHttpEmailTransport((url, init) => {
+      posted.push(new URL(String(url)).pathname);
+      if (options.withhold && String(url).endsWith('/source/answer/release')) {
+        return Promise.resolve(Response.json({ withheld: 'Olympus withheld this answer because an item became Private.' }));
+      }
+      return worker.fetch(new Request(url, init));
+    });
+    return { email: new EmailClient(config, transport), config, posted };
+  }
+  function context(surface: 'mcp' | 'native' | 'cli', email: EmailClient, config: ReturnType<typeof defaultConfig>, jobs?: SourceAnswerJobRegistry): OperationContext {
     return {
-      config: defaultConfig(),
+      config,
       caller: { surface, displayName: 'Muse' },
       email,
       ...(jobs ? { sourceAnswerJobs: { registry: jobs, owner: `${surface}:test` } } : {}),
@@ -554,29 +619,30 @@ describe('a local agent\'s answer is recorded only at its tool result', () => {
     const records = capture();
     let finish!: (value: unknown) => void;
     const finished = new Promise((resolve) => { finish = resolve; });
+    const { email, config, posted } = engine(() => finished);
     const jobs = new SourceAnswerJobRegistry({ limits: { handoffMs: 1, resultWaitMs: 30 } });
-    const ctx = context('mcp', { sourceAnswer: () => finished, revalidateSourceAnswer: async (result: unknown) => result }, jobs);
+    const ctx = context('mcp', email, config, jobs);
     const pending = await findOperationByName('source_answer')!.handler(ctx, { question: 'Which invoices are unpaid?' }) as SourceAnswerPending;
     expect(pending.status).toBe('working');
-    finish({ answer: 'Two.', evidence: [PERSONAL] });
-    await finished;
+    finish(answered([PERSONAL]));
+    // The job finishes in the background, through the worker: still nothing listed.
+    await waitFor(() => posted.some((path) => path.endsWith('/source/answer/release')));
     await flushMicrotasks();
-    // The job finished in the background: nothing left for the agent yet.
     expect(records).toEqual([]);
     const collected = await findOperationByName('source_answer_result')!.handler(ctx, { job_id: pending.job_id }) as { answer: string };
     expect(collected.answer).toBe('Two.');
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ connection: { name: 'Muse', kind: 'agent' }, question: 'Which invoices are unpaid?', withheld: false });
     expect(records[0]!.items.map((item) => item.title)).toEqual(['Appointment confirmed: Leo']);
+    // Collected again, it is not listed twice.
+    await findOperationByName('source_answer_result')!.handler(ctx, { job_id: pending.job_id }).catch(() => undefined);
+    expect(records).toHaveLength(1);
   });
 
-  test('an answer the last release check withholds is recorded as withheld, with no items', async () => {
+  test('an answer the release check withholds is recorded as withheld, with no items', async () => {
     const records = capture();
-    const ctx = context('mcp', {
-      sourceAnswer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }),
-      revalidateSourceAnswer: async () => withheldSourceAnswer('Olympus withheld this answer because an item became Private.'),
-    });
-    const released = await findOperationByName('source_answer')!.handler(ctx, { question: 'Which invoices are unpaid?' });
+    const { email, config } = engine(async () => answered([PERSONAL]), { withhold: true });
+    const released = await findOperationByName('source_answer')!.handler(context('mcp', email, config), { question: 'Which invoices are unpaid?' });
     expect(JSON.stringify(released)).not.toContain('Appointment confirmed');
     expect(records).toHaveLength(1);
     expect(records[0]!.withheld).toBe(true);
@@ -585,21 +651,28 @@ describe('a local agent\'s answer is recorded only at its tool result', () => {
 
   test('an OpenClaw tool is recorded at its result; the owner\'s command line is not', async () => {
     const records = capture();
-    await findOperationByName('source_answer')!.handler(context('native', { sourceAnswer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }) }), { question: 'Which invoices are unpaid?' });
+    const { email, config, posted } = engine(async () => answered([PERSONAL]));
+    await findOperationByName('source_answer')!.handler(context('native', email, config), { question: 'Which invoices are unpaid?' });
     expect(records).toHaveLength(1);
-    await findOperationByName('source_answer')!.handler(context('cli', { sourceAnswer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }) }), { question: 'Which invoices are unpaid?' });
+    await findOperationByName('source_answer')!.handler(context('cli', email, config), { question: 'Which invoices are unpaid?' });
     expect(records).toHaveLength(1);
+    expect(posted.filter((path) => path.endsWith('/source/answer/received'))).toHaveLength(1);
   });
 
-  test('the worker\'s answer route records nothing itself', async () => {
+  test('the worker records only what it kept, once, and nothing for an unknown ticket', async () => {
     const records = capture();
     const worker = createEmailSourceWorker({ sourceAnswer: { answer: async () => ({ answer: 'Two.', evidence: [PERSONAL] }) } as never });
-    const response = await worker.fetch(new Request('http://worker.test/v1/source/answer', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ question: 'Which invoices are unpaid?', caller: { surface: 'mcp', display_name: 'Muse' } }),
+    const post = (path: string, body: unknown) => worker.fetch(new Request(`http://worker.test/v1${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     }));
-    expect(response.status).toBe(200);
+    const answered = await (await post('/source/answer', { question: 'Which invoices are unpaid?', caller: { surface: 'mcp', display_name: 'Muse' } })).json() as { _release_ticket: string };
+    // The answer route itself records nothing.
     expect(records).toEqual([]);
+    expect((await post('/source/answer/received', { ticket: 'not-a-ticket', withheld: false })).status).toBe(200);
+    expect(records).toEqual([]);
+    await post('/source/answer/received', { ticket: answered._release_ticket, withheld: false });
+    await post('/source/answer/received', { ticket: answered._release_ticket, withheld: false });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.question).toBe('Which invoices are unpaid?');
   });
 });

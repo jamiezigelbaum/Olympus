@@ -103647,7 +103647,23 @@ class EmailClient {
       return result;
     if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
       sourceAnswerTickets.set(result, ticket);
-    return await this.revalidateSourceAnswer(result);
+    const released = await this.revalidateSourceAnswer(result);
+    if (released !== result && released && typeof released === "object" && typeof ticket === "string" && sourceAnswerTickets.has(result)) {
+      sourceAnswerTickets.set(released, ticket);
+    }
+    return released;
+  }
+  async noteSourceAnswerReceived(original, withheld) {
+    const ticket = original && typeof original === "object" ? sourceAnswerTickets.get(original) : undefined;
+    if (!ticket)
+      return;
+    try {
+      await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/received`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket, withheld })
+      });
+    } catch {}
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
@@ -105367,41 +105383,40 @@ var init_remote_result = __esm(() => {
 function releasedItemsOfAnswer(result) {
   return (Array.isArray(result.evidence) ? result.evidence : []).filter((entry) => entry !== null && typeof entry === "object").slice(0, 48).map((entry) => releasedItemFromEvidence(entry, (typeof entry.provider === "string" ? providerSourceLabel(entry.provider) : undefined) ?? (typeof entry.family === "string" ? FAMILY_SOURCE[entry.family] : undefined) ?? "Other source", typeof entry.title === "string" ? entry.title : undefined));
 }
-async function recordLocalAgentAnswer(input) {
+function isLocalAgent(surface) {
+  return surface === "mcp" || surface === "native";
+}
+function agentAnswerReceipt(question, callerWire, result) {
+  if (!callerWire || !isLocalAgent(callerWire.surface) || !result || typeof result !== "object")
+    return;
+  return {
+    caller: {
+      surface: callerWire.surface,
+      ...callerWire.connection_id ? { connectionId: callerWire.connection_id } : {},
+      ...callerWire.display_name ? { displayName: callerWire.display_name } : {},
+      ...callerWire.provider ? { provider: callerWire.provider } : {}
+    },
+    question,
+    items: releasedItemsOfAnswer(result)
+  };
+}
+function recordAgentAnswerReceipt(receipt, withheld) {
+  recordAppRequest({
+    caller: receipt.caller,
+    question: receipt.question,
+    capture: { items: withheld ? [] : receipt.items, heldBack: 0, withheld }
+  });
+}
+async function noteLocalAgentAnswer(input) {
   try {
-    const { caller } = input;
-    if (caller?.surface !== "mcp" && caller?.surface !== "native")
+    if (!isLocalAgent(input.caller?.surface))
       return;
-    if (!input.result || typeof input.result !== "object")
+    const released = input.released;
+    if (!released || typeof released !== "object" || typeof released.answer !== "string")
       return;
-    const result = input.result;
-    const question = sourceAnswerQuestion(input.operation, input.args, result.status, result.job_id);
-    if (typeof result.answer !== "string")
+    if (typeof input.email.noteSourceAnswerReceived !== "function")
       return;
-    const withheld = isWithheldSourceAnswer(result);
-    const records = [];
-    recordAppRequest({
-      caller,
-      question,
-      capture: { items: withheld ? [] : releasedItemsOfAnswer(result), heldBack: 0, withheld },
-      fallback: (record) => records.push(record)
-    });
-    if (records.length === 0)
-      return;
-    if (input.write) {
-      for (const record of records)
-        input.write(record);
-      return;
-    }
-    const { openAppReleaseLog: openAppReleaseLog2, appReleaseLogDbPath: appReleaseLogDbPath2 } = await Promise.resolve().then(() => (init_app_release_log(), exports_app_release_log));
-    const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
-    const log = openAppReleaseLog2(appReleaseLogDbPath2(resolveRemoteConnectionsDbPath2(process.env)));
-    try {
-      for (const record of records)
-        log.record(record);
-    } finally {
-      log.close();
-    }
+    await input.email.noteSourceAnswerReceived(input.original, isWithheldSourceAnswer(released));
   } catch {}
 }
 var FAMILY_SOURCE;
@@ -121231,7 +121246,7 @@ var init_operations = __esm(() => {
         const jobs = ctx.sourceAnswerJobs;
         const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
         const released = await revalidateStdioSourceAnswer(ctx, result);
-        await recordLocalAgentAnswer({ caller: ctx.caller, operation: "source_answer", args: params, result: released });
+        await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
         return released;
       }
     },
@@ -121254,7 +121269,7 @@ var init_operations = __esm(() => {
           throw sourceAnswerJobNotFound();
         const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
         const released = await revalidateStdioSourceAnswer(ctx, result);
-        await recordLocalAgentAnswer({ caller: ctx.caller, operation: "source_answer_result", args: params, result: released });
+        await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
         return released;
       }
     },
@@ -171523,6 +171538,16 @@ function createEmailSourceWorker(options = {}) {
             return json(archiveImportAgent.remove(record8.archive_id));
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
         }
+        if (request.method === "POST" && url2.pathname === `${basePath}/source/answer/received`) {
+          const body = await parseObjectBody(request);
+          const entry = typeof body.ticket === "string" ? releaseTickets.get(body.ticket) : undefined;
+          if (entry?.receipt && entry.expires > Date.now()) {
+            const { receipt } = entry;
+            delete entry.receipt;
+            recordAgentAnswerReceipt(receipt, body.withheld !== false);
+          }
+          return json({ ok: true });
+        }
         if (request.method === "POST" && url2.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json();
           const entry = typeof body.ticket === "string" ? releaseTickets.get(body.ticket) : undefined;
@@ -171547,11 +171572,12 @@ function createEmailSourceWorker(options = {}) {
               for (const manifest2 of manifests.manifests)
                 recordReleaseManifest(manifest2);
               assertNoRawEmailFields(result);
+              const receipt = agentAnswerReceipt(sourceAnswerRequest.question, caller, result);
               let releaseTicket;
               if (caller?.surface !== "remote") {
                 pruneReleaseTickets();
                 releaseTicket = randomBytes30(32).toString("base64url");
-                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests });
+                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests, ...receipt ? { receipt } : {} });
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
               }
@@ -176072,6 +176098,7 @@ var init_email_source = __esm(() => {
   init_privacy_language();
   init_dashboard_messaging_service();
   init_source_scope_approval();
+  init_app_release_agent();
   init_release_manifest();
   init_update_check();
   init_google_handle_compatibility();
@@ -204842,6 +204869,8 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
           return askAnonymouslyToolResult(raw);
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
+        if (done && isAnswered(raw))
+          notePrivateQuestion(pending?.match?.waiting?.id);
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {} });
       }

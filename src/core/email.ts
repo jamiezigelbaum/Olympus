@@ -546,7 +546,31 @@ export class EmailClient {
     // Remote calls carry their manifest in-process to their own output boundary.
     if (options.caller?.surface === 'remote') return result;
     if (typeof ticket === 'string' && /^[A-Za-z0-9_-]{43}$/.test(ticket)) sourceAnswerTickets.set(result, ticket);
-    return await this.revalidateSourceAnswer(result) as SourceIndexAnswerResult;
+    const released = await this.revalidateSourceAnswer(result);
+    // A withheld answer still names its ticket, so the owner's list of what
+    // each AI app received can say it was withheld (noteSourceAnswerReceived).
+    if (released !== result && released && typeof released === 'object' && typeof ticket === 'string' && sourceAnswerTickets.has(result)) {
+      sourceAnswerTickets.set(released, ticket);
+    }
+    return released as SourceIndexAnswerResult;
+  }
+
+  /**
+   * Tells the worker a source answer left for an agent on this computer, at
+   * the tool result (core/app-release-agent.ts). The worker records it on the
+   * owner's list of what each AI app received from what it kept with the
+   * answer's release ticket, once. Never throws.
+   */
+  async noteSourceAnswerReceived(original: unknown, withheld: boolean): Promise<void> {
+    const ticket = original && typeof original === 'object' ? sourceAnswerTickets.get(original) : undefined;
+    if (!ticket) return;
+    try {
+      await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/received`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket, withheld }),
+      });
+    } catch {
+      // Never changes the answer.
+    }
   }
 
   /** Current-tier check for an answer collected from a local in-memory job. */

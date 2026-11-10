@@ -604,6 +604,9 @@ async function runChatGptTool(
         const done = pendingJobId(raw) === undefined;
         // Only this connection's own handed-off question, and only once it is answered.
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
+        // The waiting question made at the match follows the collected answer's row (what each AI
+        // app received), so the row is marked once that private answer completes.
+        if (done && isAnswered(raw)) notePrivateQuestion(pending?.match?.waiting?.id);
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {}) });
       }

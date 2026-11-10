@@ -44216,6 +44216,13 @@ var init_unreadable_files = __esm(() => {
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
 });
 
+// src/core/app-release-agent.ts
+var init_app_release_agent = __esm(() => {
+  init_app_release_capture();
+  init_release_manifest();
+  init_remote_result();
+});
+
 // src/workers/remote-oauth/consent-page.ts
 var init_consent_page = () => {};
 
@@ -70502,6 +70509,7 @@ var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 
 // src/workers/email-source/index.ts
 init_source_scope_approval();
+init_app_release_agent();
 init_release_manifest();
 init_update_check();
 init_google_handle_compatibility();

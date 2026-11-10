@@ -6,6 +6,7 @@ import { privateAnswerMode } from '../../core/first-run-privacy.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
+import { agentAnswerReceipt, recordAgentAnswerReceipt, type AgentAnswerReceipt } from '../../core/app-release-agent.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
@@ -879,7 +880,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceAnswer = options.sourceAnswer;
   // Content-free manifests for stdio's delayed collection. Tickets never
   // appear on an assistant surface; missing/expired tickets fail closed.
-  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[] }>();
+  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[]; receipt?: AgentAnswerReceipt }>();
   const pruneReleaseTickets = () => {
     for (const [ticket, entry] of releaseTickets) if (entry.expires <= Date.now()) releaseTickets.delete(ticket);
   };
@@ -1114,6 +1115,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
+        // An agent on this computer received this answer (its tool result,
+        // core/app-release-agent.ts): record what the worker kept with the
+        // ticket on the owner's list of what each AI app received, once. The
+        // caller names only the ticket and whether it was withheld; the
+        // question, app and items are the worker's own.
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/received`) {
+          const body = await parseObjectBody(request);
+          const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
+          if (entry?.receipt && entry.expires > Date.now()) {
+            const { receipt } = entry;
+            delete entry.receipt;
+            recordAgentAnswerReceipt(receipt, body.withheld !== false);
+          }
+          return json({ ok: true });
+        }
+
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json() as { ticket?: unknown };
           const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
@@ -1156,14 +1173,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // Forward the manifest to an in-process remote call's sink too.
               for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
-              // Not recorded on the owner's list of what each AI app received here: a local agent's
-              // answer is recorded at its tool result (core/app-release-agent.ts), after collection
-              // and the release-ticket check, and a remote call where its own output leaves.
+              // Not recorded on the owner's list of what each AI app received yet: a local agent's
+              // answer is recorded when its tool result says it was received (/source/answer/received,
+              // core/app-release-agent.ts), after collection and the release-ticket check. A remote call
+              // is recorded where its own output leaves.
+              const receipt = agentAnswerReceipt(sourceAnswerRequest.question, caller, result);
               let releaseTicket: string | undefined;
               if (caller?.surface !== 'remote') {
                 pruneReleaseTickets();
                 releaseTicket = randomBytes(32).toString('base64url');
-                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests });
+                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests, ...(receipt ? { receipt } : {}) });
                 while (releaseTickets.size > 256) releaseTickets.delete(releaseTickets.keys().next().value!);
               }
               const response = json({ ...result, ...(releaseTicket ? { _release_ticket: releaseTicket } : {}) });
