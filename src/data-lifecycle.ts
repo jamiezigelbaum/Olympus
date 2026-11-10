@@ -88,6 +88,7 @@ import {
 } from './core/source-registry.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
 import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolvePrivacyProfilePath } from './workers/classification/privacy-profile.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import {
   olympusDataRoots,
@@ -180,9 +181,11 @@ export interface DataExportArtifact {
   /**
    * `owner_rules`: which owner file this is. `mail_always_private` is the mail
    * picker's "always Private" senders on their own, without the approval
-   * (bound to this computer's grant) that holds them.
+   * (bound to this computer's grant) that holds them. `privacy_profile` is the
+   * owner's privacy profile, which owns the `privacy-` tier rules: it travels
+   * with them, or the next profile save on the new computer drops them.
    */
-  ownerFile?: 'tier_rules' | 'ingestion_exclusions' | 'mail_always_private';
+  ownerFile?: 'tier_rules' | 'privacy_profile' | 'ingestion_exclusions' | 'mail_always_private';
   bytes: number;
   sha256: string;
   sqlite?: {
@@ -500,6 +503,10 @@ export function exportOlympusData(options: {
     const env = envForContext(options);
     for (const [ownerFile, sourcePath, name] of [
       ['tier_rules', resolveTierRulesPath({ env }), 'tier-rules.json'],
+      // The privacy profile owns the tier rules whose id starts with
+      // `privacy-`: every save rewrites them from its own list, so rules
+      // restored without it are dropped by the owner's next save.
+      ['privacy_profile', resolvePrivacyProfilePath({ env }), 'privacy.json'],
       ['ingestion_exclusions', resolveSourceIngestionExclusionsPath(env), 'ingestion-exclusions.json'],
     ] as const) {
       const destinationPath = join(configRoot, name);

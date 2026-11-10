@@ -24002,6 +24002,14 @@ var init_tier_rules = __esm(() => {
   init_tier_classifier();
 });
 
+// src/workers/classification/privacy-profile.ts
+var init_privacy_profile = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_rules();
+});
+
 // src/core/source-disposition-tree.ts
 var init_source_disposition_tree = __esm(() => {
   init_source_ingestion_exclusions();
@@ -24036,6 +24044,7 @@ var init_data_lifecycle = __esm(() => {
   init_source_registry();
   init_sovereignty();
   init_tier_rules();
+  init_privacy_profile();
   init_source_dispositions();
   init_pairing_session_paths();
   init_unpaired_sources();
