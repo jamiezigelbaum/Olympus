@@ -78,6 +78,13 @@ export function createSettingsProposalHolder(targets: SettingsProposalTargets, n
       }
       rows.push({ key: 'computer_use', label: 'How this computer runs', current: 'Not chosen yet', proposed: input.computer_use === 'server' ? 'Always-on server' : 'Everyday computer' });
     }
+    if (input.privacy_judge && input.models?.[input.privacy_judge.choice] !== undefined) {
+      // The judge's approval names the exact model the running Olympus uses; a
+      // model changed in the same batch only takes effect after the restart, so
+      // the judge would be approved for the old one and then refuse to judge.
+      const provider = input.privacy_judge.choice === 'venice' ? 'Venice' : 'local';
+      throw new SettingsProposalError(`Change the ${provider} model and the privacy judge in two proposals: propose models.${input.privacy_judge.choice} first, and once it is applied, propose privacy_judge.`);
+    }
     if (input.privacy_judge) {
       const judge = targets.judge?.();
       if (!judge || !targets.saveJudge) throw new SettingsProposalError('This Olympus has no privacy judge setting.');

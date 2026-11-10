@@ -55,6 +55,7 @@ export const SETTINGS_PROPOSAL_SCHEMA = {
       fields: {
         choice: { type: 'string', allowed: ['local', 'venice'] },
         spending_limit_dollars: { type: 'number', note: 'Zero or more. Required for both choices.' },
+        note: { type: 'note', note: 'Propose a model change for the same provider (models.venice with choice venice, models.local with choice local) separately, first.' },
       },
     },
     models: {

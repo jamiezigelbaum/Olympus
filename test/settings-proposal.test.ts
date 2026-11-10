@@ -49,12 +49,11 @@ describe('the proposal holder', () => {
   test('a proposal lists each change and changes nothing until Apply', async () => {
     const { calls, targets: t } = targets();
     const holder = createSettingsProposalHolder(t);
-    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } }, 'Claude Code');
+    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 } }, 'Claude Code');
     expect(proposal.from).toBe('Claude Code');
     expect(proposal.rows).toEqual([
       { key: 'private_answer_mode', label: 'Private-answer mode', current: 'Private answers only in Olympus', proposed: 'Local models with Venice fallback' },
       { key: 'privacy_judge', label: 'Privacy judge', current: 'Local (free)', proposed: 'Venice, up to $5' },
-      { key: 'models.venice', label: 'Venice model', current: 'Qwen 3 235B', proposed: 'Always the strongest' },
     ]);
     expect(calls).toEqual([]);
     expect(holder.current()?.id).toBe(proposal.id);
@@ -64,13 +63,13 @@ describe('the proposal holder', () => {
     const { calls, targets: t } = targets();
     const holder = createSettingsProposalHolder(t);
     const first = await holder.propose({ models: { venice: 'strongest' } });
-    const second = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } });
+    const second = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { venice: 'strongest' } });
     // The owner was looking at the first; the agent replaced it since.
     expect(await holder.apply(first.id)).toBeUndefined();
     expect(calls).toEqual([]);
     const result = await holder.apply(second.id);
     expect(result?.ok).toBe(true);
-    expect(calls).toEqual(['model:venice:strongest', 'judge:venice:5', 'mode:local-first']);
+    expect(calls).toEqual(['model:venice:strongest', 'judge:local:0', 'mode:local-first']);
     expect(holder.current()).toBeUndefined();
     expect(holder.lastApplied()?.rows.every((row) => row.applied)).toBe(true);
     // A second click applies nothing again.
@@ -86,7 +85,7 @@ describe('the proposal holder', () => {
       deferReloads: async (writes) => { order.push('hold'); try { return await writes(); } finally { order.push('release'); } },
     });
     const holder = createSettingsProposalHolder(t);
-    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } });
+    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { venice: 'strongest' } });
     await holder.apply(proposal.id);
     expect(order).toEqual(['hold', 'model', 'judge', 'mode', 'release']);
   });
@@ -94,7 +93,7 @@ describe('the proposal holder', () => {
   test('one failing write is reported and the rest still apply', async () => {
     const { calls, targets: t } = targets({ saveJudge: async () => { throw new Error('Set up an allowed Venice model in Private answers first.'); } });
     const holder = createSettingsProposalHolder(t);
-    const proposal = await holder.propose({ privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } });
+    const proposal = await holder.propose({ privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { venice: 'strongest' } });
     const result = await holder.apply(proposal.id);
     expect(result?.ok).toBe(false);
     expect(result?.rows.find((row) => row.key === 'privacy_judge')).toMatchObject({ applied: false, message: 'Set up an allowed Venice model in Private answers first.' });
@@ -109,6 +108,13 @@ describe('the proposal holder', () => {
     expect(holder.discard(proposal.id)).toBe(true);
     expect(holder.current()).toBeUndefined();
     expect(calls).toEqual([]);
+  });
+
+  test('a model and the judge that uses it go in two proposals', async () => {
+    const { targets: t } = targets();
+    const holder = createSettingsProposalHolder(t);
+    await expect(holder.propose({ privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } })).rejects.toThrow('two proposals');
+    await expect(holder.propose({ privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { local: 'builtin:4b' } })).rejects.toThrow('two proposals');
   });
 
   test('values this computer does not offer are refused when proposed', async () => {
