@@ -393,7 +393,7 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
-import { LocalWorkPacer, systemIdlePowerProbe } from '../local-pacing.ts';
+import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
@@ -2443,11 +2443,6 @@ function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
     delete: (key) => real().delete(key),
     list: () => real().list(),
   };
-}
-
-/** Embedding that runs on this computer's own processor, which going easy (#922) paces. */
-function embedsOnThisComputer(provider: SourceEmbeddingProvider | undefined): boolean {
-  return provider instanceof BuiltInSourceEmbeddingProvider && !provider.embedsDocumentsRemotely;
 }
 
 export async function main(): Promise<void> {

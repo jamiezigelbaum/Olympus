@@ -59,6 +59,12 @@ export interface SourceEmbeddingProvider {
    */
   assertBindingCurrent?(): void;
   /**
+   * True when documents are embedded by this computer's own processor (the
+   * built-in model without a remote helper). Going easy (#922) paces only
+   * these. Wrappers must carry it through (scopeBoundEmbeddingProvider).
+   */
+  runsOnThisComputer?(): boolean;
+  /**
    * Present only on a provider whose model reads pictures (the built-in
    * EmbeddingGemma 2): whether it can embed a document's `image` right now
    * (its image encoder started). A provider without this method embeds the

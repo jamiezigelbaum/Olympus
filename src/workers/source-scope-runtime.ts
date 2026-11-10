@@ -458,6 +458,7 @@ export function scopeBoundEmbeddingProvider(
       },
     } : {}),
     ...(provider.embedPromptTexts ? { embedPromptTexts: (texts: string[]) => provider.embedPromptTexts!(texts) } : {}),
+    ...(provider.runsOnThisComputer ? { runsOnThisComputer: () => provider.runsOnThisComputer!() } : {}),
   };
 }
 

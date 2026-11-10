@@ -27,6 +27,15 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../core/atomic-file.ts';
 
+/** Embedding that runs on this computer's own processor, which going easy paces (scope wrappers included). */
+export function embedsOnThisComputer(provider: { runsOnThisComputer?(): boolean } | undefined): boolean {
+  try {
+    return provider?.runsOnThisComputer?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 export type PowerSource = 'ac' | 'battery' | 'no_battery';
 
 export interface IdlePowerReading {

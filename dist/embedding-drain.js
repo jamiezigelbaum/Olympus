@@ -34873,8 +34873,8 @@ class BuiltInSourceEmbeddingProvider {
   imageSupportWarned = false;
   pictureFaults;
   waiting = { query: [], document: [] };
-  get embedsDocumentsRemotely() {
-    return this.remote !== undefined;
+  runsOnThisComputer() {
+    return this.remote === undefined;
   }
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;

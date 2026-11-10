@@ -62586,8 +62586,8 @@ class BuiltInSourceEmbeddingProvider {
   imageSupportWarned = false;
   pictureFaults;
   waiting = { query: [], document: [] };
-  get embedsDocumentsRemotely() {
-    return this.remote !== undefined;
+  runsOnThisComputer() {
+    return this.remote === undefined;
   }
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
@@ -176591,6 +176591,13 @@ var init_whatsapp = __esm(() => {
 import { execFile as execFile4, spawn as spawn13 } from "node:child_process";
 import { existsSync as existsSync96, readdirSync as readdirSync29, readFileSync as readFileSync88 } from "node:fs";
 import { join as join132 } from "node:path";
+function embedsOnThisComputer(provider) {
+  try {
+    return provider?.runsOnThisComputer?.() === true;
+  } catch {
+    return false;
+  }
+}
 function parseMacIdleSeconds(text4) {
   const match = /"HIDIdleTime"\s*=\s*(\d+)/.exec(text4 ?? "");
   if (!match)
@@ -194788,7 +194795,8 @@ function scopeBoundEmbeddingProvider(provider, authority, ref) {
         return provider.embedImageVectors(images);
       }
     } : {},
-    ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {}
+    ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {},
+    ...provider.runsOnThisComputer ? { runsOnThisComputer: () => provider.runsOnThisComputer() } : {}
   };
 }
 function gmailConnectorScopeFromApproval(approval) {
@@ -220348,9 +220356,6 @@ function lazySecretStore(env) {
     delete: (key2) => real().delete(key2),
     list: () => real().list()
   };
-}
-function embedsOnThisComputer(provider) {
-  return provider instanceof BuiltInSourceEmbeddingProvider && !provider.embedsDocumentsRemotely;
 }
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);

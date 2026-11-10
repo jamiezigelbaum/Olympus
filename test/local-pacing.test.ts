@@ -23,6 +23,7 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
   GO_EASY_REFRESH_MS,
+  embedsOnThisComputer,
   LocalWorkPacer,
   parseLogindIdleSeconds,
   parseMacIdleSeconds,
@@ -36,6 +37,8 @@ import {
 import { renderJudgeChoice } from '../src/workers/dashboard/pages/local.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
+import { BUILT_IN_EMBEDDING_REMOTE_URL_ENV, BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
+import { scopeBoundEmbeddingProvider } from '../src/workers/source-scope-runtime.ts';
 import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
 import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
@@ -328,6 +331,20 @@ test('local embedding embeds one item a pass while trickling, and drains at full
   trickle = false;
   const full = await sweep.run();
   expect(full.counts).toMatchObject({ chunks_embedded: 4, items_queued: 0 });
+});
+
+test('a scope-bound built-in embedder is still local work; a remote helper or a cloud embedder is not', () => {
+  const local = new BuiltInSourceEmbeddingProvider({ env: {} });
+  const remote = new BuiltInSourceEmbeddingProvider({ env: { [BUILT_IN_EMBEDDING_REMOTE_URL_ENV]: 'http://127.0.0.1:9/embed' } });
+  const authority = { assertRefCurrent() {} } as unknown as Parameters<typeof scopeBoundEmbeddingProvider>[1];
+  const ref = {} as Parameters<typeof scopeBoundEmbeddingProvider>[2];
+  expect(embedsOnThisComputer(local)).toBe(true);
+  // Approved Gmail and file scopes wrap the provider in a plain object (#1126 review).
+  expect(embedsOnThisComputer(scopeBoundEmbeddingProvider(local, authority, ref))).toBe(true);
+  expect(embedsOnThisComputer(remote)).toBe(false);
+  expect(embedsOnThisComputer(scopeBoundEmbeddingProvider(remote, authority, ref))).toBe(false);
+  expect(embedsOnThisComputer({ provider: 'gemini' } as never)).toBe(false);
+  expect(embedsOnThisComputer(undefined)).toBe(false);
 });
 
 // --- The checkbox -------------------------------------------------------------

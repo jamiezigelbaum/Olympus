@@ -160,9 +160,9 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private pictureFaults: { count: number; heldUntilMs?: number } | undefined;
   private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
 
-  /** True when documents are embedded by a configured helper on another machine, not this one. */
-  get embedsDocumentsRemotely(): boolean {
-    return this.remote !== undefined;
+  /** False when documents are embedded by a configured helper on another machine. */
+  runsOnThisComputer(): boolean {
+    return this.remote === undefined;
   }
 
   constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
