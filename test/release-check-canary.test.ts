@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  canaryVerdict, isDashboard, isSystemPrompt, openedWindows, parseCanaryAccounts, parseWindows, pinnedVersion, renderCanaryHtml, renewals, runCanary,
+  canaryVerdict, isDashboard, macCloseCommand, isSystemPrompt, openedWindows, parseCanaryAccounts, parseWindows, pinnedVersion, renderCanaryHtml, renewals, runCanary,
   SITE_INSTALLER, type CanaryOptions, type CanaryReport,
 } from '../scripts/release-check/canary.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
@@ -283,5 +284,27 @@ describe('release-check canary', () => {
     expect(desktop.scripts.some((script) => script.includes('connections revoke conn_1'))).toBe(true);
     // The token stays on the machine: no script carries it, each reads it from the machine's own file.
     expect(desktop.scripts.filter((script) => script.includes('8010/mcp')).every((script) => script.includes('token="$(cat "$HOME/.olympus-canary/mcp-token")"'))).toBe(true);
+  });
+});
+
+describe('closing a leftover macOS dashboard window', () => {
+  test('the raise and the Command-W each get their own script when the command runs in a shell', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'canary-osascript-'));
+    const log = join(bin, 'scripts.log');
+    // A stand-in osascript and open record what they were given; sleep is stubbed so the test never waits.
+    writeFileSync(join(bin, 'osascript'), `#!/bin/sh\n{ cat; echo "--- end"; } >> "${log}"\n`);
+    writeFileSync(join(bin, 'open'), '#!/bin/sh\nexit 0\n');
+    writeFileSync(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+    for (const name of ['osascript', 'open', 'sleep']) chmodSync(join(bin, name), 0o755);
+    const command = macCloseCommand({ id: '1', app: 'Safari', title: 'Olympus / Keys' });
+    const run = spawnSync('/bin/sh', ['-c', command], { env: { PATH: `${bin}:/usr/bin:/bin` }, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    const scripts = readFileSync(log, 'utf8').split('--- end\n').filter(Boolean);
+    expect(scripts).toHaveLength(2);
+    expect(scripts[0]).toContain('AXRaise');
+    expect(scripts[1]).toContain('CGEventCreateKeyboardEvent');
+    // No heredoc swallowed the shell commands that follow it.
+    expect(scripts.join('')).not.toContain('EOF');
+    expect(scripts.join('')).not.toContain('&&');
   });
 });

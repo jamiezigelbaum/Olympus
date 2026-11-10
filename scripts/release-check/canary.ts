@@ -402,9 +402,16 @@ async function closeDashboards(machine: Machine, options: CanaryOptions, windows
     return;
   }
   for (const window of windows) {
-    await machine.exec(`open -a ${shellQuote(window.app)} && ${macRaise(window)} && sleep 1 && ${macCommandKey(MAC_KEY_W)}`, { timeoutMs: 30_000 });
+    await machine.exec(macCloseCommand(window), { timeoutMs: 30_000 });
   }
 }
+
+/**
+ * Raises one window by its title and sends Command-W to it. Each step is its own line: both osascript calls read a heredoc,
+ * and a heredoc's terminator must stand alone on its line, so nothing may be chained after it with `&&`.
+ */
+export const macCloseCommand = (window: DesktopWindow): string =>
+  [`open -a ${shellQuote(window.app)}`, macRaise(window), 'sleep 1', macCommandKey(MAC_KEY_W)].join('\n');
 
 /** Brings one window of an app to the front by its title, so the next Command-W closes that window's front tab and no other. */
 export const macRaise = (window: DesktopWindow): string => String.raw`osascript -l JavaScript <<'EOF'
