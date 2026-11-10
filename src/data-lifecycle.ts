@@ -383,71 +383,56 @@ export function exportOlympusData(options: {
   for (const source of selected) {
     const sourceRoot = join(destination, 'sources', safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
-    // Each file is its own snapshot while the background keeps judging and
-    // moving items between this source's stores, so the set is taken again
-    // until its privacy ledgers stayed at one generation throughout (#1224).
-    const stored = snapshotAtOneLedgerGeneration({
-      ledgerPaths: source.files.stores.filter((store) => store !== ':memory:').map(tierLedgerPathForStore),
-      discard: (attempt) => { for (const path of attempt.files) rmSync(path, { force: true }); },
-      attempt: () => {
-        const local = { files: [] as string[], skipped: [] as string[], artifacts: [] as DataExportArtifact[] };
-      const legacyIndex = source.files.preCutoverIndex;
-      if (legacyIndex) {
-        exportSqliteStore({
-          sqlitePath: legacyIndex.path,
-          destinationRoot: sourceRoot,
-          exportRoot: destination,
-          sourceId: source.sourceId,
-          role: 'legacy_store',
-          expectedStoreId: legacyIndex.storeId,
-          files: local.files,
-          skipped: local.skipped,
-          artifacts: local.artifacts,
-        });
-      }
-      source.files.stores.forEach((storePath, storeIndex) => {
-        const before = local.artifacts.length;
-        exportSqliteStore({
-          sqlitePath: storePath,
-          destinationRoot: sourceRoot,
-          exportRoot: destination,
-          sourceId: source.sourceId,
-          role: 'connector_store',
-          expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-          files: local.files,
-          skipped: local.skipped,
-          artifacts: local.artifacts,
-        });
-        if (local.artifacts.length > before) local.artifacts[before]!.storeIndex = storeIndex;
-        // The store's privacy judgments, its sniffer queue and its secret
-        // locations sit beside it. Without them a restore judges every item
-        // again, which on a laptop takes nights (#1065). A ledger can exist
-        // beside a store that was never created (a tier lane shares the secure
-        // store's ledger), so each one is taken whether or not its store is.
-        for (const [sidecar, path, storeId] of [
-          ['tier_ledger', tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
-          ['tier_sniffer', tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
-          ['secret_locations', secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID],
-        ] as const) {
-          if (!existsSync(path)) continue;
-          const at = local.artifacts.length;
-          exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: 'tier_sidecar', expectedStoreId: storeId, files: local.files, skipped: local.skipped, artifacts: local.artifacts });
-          if (local.artifacts.length > at) Object.assign(local.artifacts[at]!, { storeIndex, sidecar });
-        }
+    const legacyIndex = source.files.preCutoverIndex;
+    if (legacyIndex) {
+      exportSqliteStore({
+        sqlitePath: legacyIndex.path,
+        destinationRoot: sourceRoot,
+        exportRoot: destination,
+        sourceId: source.sourceId,
+        role: 'legacy_store',
+        expectedStoreId: legacyIndex.storeId,
+        files,
+        skipped,
+        artifacts,
       });
-        return local;
-      },
-    });
-    files.push(...stored.files);
-    skipped.push(...stored.skipped);
-    artifacts.push(...stored.artifacts);
-    for (const artifact of stored.artifacts) {
-      if (artifact.role !== 'connector_store') continue;
-      // Read from the snapshot, so the pictures are the ones the exported rows name.
-      for (const row of readChunkMediaRefs(join(destination, artifact.relativePath))) {
-        if (!mediaRefs.has(row.media_sha256)) mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
-      }
     }
+    source.files.stores.forEach((storePath, storeIndex) => {
+      const before = artifacts.length;
+      exportSqliteStore({
+        sqlitePath: storePath,
+        destinationRoot: sourceRoot,
+        exportRoot: destination,
+        sourceId: source.sourceId,
+        role: 'connector_store',
+        expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+        files,
+        skipped,
+        artifacts,
+      });
+      if (artifacts.length > before) {
+        artifacts[before]!.storeIndex = storeIndex;
+        // Read from the snapshot, so the pictures are the ones the exported rows name.
+        for (const row of readChunkMediaRefs(join(destination, artifacts[before]!.relativePath))) {
+          if (!mediaRefs.has(row.media_sha256)) mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
+        }
+      }
+      // The store's privacy judgments, its sniffer queue and its secret
+      // locations sit beside it. Without them a restore judges every item
+      // again, which on a laptop takes nights (#1065). A ledger can exist
+      // beside a store that was never created (a tier lane shares the secure
+      // store's ledger), so each one is taken whether or not its store is.
+      for (const [sidecar, path, storeId] of [
+        ['tier_ledger', tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
+        ['tier_sniffer', tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
+        ['secret_locations', secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID],
+      ] as const) {
+        if (!existsSync(path)) continue;
+        const at = artifacts.length;
+        exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: 'tier_sidecar', expectedStoreId: storeId, files, skipped, artifacts });
+        if (artifacts.length > at) Object.assign(artifacts[at]!, { storeIndex, sidecar });
+      }
+    });
     for (const policyPath of source.files.settings) {
       const destinationPath = join(sourceRoot, basename(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
@@ -1844,49 +1829,6 @@ function requireAccount(sourceId: string | undefined, context: LifecyclePathCont
 }
 
 /**
- * Runs `attempt` (a source's store and ledger snapshots) until no privacy
- * ledger it covers changed while it ran (#1224). Each SQLite file is its own
- * snapshot, and a tier move stages and flips in the ledger around its store
- * writes; with the ledger at one generation throughout, the files agree on
- * which store holds each item. A changed ledger discards the attempt
- * (`discard`) and takes it again; one that keeps changing fails the export
- * closed rather than publish a mixture. The watch is `PRAGMA data_version`
- * on a read-only connection, which moves when any other connection commits.
- */
-export function snapshotAtOneLedgerGeneration<T>(input: {
-  ledgerPaths: readonly string[];
-  attempt: () => T;
-  discard: (result: T) => void;
-  attempts?: number;
-}): T {
-  const paths = [...new Set(input.ledgerPaths)].filter((path) => existsSync(path));
-  const attempts = input.attempts ?? 3;
-  for (let tried = 0; tried < attempts; tried += 1) {
-    const watches = paths.map((path) => {
-      const db = new Database(path, { readonly: true });
-      db.exec('PRAGMA busy_timeout = 10000;');
-      return { db, start: ledgerDataVersion(db) };
-    });
-    try {
-      const result = input.attempt();
-      if (watches.every((watch) => ledgerDataVersion(watch.db) === watch.start)) return result;
-      input.discard(result);
-    } finally {
-      for (const watch of watches) closeSqliteStore(watch.db, { checkpoint: false });
-    }
-  }
-  throw new OperationError(
-    'source_index_error',
-    `Olympus kept changing privacy decisions while this source was exported, ${attempts} times over, so its stores and ledgers never matched; nothing was published for it.`,
-    'Export again in a few minutes, or once the privacy judge has caught up.',
-  );
-}
-
-function ledgerDataVersion(db: Database): number {
-  return (db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
-}
-
-/**
  * Exports one SQLite store as a verified, crash-durable snapshot.
  *
  * A file copy of the main database plus its sidecars is not a snapshot. A
@@ -1969,9 +1911,7 @@ function snapshotSqliteStore(sqlitePath: string, staging: string): boolean {
       'Retry the export once the store is readable; no partial snapshot was published.',
     );
   } finally {
-    // Read-only: no checkpoint into the live file. A TRUNCATE checkpoint resets
-    // its WAL, which reads as a change to the ledger watch (#1224).
-    closeSqliteStore(db, { checkpoint: false });
+    closeSqliteStore(db);
   }
   return true;
 }

@@ -19,7 +19,6 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
   exportDurabilityBoundary,
   exportOlympusData,
-  snapshotAtOneLedgerGeneration,
   verifyOlympusDataExport,
 } from '../src/data-lifecycle.ts';
 
@@ -290,52 +289,5 @@ describe('data export produces a verified crash-durable snapshot', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe('a source is exported at one privacy-ledger generation (#1224)', () => {
-  function seedLedger(): { path: string; writer: Database } {
-    const root = mkdtempSync(join(tmpdir(), 'olympus-export-generation-'));
-    const path = join(root, 'tier-ledger.sqlite');
-    seedWalStore(path, 'stage');
-    return { path, writer: openStores.at(-1)! };
-  }
-
-  test('a ledger write during the snapshots discards them and takes them again', () => {
-    const { path, writer } = seedLedger();
-    const taken: number[] = [];
-    const discarded: number[] = [];
-    const result = snapshotAtOneLedgerGeneration({
-      ledgerPaths: [path, path, join(dirname(path), 'absent.sqlite')],
-      attempt: () => {
-        taken.push(taken.length);
-        // The background flips a tier move between this source's store and ledger snapshots.
-        if (taken.length === 1) writer.query('INSERT INTO rows (value) VALUES (?)').run('flip');
-        return taken.length;
-      },
-      discard: (attempt) => discarded.push(attempt),
-    });
-    expect(result).toBe(2);
-    expect(discarded).toEqual([1]);
-  });
-
-  test('a ledger that keeps changing fails the export closed', () => {
-    const { path, writer } = seedLedger();
-    const discarded: number[] = [];
-    let taken = 0;
-    expect(() => snapshotAtOneLedgerGeneration({
-      ledgerPaths: [path],
-      attempt: () => { writer.query('INSERT INTO rows (value) VALUES (?)').run(`move ${taken}`); return ++taken; },
-      discard: (attempt) => discarded.push(attempt),
-    })).toThrow('kept changing privacy decisions');
-    expect(discarded).toEqual([1, 2, 3]);
-  });
-
-  test('the export takes each source\'s stores and ledgers inside that watch', () => {
-    expect(LIFECYCLE_SOURCE).toMatch(/const stored = snapshotAtOneLedgerGeneration\(\{\s*ledgerPaths: source\.files\.stores[^\n]*\.map\(tierLedgerPathForStore\)/);
-    const watched = LIFECYCLE_SOURCE.slice(LIFECYCLE_SOURCE.indexOf('const stored = snapshotAtOneLedgerGeneration({'), LIFECYCLE_SOURCE.indexOf('files.push(...stored.files);'));
-    expect(watched).toContain("role: 'connector_store'");
-    expect(watched).toContain("role: 'legacy_store'");
-    expect(watched).toContain("role: 'tier_sidecar'");
   });
 });
