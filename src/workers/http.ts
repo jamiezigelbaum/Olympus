@@ -59,6 +59,9 @@ export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-
  * which controls this session reaches. Stripped from every incoming request.
  */
 export const DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = 'X-Olympus-Control-Session-Grade';
+/** Update now (core/self-update.ts): a local-grade session only, never the bearer. */
+export const DASHBOARD_SELF_UPDATE_PATHS = { start: '/dashboard/engine/update', status: '/dashboard/engine/update/status' } as const;
+export const DASHBOARD_SELF_UPDATE_LOCAL_ONLY = 'Olympus updates itself only from the dashboard on this computer, in an unlocked browser.';
 /**
  * Internal context carried from the native Gateway bridge to the worker.
  *
@@ -683,11 +686,23 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
     || (request.method === 'POST' && (DASHBOARD_BACKUP_PATHS as readonly string[]).includes(new URL(request.url).pathname))
+    || isDashboardSelfUpdateRoute(request)
     || isDashboardPrivacyItemRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));
 }
 
+function isDashboardSelfUpdateRoute(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return request.method === 'POST' && (path === DASHBOARD_SELF_UPDATE_PATHS.start || path === DASHBOARD_SELF_UPDATE_PATHS.status);
+}
+
 function dashboardLocalGradeRefusal(request: Request): Response {
+  if (isDashboardSelfUpdateRoute(request)) {
+    return new Response(JSON.stringify({ ok: false, error: { code: 'mac_dashboard_only', message: DASHBOARD_SELF_UPDATE_LOCAL_ONLY } }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    });
+  }
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)
     && !isDashboardPrivacyItemRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({

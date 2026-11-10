@@ -21,6 +21,7 @@ import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } fr
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
+import { createSelfUpdater } from '../../core/self-update.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync, openLinuxDesktopPath } from '../../core/linux-desktop-opener.ts';
@@ -6191,8 +6192,16 @@ export async function main(): Promise<void> {
     runningVersion: runningOlympusVersion(), platform: process.platform,
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
+  // Update now (#1063): only the standalone engine the installer put in place updates itself.
+  const selfUpdater = createSelfUpdater({
+    platform: process.platform, runningVersion: runningOlympusVersion(),
+    stateDir: join(engineServicePaths().logDir, 'updates'),
+    standaloneEngine: isStandaloneEngineProcess(process.env),
+    available: () => updateChecker.available(),
+  });
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
+    ...(isStandaloneEngineProcess(process.env) ? { selfUpdate: selfUpdater } : {}),
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
     agentConnections: {
