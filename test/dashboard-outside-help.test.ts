@@ -1058,7 +1058,7 @@ describe('the adapter: a computer without network confinement', () => {
     const { backend } = adapter({ home: tempHome(), zkapi: false, confinement });
     const value = await backend.status();
     expect(value.confinementInstallRequired).toBe(true);
-    const render = { ...value, tools: { tools: [{ tool: 'zkapi-clientd' as const, label: 'zkAPI', source, offered: true, installedVersion: '0.1.6-olympus3', version: '0.1.6-olympus4' }], install: { state: 'idle' as const } } };
+    const render = { ...value, tools: { tools: [{ tool: 'zkapi-clientd' as const, label: 'zkAPI', source, offered: true, installedVersion: '0.1.6-olympus3', version: '0.1.6-olympus5' }], install: { state: 'idle' as const } } };
     const html = renderOutsideHelpCard(render, { csrfToken: 'csrf', localSession: true });
     const document = new Window().document;
     document.body.innerHTML = html;

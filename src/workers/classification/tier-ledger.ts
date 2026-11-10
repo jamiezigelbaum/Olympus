@@ -1314,6 +1314,69 @@ export class TierLedger {
   }
 
   /**
+   * The owner asked to check one chat's or one source's privacy again
+   * (`olympus tier recheck`, #638): a durable, content-free request beside
+   * the ledger, which the re-judge pass works through (tier-rejudge.ts).
+   * It never sets a tier: each item in the scope is judged again on its own.
+   * Asking again for the same scope starts it over. Returns how many routed
+   * items the scope holds now (0: nothing is requested).
+   */
+  requestRecheck(scope: TierRecheckScope): { items: number } {
+    const items = (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items
+      WHERE routed = 1 AND (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR account_scope = ?2) AND (?3 IS NULL OR conversation_key = ?3)
+    `).get(scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null) as { n: number }).n;
+    if (items > 0) this.writeMeta(recheckRequestKey(scope), JSON.stringify({ scope }));
+    return { items };
+  }
+
+  /** The open re-check requests, oldest scope key first. */
+  recheckRequests(): TierRecheckRequest[] {
+    const requests: TierRecheckRequest[] = [];
+    for (const entry of this.metaEntries(TIER_RECHECK_META_PREFIX)) {
+      try {
+        const parsed = JSON.parse(entry.value) as { scope?: TierRecheckScope; after?: TierLedgerIdentity };
+        if (!parsed.scope) continue;
+        requests.push({ key: entry.key, scope: parsed.scope, ...(parsed.after ? { after: parsed.after } : {}) });
+      } catch {
+        // A damaged request is dropped below, not retried forever.
+        this.deleteMeta(entry.key);
+      }
+    }
+    return requests;
+  }
+
+  /** Routed items of a re-check's scope in key order after `after`; `next` is absent once the scope is read to its end. */
+  recheckScopePage(scope: TierRecheckScope, options: { after?: TierLedgerIdentity; limit: number }): { records: TierLedgerRecord[]; next?: TierLedgerIdentity } {
+    const limit = Math.max(1, Math.min(options.limit, 5_000));
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : null;
+    const rows = this.db.query(`
+      SELECT * FROM tier_items
+      WHERE routed = 1 AND (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR account_scope = ?2) AND (?3 IS NULL OR conversation_key = ?3)
+        AND (?4 IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?5, ?6, ?7, ?8))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?9
+    `).all(
+      scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null,
+      after ? 1 : null, ...(after ?? [null, null, null, null]), limit,
+    ) as TierItemRow[];
+    const records = rows.map(recordFromRow);
+    const last = rows.at(-1);
+    return { records, ...(rows.length >= limit && last ? { next: identityOfRow(last) } : {}) };
+  }
+
+  /** Where a re-check request continues from, or (no `after`) that it is done. */
+  advanceRecheck(request: TierRecheckRequest, after: TierLedgerIdentity | undefined): void {
+    // A request made again meanwhile starts over: it is not moved on, nor dropped, by the older pass.
+    const stored = this.readMeta(request.key);
+    if (stored === undefined || stored !== JSON.stringify({ scope: request.scope, ...(request.after ? { after: request.after } : {}) })) return;
+    if (after) this.writeMeta(request.key, JSON.stringify({ scope: request.scope, after }));
+    else this.deleteMeta(request.key);
+  }
+
+  /**
    * Routed items held ONLY because their text has not been read (no open
    * names question, content unread): pending on it, or settled fail-safe
    * Private for the content question it could not have yet. In key order
@@ -4484,6 +4547,25 @@ function settleStaleEmbedHolds(db: Database, now: string): number {
       )
   `).run(now);
   return (db.query('SELECT changes() AS n').get() as { n: number }).n;
+}
+
+/** One chat (`conversationKey`) or one source (`provider`, optionally one account) the owner asked to re-check. */
+export interface TierRecheckScope {
+  provider?: string;
+  accountScope?: string;
+  conversationKey?: string;
+}
+
+export interface TierRecheckRequest {
+  key: string;
+  scope: TierRecheckScope;
+  after?: TierLedgerIdentity;
+}
+
+const TIER_RECHECK_META_PREFIX = 'recheck:';
+
+function recheckRequestKey(scope: TierRecheckScope): string {
+  return `${TIER_RECHECK_META_PREFIX}${JSON.stringify([scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null])}`;
 }
 
 /** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */
