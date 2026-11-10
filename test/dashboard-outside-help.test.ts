@@ -292,7 +292,7 @@ describe('the card split between Settings › zkAPI and Privacy rules (#1047)', 
     expect(button.textContent).toBe(W.saveLanguages);
     form.dispatchEvent(Object.assign(new window.Event('submit', { cancelable: true }), { submitter: button }));
     await settle();
-    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ enabled: true, revision: 3, languages: ['en', 'pt-BR'] });
+    expect(JSON.parse(posts[0]!.init.body!)).toEqual({ enabled: true, revision: 3, languages: ['en', 'pt-BR'], save_languages: true });
   });
 });
 
@@ -1235,6 +1235,20 @@ describe('the adapter: turning outside help on and off', () => {
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 3, enabled: false, languages: ['en', 'pt-BR'] } });
     // On with no language is still refused.
     expect(await backend.setEnabled({ enabled: true, revision: 3, languages: [] })).toMatchObject({ ok: false, code: 'languages_empty' });
+  });
+
+  test('Save languages while zkAPI is off keeps the selection for turning on (#1047)', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    expect((await backend.setEnabled({ enabled: true, revision: 0, languages: ['en'] })).ok).toBe(true);
+    expect((await backend.setEnabled({ enabled: false, revision: 1 })).ok).toBe(true);
+    expect(await backend.setEnabled({ enabled: false, revision: 2, languages: ['en', 'pt-BR'], save_languages: true })).toEqual({ ok: true, status_message: 'Languages saved.', revision: 3 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: false, languages: ['en', 'pt-BR'] } });
+    // The button's own save is checked like turning on; the off switch is not.
+    expect(await backend.setEnabled({ enabled: false, revision: 3, languages: [], save_languages: true })).toMatchObject({ ok: false, code: 'languages_empty' });
+    expect(await backend.setEnabled({ enabled: false, revision: 3, languages: ['xx'], save_languages: true })).toMatchObject({ ok: false, code: 'language_unknown' });
+    expect((await backend.setEnabled({ enabled: true, revision: 3, languages: ['en', 'pt-BR'] })).ok).toBe(true);
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: true, languages: ['en', 'pt-BR'] } });
   });
 
   test('turning on requires a configured route and complete acknowledgements; off never does', async () => {

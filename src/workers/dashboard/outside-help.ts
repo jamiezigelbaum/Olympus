@@ -356,7 +356,7 @@ function renderOutsideHelpPrivacyPart(status: DashboardOutsideHelpStatus, input:
   // The languages post the switch as it is, with this form's own button.
   const invalid = status.settings.state === 'invalid';
   const save = canEdit && !invalid
-    ? `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? 'true' : 'false'}">${escapeHtml(W.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>`
+    ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? 'true' : 'false'}">${escapeHtml(W.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>`
     : '';
   more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
@@ -965,6 +965,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
       var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
+      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
       return body;
     }
     if (kind === 'route') {

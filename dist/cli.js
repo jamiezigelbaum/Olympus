@@ -154104,7 +154104,7 @@ function renderOutsideHelpPrivacyPart(status, input) {
   if (status.writer)
     more.push(renderWriter(status.writer, canEdit));
   const invalid4 = status.settings.state === "invalid";
-  const save = canEdit && !invalid4 ? `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const save = canEdit && !invalid4 ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
   more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
@@ -154483,6 +154483,7 @@ function outsideHelpClientScript(config2) {
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
       var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
+      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
       return body;
     }
     if (kind === 'route') {
@@ -217850,7 +217851,8 @@ function createDashboardConsultAdapter(options) {
       const current2 = readConsultSettings(location);
       const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen = [...base.languages];
-      if (enabled && update.languages !== undefined) {
+      const savingLanguages = update.languages !== undefined && (enabled || update.save_languages === true);
+      if (savingLanguages) {
         if (!Array.isArray(update.languages) || update.languages.length === 0)
           return invalid5(MESSAGES3.languagesEmpty, "languages_empty");
         if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
@@ -217875,7 +217877,7 @@ function createDashboardConsultAdapter(options) {
         if (!acknowledgementsComplete())
           return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES3.acknowledgementsIncomplete };
       }
-      if (enabled && (turningOn || update.languages !== undefined)) {
+      if (turningOn || savingLanguages) {
         const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed2.has(language)))
           return invalid5(MESSAGES3.languageMissing, "language_pack_missing");
@@ -217892,7 +217894,7 @@ function createDashboardConsultAdapter(options) {
       }, location);
       if (result.ok) {
         const paused = enabled && Boolean(zkapiProfile()) && !acknowledgementsComplete();
-        const message2 = update.level !== undefined ? paused ? MESSAGES3.levelSavedPaused : MESSAGES3.levelSaved : enabled ? MESSAGES3.turnedOn : MESSAGES3.turnedOff;
+        const message2 = update.level !== undefined ? paused ? MESSAGES3.levelSavedPaused : MESSAGES3.levelSaved : update.save_languages === true ? MESSAGES3.languagesSaved : enabled ? MESSAGES3.turnedOn : MESSAGES3.turnedOff;
         return { ok: true, status_message: message2, revision: result.settings.revision };
       }
       return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
@@ -218063,6 +218065,7 @@ var init_dashboard_consult = __esm(() => {
     confirm: "This action needs your confirmation.",
     turnedOn: "Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.",
     turnedOff: "Anonymous answers are off. No question is sent.",
+    languagesSaved: "Languages saved.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
     routeAdded: "The zkAPI route is added. Finish the steps below.",
