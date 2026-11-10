@@ -35241,7 +35241,7 @@ function createConnectorStoreCorpusAdapter(options) {
         const hits = withPinnedNewestChatHits({
           store,
           recencyRows,
-          hits: rankedCandidates(fused, request.maxResults, complete).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
+          hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
           limit: request.maxResults,
           ...options.resultProjector ? { resultProjector: options.resultProjector } : {},
           ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -35492,7 +35492,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(seated, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
     limit: maxResults,
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -35589,6 +35589,15 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId))
   ];
+  const leader = rows[0];
+  const nameLeader = leader && !connectorStoreRowHasContent(leader) && !complete.has(leader.sourceItem.localItemId) ? leader.sourceItem.localItemId : undefined;
+  if (leader && nameLeader !== undefined) {
+    const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
+    const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
+    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]) ? 1 : 0);
+    if (firstPartial >= 0 && at > seat)
+      ordered.splice(seat, 0, ...ordered.splice(at, 1));
+  }
   const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions, deadlineAtMs));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));
   const allRows = baseline ? [
@@ -35607,6 +35616,7 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []]),
+    ...(baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: baseline?.nameLeaderItemId ?? nameLeader } : {},
     ...baseline ? { baseline } : {}
   };
 }
@@ -35647,10 +35657,11 @@ function connectorStoreRowIsSecureTier(row) {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-function rankedCandidates(candidates, limit, complete, hasContent = lexicalContentPreference) {
+function rankedCandidates(candidates, limit, complete, hasContent = lexicalContentPreference, nameLeaderItemId) {
   const tiers = [[], [], [], []];
   for (const candidate of candidates) {
-    tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)].push(candidate);
+    const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeaderItemId;
+    tiers[(complete(candidate) ? 0 : 2) + (readable ? 0 : 1)].push(candidate);
   }
   return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
 }

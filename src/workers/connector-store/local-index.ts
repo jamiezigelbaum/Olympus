@@ -14566,7 +14566,7 @@ export function createConnectorStoreCorpusAdapter(
       const hits = withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: rankedCandidates(fused, request.maxResults, complete).map((candidate) => connectorStoreHitFromRow(
+        hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(
           store,
           candidate.item,
           candidate.score,
@@ -14982,7 +14982,7 @@ async function hybridConnectorStoreSearch(
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(seated, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -15114,6 +15114,8 @@ type ConnectorStoreKeywordLane = {
   matchCount: SourceIndexCorpusMatchCount;
   matchedItemIds: ReadonlySet<string>;
   completeItemIds: ReadonlySet<string>;
+  /** The plain search's bm25 leader when it is a partial, title-only match: it keeps the lead among partial matches. */
+  nameLeaderItemId?: string;
   allRows: ConnectorStoreSearchRow[];
   /** The expansion-free search, when expansion changed this one. */
   baseline?: ConnectorStoreKeywordLane;
@@ -15157,6 +15159,27 @@ async function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
+  // The best name match keeps a seat among the partial matches. Content first
+  // demoted the plain search's bm25 leader behind every readable row that
+  // shares part of the question, so a file named for the question, unread or
+  // with Private content, never left its store (2026-11-10 eval gap-1: first
+  // of 377 by bm25, absent from the pack). The rule: when the plain search's
+  // best match is a name that outscores every readable partial match, it
+  // keeps a seat whenever the lane has room for more than one, and never
+  // takes the first seat from a readable match, so a one-result search still
+  // gets content. One row, never more: the titles after it still follow the
+  // readable rows.
+  const leader = rows[0];
+  const nameLeader = leader && !connectorStoreRowHasContent(leader) && !complete.has(leader.sourceItem.localItemId)
+    ? leader.sourceItem.localItemId
+    : undefined;
+  if (leader && nameLeader !== undefined) {
+    const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
+    const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
+    // Right after the best readable partial match, when one leads it.
+    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]!) ? 1 : 0);
+    if (firstPartial >= 0 && at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
+  }
   // The expansion-free baseline is the same search when expansion changes
   // nothing about it (no alternatives, no foreign stopwords): running it
   // again only doubled the lane's cost (Sparta 2026-11-10, #1242).
@@ -15182,6 +15205,7 @@ async function connectorStoreKeywordLaneRows(
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
+    ...((baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: (baseline?.nameLeaderItemId ?? nameLeader)! } : {}),
     ...(baseline ? { baseline } : {}),
   };
 }
@@ -15278,10 +15302,14 @@ function rankedCandidates(
   limit: number,
   complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
   hasContent: ContentPreference = lexicalContentPreference,
+  nameLeaderItemId?: string,
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
   const tiers: FusedRankedCandidate<ConnectorStoreSearchRow>[][] = [[], [], [], []];
   for (const candidate of candidates) {
-    tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)]!.push(candidate);
+    // The best name match is never demoted for having no text: its lane
+    // already put readable rows that match the question as fully ahead of it.
+    const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeaderItemId;
+    tiers[(complete(candidate) ? 0 : 2) + (readable ? 0 : 1)]!.push(candidate);
   }
   return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
 }
