@@ -34803,12 +34803,12 @@ function rankedCandidates(candidates, limit, complete, hasContent = lexicalConte
 }
 function withLaneLeadersSeated(fused, vettedVectorItemIds) {
   const isLeader = (candidate) => candidate.laneRanks.get("keyword") === 1 || candidate.laneRanks.get("vector") === 1 && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
-  const buried = fused.filter((candidate, index) => index >= LANE_LEADER_SEATS && isLeader(candidate));
-  if (buried.length === 0)
+  if (!fused.some((candidate, index) => index >= LANE_LEADER_SEATS && isLeader(candidate)))
     return [...fused];
-  const rest = fused.filter((candidate) => !buried.includes(candidate));
-  const seat = Math.max(0, LANE_LEADER_SEATS - buried.length);
-  return [...rest.slice(0, seat), ...buried, ...rest.slice(seat)];
+  const leaders = fused.filter(isLeader).length;
+  let openSeats = Math.max(0, LANE_LEADER_SEATS - leaders);
+  const seated = fused.filter((candidate) => isLeader(candidate) || openSeats-- > 0);
+  return [...seated, ...fused.filter((candidate) => !seated.includes(candidate))];
 }
 function allCandidates(lanes) {
   return Math.max(1, lanes.reduce((total, lane) => total + lane.items.length, 0));

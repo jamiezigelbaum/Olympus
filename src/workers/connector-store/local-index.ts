@@ -15150,24 +15150,26 @@ function rankedCandidates(
 // touched (rank 30 to 36 of 50 on the 2026-11-10 eval) whenever the vector
 // lane missed it. A leader fusion already placed in the first
 // LANE_LEADER_SEATS keeps its place, so a candidate several lanes agree on
-// still leads; one placed lower moves up to the last seat, and everything else
-// keeps its relative order. The complete/content tiers still apply on top. A
+// still leads; one placed lower takes a seat from the lowest-placed
+// non-leader, and everything else keeps its relative order. The complete/content tiers still apply on top. A
 // vector leader is seated only when vetted (at or above its relevance bar): an
 // unvetted nearest neighbour is no evidence and must not jump the queue.
 const LANE_LEADER_SEATS = 3;
 
-function withLaneLeadersSeated(
+export function withLaneLeadersSeated(
   fused: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
   vettedVectorItemIds: ReadonlySet<string>,
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
   const isLeader = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>): boolean =>
     candidate.laneRanks.get('keyword') === 1
     || (candidate.laneRanks.get('vector') === 1 && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId));
-  const buried = fused.filter((candidate, index) => index >= LANE_LEADER_SEATS && isLeader(candidate));
-  if (buried.length === 0) return [...fused];
-  const rest = fused.filter((candidate) => !buried.includes(candidate));
-  const seat = Math.max(0, LANE_LEADER_SEATS - buried.length);
-  return [...rest.slice(0, seat), ...buried, ...rest.slice(seat)];
+  if (!fused.some((candidate, index) => index >= LANE_LEADER_SEATS && isLeader(candidate))) return [...fused];
+  // Every leader, plus the best non-leaders that still fit, takes the seats in
+  // fused order; so a buried leader evicts a non-leader, never a seated leader.
+  const leaders = fused.filter(isLeader).length;
+  let openSeats = Math.max(0, LANE_LEADER_SEATS - leaders);
+  const seated = fused.filter((candidate) => isLeader(candidate) || (openSeats-- > 0));
+  return [...seated, ...fused.filter((candidate) => !seated.includes(candidate))];
 }
 
 function allCandidates(lanes: ReadonlyArray<{ items: readonly unknown[] }>): number {

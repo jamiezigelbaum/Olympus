@@ -13,6 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import type { FusedRankedCandidate } from '../src/core/source-index/retrieval.ts';
+import { withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreCorpusAdapter,
@@ -76,6 +78,29 @@ describe('connector-store fusion keeps each lane\'s best hit', () => {
       expect(hybrid.length).toBe(5);
       expect(hybrid.filter((id) => id !== 'target').every((id) => id.startsWith('note-'))).toBe(true);
     });
+  });
+});
+
+describe('lane leader seats', () => {
+  // Fused order [A, B, K, V]: K leads the keyword lane (already third), V
+  // leads the vector lane (buried). V takes B's seat, not K's (#1231 review).
+  const candidate = (id: string, ranks: Record<string, number>) => ({
+    id, score: 0, laneRanks: new Map(Object.entries(ranks)),
+    item: { sourceItem: { localItemId: id } },
+  }) as unknown as FusedRankedCandidate<never>;
+  const order = (vetted: string[]) => withLaneLeadersSeated([
+    candidate('A', { keyword: 2, vector: 2 }),
+    candidate('B', { keyword: 3, vector: 3 }),
+    candidate('K', { keyword: 1 }),
+    candidate('V', { vector: 1 }),
+  ] as never, new Set(vetted)).map((entry) => String(entry.id));
+
+  test('a buried leader evicts a non-leader, never a seated leader', () => {
+    expect(order(['V'])).toEqual(['A', 'K', 'V', 'B']);
+  });
+
+  test('an unvetted vector leader gets no seat', () => {
+    expect(order([])).toEqual(['A', 'B', 'K', 'V']);
   });
 });
 
