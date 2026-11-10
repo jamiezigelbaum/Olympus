@@ -1235,6 +1235,8 @@ var init_public_surface = __esm(() => {
     "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
+    "privacy_item_find",
+    "privacy_item_set",
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
@@ -1248,7 +1250,9 @@ var init_public_surface = __esm(() => {
     "olympus_doctor",
     "olympus_setup_status",
     "ask_anonymously",
-    "archive_import"
+    "archive_import",
+    "privacy_item_find",
+    "privacy_item_set"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -1260,7 +1264,9 @@ var init_public_surface = __esm(() => {
     "olympus_doctor",
     "olympus_setup_status",
     "ask_anonymously",
-    "archive_import"
+    "archive_import",
+    "privacy_item_find",
+    "privacy_item_set"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
@@ -19976,7 +19982,10 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_parent_context();
+  init_stored_names();
   init_tier_rejudge();
+  init_tier_rules_sweep();
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
@@ -27551,6 +27560,25 @@ class EmailClient {
         ...options.path !== undefined ? { path: options.path } : {},
         ...options.archiveId !== undefined ? { archive_id: options.archiveId } : {}
       })
+    });
+  }
+  async privacyItem(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError("source_index_not_enabled", "Privacy labels cannot be changed because the source index is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up.");
+    }
+    const body = options.action === "find" ? {
+      ...options.query !== undefined ? { query: options.query } : {},
+      ...options.recent !== undefined ? { recent: options.recent } : {},
+      ...options.limit !== undefined ? { limit: options.limit } : {}
+    } : { item_id: options.itemId };
+    return this.transport.requestJson(`${this.config.email.baseUrl}/privacy-item/${options.action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
+      body: JSON.stringify(body)
     });
   }
   async sourceAnswer(options) {
@@ -35675,6 +35703,15 @@ var ARCHIVE_IMPORT_PARAMS = {
   path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, a WhatsApp chat export: its .txt or .zip, or a folder of them, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
   archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
 };
+var PRIVACY_ITEM_FIND_PARAMS = {
+  query: { type: "string", description: "Words from the item's title, sender or file name, as the user named it. Omit with recent." },
+  recent: { type: "boolean", description: "true lists the items Olympus sorted most recently instead of searching." },
+  limit: { type: "number", description: "Max items (default 20, at most 50)." }
+};
+var PRIVACY_ITEM_SET_PARAMS = {
+  item_id: { type: "string", required: true, description: "The item_id privacy_item_find returned." },
+  tier: { type: "string", required: true, enum: ["private"], description: 'Always "private": an AI app can only make an item Private.' }
+};
 var operations = [
   {
     name: "argus_ping",
@@ -36161,6 +36198,57 @@ var operations = [
         ...archiveId !== undefined ? { archiveId } : {},
         ...ctx.signal ? { signal: ctx.signal } : {}
       });
+    }
+  },
+  {
+    name: "privacy_item_find",
+    description: [
+      "Find one of the user's items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).",
+      "Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge's category and confidence) where the judge decided it.",
+      "Items whose names are Private, and Secret items, are never listed here.",
+      "Use it when the user says an item should be private, then call privacy_item_set."
+    ].join(" "),
+    params: PRIVACY_ITEM_FIND_PARAMS,
+    mutating: false,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "privacy item find", positional: ["query"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_FIND_PARAMS, params, "Privacy item find");
+      const query = optionalString4(params.query);
+      const recent = optionalBoolean(params.recent, "recent");
+      const limit = optionalNumber2(params.limit, "limit");
+      if (query === undefined === (recent !== true)) {
+        throw new OperationError("invalid_params", "Give query, or recent: true, not both.");
+      }
+      return ctx.email.privacyItem({
+        action: "find",
+        ...query !== undefined ? { query } : {},
+        ...recent !== undefined ? { recent } : {},
+        ...limit !== undefined ? { limit } : {},
+        ...ctx.signal ? { signal: ctx.signal } : {}
+      });
+    }
+  },
+  {
+    name: "privacy_item_set",
+    description: [
+      'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
+      "It is the user's decision on that one item, never a rule for its sender, chat or folder.",
+      "Making an item Personal, or putting it back to the judge's label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.",
+      "Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words."
+    ].join(" "),
+    params: PRIVACY_ITEM_SET_PARAMS,
+    mutating: true,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "privacy item set", positional: ["item_id", "tier"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_SET_PARAMS, params, "Privacy item set");
+      const itemId = asString(params.item_id, "item_id");
+      const tier = asString(params.tier, "tier");
+      if (tier !== "private") {
+        throw new OperationError("invalid_params", "An AI app can only make an item Private.", "To make it Personal, or put it back to the judge's label, use Privacy on the Olympus dashboard on this computer.");
+      }
+      return ctx.email.privacyItem({ action: "raise", itemId, ...ctx.signal ? { signal: ctx.signal } : {} });
     }
   },
   {

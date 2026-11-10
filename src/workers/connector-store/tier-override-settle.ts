@@ -25,7 +25,17 @@
 // what this pass read (`TierOwnerOverrideGuard`). Only tier overrides act here: `not-secret` needs the item's
 // signals and text, which its next listing supplies.
 
-import { classifyItemTiers, contentDigestReason, heldUntilJudged, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import {
+  classifyItemTiers,
+  contentDigestReason,
+  contentNamesReason,
+  heldUntilJudged,
+  maxTier,
+  ownerRuleMatches,
+  tierRank,
+  type TierDecision,
+  type TierKey,
+} from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   trustDomainRank,
@@ -35,7 +45,10 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
+import { parentNamesContext } from './parent-context.ts';
+import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
+import { reopenLabelRuleSweep } from './tier-rules-sweep.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export interface TierOverrideSettleReport {
@@ -51,6 +64,8 @@ export interface TierOverrideSettleReport {
   secrets: number;
   /** Mid-move items whose move does not carry the override yet: applied once it lands. */
   heldMoving: number;
+  /** Items whose override the owner cleared ("undo"), put back to the decision it took over from. */
+  restored: number;
 }
 
 export function applyOwnerOverrides(options: {
@@ -58,7 +73,7 @@ export function applyOwnerOverrides(options: {
   /** @internal Test hook: runs after the overrides are read, before any is applied (another process's write). */
   afterRead?: () => void;
 }): TierOverrideSettleReport {
-  const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
+  const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0, restored: 0 };
   const { set } = options;
   const ledger = set.ledger;
   let retirePublic = false;
@@ -84,10 +99,138 @@ export function applyOwnerOverrides(options: {
       // Left as it was; the next pass (or the item's next listing) applies it.
     }
   }
+  // Overrides the owner cleared ("undo", tier-owner-items.ts): the item goes
+  // back to the decision the override took it over from, through the same
+  // router write a listing makes.
+  // Paged by identity, so items that cannot be restored (set by the owner
+  // before anything else decided them) never hold back the ones after them.
+  const CLEARED_PAGE = 100;
+  for (let after: TierLedgerRecord | undefined, page: TierLedgerRecord[]; ; after = page[page.length - 1]) {
+    page = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
+    for (const record of page) {
+      try {
+        if (restoreClearedOverride(set, record)) report.restored += 1;
+      } catch {
+        // Left as it was; the next pass tries again.
+      }
+    }
+    if (page.length < CLEARED_PAGE) break;
+  }
   // Items that left Secrets since the last tick (here, in a listing, a move
   // landing or another process): their job names come back.
   retireSecretRedactions(ledger);
   return report;
+}
+
+/**
+ * Put an item whose override was cleared back to the decision recorded before
+ * the owner changed it (`TierLedger.settledDecisionBeforeOverride`), raised to
+ * what the owner's current rules ask for. A rule added while the override
+ * stood skipped the item (tier-rules-sweep.ts leaves overridden items alone
+ * and still counts itself done), so it is applied here, in the same write;
+ * rules only raise. A label rule cannot be checked from what a store keeps:
+ * wherever a raising label rule could apply to the item, it keeps the
+ * protection it has now, up to that rule's tier, so it is never exposed before
+ * the provider has answered; and the provider account's label rules are made
+ * pending again, so the next label sweep asks the provider which stored items
+ * carry each label (#1176 tracks lowering one the provider says does not). A
+ * raise hides first and a
+ * lowering stays where it is until its move lands, as for any decision a
+ * listing records. The write re-checks, in its own transaction, that no
+ * override was set again and the generation is still the one read. An item
+ * the owner set before anything else decided it stays as it is: its next
+ * listing decides it.
+ */
+/** The receipts that let a recorded content verdict be reused for this text under these names. */
+function isVerdictReceipt(reason: string): boolean {
+  return reason.startsWith('content:names:') || reason.startsWith('content:sha256:') || reason.startsWith('content:judge_verdict:');
+}
+
+function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): boolean {
+  const ledger = set.ledger;
+  const identity = identityOf(record);
+  const before = ledger.settledDecisionBeforeOverride(identity);
+  if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;
+  // Rules that cannot be trusted now: wait, rather than restore without them.
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason) return false;
+  const rules = classification.rules ?? [];
+  const raising = rules.filter((rule) => tierRank(rule.tier) > tierRank('private'));
+  const copies = ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  // Names that cannot be read back from an item that has copies: the next pass tries again.
+  if (!exported && copies.length > 0 && raising.length > 0) return false;
+  const stored = exported ? storedSignals(exported) : {};
+  // The earlier verdict judged the names it records. Renamed or moved since (or
+  // names that cannot be read back): it no longer speaks for the item, which
+  // keeps the protection it has until its names are judged again.
+  const namesReceipt = before.reasons.find((reason) => reason.startsWith('content:names:'));
+  const namesChanged = namesReceipt !== undefined && (!exported
+    || namesReceipt !== contentNamesReason(stored, parentNamesContext(set, identity)));
+  const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
+  // Label rules for this item's source: whether the item carries the label is not known here,
+  // so it keeps the protection it has now (up to the rule's tier) and the provider is asked again (below).
+  const labelRules = raising.filter((rule) => rule.match.kind === 'label'
+    && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
+  const heldNow = maxTier(record.metadataTier, record.contentTier);
+  let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
+  for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
+  // Renamed: no lower than it is held now, and without the earlier verdict's
+  // receipts, so the next re-judge reads the new names before anything lowers it.
+  const floor = namesChanged ? heldNow : 'public';
+  const metadataTier = maxTier(maxTier(before.metadataTier, ruleTier), floor);
+  const contentTier = maxTier(maxTier(before.contentTier, metadataTier), floor);
+  const byRule = tierRank(ruleTier) > tierRank(before.metadataTier);
+  let ruleReasons: string[] = [];
+  if (byRule) {
+    // The rules' reason codes exactly as a listing states them.
+    const classified = classifyItemTiers(
+      {
+        signals: { ...stored, ...(labelRules.length > 0 ? { labels: labelRules.map((rule) => rule.match.value) } : {}) },
+        provider: record.provider,
+        subject: identity,
+      },
+      { rules: [...rules], ...(classification.retirePublic ? { retirePublic: true } : {}) },
+    );
+    ruleReasons = classified.reasons.filter((reason) => reason.startsWith('metadata:owner_rule:'));
+  }
+  const decision: TierDecision = {
+    metadataTier,
+    contentTier,
+    // A stored decider outside the classifier's own list (a landed move) is kept as recorded.
+    decidedBy: byRule ? 'owner_rule' : before.decidedBy as TierDecision['decidedBy'],
+    reasons: byRule
+      ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith('content:') && (!namesChanged || !isVerdictReceipt(reason)))]
+      : before.reasons.filter((reason) => !namesChanged || !isVerdictReceipt(reason)),
+    // Renamed: held for its text question, which the judge asks again with the new names.
+    state: namesChanged ? 'pending' : 'current',
+    contentRead: before.reasons.some((reason) => reason.startsWith('content:')),
+    metadataPending: false,
+    contentPending: namesChanged,
+    metadataForced: before.reasons.some((reason) => reason.startsWith('metadata:') && reason.endsWith(':force'))
+      || (byRule && matched.some((rule) => rule.strength === 'force')),
+    metadataFlagged: before.reasons.some((reason) => reason.startsWith('metadata:possibly_private:')),
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: '',
+  };
+  const guard = { generation: record.generation, override: undefined };
+  // The provider answers whether the item carries a label rule's label: the next label sweep asks it.
+  const askProvider = () => {
+    if (labelRules.length > 0) reopenLabelRuleSweep(ledger, record.provider, record.accountScope);
+  };
+  if (metadataTier === 'secrets') {
+    const settled = exported !== undefined
+      && settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard });
+    if (settled) askProvider();
+    return settled;
+  }
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    guard,
+    staleCopiesGone: set.routedWithoutAnyCopy(identity),
+  });
+  if (recorded.outcome !== 'unchanged') askProvider();
+  return recorded.outcome !== 'unchanged';
 }
 
 function applyOne(
@@ -208,4 +351,8 @@ function identityOf(record: TierLedgerRecord): TierLedgerIdentity {
     providerItemId: record.providerItemId,
     ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
   };
+}
+
+function minTier(a: TierKey, b: TierKey): TierKey {
+  return tierRank(a) <= tierRank(b) ? a : b;
 }
