@@ -3,9 +3,9 @@
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { fetchModelEndpoint } from '../../core/model-transport.ts';
 import { assertSnifferProfileAllowed, initialSnifferMode, snifferLaneOffersDecision, type SnifferLane } from './sniffer-lane.ts';
-import { buildSnifferBatchPrompt, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT } from './sniffer.ts';
+import { buildSnifferBatchPrompt, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT, snifferDecisionBar } from './sniffer.ts';
 import type { SnifferPass, StoredSnifferVerdict } from './sniffer-store.ts';
-import { privateChance, tierMass, SNIFFER_DECISION_PRIVATE_BAR, type TokenChance } from './sniffer-decision-mass.ts';
+import { privateChance, tierMass, type TokenChance } from './sniffer-decision-mass.ts';
 
 export const REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"';
 const PLACEHOLDER = 'CALIBRATION_ITEM_PLACEHOLDER';
@@ -178,9 +178,12 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
           // A cold slot (e.g. a server restart between calls) must be primed again.
           if (reply?.tokens_cached === 0) reset();
           if (chance === undefined || !Number.isFinite(chance)) { reset(); return { text: '', modelId: lane.modelId, decisionMetrics }; }
+          // Stored as the tier at this lane's bar with that tier's mass, so
+          // P(Private) is recoverable and a later bar re-reads it (sniffer.ts).
+          const held = chance >= snifferDecisionBar(lane);
           return { text: '', modelId: lane.modelId, decisionMetrics, decisionVerdict: {
-            tier: chance >= SNIFFER_DECISION_PRIVATE_BAR ? 'private' : 'personal', category: SNIFFER_DECISION_CATEGORY,
-            confidence: chance >= SNIFFER_DECISION_PRIVATE_BAR ? chance : 1 - chance, failSafe: false,
+            tier: held ? 'private' : 'personal', category: SNIFFER_DECISION_CATEGORY,
+            confidence: held ? chance : 1 - chance, failSafe: false,
           } };
         } catch (error) {
           reset();
