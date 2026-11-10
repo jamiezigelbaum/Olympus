@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How do I keep passwords and secrets out of AI chats? - Olympus guides</title>
+  <meta name="description" content="How passwords, API keys and recovery codes end up in AI chats, and how to keep them out: habits, secret scanners and a local filter before anything is sent.">
+  <link rel="canonical" href="https://olympusplugin.ai/guides/keep-passwords-and-secrets-out-of-ai/">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>How do I keep passwords and secrets out of AI chats?</h1>
+      <p class="lede">Never paste them, and make sure any tool that reads your files on your behalf filters secrets out before anything reaches the AI. Most leaks are accidental: a pasted config file, a screenshot, or an email with a recovery code that a connector passes along.</p>
+
+      <h2>Where secrets slip in</h2>
+      <ul>
+        <li>Pasting logs, config files or code that contain API keys.</li>
+        <li>Connectors that read your whole inbox or drive, including password-reset emails and saved credentials.</li>
+        <li>Screenshots and PDFs with account numbers or codes in them.</li>
+      </ul>
+
+      <h2>What helps</h2>
+      <ol>
+        <li>Keep passwords in a password manager, not in notes or email.</li>
+        <li>Run a secret scanner (for example gitleaks) on code before you share it.</li>
+        <li>Rotate any key you have pasted into a chat.</li>
+        <li>Use tools that check content on your computer before sending it.</li>
+      </ol>
+
+      <h2>How Olympus handles secrets</h2>
+      <p>Olympus looks for common forms of secrets, such as private keys, API keys and labeled passwords, in the items it indexes on your computer. Once it recognizes a Secret, it never sends it anywhere or answers from it, and removes its contents from the search index. Recognition can miss unusual forms, and an item it misses is labeled like any other item, so these habits still matter. Details are in the <a href="/privacy/">privacy policy</a>.</p>
+      <p class="meta">Updated 10 November 2026.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li><a href="/help/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>
