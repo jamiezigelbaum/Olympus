@@ -157644,7 +157644,7 @@ function outsideHelpClientScript(config2) {
   // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
   // (in memory), which says it again in the same form, with its section open.
   function formKey(form) {
-    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : form.hasAttribute('data-outside-save-languages') ? ':languages' : '');
   }
   function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
   (function showSaved() {
@@ -157710,7 +157710,8 @@ function outsideHelpClientScript(config2) {
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
+        // The switch's new state shows on the redrawn card; Save languages leaves nothing to see but its confirmation.
+        if ((kind !== 'enable' || form.hasAttribute('data-outside-save-languages')) && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
           redrawWhenBack(4000, form);
