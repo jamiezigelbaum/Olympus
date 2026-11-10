@@ -120,7 +120,7 @@ export async function runSampler(options: SamplerOptions): Promise<void> {
   const dashboardReads = options.dashboardReads ?? 3;
   const timeoutMs = options.timeoutMs ?? 120_000;
   const rssMb = options.rssMb ?? processRssMb;
-  const pids = options.pids ?? (() => ({}));
+  const pids: () => { worker?: number; background?: number } = options.pids ?? (() => ({}));
   const apiBase = options.apiBase.replace(/\/+$/, '');
   const root = apiBase.replace(/\/v1$/, '');
   const headers: Record<string, string> = options.authToken ? { Authorization: `Bearer ${options.authToken}` } : {};
