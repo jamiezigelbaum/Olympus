@@ -71526,6 +71526,7 @@ init_sovereignty();
 init_tier_ledger_path();
 init_tier_rules();
 init_source_dispositions();
+init_media_cache();
 init_source_account_binding();
 init_provider_account_identity();
 init_source_registry();
