@@ -14852,6 +14852,7 @@ async function hybridConnectorStoreSearch(
     limit: allCandidates(lanes),
     tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
+  const seated = withLaneLeadersSeated(fused, vettedVectorItemIds);
   const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => {
     const id = candidate.item.sourceItem.localItemId;
     return (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(id))
@@ -14860,7 +14861,7 @@ async function hybridConnectorStoreSearch(
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(fused, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -15140,6 +15141,33 @@ function rankedCandidates(
     tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)]!.push(candidate);
   }
   return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+}
+
+// Each lane's best hit keeps a seat near the top of fusion's order (#1230).
+// Under RRF (k 60) a candidate both lanes found at any depth up to 60 scores
+// at least 2/120, more than a single-lane rank 1 (1/61), so the keyword lane's
+// clear winner for an exact value sank below every document both lanes merely
+// touched (rank 30 to 36 of 50 on the 2026-11-10 eval) whenever the vector
+// lane missed it. A leader fusion already placed in the first
+// LANE_LEADER_SEATS keeps its place, so a candidate several lanes agree on
+// still leads; one placed lower moves up to the last seat, and everything else
+// keeps its relative order. The complete/content tiers still apply on top. A
+// vector leader is seated only when vetted (at or above its relevance bar): an
+// unvetted nearest neighbour is no evidence and must not jump the queue.
+const LANE_LEADER_SEATS = 3;
+
+function withLaneLeadersSeated(
+  fused: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
+  vettedVectorItemIds: ReadonlySet<string>,
+): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
+  const isLeader = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>): boolean =>
+    candidate.laneRanks.get('keyword') === 1
+    || (candidate.laneRanks.get('vector') === 1 && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId));
+  const buried = fused.filter((candidate, index) => index >= LANE_LEADER_SEATS && isLeader(candidate));
+  if (buried.length === 0) return [...fused];
+  const rest = fused.filter((candidate) => !buried.includes(candidate));
+  const seat = Math.max(0, LANE_LEADER_SEATS - buried.length);
+  return [...rest.slice(0, seat), ...buried, ...rest.slice(seat)];
 }
 
 function allCandidates(lanes: ReadonlyArray<{ items: readonly unknown[] }>): number {

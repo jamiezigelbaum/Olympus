@@ -1,0 +1,188 @@
+// A lane's best hit is never buried by fusion (#1230).
+//
+// Reproduces the 2026-11-10 eval finding without private data: the keyword
+// lane put the one document holding the asked-for value at rank 1, the vector
+// lane missed it, and the fused top 50 placed it at rank 30 to 36. Under RRF a
+// candidate both lanes found at ANY depth up to 60 scores
+// 1/(60+a) + 1/(60+b) >= 2/120, which beats a single-lane rank 1 (1/61). So
+// every document both lanes merely touched went ahead of the keyword lane's
+// clear winner, and the evidence pack (top 5) never saw it.
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, test } from 'bun:test';
+import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import {
+  LocalConnectorStore,
+  createConnectorStoreCorpusAdapter,
+  defineConnectorCorpus,
+} from '../src/workers/connector-store/index.ts';
+import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+
+const ACCOUNT = 'personal';
+const CORPUS_ID = 'internal.fake.leader';
+
+interface FixtureItem { id: string; name: string; text: string }
+
+// The answer: short, so bm25 ranks it first for the question's words.
+const TARGET: FixtureItem = {
+  id: 'target',
+  name: 'renewal.txt',
+  text: 'Harbor boat insurance renewal: policy number ZX-4471.',
+};
+
+// Forty longer notes that share the question's words. The vector lane finds
+// them all (they sit on the query axis); the target sits off it.
+const NEIGHBOURS: FixtureItem[] = Array.from({ length: 40 }, (_, index) => ({
+  id: `note-${index}`,
+  name: `note-${index}.txt`,
+  text: `Marina log ${index}. Harbor boat insurance renewal came up again at the dock meeting; `
+    + 'members compared notes on weather, fuel, mooring fees, winter storage, hull cleaning and paint '
+    + `schedules, and agreed to revisit item ${index} next season after the survey.`,
+}));
+
+describe('connector-store fusion keeps each lane\'s best hit', () => {
+  test('a keyword rank-1 hit the vector lane missed stays in the top 5', async () => {
+    await withStore(async (store, provider) => {
+      const keyword = await search(store, 'harbor boat insurance renewal', { retrievalMode: 'keyword', maxResults: 5 });
+      // Precondition: the keyword lane alone ranks the target first.
+      expect(hitIds(keyword)[0]).toBe('target');
+
+      const hybrid = await search(store, 'harbor boat insurance renewal', {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      });
+      expect(hitIds(hybrid)).toContain('target');
+    });
+  });
+
+  test('a vetted vector rank-1 hit the keyword lane missed stays in the top 5', async () => {
+    await withStore(async (store, provider) => {
+      // "vessel cover" shares no word with any note; only the vector lane
+      // finds the target (query on the target's axis), while "harbor" keeps
+      // the forty notes in the keyword lane.
+      const hybrid = await search(store, 'harbor vessel cover', {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      });
+      expect(hitIds(hybrid)).toContain('target');
+    });
+  });
+
+  test('fusion order among the rest is unchanged: dual-lane notes still lead the remainder', async () => {
+    await withStore(async (store, provider) => {
+      const hybrid = hitIds(await search(store, 'harbor boat insurance renewal', {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(hybrid.length).toBe(5);
+      expect(hybrid.filter((id) => id !== 'target').every((id) => id.startsWith('note-'))).toBe(true);
+    });
+  });
+});
+
+async function withStore(run: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-keyword-leader-'));
+  const store = new LocalConnectorStore({
+    dbPath: join(dir, 'leader.sqlite'),
+    corpusId: CORPUS_ID,
+    family: 'file',
+    trustDomain: 'internal',
+  });
+  const provider = embeddingProvider();
+  try {
+    await store.syncFromConnector(fixtureConnector([TARGET, ...NEIGHBOURS]), { fetchContent: true });
+    await store.embedChunks({ provider });
+    await run(store, provider);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function fixtureConnector(items: readonly FixtureItem[]): SourceConnector {
+  const rawItems = items.map((item): RawItem => ({
+    identity: {
+      family: 'file',
+      provider: 'fake_leader',
+      accountScope: ACCOUNT,
+      providerItemId: item.id,
+      providerFileId: item.id,
+      localItemId: `${ACCOUNT}:${item.id}`,
+      sourceVersion: `${item.id}:v1`,
+    },
+    mimeType: 'text/plain',
+    content: { kind: 'text', text: item.text },
+    metadata: Object.freeze({
+      name: item.name,
+      locatorUri: `/notes/${item.name}`,
+      pathDisplay: `/notes/${item.name}`,
+      updatedAt: '2026-11-10T10:00:00.000Z',
+    }),
+    fetchedAt: '2026-11-10T10:00:00.000Z',
+  }));
+  const byId = new Map(rawItems.map((item) => [item.identity.localItemId, item]));
+  return {
+    id: 'fake-leader',
+    family: 'file',
+    async authenticate(): Promise<void> {},
+    listItems(): AsyncIterable<SourceConnectorListPage> {
+      return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+        yield { items: rawItems, done: true };
+      })();
+    },
+    async fetchItem(localItemId: string): Promise<RawItem> {
+      const item = byId.get(localItemId);
+      if (!item) throw new Error(`missing fixture ${localItemId}`);
+      return item;
+    },
+    classificationSignals() {
+      return {};
+    },
+  };
+}
+
+// Two axes: [the notes' topic, the target's topic]. A query naming "vessel
+// cover" sits on the target's axis; any other query sits on the notes' axis.
+// Notes lean slightly off-axis by index so the vector lane has a stable order.
+function embeddingProvider(): SourceEmbeddingProvider {
+  return {
+    provider: 'keyword-leader-fixture',
+    modelId: 'keyword-leader-v1',
+    dimension: 2,
+    configHash: 'keyword-leader-config',
+    epochId: 'local:keyword-leader-fixture:keyword-leader-v1:2',
+    backend: 'local',
+    async embed(inputs: SourceEmbeddingInput[], options): Promise<number[][]> {
+      return inputs.map((input) => {
+        const text = `${input.title ?? ''}\n${input.text}`.toLowerCase();
+        if (options.taskType === 'RETRIEVAL_QUERY') return text.includes('vessel cover') ? [0, 1] : [1, 0];
+        if (text.includes('zx-4471')) return [0, 1];
+        const match = /marina log (\d+)/.exec(text);
+        const lean = match ? Number(match[1]) / 200 : 0;
+        return [1, lean];
+      });
+    },
+  };
+}
+
+async function search(
+  store: LocalConnectorStore,
+  query: string,
+  options: { retrievalMode: 'keyword' | 'hybrid'; maxResults: number; provider?: SourceEmbeddingProvider; semanticRelevanceBar?: number },
+) {
+  const adapter = createConnectorStoreCorpusAdapter({
+    store,
+    retrievalMode: options.retrievalMode,
+    ...(options.provider ? { embeddingProvider: options.provider } : {}),
+    ...(options.semanticRelevanceBar !== undefined ? { semanticRelevanceBar: options.semanticRelevanceBar } : {}),
+  });
+  return adapter({
+    query,
+    maxResults: options.maxResults,
+    corpus: defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain }),
+    context: { allowedTrustDomains: [store.trustDomain] },
+  });
+}
+
+function hitIds(response: { hits: ReadonlyArray<{ sourceItem: { providerItemId: string } }> }): string[] {
+  return response.hits.map((hit) => hit.sourceItem.providerItemId);
+}
