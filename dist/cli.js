@@ -34210,7 +34210,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -34223,6 +34223,7 @@ var init_local_index = __esm(() => {
   init_keyword_languages();
   init_keyword_expansion();
   init_control_path_headroom();
+  init_provider_account_identity();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -34319,7 +34320,7 @@ var init_local_index = __esm(() => {
       this.name = "TierLedgerUnavailableError";
     }
   };
-  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
+  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -34568,6 +34569,35 @@ var init_local_index = __esm(() => {
           return this.tierLedgerHandle.dbPath;
       } catch {}
       return findTierSetLedger(this.dbPath, binding);
+    }
+    rebindRestoredSourceScope(input) {
+      const row = this.db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+      if (!row?.cursor)
+        return 0;
+      let record;
+      try {
+        record = JSON.parse(row.cursor);
+      } catch {
+        return 0;
+      }
+      if (record.provider !== input.provider || typeof record.providerAccountId !== "string")
+        return 0;
+      if (compareProviderAccounts(record.providerAccountId, input.providerAccountId) !== "same")
+        return 0;
+      const generations = Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
+      return this.db.transaction(() => {
+        let changed = 0;
+        for (const generation of generations) {
+          if (generation === input.accountGeneration)
+            continue;
+          changed += this.db.query(`
+          UPDATE items SET source_scope_generation = ?, source_scope_revision = ?
+          WHERE provider = ? AND source_scope_generation = ?
+        `).run(input.accountGeneration, input.revision, input.provider, generation).changes;
+        }
+        this.db.query("DELETE FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+        return changed;
+      }).immediate();
     }
     tierSetBinding() {
       const row = this.db.query(`
@@ -54067,13 +54097,19 @@ function mailOwnerRulesForExport(statePath) {
   const senders = approval ? approval.mail_scope.always_private_senders : read.state.carried_owner_rules?.always_private_senders;
   return senders && senders.length > 0 ? { schema_version: 1, source_id: MAIL_SOURCE_SCOPE_ID, always_private_senders: [...senders] } : undefined;
 }
+function assertMailOwnerRulesCarriable(statePath) {
+  if (readState3(statePath).kind === "malformed")
+    throw unreadableMailScope(statePath);
+}
+function unreadableMailScope(statePath) {
+  return new OperationError("invalid_params", `The mail scope file at ${statePath} is unreadable, so the backup's mail privacy rules were not restored.`, "Repair or remove that file (Olympus asks for the mail scope again), then restore.");
+}
 function carryMailOwnerRules(statePath, alwaysPrivateSenders) {
   const senders = normalizeSenders(alwaysPrivateSenders, "always Private");
   return withFileLeaseSync(statePath, (lease) => {
     const read = readState3(statePath);
-    if (read.kind === "malformed") {
-      throw new OperationError("invalid_params", `The mail scope file at ${statePath} is unreadable, so the backup's mail privacy rules were not restored.`);
-    }
+    if (read.kind === "malformed")
+      throw unreadableMailScope(statePath);
     const approvals = read.kind === "valid" ? read.state.approvals : [];
     if (approvals.some((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID))
       return "kept_approval";
@@ -195363,6 +195399,16 @@ class FileSourceScopeAuthority {
       statePath: this.statePath
     });
   }
+  approvedProviderAccount(approval) {
+    if (approval.status !== "approved" || !approval.accountGeneration)
+      return;
+    try {
+      const account = connectedFileSourceAccountGeneration(approval.sourceId, this.fileScopeRegistry());
+      return account?.generation === approval.accountGeneration ? account.handle.providerAccountId : undefined;
+    } catch {
+      return;
+    }
+  }
   assertCurrent(ref) {
     const key2 = this.approvalFilesKey(ref);
     const reused = key2 === undefined ? undefined : this.approvedByFiles.get(ref.sourceId);
@@ -195402,6 +195448,24 @@ class FileSourceScopeAuthority {
       revision: snapshot2.revision
     };
   }
+}
+function rebindRestoredFileScope(input) {
+  const { approval, providerAccountId } = input;
+  if (approval.status !== "approved" || !approval.accountGeneration || !providerAccountId)
+    return 0;
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition || definition.account !== "provider_account")
+    return 0;
+  let carried = 0;
+  for (const store of new Set(input.stores)) {
+    carried += store.rebindRestoredSourceScope({
+      provider: definition.provider,
+      accountGeneration: approval.accountGeneration,
+      revision: approval.revision,
+      providerAccountId
+    });
+  }
+  return carried;
 }
 function scopeKeyFilter(definition, role, keys) {
   if (keys.length === 0)
@@ -223715,6 +223779,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           await browser.afterApproval({ wholeAccount: input.wholeAccount });
         } catch {}
       }
+      if (approval.replayed !== true) {
+        try {
+          const sets = fileExtractionTierSets();
+          rebindRestoredFileScope({
+            approval,
+            providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
+            stores: definition.corpusIdsToInvalidate.flatMap((corpusId) => {
+              const set2 = sets.get(corpusId);
+              return set2 ? TIER_DOMAIN_ORDER.flatMap((domain) => set2.store(domain) ?? []) : [];
+            })
+          });
+        } catch {}
+      }
       let invalidatedJobs = 0;
       if (fileExtractionRuntime && approval.replayed !== true) {
         invalidatedJobs = definition.corpusIdsToInvalidate.reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0);
@@ -227819,6 +227896,7 @@ init_source_registry();
 init_source_storage();
 init_mail_source_scope();
 init_local_index();
+init_file_scope_sources();
 init_tier_ledger();
 init_tier_ledger_path();
 import { closeSync as closeSync31, copyFileSync as copyFileSync4, existsSync as existsSync84, fsyncSync as fsyncSync9, openSync as openSync30, readFileSync as readFileSync71, renameSync as renameSync18, rmSync as rmSync33, statSync as statSync37, chmodSync as chmodSync35 } from "node:fs";
@@ -227893,6 +227971,7 @@ function restoreOlympusData(options) {
         if (artifact.ownerFile === "mail_always_private") {
           const to2 = defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath(context2));
           normalizeSenders(JSON.parse(readFileSync71(join114(input, from), "utf8")).always_private_senders, "always Private");
+          assertMailOwnerRulesCarriable(to2);
           plan.push({ from, to: to2, sourceId: "olympus.config", kind: "owner_settings", merge: "mail_always_private" });
           break;
         }
@@ -227980,6 +228059,7 @@ function restoreOlympusData(options) {
       const prepare = entry.kind === "store" ? (staged) => {
         repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to);
         held = repointMediaPaths(staged, (sha2568) => pictures.get(sha2568));
+        recordRestoredScope(staged, entry.sourceId, identities.find((identity2) => identity2.sourceId === entry.sourceId)?.boundAccount);
       } : undefined;
       copyPrivate(join114(input, entry.from), entry.to, prepare);
       for (const sha2568 of held)
@@ -228148,6 +228228,33 @@ function repointMediaPaths(storePath, pictureFor) {
       }
     })();
     return moved;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function recordRestoredScope(storePath, sourceId, providerAccountId) {
+  const definition = getFileScopeSource(sourceId);
+  if (!definition || definition.account !== "provider_account" || !providerAccountId)
+    return;
+  const db = new Database24(storePath, { readwrite: true, create: false });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000;");
+    const tables = new Set(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('items', 'sync_runs')").all().map((row) => row.name));
+    if (!tables.has("items") || !tables.has("sync_runs"))
+      return;
+    const columns = db.query("PRAGMA table_info(items)").all().map((column) => column.name);
+    if (!columns.includes("source_scope_generation"))
+      return;
+    const generations = db.query("SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL").all(definition.provider).map((row) => row.generation);
+    if (generations.length === 0)
+      return;
+    const corpus = db.query("SELECT corpus_id FROM sync_runs LIMIT 1").get();
+    db.query(`
+      INSERT OR REPLACE INTO sync_runs (
+        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+        items_indexed, started_at, completed_at
+      ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+    `).run(RESTORED_SCOPE_RUN_ID, corpus?.corpus_id ?? "", RESTORED_SCOPE_CONNECTOR_ID, JSON.stringify({ provider: definition.provider, generations, providerAccountId }));
   } finally {
     closeSqliteStore(db);
   }
