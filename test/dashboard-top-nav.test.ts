@@ -49,7 +49,7 @@ describe('Settings', () => {
     expect(dashboardHtmlRoutePage(new URL(`${ORIGIN}/dashboard?settings`))).toBe('settings');
     const html = renderDashboardLocalPage('settings', { url: new URL(`${ORIGIN}/dashboard?settings`), options: {
       controlSessionCsrfToken: 'c',
-      settings: { models: [{ name: 'Search model', state: 'Ready', detail: 'Finds matching passages', downloadBytes: 600_000_000 }], update: { version: '1.4.1', command: 'curl -fsSL https://olympusplugin.ai/install | sh' } },
+      settings: { models: { privateAnswers: { first: 'Venice' }, builtIn: { name: 'Qwen3.5 4B', state: 'downloaded', used: false } }, update: { version: '1.4.1', command: 'curl -fsSL https://olympusplugin.ai/install | sh' } },
     } });
     const doc = new Window().document; doc.write(html);
     expect([...doc.querySelectorAll('.setside a')].map(link => link.textContent)).toEqual(['Agents and access', 'Models on this computer', 'zkAPI', 'Updates', 'Help']);
@@ -58,7 +58,7 @@ describe('Settings', () => {
     expect([...doc.querySelectorAll('.setmain > section.setpane')].map(pane => pane.id)).toEqual(['agents', 'models', 'zkapi', 'updates', 'help']);
     expect(html).toContain('.setmain > .setpane { display: none;');
     expect(html).toContain('.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }');
-    expect(doc.getElementById('models')!.textContent).toContain('Search model');
+    expect(doc.getElementById('models')!.textContent).toContain('Qwen3.5 4B, downloaded · not used by your current route');
     expect(doc.getElementById('updates')!.textContent).toContain('Olympus 1.4.1 is available');
     const quiet = renderDashboardLocalPage('settings', { url: new URL(`${ORIGIN}/dashboard?settings`) });
     expect(quiet).toContain('Olympus is up to date.');

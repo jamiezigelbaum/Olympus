@@ -33,7 +33,7 @@ import type {
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import { renderMessagingCard } from '../messaging.ts';
-import { DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken } from '../../../core/open-targets.ts';
+import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
   connectorSheet,
@@ -91,7 +91,8 @@ export interface DashboardPageOptions {
   };
   /** Settings: the built-in models on this computer, and an update when one is out. */
   settings?: {
-    models?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
+    /** Settings › Models on this computer (#1043, #1085). */
+    models?: import('../models-on-computer.ts').DashboardModelsOnComputer;
     update?: { version: string; command: string };
   };
   /** OPENER supplies the current desktop/headless approval handoff. */
@@ -293,12 +294,15 @@ function needsSetupAgain(source: DashboardSourceCard): boolean {
 }
 
 /** One connected source: logo, name, facts, the one thing it needs, and the ⋯ menu. */
-function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: boolean, off: string, kept = false): { row: string; dialogs: string } {
+function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: boolean, off: string, kept = false, basePath = '/dashboard'): { row: string; dialogs: string } {
   const id = sourceDomId(source.source_id);
   const label = escapeHtml(source.label);
   const items: string[] = [];
   const dialogs: string[] = [];
   const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
+  // Home lists no sources (#1085): Details opens this source's own row there, with its See why, Unpair,
+  // Import an archive and Details for support.
+  if (!kept) items.push(`<a class="menuitem" href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
   if (sync) items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
   const confirm = (kind: 'disconnect_source' | 'delete_source_data', title: string, line: string, button: string, danger: boolean, menuLabel = title.endsWith('?') ? title.slice(0, -1) : title): string => {
     const dialogId = `${kind === 'disconnect_source' ? 'disconnect' : 'delete'}-${id}`;
@@ -349,8 +353,8 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
   // Disconnected with its indexed data kept: a quiet row with Reconnect and Delete.
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0
     && source.connection.action.kind !== 'archive_import');
-  const rows = connected.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off))
-    .concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
+  const rows = connected.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off, false, basePath))
+    .concat(kept.map((source) => connectedSourceRow(source, false, off, true, basePath)));
   const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) =>
     `<button class="srctile" type="button" data-source-pick="${escapeHtml(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml(source.label)}</b><span class="pnote">${escapeHtml(SOURCE_TILE_LINES[source.source_id] ?? '')}</span></span></button>`).join('');
   const panels = setupable.map((source) =>
@@ -366,7 +370,7 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     lockedGate(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER}</span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
     // People (#1076): who is who across these sources, at the bottom of Sources.
     dashboardPeopleRow(token),
     rows.map((entry) => entry.dialogs).join(''),
@@ -381,6 +385,33 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     styles: [MODEL_SETUP_CSS, MODEL_PICKER_CSS, SOURCE_LOGO_CSS, SOURCES_CSS],
     options,
   });
+}
+
+/**
+ * Settings › Models on this computer (lane 4 mockup 8): who answers Private
+ * questions (the saved route, first then fallback), the built-in model and
+ * whether that route uses it, and transcription with its one cause.
+ */
+function renderModelsOnComputer(models: import('../models-on-computer.ts').DashboardModelsOnComputer | undefined, token: string | undefined): string {
+  const rules = escapeHtml(`${dashboardLocalPageHref('keys', token)}#private-routing`);
+  const row = (key: string, title: string, line: string, extra = '') =>
+    `<div class="srow nodot" data-model-row="${key}"><div class="smain"><b>${escapeHtml(title)}</b> — ${escapeHtml(line)}${extra}</div></div>`;
+  const rows: string[] = [];
+  const answers = models?.privateAnswers;
+  const change = ` <a href="${rules}">Change on Privacy rules</a>`;
+  if (answers && 'off' in answers) rows.push(row('private-answers', 'Private answers', 'off: Private items are never answered.', change));
+  else if (answers && 'first' in answers) {
+    rows.push(row('private-answers', 'Private answers', `answered by ${answers.first}${answers.fallback ? `, then ${answers.fallback} if it can't` : ''}.`, change));
+  } else if (answers && 'any' in answers) {
+    const names = answers.any.length > 2 ? `${answers.any.slice(0, -1).join(', ')} or ${answers.any.at(-1)}` : answers.any.join(' or ');
+    rows.push(row('private-answers', 'Private answers', `answered by ${names}, whichever is working and fastest for each question.`, change));
+  } else rows.push(row('private-answers', 'Private answers', 'see how they are answered on Privacy rules.', change));
+  if (models?.builtIn) {
+    const built = models.builtIn;
+    rows.push(row('built-in', 'Built-in model', `${built.name}, ${built.state} · ${built.used ? 'used by your current route' : 'not used by your current route'}`));
+  }
+  if (models?.transcription) rows.push(row('transcription', 'Transcription', models.transcription.line));
+  return `<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3><div class="srows">${rows.join('')}</div></section>`;
 }
 
 const SOURCES_CSS = `
@@ -636,11 +667,7 @@ export function renderDashboardSettingsPage(options?: DashboardPageOptions): str
   const agents = `<section class="setpane" id="agents">${options?.agents
     ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>')
     : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
-  const models = '<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3>'
-    + (settings?.models?.length
-      ? `<div class="srows">${settings.models.map(model => `<div class="srow nodot"><div class="smain"><b>${escapeHtml(model.name)}</b> <span class="pnote">· ${escapeHtml(model.state)}</span><p class="pnote">${escapeHtml(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p></div></div>`).join('')}</div>`
-      : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>')
-    + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml(dashboardLocalPageHref('keys', token)) + '">Privacy rules</a>.</p></section>';
+  const models = renderModelsOnComputer(settings?.models, token);
   // zkAPI's account half (#1047): status, problems, money, setup; its privacy choices are on Privacy rules.
   const csrfToken = options?.controlSessionCsrfToken;
   const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>`

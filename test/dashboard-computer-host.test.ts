@@ -537,21 +537,47 @@ const UNPAIR_TELEGRAM = {
   confirmation: 'Stop new Telegram reads and delete this computer\'s Telegram pairing session. Messages already indexed stay.',
 };
 const C = DASHBOARD_COMPUTER_PANEL_COPY;
+/** Home lists no sources (#1085): an open link that lands on one keeps its row there. */
+const TELEGRAM_LANDING = { ...COMPUTER, landing: { sourceId: 'telegram.messages' } };
+const DROPBOX_LANDING = { ...COMPUTER, landing: { sourceId: 'dropbox.files' } };
 
 describe('the panel on the computer', () => {
-  test('Home: one status line with totals, Needs you, and every source one click away; the top bar replaces On this computer', async () => {
-    const page = await onHost(COMPUTER, model({ computerControls: { href: `${OPEN_BASE}dashboard/` }, sources: [GMAIL_RECONNECT, TELEGRAM] }), { indexFaster: { on: false }, indexedItems: 48_210 });
+  test('Home: one status line with totals, Needs you and In progress; no source list, Privacy box or models call-out (#1085)', async () => {
+    const page = await onHost(COMPUTER, model({
+      sources: [GMAIL_RECONNECT, TELEGRAM],
+      privacy: { configured: true, ruleCount: 0, pendingCount: 0 },
+    } as unknown as Partial<DashboardViewModelV1>), { indexFaster: { on: false }, indexedItems: 48_210 });
     const asked = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);
     expect(asked).toEqual([DASHBOARD_TOOL_NAME]);
-    const status = page.win.document.querySelector('[data-home-status]')!;
+    const doc = page.win.document;
+    const status = doc.querySelector('[data-home-status]')!;
     expect(status.textContent).toContain('2 sources · 48,210 items · checked');
-    expect(page.win.document.querySelector('section.on-computer')).toBeNull();
-    expect(page.win.document.querySelector('.more-on-computer')).toBeNull();
-    // Models live on Settings now.
-    expect(page.win.document.querySelector('details[data-open-key="models"]')).toBeNull();
-    const all = page.win.document.querySelector('details[data-open-key="home-sources"]')!;
-    expect(all.querySelector('summary')!.textContent).toBe('All sources (2)');
-    expect(all.querySelectorAll('.row.source')).toHaveLength(2);
+    expect(doc.querySelector('section.on-computer')).toBeNull();
+    expect(doc.querySelector('.more-on-computer')).toBeNull();
+    // The three removed blocks: the models call-out, the Privacy box and the All sources list.
+    expect(doc.querySelector('details[data-open-key="models"]')).toBeNull();
+    expect(doc.querySelector('section.privacy-row')).toBeNull();
+    expect(doc.querySelector('details[data-open-key="home-sources"]')).toBeNull();
+    expect(doc.querySelectorAll('.row.source')).toHaveLength(0);
+    expect(page.text()).not.toContain('All sources');
+    // In progress: one line, with a Details button (not a disclosure) that opens the stages.
+    const index = doc.querySelector('[data-home-index]')!;
+    expect(index.textContent).toContain('First index');
+    expect(index.textContent).toContain('40%');
+    expect(index.querySelector('details')).toBeNull();
+    const toggle = page.button('Details');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(doc.getElementById('progress-details')).toBeNull();
+    toggle.click();
+    await settle();
+    expect(page.button('Details').getAttribute('aria-expanded')).toBe('true');
+    expect(doc.getElementById('progress-details')!.textContent).toContain('Indexing: 400 of 1,000 files');
+  });
+
+  test('the host page around Home has no built-in models call-out, whatever the worker reports (#1085)', () => {
+    const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'c' });
+    expect(html).not.toContain('Built-in models on this computer');
+    expect(html).not.toContain('<details class="gate">');
   });
 
   test('Home says it is up to date when nothing needs the owner and nothing runs', async () => {
@@ -562,17 +588,76 @@ describe('the panel on the computer', () => {
     expect(status.getAttribute('data-home-status')).toBe('ok');
     expect(status.textContent).toContain('Olympus is up to date');
     expect(status.textContent).toContain('1 source · checked');
+    expect(page.win.document.querySelector('.home-progress')).toBeNull();
   });
 
-  test('Home keeps the privacy rules editor and a transcription that needs a hand', async () => {
+  test('privacy items waiting and a transcription that needs a hand are Needs you lines, each with one button', async () => {
     const data = model({
       sources: [TELEGRAM],
-      privacy: { configured: true, ruleCount: 2 },
+      privacy: { configured: true, ruleCount: 2, pendingCount: 2 },
       models: { embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'load_failed', download: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'transcription' } } } },
     } as unknown as Partial<DashboardViewModelV1>);
     const page = await onHost(COMPUTER, data);
-    expect(page.win.document.querySelector('section.privacy-row button')).not.toBeNull();
-    expect(page.win.document.querySelector('details[data-open-key="models"]')).not.toBeNull();
+    const doc = page.win.document;
+    expect(doc.querySelector('section.privacy-row')).toBeNull();
+    expect(doc.querySelector('details[data-open-key="models"]')).toBeNull();
+    const pending = doc.querySelector('[data-privacy-pending]')!;
+    expect(pending.textContent).toContain('2 items waiting to be checked');
+    expect(Array.from(pending.querySelectorAll('button')).map((node) => node.textContent)).toEqual(['Open Privacy']);
+    const needs = Array.from(doc.querySelectorAll('.row.need')).map((node) => node.textContent);
+    expect(needs.some((line) => line!.startsWith('Transcription:') && line!.endsWith('Try again'))).toBe(true);
+    expect(doc.querySelector('[data-home-status]')!.textContent).toContain('2 things need you');
+  });
+
+  test('a transcription model not needed yet is not Needs you: its optional Download now stays in Settings, and Home stays up to date (#1163 review)', async () => {
+    const calm = model({
+      sources: [TELEGRAM],
+      models: { embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'not_needed', download: { label: 'Download now', tool: 'olympus_model_download', args: { model: 'transcription' } } } },
+    } as unknown as Partial<DashboardViewModelV1>);
+    delete calm.progress;
+    const page = await onHost(COMPUTER, calm);
+    const doc = page.win.document;
+    expect(Array.from(doc.querySelectorAll('.row.need')).map((node) => node.textContent).filter((line) => line!.startsWith('Transcription'))).toEqual([]);
+    expect(page.buttons().some((node) => node.textContent === 'Download now')).toBe(false);
+    expect(doc.querySelector('[data-home-status]')!.getAttribute('data-home-status')).toBe('ok');
+  });
+
+  test('a cost-guard wait is In progress with its reason and resume time in local time and UTC, and no Sync now (#1044)', async () => {
+    const X = { id: 'x.bookmarks', label: 'X bookmarks', group: 'cloud', status: 'Working', lastSyncAt: ago(12 * 60 * MIN),
+      primary: { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'x.bookmarks' } } } as DashboardViewModelV1['sources'][number];
+    const data = model({ sources: [X], waits: [{ sourceId: 'x.bookmarks', label: 'X bookmarks', reason: 'daily_budget', api: 'X', resumesAt: '2026-11-11T00:00:00.000Z' }] });
+    delete data.progress;
+    const page = await onHost(COMPUTER, data);
+    const doc = page.win.document;
+    const wait = doc.querySelector('[data-source-wait="x.bookmarks"]')!;
+    expect(wait.closest('.home-progress')).not.toBeNull();
+    const at = new Date('2026-11-11T00:00:00.000Z');
+    const local = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+    expect(wait.textContent).toBe(`X bookmarks · daily X API budget used · resumes at ${local} (00:00 UTC)`);
+    expect(wait.querySelector('button')).toBeNull();
+    expect(page.buttons().some((node) => node.textContent === 'Sync now')).toBe(false);
+    expect(page.text()).not.toContain('Needs you');
+  });
+
+  test('"paused" is only an owner pause: a source idle between runs is not named on the first-index line (#1044)', async () => {
+    const DRIVE = { id: 'google_drive.docs', label: 'Google Drive', group: 'cloud', status: 'Working',
+      progress: { stage: 'listing', unit: 'items', done: 36_495, total: 0, stalled: true, stall: { cause: 'no_movement', stage: 'listing', stillSeconds: 7200 } } } as unknown as DashboardViewModelV1['sources'][number];
+    const RETRYING = { id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Working',
+      progress: { stage: 'reading', unit: 'files', done: 10, total: 100, percent: 10, stalled: true, stall: { cause: 'failing', failure: 'network' } } } as unknown as DashboardViewModelV1['sources'][number];
+    const idle = model({ sources: [DRIVE], progress: { unit: 'items', phase: 'initial', stalled: true, details: [{ stage: 'Finding items', unit: 'items', done: 36_495, total: 0 }] } });
+    const page = await onHost(COMPUTER, idle);
+    const line = page.win.document.querySelector('[data-home-index]')!.textContent!;
+    expect(line).toContain('36,495');
+    expect(line).not.toContain('paused');
+    const failing = await onHost(COMPUTER, model({ sources: [RETRYING], progress: { unit: 'files', phase: 'initial', percent: 10, stalled: true, details: [{ stage: 'Reading', unit: 'files', done: 10, total: 100 }] } }));
+    const words = failing.win.document.querySelector('[data-home-index]')!.textContent!;
+    expect(words).toContain('Dropbox retrying');
+    expect(words).not.toContain('paused');
+  });
+
+  test('an open link that lands on a source keeps that one row on Home', async () => {
+    const page = await onHost({ ...COMPUTER, landing: { sourceId: 'telegram.messages' } }, model({ sources: [GMAIL_RECONNECT, TELEGRAM] }));
+    expect(Array.from(page.win.document.querySelectorAll('.row.source .source-name')).map((node) => node.textContent)).toEqual(['Telegram']);
   });
 
   test('Home is catching up, not up to date, while a model still downloads', async () => {
@@ -584,9 +669,12 @@ describe('the panel on the computer', () => {
 
   test('Index faster sits under Progress details only while indexing runs, and calls its tool', async () => {
     const page = await onHost(COMPUTER, model(), { indexFaster: { on: false } });
+    expect(page.win.document.querySelector('.index-faster')).toBeNull();
+    page.button('Details').click();
+    await settle();
     const control = page.win.document.querySelector('.index-faster')!;
     expect(control).not.toBeNull();
-    expect(control.closest('details')).not.toBeNull();
+    expect(control.closest('#progress-details')).not.toBeNull();
     const faster = Array.from(control.querySelectorAll('button'))[0]!;
     expect(faster.textContent).toBe(C.indexFaster.on);
     faster.click();
@@ -597,6 +685,8 @@ describe('the panel on the computer', () => {
     const idle = await onHost(COMPUTER, model({
       sources: [{ id: 'dropbox', label: 'Dropbox', group: 'cloud', status: 'Fresh', lastSyncAt: ago(MIN) } as DashboardViewModelV1['sources'][number]],
     }), { indexFaster: { on: false } });
+    idle.button('Details').click();
+    await settle();
     expect(idle.win.document.querySelector('.index-faster')).toBeNull();
 
     // No guard facts on this machine (a Mac): nothing to offer.
@@ -605,7 +695,7 @@ describe('the panel on the computer', () => {
   });
 
   test('locked: the controls are disabled with no reason of their own (the banner says it once)', async () => {
-    const page = await onHost({ ...COMPUTER, readOnly: true }, model({ sources: [GMAIL_RECONNECT] }), { indexFaster: { on: false } });
+    const page = await onHost({ ...COMPUTER, readOnly: true, landing: { sourceId: 'gmail.email' } }, model({ sources: [GMAIL_RECONNECT] }), { indexFaster: { on: false } });
     expect(page.button('Reconnect').disabled).toBe(true);
     expect(page.text()).not.toContain(C.locked);
   });
@@ -617,7 +707,7 @@ describe('the panel on the computer', () => {
   });
 
   test('a paired chat app\'s ⋯ menu offers Unpair on the computer, confirms with the engine\'s own words, and says what it did', async () => {
-    const page = await onHost(COMPUTER, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    const page = await onHost(TELEGRAM_LANDING, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
     page.button('Unpair Telegram').click();
     await settle();
     expect(page.text()).toContain(UNPAIR_TELEGRAM.confirmation);
@@ -636,7 +726,7 @@ describe('the panel on the computer', () => {
   });
 
   test('Unpair\'s refusal is shown beside it, not as a dead panel', async () => {
-    const page = await onHost(COMPUTER, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    const page = await onHost(TELEGRAM_LANDING, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
     page.button('Unpair Telegram').click();
     await settle();
     page.button('Yes, unpair telegram').click();
@@ -648,9 +738,9 @@ describe('the panel on the computer', () => {
   });
 
   test('no Unpair where the computer did not offer it: a source it does not list, or locked', async () => {
-    const unlisted = await onHost(COMPUTER, model({ sources: [TELEGRAM] }), { indexFaster: { on: false } });
+    const unlisted = await onHost(TELEGRAM_LANDING, model({ sources: [TELEGRAM] }), { indexFaster: { on: false } });
     expect(unlisted.buttons().some((node) => node.textContent === 'Unpair Telegram')).toBe(false);
-    const locked = await onHost({ ...COMPUTER, readOnly: true }, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    const locked = await onHost({ ...TELEGRAM_LANDING, readOnly: true }, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
     expect(locked.button('Unpair Telegram').disabled).toBe(true);
   });
 });
@@ -669,7 +759,7 @@ const UNREADABLE_META = { unreadable: [{ sourceId: 'dropbox.files', files: [{ na
 
 describe('See why on the computer', () => {
   test('lists the computer\'s own files: each with a token opens through the computer-only tool, the rest plain text', async () => {
-    const page = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const page = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
     const why = page.win.document.querySelector('details.why')!;
     expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'and 1 more']);
     // The result's ChatGPT names and its "and N more" link give way to the computer's list.
@@ -691,7 +781,7 @@ describe('See why on the computer', () => {
 
   // Codex review of #231 (P2c): past the first page, every file is reachable.
   test('"and N more" reads the next page and lists it under the first, each file opening', async () => {
-    const page = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const page = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
     const more = () => Array.from(page.win.document.querySelectorAll('details.why ul.files button')).find((node) => /more$/.test(node.textContent ?? '')) as unknown as HTMLButtonElement | undefined;
     more()!.click();
     await settle();
@@ -710,7 +800,7 @@ describe('See why on the computer', () => {
   });
 
   test('a file that is gone says so beside it', async () => {
-    const page = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const page = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
     (page.win.document.querySelector('details.why ul.files button') as unknown as HTMLButtonElement).click();
     await settle();
     page.respond('tools/call', { isError: true, content: [{ type: 'text', text: 'This file is no longer in the list. Refresh the dashboard.' }], structuredContent: { error: 'gone' } });
@@ -719,10 +809,10 @@ describe('See why on the computer', () => {
   });
 
   test('a forged token is plain text, and a result without the computer\'s list shows the result\'s own names', async () => {
-    const forged = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'x.pdf', token: '../../etc' }], more: 0 }] });
+    const forged = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'x.pdf', token: '../../etc' }], more: 0 }] });
     expect(forged.win.document.querySelectorAll('details.why ul.files button').length).toBe(0);
     expect(forged.win.document.querySelector('details.why ul.files')!.textContent).toBe('x.pdf');
-    const plain = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), { indexFaster: { on: false } });
+    const plain = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), { indexFaster: { on: false } });
     expect(Array.from(plain.win.document.querySelectorAll('details.why ul.files li')).map((node) => node.textContent)).toEqual(['ChatGPT name.pdf', 'and 2 more']);
   });
 
@@ -748,7 +838,8 @@ describe('See why on the computer', () => {
     expect(chatgpt.win.document.querySelector('.landed')).toBeNull();
     const missing = await onHost({ ...COMPUTER, landing: { sourceId: 'gmail.email' } }, model({ sources: [UNREADABLE_DROPBOX] }));
     expect(missing.win.document.querySelector('.landed')).toBeNull();
-    expect((missing.win.document.querySelector('details.why') as unknown as HTMLDetailsElement).open).toBe(false);
+    // Home lists no sources: nothing to land on, and Dropbox's row is not drawn.
+    expect(missing.win.document.querySelector('details.why')).toBeNull();
   });
 });
 
@@ -902,7 +993,7 @@ describe('Privacy saves through the panel tools', () => {
       revision: saved ? 'prv1.saved' : 'prv1.unset',
     });
     const setup = {
-      secretLocations: () => ({ folderKeys: new Set<string>(), pathPrefixes: [], labelIds: new Set<string>(), senders: [] }),
+      secretLocations: () => ({ folderKeys: new Set<string>(), pathPrefixes: [], labelIds: new Set<string>(), senders: [], chatKeys: new Set<string>() }),
       privacySettings: settings,
       privacyQuestions: async () => ({ fallback: true, questions: [] }),
       privacyCheck: async () => null,
@@ -1200,7 +1291,7 @@ describe('the computer\'s Needs you line for waiting private questions', () => {
 test('the computer names missing chosen folders; ChatGPT never renders computer-only paths', async () => {
   const source = { id: 'dropbox.files', label: 'Dropbox', group: 'cloud' as const, status: 'Needs you' as const, progress: { stage: 'listing' as const, unit: 'files' as const, done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_missing' as any } };
   const meta = { missingFolders: [{ sourceId: 'dropbox.files', paths: ['/Gone', '/Also gone'] }] };
-  const computer = await onHost(COMPUTER, model({ sources: [source] }), meta);
+  const computer = await onHost(DROPBOX_LANDING, model({ sources: [source] }), meta);
   expect(computer.win.document.querySelector('.stall-line')!.textContent).toBe('A folder you chose is missing: /Gone, /Also gone');
   const remote = await onHost(undefined, model({ sources: [source] }), meta);
   expect(remote.win.document.querySelector('.stall-line')!.textContent).toBe('A folder you chose is missing');

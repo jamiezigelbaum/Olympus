@@ -9,7 +9,7 @@ import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
+import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelCompletion, type SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
 import { privateChance, tierMass } from '../src/workers/classification/sniffer-decision-mass.ts';
 import { CachedTierSniffer, buildSnifferBatchPrompt, cachedSnifferVerdictHolds, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROMPT, snifferCacheModelId, snifferId, snifferPromptVersions, snifferReasonCode, snifferTierKey, snifferVerdictTier } from '../src/workers/classification/sniffer.ts';
 import { runSnifferPass, SnifferCallBudget, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY } from '../src/workers/classification/sniffer-resolver.ts';
@@ -213,6 +213,22 @@ describe('native sniffer decision', () => {
       expect(snifferVerdictTier(stored, { ...f.lane, cacheModelId: small.modelId }, ['content:own_record:fixture']).tier).toBe('secure');
       expect(parseSnifferBatchResponse(JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'decision', confidence: 0.7, ownRecord: false, privateKind: 'none' }] }), new Set([1])).size).toBe(0);
     } finally { store.close(); ledger.close(); f.stop(); tmp.cleanup(); }
+  });
+
+  test('the decision is taken at the lane bar and stores P(Private) recoverably (#1184)', async () => {
+    const f = fakeServer({ privateProbability: 0.2 });
+    const fourB = BUILT_IN_REASONING_MODELS.find(m => m.displayName === 'Qwen3.5 4B')!;
+    try {
+      const atDefault = await f.model().complete(request('a letter')) as SnifferModelCompletion;
+      expect(atDefault.decisionVerdict).toMatchObject({ tier: 'personal', category: 'decision' });
+      expect(atDefault.decisionVerdict!.confidence).toBeCloseTo(0.8);
+      f.lane.cacheModelId = `${fourB.modelId}:${fourB.revision}`;
+      const at4B = await f.model().complete(request('a letter')) as SnifferModelCompletion;
+      expect(at4B.decisionVerdict).toMatchObject({ tier: 'private', category: 'decision' });
+      expect(at4B.decisionVerdict!.confidence).toBeCloseTo(0.2);
+      expect(snifferVerdictTier(at4B.decisionVerdict!, f.lane, []).tier).toBe('secure');
+      expect(snifferTierKey(at4B.decisionVerdict!)).toBe('private');
+    } finally { f.stop(); }
   });
 
   test('no mass uses existing three-attempt fail-safe, re-priming each retry', async () => {

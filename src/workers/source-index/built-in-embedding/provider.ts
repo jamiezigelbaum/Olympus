@@ -269,7 +269,13 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       // compile), so a question never waits for it; an ONNX load takes a second.
       if (this.spec.runtime === 'litert' || (status.state !== 'ready' && status.state !== 'loading')) {
         void this.load().catch(() => undefined);
-        throw new BuiltInEmbeddingNotReadyError(this.status());
+        // A model already on disk is starting, and a caller with time to spare
+        // may wait for it (awaitStartingQueryEmbedding, #1172). A download, or
+        // a start that just failed and is backing off, is not worth waiting on.
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === 'ready' || now.state === 'loading'),
+        });
       }
     }
     const model = await this.ready();
@@ -732,8 +738,8 @@ export function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddi
 export class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
   readonly status: BuiltInEmbeddingStatus;
 
-  constructor(status: BuiltInEmbeddingStatus, cause?: unknown) {
-    super(BUILT_IN_EMBEDDING_PROVIDER, 'timeout', 0);
+  constructor(status: BuiltInEmbeddingStatus, cause?: unknown, options: { modelStarting?: boolean } = {}) {
+    super(BUILT_IN_EMBEDDING_PROVIDER, 'timeout', 0, 0, options);
     this.name = 'BuiltInEmbeddingNotReadyError';
     this.status = status;
     // The status file is the shared record; a load that just failed in this

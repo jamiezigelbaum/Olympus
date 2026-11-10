@@ -15,7 +15,7 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
+  ALL_SOURCES_PATH, ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
   type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
@@ -409,7 +409,7 @@ export async function rowAfterDrain(host: ArchiveHost, driver: JourneyDriver, fi
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const tryStarted = host.now();
     try {
-      await driver.go('/dashboard');
+      await driver.go(ALL_SOURCES_PATH);
     } catch (error) {
       problems.push(`navigation ${attempt} to the dashboard threw: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`);
       continue;
