@@ -9,7 +9,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Cdp } from './browser.ts';
-import type { ElementInfo, JourneyDriver, OpenPlace, PageEvents } from './journey.ts';
+import type { Command, ElementInfo, JourneyDriver, OpenPlace, PageEvents } from './journey.ts';
 import { PROBE_SOURCE, type WireTarget } from './probe.ts';
 import { layoutFindings, layoutRulesScript, type LayoutFinding } from './layout-rules.ts';
 import type { PlantedPicture } from './reviewer-plants.ts';
@@ -26,6 +26,8 @@ export interface DriverSetup {
   outDir: string;
   /** Called with the origin of each opening link, so a machine's owner-socket bridge can be started on its port. */
   onOrigin?(origin: string): void;
+  /** Runs `olympus <argv>` on this machine as the owner (journeys that cross into Terminal). */
+  command?(command: Command): Promise<{ code: number; output: string }>;
 }
 
 interface Context { id: number; frameId: string; isDefault: boolean }
@@ -223,7 +225,8 @@ export class CdpJourneyDriver implements JourneyDriver {
   async open(place: OpenPlace): Promise<void> {
     const url = await this.setup.mintLink(place);
     this.origin = new URL(url).origin;
-    this.setup.onOrigin?.(this.origin);
+    // The update stand-in is served by the release check itself, not by the engine: no owner-socket bridge for its port.
+    if (place !== 'update') this.setup.onOrigin?.(this.origin);
     await this.cdp.send('Page.navigate', { url });
     await this.settleLoad();
     if (place === 'private') {
@@ -315,6 +318,11 @@ export class CdpJourneyDriver implements JourneyDriver {
       try { results.push(await this.evalIn(frame, expression)); } catch { /* no such frame */ }
     }
     return results;
+  }
+
+  async command(command: Command): Promise<{ code: number; output: string }> {
+    if (!this.setup.command) throw new Error('this machine runs no commands for the journeys');
+    return await this.setup.command(command);
   }
 
   drainEvents(): PageEvents {

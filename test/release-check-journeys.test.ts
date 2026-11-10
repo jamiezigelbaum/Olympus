@@ -681,7 +681,7 @@ describe('visual baselines', () => {
     const ids = selectJourneys(undefined, ['agent-never-expired', 'inbox-delete-one']).map((journey) => journey.id);
     expect(ids).not.toContain('agent-never-expired');
     expect(ids).not.toContain('inbox-delete-one');
-    expect(ids.length).toBe(JOURNEYS.length - 2);
+    expect(ids.length).toBe(JOURNEYS.filter((journey) => journey.machine === undefined).length - 2);
     expect(selectJourneys(['agent-never-expired', 'no-public-tier'], ['agent-never-expired']).map((journey) => journey.id)).toEqual(['no-public-tier']);
   });
 
