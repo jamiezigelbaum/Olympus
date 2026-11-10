@@ -2110,6 +2110,33 @@ export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
  * "Other ways". It is the only place the locked state is explained: the
  * panel's controls are disabled without a reason of their own.
  */
+/**
+ * "Set up with my agent" (#1077, approved mockup 2-agent-brief, owner
+ * 2026-11-10): the short brief the owner copies to the agent they already
+ * use. It points the agent at `olympus setup status` (core/setup-checklist.ts)
+ * and says what the agent may and may not change.
+ */
+export const DASHBOARD_SETUP_AGENT_COPY = {
+  open: 'Set up with my agent',
+  title: 'Set up with my agent',
+  intro: "Copy this to the agent you already use (Claude, ChatGPT, Codex, OpenClaw). It will check what's done, run the steps it's allowed to, and send you a link here for anything that needs your click.",
+  brief: [
+    'Help me finish setting up Olympus on this computer.',
+    '',
+    '1. Run: olympus setup status',
+    "   It lists every setup step, what's done, and the one way forward for each.",
+    '2. Do the steps marked "you can run this" yourself.',
+    '3. For steps marked "needs the owner", give me the link it shows, wait for me, then run setup status again. Don\'t ask me what\'s on screen.',
+    "4. To change several settings at once, use olympus settings propose. I'll apply them with one click.",
+    '',
+    "You can't change what's Private, who has access, or what Olympus spends. Those always need my click in the dashboard.",
+  ].join('\n'),
+  copy: 'Copy for my agent',
+  copied: 'Copied',
+  copyFailed: 'Select the text and copy it.',
+  close: 'Close',
+} as const;
+
 export const DASHBOARD_HOST_GATE_COPY = {
   title: 'Dashboard controls are locked',
   open: 'Open dashboard controls',
