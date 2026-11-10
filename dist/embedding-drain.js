@@ -41853,9 +41853,21 @@ var init_dropbox = __esm(() => {
   init_corpus_adapter3();
 });
 
+// src/core/descendant-groups.ts
+var init_descendant_groups = __esm(() => {
+  init_remote_access();
+});
+
+// src/core/native-process-service.ts
+var init_native_process_service = __esm(() => {
+  init_descendant_groups();
+});
+
 // src/workers/file-extraction/extractors/command-runner.ts
 var resolvedCommands;
 var init_command_runner = __esm(() => {
+  init_descendant_groups();
+  init_native_process_service();
   resolvedCommands = new Map;
 });
 
@@ -46917,9 +46929,6 @@ var init_engine_split = __esm(() => {
   init_worker_transport();
 });
 
-// src/core/native-process-service.ts
-var init_native_process_service = () => {};
-
 // src/core/native-worker-service.ts
 var init_native_worker_service = __esm(() => {
   init_worker_cli_launcher();
@@ -46927,6 +46936,7 @@ var init_native_worker_service = __esm(() => {
   init_linux_owner_bridge_host();
   init_worker_transport();
   init_engine_split();
+  init_descendant_groups();
   init_config();
   init_native_process_service();
   init_olympus_layout();
