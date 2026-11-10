@@ -13,7 +13,7 @@ import { DASHBOARD_JUDGE_CHECK_COPY as J } from '../vocabulary.ts';
 
 export const DASHBOARD_JUDGE_CHECK_PATH = '/dashboard/privacy/judge-check';
 
-/** Fired (bubbling) from the card when an answer set an item, so the Your items list below reloads. */
+/** Fired (bubbling) from the card when an answer set an item (its id on `itemId`), so the Your items list below reloads. */
 export const JUDGE_CHECK_ITEMS_CHANGED_EVENT = 'olympus-judge-check-items-changed';
 
 /** Where the card goes: the top of Your items. Empty until the script reads the round. */
@@ -115,6 +115,8 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
       if (round.changed > setBefore) {
         var changedEvent = document.createEvent('Event');
         changedEvent.initEvent(config.changedEvent, true, false);
+        // Which item: the list drops its own record of an earlier change to it.
+        changedEvent.itemId = body.item_id;
         mount.dispatchEvent(changedEvent);
       }
     }

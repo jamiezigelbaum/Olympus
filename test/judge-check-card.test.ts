@@ -106,13 +106,17 @@ describe('Check how Olympus labelled your items', () => {
   test('an answer that sets an item tells Your items below to reload; agreeing does not', async () => {
     const c = await card();
     let reloads = 0;
-    c.$('[data-privacy-items]')!.addEventListener(JUDGE_CHECK_ITEMS_CHANGED_EVENT, () => { reloads += 1; });
+    let changedId: string | undefined;
+    c.$('[data-privacy-items]')!.addEventListener(JUDGE_CHECK_ITEMS_CHANGED_EVENT, (event) => { reloads += 1; changedId = (event as unknown as { itemId?: string }).itemId; });
     await c.click('[data-jc-act="start"]');
     const tierOf = (id: string) => items.find((candidate) => candidate.item_id === id)!.tier!;
     await c.click(`[data-jc-answer="${tierOf(c.current())}"]`);
     expect(reloads).toBe(0);
-    await c.click(`[data-jc-answer="${tierOf(c.current()) === 'Personal' ? 'Private' : 'Personal'}"]`);
+    const differing = c.current();
+    await c.click(`[data-jc-answer="${tierOf(differing) === 'Personal' ? 'Private' : 'Personal'}"]`);
     expect(reloads).toBe(1);
+    // It names the item, so the list drops its own earlier change to it.
+    expect(changedId).toBe(differing);
   });
 
   const finishRound = async (c: Awaited<ReturnType<typeof card>>) => {

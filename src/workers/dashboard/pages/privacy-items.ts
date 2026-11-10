@@ -511,7 +511,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     if (media && media.addEventListener) media.addEventListener('change', render);
   }
   // The label check above set an item: reload so its label, mark and Undo match.
-  root.addEventListener(${JSON.stringify(JUDGE_CHECK_ITEMS_CHANGED_EVENT)}, function () { load(); });
+  root.addEventListener(${JSON.stringify(JUDGE_CHECK_ITEMS_CHANGED_EVENT)}, function (event) {
+    // The check set this item after any change made here, so the stored label wins.
+    if (event && event.itemId) delete changes[event.itemId];
+    load();
+  });
   load();
 })();`;
 }

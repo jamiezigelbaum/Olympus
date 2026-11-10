@@ -166781,6 +166781,8 @@ function judgeCheckClientScript(input) {
       if (round.changed > setBefore) {
         var changedEvent = document.createEvent('Event');
         changedEvent.initEvent(config.changedEvent, true, false);
+        // Which item: the list drops its own record of an earlier change to it.
+        changedEvent.itemId = body.item_id;
         mount.dispatchEvent(changedEvent);
       }
     }
@@ -167289,7 +167291,11 @@ function privacyItemsClientScript(input) {
     if (media && media.addEventListener) media.addEventListener('change', render);
   }
   // The label check above set an item: reload so its label, mark and Undo match.
-  root.addEventListener(${JSON.stringify(JUDGE_CHECK_ITEMS_CHANGED_EVENT)}, function () { load(); });
+  root.addEventListener(${JSON.stringify(JUDGE_CHECK_ITEMS_CHANGED_EVENT)}, function (event) {
+    // The check set this item after any change made here, so the stored label wins.
+    if (event && event.itemId) delete changes[event.itemId];
+    load();
+  });
   load();
 })();`;
 }
