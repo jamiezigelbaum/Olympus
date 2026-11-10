@@ -566,24 +566,62 @@ describe('the Bun program pin', () => {
   });
 });
 
+/**
+ * A helper zip with the structure of the real one (`Olympus Engine.app` with the engine host's bundle identifier and a code
+ * signature file) whose signature is fake: off macOS only the receipt from the Mac's verification can tell it apart (#696).
+ */
+function fakeSignedHelperZip(path: string): void {
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.olympusplugin.engine-host</string>
+  <key>CFBundleExecutable</key>
+  <string>Olympus Engine</string>
+</dict></plist>
+`;
+  writeFileSync(path, zipSync({
+    'Olympus Engine.app/Contents/Info.plist': strToU8(plist),
+    'Olympus Engine.app/Contents/MacOS/Olympus Engine': strToU8('#!/bin/sh\nexit 0\n'),
+    'Olympus Engine.app/Contents/_CodeSignature/CodeResources': strToU8('<?xml version="1.0"?><plist version="1.0"><dict><key>files</key><dict/></dict></plist>\n'),
+  }));
+}
+
 test('off-macOS publishing requires a matching helper receipt', () => {
   const { root, artifact } = fixture();
   const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
-  writeFileSync(helper, 'fixture zip');
+  fakeSignedHelperZip(helper);
+  if (has('unzip')) {
+    // The fixture is the plausible fake the receipt exists for: a real zip that unpacks to the engine host's bundle.
+    const listed = spawnSync('unzip', ['-Z1', helper], { encoding: 'utf8' });
+    expect(listed.status).toBe(0);
+    expect(listed.stdout).toContain('Olympus Engine.app/Contents/_CodeSignature/CodeResources');
+  }
   const receiptPath = `${helper}.receipt.json`;
   const receipt = { name: basename(helper), ...fileDigest(helper), team: 'ND2P3ZTQRD', bundleId: 'ai.olympusplugin.engine-host', notarySubmissionId: 'test-id', createdAt: '2026-10-31T00:00:00Z' };
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+  const served = join(root, 'site/releases', '1.0.0-rc.1', basename(helper));
   try {
     const publish = () => publishToSite({ root, artifact, macosHelper: helper });
-    expect(publish).toThrow('receipt');
-    writeFileSync(receiptPath, JSON.stringify({ ...receipt, sha256: '0'.repeat(64) }));
-    expect(publish).toThrow('receipt');
-    writeFileSync(receiptPath, JSON.stringify({ ...receipt, team: 'ABCDEFGHIJ' }));
-    expect(publish).toThrow('receipt');
+    // Each refusal is the receipt's own, never an unzip or structure error, and nothing is served.
+    expect(publish).toThrow('macOS helper receipt is missing or invalid.');
+    writeFileSync(receiptPath, '{ not json');
+    expect(publish).toThrow('macOS helper receipt is missing or invalid.');
+    for (const wrong of [
+      { sha256: '0'.repeat(64) },
+      { bytes: receipt.bytes + 1 },
+      { team: 'ABCDEFGHIJ' },
+      { bundleId: 'ai.olympusplugin.other' },
+      { name: 'olympus-engine-helper-fedcba9876543210.zip' },
+    ]) {
+      writeFileSync(receiptPath, JSON.stringify({ ...receipt, ...wrong }));
+      expect(publish).toThrow('macOS helper receipt does not match the archive.');
+    }
+    expect(existsSync(served)).toBe(false);
     writeFileSync(receiptPath, JSON.stringify(receipt));
     const result = publish();
-    const served = join(root, 'site/releases', result.version, basename(helper));
+    expect(join(root, 'site/releases', result.version, basename(helper))).toBe(served);
     expect(readFileSync(served)).toEqual(readFileSync(helper));
     expect(readFileSync(`${served}.receipt.json`)).toEqual(readFileSync(receiptPath));
     expect(checkSiteRelease(root)).toEqual([]);
