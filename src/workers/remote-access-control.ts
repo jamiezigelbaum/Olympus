@@ -82,6 +82,17 @@ export function createStandaloneRemoteAccessConfigWriter(options: {
   };
 }
 
+/**
+ * The standalone engine's control. A host that cannot change remote access
+ * from the dashboard (Linux, for now) offers no switch: the row says why
+ * instead of a button the route would only refuse with 501 (#1034).
+ */
+export function createStandaloneRemoteAccessControl(options: Parameters<typeof createStandaloneRemoteAccessConfigWriter>[0]): DashboardRemoteAccessControl {
+  const reason = options.unsupportedReason;
+  if (reason) return { manual: () => reason };
+  return createDashboardRemoteAccessControl({ setEnabled: createStandaloneRemoteAccessConfigWriter(options) });
+}
+
 /** Let the HTTP response finish before the host's full restart stops this worker. */
 export function createDashboardEngineRestart(options: {
   restart(): void;
