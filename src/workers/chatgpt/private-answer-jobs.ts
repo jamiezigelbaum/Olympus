@@ -88,6 +88,7 @@ import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
  * restart forgets every job and every answer; an expired job's answer is
  * dropped with it.
  */
+import { notePrivateAnswerCompleted } from '../../core/app-release-capture.ts';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import {
@@ -1072,6 +1073,8 @@ export class PrivateAnswerJobs {
         usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
       };
       this.finish(analysis, 'done');
+      // What each AI app received: each request whose question this answers was answered privately.
+      for (const job of analysis.jobs) if (job.waiting) notePrivateAnswerCompleted(job.waiting);
     } catch (error) {
       if (!timedOut) this.finish(analysis, 'failed', error instanceof AnalysisStop ? error.reason : 'error');
     } finally {

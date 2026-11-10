@@ -1,4 +1,5 @@
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
+import { buildSetupChecklist } from '../src/core/setup-checklist.ts';
 import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
@@ -19,7 +20,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=<name>  that preview state, in one load
 //   /dashboard?state=inbox-failed&private-answers&controls  settled Inbox failure
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
-//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?connector
+//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?apps-received | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
 //   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth (a source's
@@ -1941,6 +1942,15 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
       ...(result._meta ?? {}),
       [COMPUTER_META_KEY]: {
         indexFaster: { on: indexFasterOn },
+        // The setup checklist (#1077) as mockup 1-home-setup shows it: 4 of 7, WhatsApp chats next.
+        setup: buildSetupChecklist({
+          version: '1.5.0', running: true,
+          privateAnswers: { chosen: true, label: 'Local models with Venice fallback' },
+          judge: { chosen: true, choice: 'venice', limitDollars: 5 },
+          sources: [{ id: 'gmail.email', name: 'Gmail', state: 'connected' }, { id: 'whatsapp.personal.messages', name: 'WhatsApp', state: 'connected' }],
+          messaging: [{ name: 'WhatsApp', paired: true, chatsChosen: false }],
+          aiApps: [], findableItems: 0,
+        }),
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
         ...(previewArchivesMeta(state) ? { archives: previewSplitArchives(previewArchivesMeta(state)!).archives } : {}),
@@ -2085,6 +2095,10 @@ if (import.meta.main) {
     }
     if (url.pathname === '/preview-secret-panel') return html(previewSecretPanel(url.origin));
     const waitingCount = previewWaitingCount(request, url);
+    if (request.method === 'POST' && url.pathname === '/dashboard/apps-received') {
+      if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
+      return Response.json(previewAppsReceivedAction(await request.json().catch(() => ({})) as Record<string, unknown>));
+    }
     if (request.method === 'POST' && url.pathname === '/dashboard/private-answers') {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
       return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount, state);
@@ -2218,6 +2232,7 @@ if (import.meta.main) {
           agents: previewAgentsView(url.searchParams.get('agents')),
           // The pretend session is a local one, so Private answers shows its list.
           outsideHelpLocalSession: unlocked,
+          appsReceivedAvailable: true,
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
           privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount, pageState) } : {}) },
         },
@@ -2235,5 +2250,37 @@ if (import.meta.main) {
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}/dashboard`);
   console.log(`  states (open one, then /dashboard): ${DASHBOARD_PREVIEW_STATES.map((name) => `/${name}`).join(' ')}`);
-  console.log('  /dashboard?controls unlocks; ?keys ?connect ?agents ?private-answers ?connector are the computer\'s own pages; &waiting=N sets the waiting questions');
+  console.log('  /dashboard?controls unlocks; ?keys ?connect ?agents ?private-answers ?apps-received ?connector are the computer\'s own pages; &waiting=N sets the waiting questions');
+}
+
+// What AI apps received (#1061): the signed-off mockup's four requests, in memory.
+const PREVIEW_APPS_NOW = NOW.getTime();
+let previewAppsRetention = 30;
+let previewAppsRequests = previewAppsSeed();
+function previewAppsSeed() {
+  const hours = (n: number) => PREVIEW_APPS_NOW - n * 3_600_000;
+  const item = (position: number, source: string, title: string) => ({ position, source, title, tier: 'personal', madePrivate: false });
+  return [
+    { id: 'apr_leo', at: hours(0.5), connection: { name: 'ChatGPT', kind: 'app' }, question: 'When is Leo\'s dentist appointment?', heldBack: 1, answeredPrivately: true, withheld: false,
+      items: [item(0, 'Gmail', 'Appointment confirmed: Leo, Saturday 8 November'), item(1, 'Gmail', 'Friday 7 November: school closes at 13:00'), item(2, 'Dropbox', 'Family/School/Escola Azul - calendar 2026-27.pdf')] },
+    { id: 'apr_demo', at: hours(2), connection: { name: 'Claude', kind: 'app' }, question: 'What did I note about the demo night script?', heldBack: 0, answeredPrivately: false, withheld: false,
+      items: [item(0, 'Reflect', 'Demo night script, draft 3'), item(1, 'Gmail', 'Re: demo night running order')] },
+    { id: 'apr_deposit', at: hours(26), connection: { name: 'Grok', kind: 'app' }, question: 'What are general tenant deposit rules?', heldBack: 0, answeredPrivately: false, withheld: false, items: [] },
+    { id: 'apr_invoices', at: hours(28), connection: { name: 'Muse', kind: 'agent' }, question: 'Which invoices are unpaid?', heldBack: 2, answeredPrivately: false, withheld: false,
+      items: [item(0, 'Gmail', 'Invoice 2026-114 from Atelier Norte')] },
+  ];
+}
+function previewAppsReceivedAction(body: Record<string, unknown>): Record<string, unknown> {
+  switch (body.action) {
+    case 'list': return { ok: true, retentionDays: previewAppsRetention, requests: previewAppsRetention === 0 ? [] : previewAppsRequests };
+    case 'retention': previewAppsRetention = Number(body.days); if (previewAppsRetention === 0) previewAppsRequests = []; return { ok: true, retentionDays: previewAppsRetention };
+    case 'clear': { const removed = previewAppsRequests.length; previewAppsRequests = []; return { ok: true, removed }; }
+    case 'make_private': {
+      const request = previewAppsRequests.find((candidate) => candidate.id === body.request);
+      const item = request?.items.find((candidate) => candidate.position === body.item);
+      if (item) item.madePrivate = true;
+      return { ok: true, madePrivate: true };
+    }
+    default: return { ok: false, error: { code: 'invalid_params', message: 'Unknown action.' } };
+  }
 }
