@@ -147,6 +147,12 @@ const LINKS = {
   connector: 'http://127.0.0.1:8787/dashboard?connector',
 };
 const COMPUTER = { kind: 'computer', readOnly: false, links: LINKS };
+/**
+ * Home lists no sources (#1085): the rows and their archives are reached from the Sources tab's Imported
+ * archives and details, which lands on every row. Each test here mounts Home that way unless it lands
+ * somewhere else.
+ */
+const ON_ARCHIVES = { ...COMPUTER, landing: { sourceId: 'all.sources' } };
 
 /** The panel on a host that answers its tool calls from `serve`; `computer: false` is ChatGPT. */
 async function mount(serve: Serve, options: {
@@ -174,7 +180,7 @@ async function mount(serve: Serve, options: {
       if (message.method === 'ui/initialize') {
         reply(message.id, {
           protocolVersion: '2026-01-26',
-          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], ...(computer ? { [OLYMPUS_HOST_CONTEXT_KEY]: options.host ?? COMPUTER } : {}) },
+          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], ...(computer ? { [OLYMPUS_HOST_CONTEXT_KEY]: options.host ?? ON_ARCHIVES } : {}) },
         });
       } else if (message.method === 'tools/call') {
         const handler = serve[message.params.name];

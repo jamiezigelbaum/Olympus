@@ -44,6 +44,8 @@ export interface ChatGptDashboardClientConfig {
    * (Other archives), for exports that are not from one of the sources above.
    */
   archivesSourceId: string;
+  /** The landing id the Sources tab's Archives and details uses: every source's row on Home (#1085). */
+  allSourcesId: string;
   connection: typeof DASHBOARD_CHATGPT_CONNECTION_COPY;
   page: typeof DASHBOARD_CHATGPT_PAGE_COPY;
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
@@ -328,8 +330,11 @@ export function chatgptDashboardClient(
     // Said once, in the first answer: See why on one source (core/open-targets.ts unreadable/<source>).
     const landing = value.landing;
     if (value.kind === 'computer' && landing && typeof landing.sourceId === 'string' && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
-      state.landing = landing.sourceId;
-      state.landingImport = landing.import === true;
+      if (landing.sourceId === config.allSourcesId) state.open['home-all'] = true;
+      else {
+        state.landing = landing.sourceId;
+        state.landingImport = landing.import === true;
+      }
     }
   }
 
@@ -2426,6 +2431,8 @@ export function chatgptDashboardClient(
     // parked on Olympus's own budget (its own In progress line), is not named.
     const failing = stalled.filter((source: Any) => source.progress.stall && source.progress.stall.cause === 'failing');
     const off = stalled.filter((source: Any) => source.progress.stall && source.progress.stall.cause === 'switched_off');
+    // No row reports a stop at all: the bare word, as before.
+    if (!stalled.length) return P.stalled;
     const parts: string[] = [];
     if (failing.length) parts.push(fill(P.stalledRetrying, { sources: nameList(failing.map((source: Any) => String(source.label))) }));
     if (off.length) parts.push(fill(P.stalledOff, { sources: nameList(off.map((source: Any) => String(source.label))) }));
@@ -2877,6 +2884,12 @@ export function chatgptDashboardClient(
    * archive at work or waiting on the owner (their buttons live on the row).
    */
   function homeFocusedSources(all: Any[]): HTMLElement | null {
+    // The Sources tab's Archives and details: every row, with the imported archives.
+    if (state.open['home-all']) {
+      const section = el('div', 'home-sources');
+      add(section, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+      return section;
+    }
     const focus = state.landing || (state.landed ? state.landed.id : '');
     const shown = all.filter((source: Any) => {
       const id = String(source && (source.id || source.label));
@@ -2892,7 +2905,7 @@ export function chatgptDashboardClient(
     if (!shown.length && !archivesMoving()) return null;
     const sources = shown.filter((source: Any) => !isArchivesCard(source));
     const archives = all.filter(isArchivesCard)[0];
-    const section = el('section', 'section home-sources');
+    const section = el('div', 'home-sources');
     if (sources.length) add(section, sourcesSection(sources));
     if (archives && (shown.indexOf(archives) >= 0 || archivesMoving())) add(section, otherArchivesSection(archives));
     return section.childNodes.length ? section : null;

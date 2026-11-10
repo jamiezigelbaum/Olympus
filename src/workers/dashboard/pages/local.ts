@@ -31,7 +31,7 @@ import type {
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import { renderMessagingCard } from '../messaging.ts';
-import { DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
+import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
   connectorSheet,
@@ -363,7 +363,7 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     lockedGate(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml(dashboardLocalPageHref('connector', token))}">Build a connector</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml(dashboardLocalPageHref('connector', token))}">Build a connector</a> · <a href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
     rows.map((entry) => entry.dialogs).join(''),
     sheet,
   ].filter((block) => block !== '').join('\n');

@@ -35,6 +35,7 @@ import {
   DISCONNECT_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
+import { DASHBOARD_ALL_SOURCES_ID } from '../../../core/open-targets.ts';
 import { privacyLogic } from '../shared-privacy-logic.ts';
 import {
   CHATGPT_CONNECT_HOST,
@@ -396,6 +397,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
+    allSourcesId: DASHBOARD_ALL_SOURCES_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
