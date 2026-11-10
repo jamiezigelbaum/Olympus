@@ -1,4 +1,5 @@
 import { runTierClassifier } from '../src/workers/classification/tier-cli.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { approveClassifier, readClassificationLedger, isClassifierApproved, revokeClassifier } from '../src/workers/classification-ledger.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
@@ -7,7 +8,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createOpenAICompatibleAnalystModel } from '../src/core/analyst-openai.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth, DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../src/workers/http.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -140,9 +141,7 @@ test('judge approval POST requires local controls and CSRF; a bearer cannot opt 
   }));
   expect((await post({})).status).toBe(401);
   expect((await post({ Authorization: 'Bearer synthetic-bearer' })).status).toBe(403);
-  const mintRequest = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
-  recordRequestPeer(mintRequest, '127.0.0.1');
-  const mint = await fetcher(mintRequest); expect(mint.status).toBe(200);
+  const mint = await ownerLocalMint(fetcher, origin, 'synthetic-bearer'); expect(mint.status).toBe(200);
   const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
   const csrf = (await mint.json() as { csrf_token: string }).csrf_token;
   expect((await post({ Cookie: cookie, 'X-Olympus-CSRF': 'wrong' })).status).toBe(403);
@@ -481,9 +480,7 @@ test('the Keys page renders through the real setup object and shows the upgrade 
   cleanup.push(() => worker.close());
   const fetcher = withWorkerBearerAuth(worker.fetch, { authToken: 'synthetic-bearer' });
   const origin = 'http://127.0.0.1:17777';
-  const mintRequest = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
-  recordRequestPeer(mintRequest, '127.0.0.1');
-  const cookie = (await fetcher(mintRequest)).headers.get('Set-Cookie')!.split(';')[0]!;
+  const cookie = (await ownerLocalMint(fetcher, origin, 'synthetic-bearer')).headers.get('Set-Cookie')!.split(';')[0]!;
   const keys = async () => {
     const page = new Request(origin + '/dashboard?keys', { headers: { Cookie: cookie } });
     recordRequestPeer(page, '127.0.0.1');
