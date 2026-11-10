@@ -241,6 +241,11 @@ describe('the worker reads the facts the dashboard reads', () => {
     expect(step(paired, 'messaging_chats')).toMatchObject({ state: 'next', title: 'Choose your WhatsApp chats' });
     const chosen = setupChecklistFromView(view([card('whatsapp.personal.messages', 'WhatsApp', connected({ capture: { scope: { kind: 'chats', count: 3 } } }))]), worker);
     expect(step(chosen, 'messaging_chats').state).toBe('done');
+    // A native capture service reports no scope to the worker; a captured message shows its chats were approved.
+    const native = setupChecklistFromView(view([card('telegram.messages', 'Telegram', connected({ freshness: { label: '', stale: false, capture: { state: 'fresh', age_seconds: 60, threshold_seconds: 3600 } } }))]), worker);
+    expect(step(native, 'messaging_chats').state).toBe('done');
+    const nothingYet = setupChecklistFromView(view([card('telegram.messages', 'Telegram', connected({ freshness: { label: '', stale: false, capture: { state: 'awaiting', threshold_seconds: 3600 } } }))]), worker);
+    expect(step(nothingYet, 'messaging_chats').state).toBe('next');
     const unpaired = setupChecklistFromView(view([card('telegram.messages', 'Telegram')]), worker);
     expect(step(unpaired, 'messaging_chats').state).toBe('skipped');
   });

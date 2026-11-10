@@ -42,9 +42,11 @@ export function setupFactsFromView(view: SourceDashboardViewModel | undefined, w
   const messaging: SetupMessagingFact[] = cards.filter((card) => MESSAGING.has(card.source_id)).map((card) => ({
     name: card.label,
     paired: CONNECTED.has(card.connection.state) || card.connection.state === 'reauth_required',
-    // Pairing alone starts nothing: capture runs once chats are approved, and
-    // the approval is what the capture runtime reads back.
-    chatsChosen: card.capture?.scope !== undefined,
+    // Pairing alone starts nothing: capture runs once chats are approved. The
+    // approval is what a worker-owned capture runtime reads back; a native
+    // capture service (OpenClaw's own Telegram or WhatsApp) shows none here,
+    // so a message it has captured is the evidence instead.
+    chatsChosen: card.capture?.scope !== undefined || card.freshness?.capture?.age_seconds !== undefined,
   }));
   const findableItems = view
     ? view.sources.reduce((sum, card) => sum + (Number.isFinite(card.coverage?.indexed_items) ? Math.max(0, card.coverage.indexed_items) : 0), 0)

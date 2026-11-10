@@ -219369,7 +219369,7 @@ function setupFactsFromView(view3, worker) {
   const messaging = cards.filter((card) => MESSAGING.has(card.source_id)).map((card) => ({
     name: card.label,
     paired: CONNECTED.has(card.connection.state) || card.connection.state === "reauth_required",
-    chatsChosen: card.capture?.scope !== undefined
+    chatsChosen: card.capture?.scope !== undefined || card.freshness?.capture?.age_seconds !== undefined
   }));
   const findableItems = view3 ? view3.sources.reduce((sum2, card) => sum2 + (Number.isFinite(card.coverage?.indexed_items) ? Math.max(0, card.coverage.indexed_items) : 0), 0) : undefined;
   return {
