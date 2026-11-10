@@ -224,7 +224,12 @@ checking that no read is running (`index.ts:4061`).
 **D. In-process signals that become cross-process.** The owner's own
 answers preempt the judge (`localModelActivity.onBusy → tierSniffer.preempt()`,
 `server.ts:7350`). With the split, the front sends `owner_busy` and
-`owner_idle`. On one shared local model this still matters (#1030,
+`owner_idle`. Matched-first judging (#1062, PR #1115) is the second
+signal: the tier visibility gate reports held items that a search or
+answer matched, and the judge takes them first (`judge-boost.ts`). The
+front sends `judge_boost {ids}` (at most 20 ids per question, 15-minute
+life); without it, matched-first ordering would quietly stop working,
+though privacy would not change. On one shared local model this still matters (#1030,
 #1031); with the model on Delphi or Venice it stops mattering.
 
 **State the front reads, published by the background** in its snapshot:
