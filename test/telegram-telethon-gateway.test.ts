@@ -97,6 +97,17 @@ describe('long-lived read-only Telethon capture gateway', () => {
     } finally { rmSync(fixture.root, { recursive: true, force: true }); }
   }, 30_000);
 
+  // #1075: the supervisor counts every grant token, kinds included; the receipt must say the same number.
+  pythonTest('a kind grant publishes the readiness count the native supervisor expects', async () => {
+    const fixture = gatewayFixture();
+    try {
+      const result = await runGateway(fixture, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f', FAKE_REQUIRE_NATIVE_READY: '1', OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: 'kind:dm,kind:group,telegram.personal:chat:101' });
+      expect(result.code).toBe(0);
+      const receipt = JSON.parse(readFileSync(join(fixture.stateDir, 'native-service-readiness.json'), 'utf8'));
+      expect(receipt.approved_chats).toBe(3);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
   pythonTest('refuses an unpaired native session before scope reads or readiness', async () => {
     const fixture = gatewayFixture();
     try {

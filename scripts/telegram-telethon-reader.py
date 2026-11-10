@@ -247,6 +247,11 @@ class GatewayConfig:
     def whole_account(self) -> bool:
         return self.approved_scopes == ("*",)
 
+    @property
+    def grant_size(self) -> int:
+        """Every distinct grant token, kinds included: the count the native supervisor checks."""
+        return len(set(self.approved_scopes)) + len(set(self.approved_kinds))
+
 
 @asynccontextmanager
 async def gateway_client_session(client: Any, native: bool):
@@ -336,7 +341,7 @@ async def run_gateway(run_once: bool = False) -> None:
                     "instance_id": instance_id,
                     "pid": os.getpid(),
                     "authenticated": True,
-                    "approved_chats": len(config.approved_scopes),
+                    "approved_chats": config.grant_size,
                     "generated_at": gateway_now_iso(),
                 })
             while True:
@@ -1040,7 +1045,7 @@ def gateway_report(config: GatewayConfig, state: dict[str, Any], captured: int) 
         "generated_at": gateway_now_iso(),
         "status": "attention" if freshness_status in ("stale", "unavailable") else "ok",
         "credential_endpoint_id": TELEGRAM_GATEWAY_ENDPOINT_ID,
-        "approved_chats": len(config.approved_scopes),
+        "approved_chats": config.grant_size,
         "records_captured": captured,
         "spool_records": spool_records,
         **({"spool_newest_age_seconds": age} if age is not None else {}),
