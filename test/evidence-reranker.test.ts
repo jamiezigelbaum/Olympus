@@ -15,6 +15,7 @@ import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createCrossEncoderReranker } from '../src/workers/source-index/built-in-reranker.ts';
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
 import type { EmbeddingBatch } from '../src/workers/source-index/built-in-embedding/runtime.ts';
+import { SourceModelPolicyDeniedError } from '../src/core/source-model-policy.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 
 // A reranker that scores a passage by how many of the query's words it holds:
@@ -107,7 +108,12 @@ function item(id: string) {
 }
 
 // Ten hits in fused order; the one that answers the question is ranked last.
-function packInput(reranker: EvidenceReranker | undefined, requested: number[], question = 'When is the invoice total due?') {
+function packInput(
+  reranker: EvidenceReranker | undefined,
+  requested: number[],
+  question = 'When is the invoice total due?',
+  override?: (id: string) => Awaited<ReturnType<LocalContentProvider['fetchLocalContent']>> | undefined,
+) {
   const ids = Array.from({ length: 10 }, (_, index) => `doc-${index}`);
   const text = (id: string) => (id === 'doc-9' ? 'The invoice total is due on 3 March.' : `Unrelated note ${id}.`);
   const adapter: SourceIndexCorpusSearchAdapter = (request) => {
@@ -122,6 +128,8 @@ function packInput(reranker: EvidenceReranker | undefined, requested: number[], 
   };
   const provider: LocalContentProvider = {
     async fetchLocalContent(request) {
+      const overridden = override?.(request.provenance.sourceItem.providerItemId);
+      if (overridden) return overridden;
       return {
         sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
         chunks: [text(request.provenance.sourceItem.providerItemId)],
@@ -160,6 +168,27 @@ describe('buildEvidencePackDetailed with a reranker', () => {
     expect(detail.pack.candidates).toHaveLength(3);
     expect(packIds(detail)[0]).toBe('doc-9');
     expect(detail.rerank).toMatchObject({ rerankerId: 'fixture-overlap', outcome: 'applied', scored: 10, kept: 3, promoted: 1 });
+  });
+
+  test('S5 content anywhere in the pool hard-stops the build before the reranker reads any text', async () => {
+    const calls: string[][] = [];
+    // doc-5 is below the cut and irrelevant, so only a pool-wide check sees it.
+    const input = packInput(overlapReranker(10, calls), [], undefined, (id) => id === 'doc-5'
+      ? { sensitivity: buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'internal' }), chunks: ['SECRET TEXT'] }
+      : undefined);
+    await expect(buildEvidencePackDetailed(input)).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+
+  test('a policy-denied item is counted even when readable items fill the cut', async () => {
+    const input = packInput(overlapReranker(10), [], undefined, (id) => {
+      if (id === 'doc-0') throw new SourceModelPolicyDeniedError();
+      return undefined;
+    });
+    const detail = await buildEvidencePackDetailed(input);
+    expect(detail.pack.candidates).toHaveLength(3);
+    expect(detail.policyDeniedCandidates).toBe(1);
+    expect(detail.policyDeniedCoverageGaps).toHaveLength(1);
   });
 
   test('a question about recency keeps its newest-first order and is not reranked', async () => {

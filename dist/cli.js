@@ -69103,18 +69103,35 @@ async function buildPreparedEvidencePackDetailed(input) {
     return { hit, provenance, provider, content, policyDenied };
   }));
   recordSourceAnswerHydration(Date.now() - hydrationStartedAt);
+  const sensitivityOf = (entry) => entry.content?.sensitivity ?? hitFallbackSensitivity(entry.hit, input.registry.get(entry.hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(entry.hit.trustDomain));
   let hydrated = pool;
   let rerank;
   if (reranker && pool.length > 0) {
+    const scorable = [];
+    const denied = [];
+    for (const entry of pool) {
+      if (entry.policyDenied) {
+        denied.push(entry);
+        continue;
+      }
+      const sensitivity = sensitivityOf(entry);
+      assertNoTrustDomainDowngrade(entry.hit, sensitivity);
+      assertModelTrustTierAllowed(sensitivity.trustTier);
+      for (const fact of entry.content?.facts ?? [])
+        assertModelTrustTierAllowed(fact.sensitivity.trustTier);
+      if (input.excludeSecureSensitivity && isSecureSensitivity(sensitivity))
+        continue;
+      scorable.push(entry);
+    }
     const reranked = await rerankCandidates({
       reranker,
       query: literalSearchQuery(input),
-      items: pool,
-      passageOf: (entry) => entry.policyDenied ? "" : rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
+      items: scorable,
+      passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
       keep: input.maxResults,
       ...input.rerankTimers ? { timers: input.rerankTimers } : {}
     });
-    hydrated = reranked.kept;
+    hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
   }
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
@@ -69126,7 +69143,7 @@ async function buildPreparedEvidencePackDetailed(input) {
       policyDeniedCoverageGaps.push(gap2);
       continue;
     }
-    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(hit, input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain));
+    const sensitivity = sensitivityOf({ hit, provenance, provider, content, policyDenied });
     assertNoTrustDomainDowngrade(hit, sensitivity);
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri ? {
       ...provenance,

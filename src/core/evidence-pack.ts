@@ -37,6 +37,7 @@ import {
 import type { SourceIndexCorpusRegistry } from './source-index/corpus.ts';
 import {
   assertEvidenceCandidateModelEligible,
+  assertModelTrustTierAllowed,
   SourceModelPolicyDeniedError,
 } from './source-model-policy.ts';
 import {
@@ -389,21 +390,45 @@ async function buildPreparedEvidencePackDetailed(
   }));
   recordSourceAnswerHydration(Date.now() - hydrationStartedAt);
 
+  const sensitivityOf = (entry: (typeof pool)[number]) =>
+    entry.content?.sensitivity ?? hitFallbackSensitivity(
+      entry.hit,
+      input.registry.get(entry.hit.corpusId)?.defaultSensitivity
+        ?? conservativeSensitivity(entry.hit.trustDomain),
+    );
+
   let hydrated = pool;
   let rerank: EvidenceRerankAudit | undefined;
   if (reranker && pool.length > 0) {
+    // The reranker is a model, so every pooled item passes the same model
+    // policy the pack does BEFORE any text reaches it, not only the items
+    // that survive the cut: S5 content hard-stops the build here.
+    const scorable: typeof pool = [];
+    const denied: typeof pool = [];
+    for (const entry of pool) {
+      if (entry.policyDenied) {
+        denied.push(entry);
+        continue;
+      }
+      const sensitivity = sensitivityOf(entry);
+      assertNoTrustDomainDowngrade(entry.hit, sensitivity);
+      assertModelTrustTierAllowed(sensitivity.trustTier);
+      for (const fact of entry.content?.facts ?? []) assertModelTrustTierAllowed(fact.sensitivity.trustTier);
+      // An exclusion rebuild drops secure items below, so they are not scored.
+      if (input.excludeSecureSensitivity && isSecureSensitivity(sensitivity)) continue;
+      scorable.push(entry);
+    }
     const reranked = await rerankCandidates({
       reranker,
       query: literalSearchQuery(input),
-      items: pool,
-      // A policy-denied candidate has no text a model may read.
-      passageOf: (entry) => entry.policyDenied
-        ? ''
-        : rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
+      items: scorable,
+      passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
       keep: input.maxResults,
       ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
     });
-    hydrated = reranked.kept;
+    // Denied items carry no text, but every one is still counted below, so the
+    // policy gap and the content-free lane audits do not depend on the cut.
+    hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
   }
 
@@ -421,10 +446,7 @@ async function buildPreparedEvidencePackDetailed(
     // hit carries one, never by a lower corpus default; an item of unknown
     // tier is judged S4 (secure by isSecureSensitivity), so its title never
     // reaches an ordinary analyst or ordinary released evidence.
-    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(
-      hit,
-      input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain),
-    );
+    const sensitivity = sensitivityOf({ hit, provenance, provider, content, policyDenied });
     assertNoTrustDomainDowngrade(hit, sensitivity);
 
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri
