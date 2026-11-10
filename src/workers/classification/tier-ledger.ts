@@ -293,6 +293,15 @@ export interface TierLedgerOptions {
 export const DEFAULT_REJUDGE_SCAN_ROWS = 2_000;
 
 /**
+ * A re-judge that found no serving text to read (`markRejudgeUnavailable`)
+ * tries the row again after this wait, doubling per miss up to the maximum.
+ * A newer decision of the row (a landing that stores its text again) makes
+ * it a candidate at once.
+ */
+export const REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
+export const REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+
+/**
  * An open re-judge question (`openRejudgeQuestion`): the decision the
  * sniffer's answer completes. The item stays where it is until then.
  */
@@ -1004,6 +1013,7 @@ export class TierLedger {
     const after = options.after
       ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
       : null;
+    const nowIso = this.now().toISOString();
     const rows = this.db.query(`
       WITH win AS (
         SELECT * FROM tier_items
@@ -1020,16 +1030,17 @@ export class TierLedger {
           -- resting on a retired prior: a prior replayed after a completed
           -- re-judge is a new decision and invalidates the old stamp, while a
           -- re-read that changed nothing (no text) stays settled (markRejudged).
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
-            WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || i.generation || char(0) || i.decided_at
-            ELSE ? END)
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
           -- Settled by a verdict under this classifier and sniffer (markJudged):
           -- not re-asked while its decision stays settled under this
           -- classifier. A later decision that left it owed a verdict (fail-safe,
           -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
             AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
@@ -1083,16 +1094,16 @@ export class TierLedger {
           WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
           ELSE 'content_prompt'
         END AS rejudge_cause
-      FROM win i
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
     `).all(
       after ? 1 : null,
       ...(after ?? [null, null, null, null]),
       scanLimit,
-      key,
-      key,
-      key,
-      key,
       options.engineVersion,
       options.engineVersion,
       options.snifferId ?? null,
@@ -1107,6 +1118,10 @@ export class TierLedger {
       options.engineVersion,
       metadataMarker,
       metadataMarker ?? '',
+      key,
+      key,
+      key,
+      key,
     ) as Array<TierItemRow & { rejudge_candidate: number; rejudge_cause: TierRejudgeCause }>;
     const records: TierLedgerRecord[] = [];
     const causes: TierRejudgeCause[] = [];
@@ -1115,6 +1130,10 @@ export class TierLedger {
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1) continue;
+      // Its serving text could not be read under this classifier and sniffer
+      // at this decision (#1002): tried again once the backoff ends, or at
+      // once after a newer decision. It was never stamped settled.
+      if (rejudgeUnavailableUntil(row, key) > nowIso) continue;
       const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
       if (cause === 'builtin_prompt_skipped') {
         builtinPromptSkipped += 1;
@@ -1157,6 +1176,40 @@ export class TierLedger {
         THEN ?1 || char(0) || 'prior' || char(0) || generation || char(0) || decided_at ELSE ?1 END
       WHERE provider = ?2 AND account_scope = ?3 AND conversation_key = ?4 AND provider_item_id = ?5
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
+  }
+
+  /**
+   * A re-judge found no serving text to read (#1002): the decision stands but
+   * the re-judge did not happen, so the row is NOT stamped settled. It keeps
+   * whatever settlement stamp it had and gets an unavailable marker for this
+   * classifier, sniffer and decision, so a bounded pass does not re-read it
+   * every tick: it is a candidate again when the backoff (the ledger's clock;
+   * doubling per miss, REJUDGE_UNAVAILABLE_MAX_RETRY_MS at most) ends, or at
+   * once after a newer decision of the row.
+   */
+  markRejudgeUnavailable(record: TierLedgerRecord, key: { engineVersion: string; snifferId?: string }): void {
+    const id = [record.provider, record.accountScope, record.conversationKey, record.providerItemId] as const;
+    const row = this.db.query(`
+      SELECT rejudged_key FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).get(...id, record.generation, record.decidedAt) as { rejudged_key: string | null } | null;
+    if (!row) return;
+    const stampKey = rejudgeKey(key.engineVersion, key.snifferId);
+    const split = splitRejudgeStamp(row.rejudged_key);
+    const previous = split.unavailable?.split('\u0001');
+    const misses = previous && previous[0] === stampKey && previous[1] === String(record.generation) && previous[2] === record.decidedAt
+      ? (Number(previous[4]) || 0) + 1 : 0;
+    const wait = Math.min(REJUDGE_UNAVAILABLE_RETRY_MS * 2 ** Math.min(misses, 16), REJUDGE_UNAVAILABLE_MAX_RETRY_MS);
+    const retryAt = new Date(this.now().getTime() + wait).toISOString();
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).run(
+      [split.settled ?? '', stampKey, String(record.generation), record.decidedAt, retryAt, String(misses)].join('\u0001'),
+      ...id,
+      record.generation,
+      record.decidedAt,
+    );
   }
 
   /**
@@ -4213,6 +4266,20 @@ function rejudgeKey(engineVersion: string, snifferId: string | undefined): strin
   return `${engineVersion}\u0000${snifferId ?? ''}`;
 }
 
+/** When an unavailable-text marker for this key and the row's decision lets it be read again ('' when none applies). */
+function rejudgeUnavailableUntil(row: Pick<TierItemRow, 'rejudged_key' | 'generation' | 'decided_at'>, key: string): string {
+  const mark = splitRejudgeStamp(row.rejudged_key).unavailable?.split('\u0001');
+  return mark && mark[0] === key && mark[1] === String(row.generation) && mark[2] === row.decided_at ? mark[3] ?? '' : '';
+}
+
+/** A rejudged_key's settlement stamp, and the unavailable-text marker after char(1) if any (markRejudgeUnavailable). */
+function splitRejudgeStamp(value: string | null): { settled?: string; unavailable?: string } {
+  if (!value) return {};
+  const at = value.indexOf('\u0001');
+  if (at < 0) return { settled: value };
+  return { ...(at > 0 ? { settled: value.slice(0, at) } : {}), unavailable: value.slice(at + 1) };
+}
+
 function identityOfRow(row: Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>): TierLedgerIdentity {
   return {
     provider: row.provider,
@@ -4380,7 +4447,7 @@ function settledSnifferRejudgeCause(row: TierItemRow, cause: TierRejudgeCause, i
   if (!current) return cause;
   const reasons = JSON.parse(row.reasons_json) as string[];
   const previous: Array<string | undefined> = [];
-  const stamp = row.rejudged_key?.split('\u0000');
+  const stamp = splitRejudgeStamp(row.rejudged_key).settled?.split('\u0000');
   // Match the existing stamp semantics: a completed re-read, or a model
   // settlement still free of fail-safe reasons, can cover older names too.
   if (stamp?.[0] === row.engine_version && (stamp.length === 2

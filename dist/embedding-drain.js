@@ -10913,6 +10913,12 @@ function snifferReasonCode(verdict) {
 function cachedSnifferVerdictHolds(verdict) {
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
 }
+function schemaReference(text2, verb, field) {
+  if (SCHEMA_ONLY_FIELD.test(field[0]))
+    return true;
+  const tail = text2.slice(field.index + field[0].length);
+  return SCHEMA_VALUE.test(tail) || ASSIGN_VERBS.has(verb) && /^\s+to\b/.test(tail);
+}
 function hasClassifierInstruction(text2) {
   const words = [...text2.matchAll(/[a-z][a-z0-9_]*/g)];
   for (let i = 0;i < words.length; i++) {
@@ -10924,24 +10930,27 @@ function hasClassifierInstruction(text2) {
         continue;
       const left = Math.min(verb.index, words[j].index);
       const right = Math.max(verb.index, words[j].index);
-      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)))
+      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)) && schemaReference(text2, verb[0], words[j]))
         return true;
     }
+    let outputShaped = !SETTING_VERBS.has(verb[0]);
     for (let j = i + 1;j < Math.min(words.length, i + 13); j++) {
       const object = words[j];
       if (object.index - verb.index > 100 || /[.!?;]/.test(text2.slice(verb.index, object.index)))
         break;
       if (TIER_WORD.test(object[0])) {
         const tail = text2.slice(object.index + object[0].length);
-        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
+        if (outputShaped && /^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
           return true;
         break;
       }
       if (!OBJECT_GLUE.has(object[0]))
         break;
+      if (object[0] === "with" || object[0] === "as")
+        outputShaped = true;
     }
   }
-  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text2);
+  return /\byour verdict\b(?:\s+(?:for|on)\s+[^.!?;:]{0,40})?\s*(?:[:=]|\bis\b|\bshould be\b|\bmust be\b)\s*["'`]?(?:personal|private|public)\b/.test(text2);
 }
 function normalizeSnifferMaterial(material) {
   return normalizeSnifferSurface(canonicalizeScreeningText(material));
@@ -11152,7 +11161,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -11181,16 +11190,23 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+  TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+  TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
   INJECTION_RULES = [
-    ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
-    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
-    ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-    ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
+    ["role_boundary", ROLE_TAG],
+    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+    ["forged_verdict", new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+    ["cross_item_steering", new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)]
   ];
   INSTRUCTION_VERBS = new Set(["reply", "answer", "respond", "output", "return", "mark", "set", "label", "classify", "treat", "tag", "rate", "assign", "choose", "use", "emit", "produce", "make"]);
   VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
   TIER_WORD = /^(?:personal|public|private)$/;
   OBJECT_GLUE = new Set(["only", "with", "as", "to", "be", "is", "the", "a", "an", "this", "that", "it", "these", "them", "every", "each", "all", "item", "items", "file", "files", "document", "documents", "message", "messages", "entry", "entries", "list", "batch", "not"]);
+  SCHEMA_ONLY_FIELD = /^(?:ownrecord|privatekind)$/;
+  SCHEMA_VALUE = /^["'`]?\s*(?:[:=]|\b(?:of|as|at|is|be|to)\b)?\s*["'`({[]*\s*(?:(?:0?[.,]\d+|1(?:[.,]0+)?|0)(?![\d.,]*\d)|(?:personal|private|public|ordinary|true|false|none|null)\b)/;
+  ASSIGN_VERBS = new Set(["set", "assign"]);
+  SETTING_VERBS = new Set(["set", "make", "use", "choose"]);
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy classifier. Judge the ONE item independently.",
     "PERSONAL means the owner permits their trusted cloud assistant to read it.",
@@ -18442,6 +18458,7 @@ class TierLedger {
     const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
     const key2 = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const nowIso = this.now().toISOString();
     const rows = this.db.query(`
       WITH win AS (
         SELECT * FROM tier_items
@@ -18458,16 +18475,17 @@ class TierLedger {
           -- resting on a retired prior: a prior replayed after a completed
           -- re-judge is a new decision and invalidates the old stamp, while a
           -- re-read that changed nothing (no text) stays settled (markRejudged).
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
-            WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || i.generation || char(0) || i.decided_at
-            ELSE ? END)
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
           -- Settled by a verdict under this classifier and sniffer (markJudged):
           -- not re-asked while its decision stays settled under this
           -- classifier. A later decision that left it owed a verdict (fail-safe,
           -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
             AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
@@ -18521,9 +18539,13 @@ class TierLedger {
           WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
           ELSE 'content_prompt'
         END AS rejudge_cause
-      FROM win i
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key2, key2, key2, key2, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "", key2, key2, key2, key2);
     const records = [];
     const causes = [];
     let builtinPromptSkipped = 0;
@@ -18531,6 +18553,8 @@ class TierLedger {
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1)
+        continue;
+      if (rejudgeUnavailableUntil(row, key2) > nowIso)
         continue;
       const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
       if (cause === "builtin_prompt_skipped") {
@@ -18567,6 +18591,25 @@ class TierLedger {
         THEN ?1 || char(0) || 'prior' || char(0) || generation || char(0) || decided_at ELSE ?1 END
       WHERE provider = ?2 AND account_scope = ?3 AND conversation_key = ?4 AND provider_item_id = ?5
     `).run(rejudgeKey(key2.engineVersion, key2.snifferId), ...idParams(identity));
+  }
+  markRejudgeUnavailable(record, key2) {
+    const id = [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
+    const row = this.db.query(`
+      SELECT rejudged_key FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).get(...id, record.generation, record.decidedAt);
+    if (!row)
+      return;
+    const stampKey = rejudgeKey(key2.engineVersion, key2.snifferId);
+    const split = splitRejudgeStamp(row.rejudged_key);
+    const previous = split.unavailable?.split("\x01");
+    const misses = previous && previous[0] === stampKey && previous[1] === String(record.generation) && previous[2] === record.decidedAt ? (Number(previous[4]) || 0) + 1 : 0;
+    const wait = Math.min(REJUDGE_UNAVAILABLE_RETRY_MS * 2 ** Math.min(misses, 16), REJUDGE_UNAVAILABLE_MAX_RETRY_MS);
+    const retryAt = new Date(this.now().getTime() + wait).toISOString();
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ? AND decided_at = ?
+    `).run([split.settled ?? "", stampKey, String(record.generation), record.decidedAt, retryAt, String(misses)].join("\x01"), ...id, record.generation, record.decidedAt);
   }
   markJudged(identity, key2) {
     this.db.query(`
@@ -20510,6 +20553,18 @@ function copyFromRow(row) {
 function rejudgeKey(engineVersion, snifferId2) {
   return `${engineVersion}\x00${snifferId2 ?? ""}`;
 }
+function rejudgeUnavailableUntil(row, key2) {
+  const mark = splitRejudgeStamp(row.rejudged_key).unavailable?.split("\x01");
+  return mark && mark[0] === key2 && mark[1] === String(row.generation) && mark[2] === row.decided_at ? mark[3] ?? "" : "";
+}
+function splitRejudgeStamp(value) {
+  if (!value)
+    return {};
+  const at = value.indexOf("\x01");
+  if (at < 0)
+    return { settled: value };
+  return { ...at > 0 ? { settled: value.slice(0, at) } : {}, unavailable: value.slice(at + 1) };
+}
 function identityOfRow(row) {
   return {
     provider: row.provider,
@@ -20626,7 +20681,7 @@ function settledSnifferRejudgeCause(row, cause, id) {
     return cause;
   const reasons = JSON.parse(row.reasons_json);
   const previous = [];
-  const stamp = row.rejudged_key?.split("\x00");
+  const stamp = splitRejudgeStamp(row.rejudged_key).settled?.split("\x00");
   if (stamp?.[0] === row.engine_version && (stamp.length === 2 || stamp.length === 3 && stamp[2] === "judged" && !reasons.some((reason) => reason.includes(":fail_safe:")))) {
     previous.push(stamp[1]);
   } else {
@@ -21185,11 +21240,13 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
   init_tier_ledger_path();
+  REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
+  REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
   TierLedgerGenerationConflictError = class TierLedgerGenerationConflictError extends Error {
     constructor(message2 = "Tier ledger generation changed; re-read the row before flipping.") {
       super(message2);
@@ -33382,18 +33439,33 @@ async function appendEmbeddingLedgerEntries(path, entries) {
   const line = entries.map((entry) => `${JSON.stringify(entry)}
 `).join("");
   await mkdir4(dirname25(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
+  const handle = await open3(path, "a+", 384);
   try {
     await handle.chmod(384);
+    await restoreLineBoundary(handle);
     await handle.appendFile(line, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
+async function restoreLineBoundary(handle) {
+  const { size } = await handle.stat();
+  if (size === 0)
+    return;
+  const last = Buffer.alloc(1);
+  await handle.read(last, 0, 1, size - 1);
+  if (last[0] !== 10)
+    await handle.appendFile(`
+`, "utf8");
+}
 async function appendEmbeddingLedgerEntriesOnce(path, entries) {
   if (!entries.length)
     return 0;
+  if (!entries.some((entry) => entry.entry_id?.trim())) {
+    await appendEmbeddingLedgerEntries(path, entries);
+    return entries.length;
+  }
   const known = await recordedEntryIds(path);
   const pendingIds = new Set;
   const pending = entries.filter((entry) => {
@@ -35709,7 +35781,7 @@ function rejudgeStoredContent(set, record, options) {
   const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join("") ?? "";
   if (!exported || !text2.trim()) {
     if (key2)
-      ledger.markRejudged(identity, key2);
+      ledger.markRejudgeUnavailable(record, key2);
     report.skipped += 1;
     return;
   }
@@ -43808,10 +43880,40 @@ var init_dashboard_opening = __esm(() => {
 import { existsSync as existsSync24, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname33, join as join33 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir12();
   return join33(env.XDG_CACHE_HOME ?? join33(home, ".cache"), "olympus", "telegram-python");
+}
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync24) {
+  let directory = dirname33(fileURLToPath4(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    if (exists(join33(directory, TELEGRAM_REQUIREMENTS_FILE)))
+      return directory;
+    const parent = dirname33(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function telegramInstallCommands(input) {
+  const python = join33(input.venvDir, "bin", "python");
+  const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
+  return [
+    [...pip, "-r", join33(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join33(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+  ];
+}
+function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
+  const venv = "~/.cache/olympus/telegram-python";
+  const root = packageRoot ?? "<Olympus package>";
+  const [build, telethon] = telegramInstallCommands({ venvDir: venv, packageRoot: root }).map((argv) => argv.filter((arg) => arg !== "--quiet").map((arg) => arg.includes(" ") ? `"${arg}"` : arg).join(" "));
+  return `Use a private virtual environment: python3 -m venv ${venv}, then ${build}, then ${telethon}. Re-run olympus connect telegram --pair.`;
+}
+function telegramDependencyRefusedMessage(packageRoot) {
+  return `Olympus refused to install Telethon for Telegram: a downloaded package did not match the SHA-256 pinned in ${join33(packageRoot, TELEGRAM_REQUIREMENTS_FILE)}, so it may have been tampered with or substituted on the way. Nothing was installed. Check any pip mirror or proxy this computer uses, then re-run olympus connect telegram --pair; if it happens again, report it to the Olympus maintainers.`;
 }
 async function readyTelegramPython(options = {}) {
   if (options.pythonExecutable)
@@ -43840,35 +43942,49 @@ async function pythonImportsTelethon(python) {
   const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   return await child.exited === 0;
 }
-async function provisionTelegramPython(input) {
-  const run = async (argv) => {
-    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    let timeout;
-    const result = await Promise.race([
-      child.exited,
-      new Promise((resolve10) => {
-        timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
-      })
-    ]);
-    if (timeout)
-      clearTimeout(timeout);
-    if (result === "timeout")
-      child.kill("SIGKILL");
-    return result === 0;
-  };
+async function provisionTelegramPython(input, seams = {}) {
+  const packageRoot = seams.packageRoot ?? telegramRequirementsRoot();
+  if (!packageRoot)
+    throw new Error(`Olympus could not find its pinned Telethon list (${TELEGRAM_REQUIREMENTS_FILE}); reinstall Olympus, then re-run olympus connect telegram --pair.`);
+  const run = seams.run ?? runPip;
   const cacheHome = dirname33(dirname33(input.venvDir));
   ensurePrivateRootDirectorySync(cacheHome);
   ensurePrivateDirectoryTreeSync(cacheHome, dirname33(input.venvDir));
   const python = join33(input.venvDir, "bin", "python");
-  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
-  if (!ok)
+  const steps = [[input.python3, "-m", "venv", input.venvDir], ...telegramInstallCommands({ venvDir: input.venvDir, packageRoot }), [python, "-c", "import telethon"]];
+  for (const argv of steps) {
+    const result = await run(argv);
+    if (result.code === 0)
+      continue;
     rmSync6(input.venvDir, { recursive: true, force: true });
-  return ok;
+    if (PIP_HASH_MISMATCH.test(result.stderr))
+      throw new Error(telegramDependencyRefusedMessage(packageRoot));
+    return false;
+  }
+  return true;
 }
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0", TELEGRAM_DEPENDENCY_HINT, installing;
+async function runPip(argv) {
+  const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  const stderr = new Response(child.stderr).text().catch(() => "");
+  let timeout;
+  const result = await Promise.race([
+    child.exited,
+    new Promise((resolve10) => {
+      timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  if (result === "timeout")
+    child.kill("SIGKILL");
+  return { code: result, stderr: result === "timeout" ? "" : await stderr };
+}
+var TELEGRAM_TELETHON_VERSION = "1.45.0", TELEGRAM_TELETHON_REQUIREMENT, TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt", TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt", TELEGRAM_DEPENDENCY_HINT, PIP_HASH_MISMATCH, installing;
 var init_messaging_runtime = __esm(() => {
   init_atomic_file();
-  TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+  TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
+  TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
+  PIP_HASH_MISMATCH = /DO NOT MATCH THE HASHES|hashes are required in --require-hashes mode/i;
   installing = new Map;
 });
 
@@ -69613,7 +69729,7 @@ init_connected_handles();
 import { existsSync as existsSync25, mkdirSync as mkdirSync14, rmSync as rmSync7 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname34, join as join34 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -69772,7 +69888,7 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join34(dirname34(fileURLToPath4(import.meta.url)), "..", "..");
+    const packageRoot = options.packageRoot ?? join34(dirname34(fileURLToPath5(import.meta.url)), "..", "..");
     return { executable, args: [join34(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -71629,6 +71745,7 @@ class SourceScheduler {
   lastAfterTickAt;
   afterTickTimer;
   timer;
+  stops = 0;
   fastWakeTimers = new Map;
   continueAfterMs;
   setTimeoutImpl;
@@ -71699,6 +71816,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.stops += 1;
     this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
@@ -72025,6 +72143,7 @@ class SourceScheduler {
     const cadenceAnchor = state.nextRunAt;
     const attemptedAt = this.now().toISOString();
     state.lastAttemptAt = attemptedAt;
+    const stopsAtStart = this.stops;
     try {
       if (this.stateStore) {
         if (state.pendingUnpark && this.stateStore.claimUnparkAttempt) {
@@ -72055,7 +72174,7 @@ class SourceScheduler {
           }));
         }
       }
-      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance);
+      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
@@ -72124,6 +72243,10 @@ class SourceScheduler {
         this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
+      if (this.stops !== stopsAtStart) {
+        this.recordShutdownInterruption(state);
+        return;
+      }
       const message2 = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
       const errorHash = hash(message2);
@@ -72156,6 +72279,21 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind, error)}`);
     }
   }
+  recordShutdownInterruption(state) {
+    const interruptedAt = this.now().toISOString();
+    if (this.stateStore?.recordInterruption) {
+      try {
+        this.applyPersistedState(state, this.stateStore.recordInterruption({
+          ...schedulerTaskStateKey(state.source, state.task),
+          interruptedAt
+        }));
+      } catch (stateError) {
+        console.error(`[olympus:source-scheduler] state_persist_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${safeSchedulerErrorKind(stateError)}`);
+      }
+    }
+    state.nextRunAt = Date.parse(interruptedAt);
+    console.info(`[olympus:source-scheduler] task_interrupted_by_shutdown source_id=${state.source.sourceId} task_id=${state.task.id}`);
+  }
   applyPendingUnparks(dueAt) {
     if (!this.stateStore?.pendingUnparks)
       return;
@@ -72173,7 +72311,7 @@ ${request.taskId}`);
       state.nextRunAt = Math.min(state.nextRunAt, dueAt);
     }
   }
-  async runWithTransientRetries(state, task, attemptedAt, provenance) {
+  async runWithTransientRetries(state, task, attemptedAt, provenance, stopsAtStart) {
     let lastError;
     for (let attempt = 1;attempt <= this.maxTransientRetries; attempt += 1) {
       try {
@@ -72191,7 +72329,11 @@ ${request.taskId}`);
         lastError = error;
         if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries)
           break;
+        if (this.stops !== stopsAtStart)
+          break;
         await this.sleep(this.errorBackoffMs);
+        if (this.stops !== stopsAtStart)
+          break;
       }
     }
     throw lastError;
@@ -76528,6 +76670,15 @@ import { existsSync as existsSync33 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
+var GLOBAL_TIMERS = {
+  setInterval: (callback, ms) => setInterval(callback, ms),
+  clearInterval: (timer) => clearInterval(timer),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+function unrefTimer(timer) {
+  timer?.unref?.();
+}
 var MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 var DEFAULT_AUTO_MOVES_PER_PASS = 1000;
 var DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
@@ -76592,24 +76743,27 @@ class TierSnifferService {
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
   }
+  timers() {
+    return this.options.timers ?? GLOBAL_TIMERS;
+  }
   start() {
     if (this.timer)
       return;
-    this.timer = setInterval(() => {
+    this.timer = this.timers().setInterval(() => {
       this.drainMoves();
       this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
-    this.timer.unref?.();
+    unrefTimer(this.timer);
     this.wake();
   }
   wake() {
     if (this.stopped || this.continuation)
       return;
-    this.continuation = setTimeout(() => {
+    this.continuation = this.timers().setTimeout(() => {
       this.continuation = undefined;
       this.scheduledRun();
     }, 0);
-    this.continuation.unref?.();
+    unrefTimer(this.continuation);
   }
   async scheduledRun() {
     if (this.notAnsweringUntilMs > this.clockMs())
@@ -76623,7 +76777,7 @@ class TierSnifferService {
     const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
     if (!filters.length)
       return;
-    this.trainingTimer = setTimeout(() => {
+    this.trainingTimer = this.timers().setTimeout(() => {
       this.trainingTimer = undefined;
       const shouldYield = () => this.stopped || this.trainingJudge !== judge2 || this.yieldNow();
       const job = (async () => {
@@ -76646,12 +76800,12 @@ class TierSnifferService {
         this.scheduleTraining(judge2, !this.yieldNow() && filters.some((filter) => filter.trainingPending) ? 0 : 1000);
       });
     }, delay);
-    this.trainingTimer.unref?.();
+    unrefTimer(this.trainingTimer);
   }
   pauseTraining() {
     this.trainingJudge = undefined;
     if (this.trainingTimer)
-      clearTimeout(this.trainingTimer);
+      this.timers().clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
   }
   async finishTrainingValidation(signal) {
@@ -76677,10 +76831,10 @@ class TierSnifferService {
     this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation)
-      clearTimeout(this.continuation);
+      this.timers().clearTimeout(this.continuation);
     this.continuation = undefined;
     if (this.timer)
-      clearInterval(this.timer);
+      this.timers().clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running)
@@ -77065,6 +77219,11 @@ class TierSnifferService {
       if (!this.fairTurn)
         this.yieldingSinceMs = undefined;
       return false;
+    }
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
     }
     if (this.fairTurn)
       return false;
@@ -77489,17 +77648,26 @@ class TierSnifferService {
     }
   }
   newRaisesQueued() {
-    return this.ledgerPaths().some((path) => {
+    const paths = this.ledgerPaths();
+    let budget = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+    const offset = this.moveLedgerOffsets.raise % Math.max(1, paths.length);
+    for (const path of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0)
+        return false;
       try {
         const set2 = tierSetForLedger(path);
         if (!set2 || !setEmbedsWithBuiltInOnly(set2))
-          return false;
-        const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
-        return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
+          continue;
+        for (const record3 of set2.ledger.listMoving({ limit: budget, direction: "raise" }).filter(isAutoMoveCandidate)) {
+          budget--;
+          if (!this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`))
+            return true;
+        }
       } catch {
         return true;
       }
-    });
+    }
+    return false;
   }
   async drainMoves(direction = "raise") {
     try {
@@ -77530,6 +77698,13 @@ class TierSnifferService {
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
       return;
+    }
+  }
+  ownerAnswering() {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
   answering() {

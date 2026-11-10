@@ -35,7 +35,9 @@
 //   recorded, and the copies handed to the one Secrets policy
 //   (secrets-disposition.ts).
 // - A row the pass leaves as it was is stamped (`markRejudged`), so it is not
-//   re-read on every tick; a page reads a bounded window of the ledger.
+//   re-read on every tick; a page reads a bounded window of the ledger. A row
+//   whose serving text cannot be read is not settled: it is retried after a
+//   backoff (`markRejudgeUnavailable`).
 // - Runs only with a sniffer configured (the sniffer service calls it): with
 //   no private lane, recorded decisions stand exactly as before.
 
@@ -320,9 +322,11 @@ export function rejudgeStoredContent(
   const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
   const text = exported?.chunks.map((chunk) => chunk.boundedText).join('') ?? '';
   if (!exported || !text.trim()) {
-    // Nothing to read back: the decision stands, and the row is not re-read
-    // until the classifier or the sniffer changes again.
-    if (key) ledger.markRejudged(identity, key);
+    // Nothing to read back: the decision stands, but it was not re-judged, so
+    // the row is not stamped settled (#1002: an owner-words change would never
+    // be applied once the text came back). It is tried again after a backoff,
+    // or at once after a newer decision (markRejudgeUnavailable).
+    if (key) ledger.markRejudgeUnavailable(record, key);
     report.skipped += 1;
     return;
   }
