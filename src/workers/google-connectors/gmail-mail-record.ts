@@ -22,6 +22,7 @@
  *   the means to read its bytes later (`deferredBytes`); none for mail kept by
  *   name only.
  */
+import { strongKeysFromText } from '../../core/people-index.ts';
 import { createHash } from 'node:crypto';
 import type { RawItem, SourceClassificationSignals } from '../../core/contracts.ts';
 import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
@@ -210,6 +211,13 @@ function childIdentityOf(record: GmailMailRecord, account: string, attachment: G
   };
 }
 
+/** The From header's address, lowercased, when it carries exactly one. */
+function senderAddress(from: string): string | undefined {
+  if (!from || from.endsWith('…')) return undefined;
+  const emails = strongKeysFromText(from).filter((key) => key.startsWith('email:'));
+  return emails.length === 1 ? emails[0]!.slice('email:'.length) : undefined;
+}
+
 /** The message's own item. */
 export function gmailMessageItem(record: GmailMailRecord, account: string, fetchedAt = new Date().toISOString()): RawItem {
   const subject = record.headers.subject ?? '(no subject)';
@@ -241,6 +249,10 @@ export function gmailMessageItem(record: GmailMailRecord, account: string, fetch
       title: subject,
       subject,
       from,
+      // Who sent it, as the shared people index reads it (#1076): the From
+      // address as the stable sender id, and mail the owner sent as theirs.
+      ...(senderAddress(from) ? { senderId: senderAddress(from)! } : {}),
+      ...(record.labelIds.includes('SENT') ? { senderIsOwner: true } : {}),
       ...(record.headers.to ? { to: record.headers.to } : {}),
       ...(date ? { authoredAt: date } : {}),
       // Carried verbatim: it is the traversal's incremental watermark, and

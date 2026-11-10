@@ -1311,6 +1311,21 @@ function whatsAppConversationSignals(jid: string): Readonly<Record<string, unkno
   return {};
 }
 
+/**
+ * A person shown by their address when WhatsApp gave no saved or profile name
+ * (#1073): a phone-number id as the number, a hidden (LID) id as an unsaved
+ * contact. Never the raw internal id, which an answer cannot name anyone by.
+ * Groups and other ids have no person address and are left to the caller.
+ */
+export function whatsAppAddressLabel(jid: string | undefined): string | undefined {
+  const match = /^(\d{5,20})(?::\d+)?@(s\.whatsapp\.net|lid)$/.exec(jid?.trim() ?? '');
+  if (!match) return undefined;
+  // A hidden (lid) id has no number to show. Its last four digits keep two
+  // unsaved members of one group apart, in citations and for the people
+  // index, which links same-named senders who share a conversation.
+  return match[2] === 'lid' ? `Unsaved WhatsApp contact ·${match[1]!.slice(-4)}` : `+${match[1]}`;
+}
+
 function rawItemFromSpoolMessage(
   message: SpoolMessage,
   account: string,
@@ -1327,7 +1342,7 @@ function rawItemFromSpoolMessage(
   const text = spoolMessageText(message);
   const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
   const status = isWhatsAppStatusBroadcast(message.chatJid);
-  const senderName = message.senderContactName || message.senderName;
+  const senderName = message.senderContactName || message.senderName || whatsAppAddressLabel(message.senderJid);
   return {
     identity,
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
@@ -1336,7 +1351,7 @@ function rawItemFromSpoolMessage(
       titleIsConversation: true,
       ...(message.mediaType === undefined && !redacted ? { textComplete: true } : {}),
       ...whatsAppConversationSignals(message.chatJid),
-      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || whatsAppAddressLabel(message.chatJid) || message.chatJid,
       sender: senderName || message.senderJid,
       senderId: message.senderJid || undefined,
       senderLabel: senderName || message.senderJid || undefined,
@@ -1362,7 +1377,7 @@ function rawItemFromSpoolMessage(
 function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, account: string, fetchedAt: string): RawItem {
   const parent = recordIdentity(message, account);
   const status = isWhatsAppStatusBroadcast(message.chatJid);
-  const senderName = message.senderContactName || message.senderName;
+  const senderName = message.senderContactName || message.senderName || whatsAppAddressLabel(message.senderJid);
   return {
     identity: childIdentity(parent, child),
     mimeType: child.mimeType,
@@ -1371,7 +1386,7 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
       name: child.name,
       title: child.name,
       ...whatsAppConversationSignals(message.chatJid),
-      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || whatsAppAddressLabel(message.chatJid) || message.chatJid,
       sender: senderName || message.senderJid,
       senderLabel: senderName || message.senderJid || undefined,
       senderIsOwner: message.fromMe,
