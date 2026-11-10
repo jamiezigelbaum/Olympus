@@ -168224,7 +168224,7 @@ function updateNoticeProgram(config2) {
     if (local && csrf)
       return false;
     try {
-      const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" });
+      const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrf } });
       const body = response.ok ? await response.json() : undefined;
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrf = body.csrf_token;
