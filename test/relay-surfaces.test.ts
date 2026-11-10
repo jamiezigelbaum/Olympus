@@ -17,8 +17,8 @@ import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/co
 import { parseRemotePublicBaseUrl, remoteMcpResource, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 import { readSurfaceEntries } from '../src/core/remote-relay-runtime.ts';
 import { REMOTE_ERROR_SCHEMA } from '../src/core/remote-result.ts';
-import { CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
-import { createRelaySurfacesHandler, withRelaySurfacesRoute } from '../src/workers/relay-surfaces.ts';
+import { CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID, CURSOR_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { createRelaySurfacesHandler, relaySurfaceEntries, withRelaySurfacesRoute } from '../src/workers/relay-surfaces.ts';
 
 const SECRET = 'relay-child-secret-for-surface-tests';
 
@@ -94,6 +94,16 @@ describe('the mapping route', () => {
     });
     // Exactly the relay's wire shape.
     expect(parseSurfacesMessage({ type: 'surfaces', v: body.v, entries: body.entries })).toHaveLength(3);
+  });
+
+  test('the Claude App switch changes only pinned Claude access tokens in the engine mapping', () => {
+    const clients = [CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID, CURSOR_CLIENT_ID];
+    const tokens = clients.map(client => grant(client, 'test').tokens.accessToken);
+    const readEntries = (enabled: boolean) => Object.fromEntries(relaySurfaceEntries({
+      connections: () => store, publicUrls: urls, claudeAppEnabled: () => enabled,
+    }).map(item => [item.fingerprint, item.surface]));
+    expect(tokens.map(token => readEntries(false)[fingerprintOf(token)])).toEqual(['chatgpt', 'remote', 'remote', 'remote']);
+    expect(tokens.map(token => readEntries(true)[fingerprintOf(token)])).toEqual(['chatgpt', 'claude-app', 'remote', 'remote']);
   });
 
   test('content-free: no token, digest, refresh token, connection id, name or client', async () => {

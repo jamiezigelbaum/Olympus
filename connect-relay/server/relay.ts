@@ -1,3 +1,4 @@
+import { claudeAppDomain } from '../shared/mcp-app-client.ts';
 /**
  * Olympus connect relay, version 2.
  *
@@ -688,6 +689,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         // Which tools this credential gets, as its engine confirmed; the
         // directory endpoint serves ChatGPT only.
         credentialSurface: surface === 'directory' ? 'chatgpt' : offlineSurface(installId, key, digest),
+        connectorUrl: `${origin.origin}/mcp`,
         // A per-app demo's credentials keep the demo grant's narrow list.
         demoInstall: perAppDemoInstalls.has(installId),
       }),
@@ -868,16 +870,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    */
   const privateAnswer = async (request: Request, url: URL, ip: string): Promise<Response> => {
     const requestOrigin = request.headers.get('origin');
-    const allowed = isPanelOrigin(requestOrigin, panelOrigins);
+    const privateRoute = url.search ? undefined : privateAnswerRoute(url.pathname);
+    const jobId = privateRoute?.jobId;
+    const installId = privateAnswerInstallId(jobId);
+    const claudeOrigins = installId && surfaceMap.hasClaudeApp(installId)
+      ? [`https://${claudeAppDomain(`${origin.origin}/mcp`)}`] : [];
+    const allowed = isPanelOrigin(requestOrigin, [...panelOrigins, ...claudeOrigins]);
     // Refusals log only which kind of origin was refused: an OpenAI widget
     // host by name (not private), anything else as 'other', never verbatim.
     if (!allowed) log('panel_origin_refused', { origin: panelOriginClass(requestOrigin) });
     const cors = allowed ? privateAnswerCorsHeaders(requestOrigin) : {};
     const reply = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
       json(status, body, { ...cors, ...headers });
-    const privateRoute = url.search ? undefined : privateAnswerRoute(url.pathname);
-    const jobId = privateRoute?.jobId;
-    const installId = privateAnswerInstallId(jobId);
     if (!privateRoute || !jobId || !installId) return reply(404, { status: 'gone' });
     if (request.method === 'OPTIONS') {
       return allowed ? new Response(null, { status: 204, headers: { ...cors, 'Cache-Control': 'no-store' } }) : reply(403, { status: 'forbidden' });

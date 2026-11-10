@@ -40,13 +40,18 @@ export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
 
 /**
  * Set by the engine beside the authenticated marker on an MCP answer: which
- * tool surface that credential gets, `chatgpt` (a pinned ChatGPT grant) or
- * `remote` (Claude, Grok and every other connection). The relay keeps it with
+ * tool surface that credential gets: `chatgpt`, opt-in `claude-app`, or
+ * `remote` (every other connection). The relay keeps it with
  * the confirmed credential only to choose its own answers while the Mac is
  * offline (server/relay-mcp.ts); it grants nothing and never leaves the relay.
  */
 export const SURFACE_RESPONSE_HEADER = 'x-olympus-surface';
-export type CredentialSurface = 'chatgpt' | 'remote';
+export type CredentialSurface = 'chatgpt' | 'claude-app' | 'remote';
+
+/** Unknown or newer surface names must never promote a credential to an App surface. */
+export function credentialSurface(value: unknown): CredentialSurface {
+  return value === 'chatgpt' || value === 'claude-app' ? value : 'remote';
+}
 
 const SURFACE_FINGERPRINT_DOMAIN = 'olympus-relay/surface-fingerprint/v1\n';
 

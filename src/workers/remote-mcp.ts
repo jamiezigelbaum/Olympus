@@ -56,7 +56,8 @@ import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search
 import { DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
-import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId } from '../../connect-relay/shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId, type CredentialSurface } from '../../connect-relay/shared/tokens.ts';
+import { grantMcpSurface } from './remote-oauth/pinned-clients.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 /** The read-only tools a demo grant gets on the remote surface (shared with the relay's offline answers). */
@@ -91,6 +92,8 @@ export interface RemoteMcpHandlerOptions {
    * marker carries the child's per-boot secret, core/remote-access.ts).
    */
   isRelayed?: (request: Request) => boolean;
+  /** Per-install opt-in; only the pinned Claude OAuth grant on the relay's /mcp may use the App. */
+  claudeApp?: { enabled: () => boolean };
   chatgpt?: ChatGptSurfaceOptions & {
     /** Whether this request, from this connection, gets the ChatGPT surface. */
     servesRequest: (request: Request, connection: RemoteMcpConnection) => boolean;
@@ -154,7 +157,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       const response = await serveAuthenticated(request, verification, surface);
       // Only the relay reads the mark; a direct caller never sees it.
       if (!isRelayed(request)) return response;
-      return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? 'chatgpt' : 'remote');
+      return markAuthenticated(response, appSurface(request, verification.connection, surface));
     } catch (error) {
       // Anything thrown before or around the MCP transport (building the
       // operation context, the surface choice, the transport itself) is a
@@ -163,6 +166,13 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       return remoteFailureResponse(error);
     }
   };
+
+  function appSurface(request: Request, connection: RemoteMcpConnection, surface: McpSurface): CredentialSurface {
+    if (options.chatgpt?.servesRequest(request, connection)) return 'chatgpt';
+    if (surface === 'default' && options.chatgpt && isRelayed(request)
+      && grantMcpSurface(connection, options.claudeApp?.enabled() === true) === 'claude-app') return 'claude-app';
+    return 'remote';
+  }
 
   async function serveAuthenticated(
     request: Request,
@@ -189,8 +199,11 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     }
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const chatgpt = options.chatgpt?.servesRequest(request, verification.connection)
-      ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true }
+    const selected = appSurface(request, verification.connection, surface);
+    const urls = currentRemotePublicUrls(options.publicUrls);
+    const chatgpt = selected !== 'remote' && options.chatgpt
+      ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true,
+          ...(selected === 'claude-app' && urls ? { appClient: { host: 'claude' as const, connectorUrl: urls.resource } } : {}) }
       : undefined;
     // The directory endpoint serves the ChatGPT surface only.
     if (surface === 'directory' && !chatgpt) return jsonResponse(404, remoteSurfaceErrorOutput('not_found'));
@@ -290,7 +303,7 @@ async function withToolRetryAfter(response: Response): Promise<Response> {
  * answers while the Mac is offline never show one client another's tools
  * (connect-relay/server/relay-mcp.ts).
  */
-function markAuthenticated(response: Response, surface: 'chatgpt' | 'remote'): Response {
+function markAuthenticated(response: Response, surface: CredentialSurface): Response {
   const headers = new Headers(response.headers);
   headers.set(AUTHENTICATED_RESPONSE_HEADER, '1');
   headers.set(SURFACE_RESPONSE_HEADER, surface);

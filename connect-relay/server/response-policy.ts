@@ -32,7 +32,7 @@
  * caller: a value the platform would refuse fails the stream with a 502
  * instead of leaving the request waiting.
  */
-import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, type CredentialSurface } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialSurface, type CredentialSurface } from '../shared/tokens.ts';
 
 export type RouteKind = 'api' | 'browser' | 'demo';
 
@@ -150,7 +150,7 @@ export function checkResponseHead(
       continue;
     }
     if (name === SURFACE_RESPONSE_HEADER) {
-      if (value === 'chatgpt' || value === 'remote') surface = value;
+      surface = credentialSurface(value);
       continue;
     }
     if (!RESPONSE_HEADER_ALLOWLIST.has(name)) continue;

@@ -6642,11 +6642,12 @@ export async function main(): Promise<void> {
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
-  const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
+  const { resolveRemotePublicUrls, currentRemotePublicUrls } = await import('../../core/remote-public-url.ts');
+  const { claudeAppDomain } = await import('../../../connect-relay/shared/mcp-app-client.ts');
   const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { withRequestPeer } = await import('../../core/request-peer.ts');
   const { createRelaySurfacesHandler, withRelaySurfacesRoute } = await import('../relay-surfaces.ts');
-  const { isChatGptGrant } = await import('../remote-oauth/pinned-clients.ts');
+  const { isChatGptGrant, grantMcpSurface } = await import('../remote-oauth/pinned-clients.ts');
   const { isDemoGrant } = await import('../remote-oauth/demo-consent.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
   const { resolveDemoConsent } = await import('../remote-oauth/demo-consent.ts');
@@ -6767,13 +6768,13 @@ export async function main(): Promise<void> {
           })
       : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
-  // A background connection: a live remote agent that is not ChatGPT (the
-  // owner's ChatGPT is the owner's own work). An unknown id is not one.
+  // App connections are the owner's interactive work; other live remote
+  // agents are background connections. An unknown id is not one.
   function isBackgroundConnection(connectionId: string | undefined): boolean {
     if (!connectionId) return false;
     try {
       const record = remoteConnections()?.list().find((connection) => connection.id === connectionId);
-      return record !== undefined && !isChatGptGrant(record);
+      return record !== undefined && grantMcpSurface(record, olympusConfig.remote?.claudeAppEnabled === true) === 'remote';
     } catch {
       return false;
     }
@@ -7566,12 +7567,17 @@ export async function main(): Promise<void> {
     fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
+      claudeAppEnabled: () => olympusConfig.remote?.claudeAppEnabled === true,
       isRelayed: isRelayedRequest,
     }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs, { isRelayed: carriesRelayMarker }), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       questions: privateQuestions,
       isRelayed: isRelayedRequest,
-      extraOrigins: () => [DASHBOARD_UI_DOMAIN],
+      extraOrigins: () => {
+        const urls = currentRemotePublicUrls(remotePublicUrls);
+        return [DASHBOARD_UI_DOMAIN, ...(olympusConfig.remote?.claudeAppEnabled === true && urls
+          ? [`https://${claudeAppDomain(urls.resource)}`] : [])];
+      },
     }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
@@ -7591,6 +7597,7 @@ export async function main(): Promise<void> {
       withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
         withRemoteFailureBoundary(createRemoteMcpHandler({
           ...sharedRemoteMcpOptions,
+          claudeApp: { enabled: () => olympusConfig.remote?.claudeAppEnabled === true },
           // Only the public relay route can select the pinned ChatGPT surface.
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),

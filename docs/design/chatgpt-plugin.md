@@ -323,6 +323,24 @@ private panels are unaffected: their job ids name the install, not the
 endpoint. Installs forward `/openai/mcp` from the release that added it; an
 older install answers it 404.
 
+**Claude dashboard opt-in (2026-11-10, #1266).** Set
+`remote.claudeAppEnabled: true` in the install's existing configuration
+(`~/.olympus/engine.json` for the standalone engine, or the Olympus plugin's
+`remote` section in OpenClaw), then restart Olympus. This setting, “Show the
+dashboard in Claude”, defaults off. Only the pinned Claude custom connector
+on `/mcp` gains the shared dashboard, private question and private answer
+MCP Apps. App-only tool visibility and widget-only privacy confirmations are
+unchanged. Grok, Cursor, bearer connections and `/openai/mcp` keep their
+existing surfaces. The Claude resources use the first 32 hex characters of
+SHA-256 of the public connector URL, followed by `.claudemcpcontent.com`, as
+their bare `ui.domain`; ChatGPT's resource output stays unchanged.
+
+The relay syncs `claude-app` as a credential surface for offline listings.
+The exact Claude sandbox origin is accepted on private panel routes only
+while that install has a live Claude App mapping; the engine independently
+checks its opt-in. Panel job ownership, sealing and one-time collection use
+the existing handlers. Unknown surface names fall back to `remote`.
+
 ## Dashboard view-model contract (v1)
 
 Returned as `structuredContent` by the `olympus_dashboard` tool and rendered by

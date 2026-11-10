@@ -12,7 +12,7 @@
  * - Each frame replaces the install's whole set: a rotated token is added,
  *   and a revoked or expired one goes, as soon as the engine says so. An
  *   entry past its expiry is never served, whatever the engine last said.
- * - Content-free: fingerprints, a two-value surface, an endpoint and an
+ * - Content-free: fingerprints, a surface name, an endpoint and an
  *   expiry. No token, name, provider, connection or question.
  * - Bounded: MAX_SURFACE_ENTRIES per install, and `maxEntries` across the
  *   relay (the installs that synced longest ago are dropped first).
@@ -31,7 +31,7 @@
  * `maxSyncedInstalls`, the registry's own bound by default.
  */
 import { MAX_SURFACE_ENTRIES, type SurfaceEndpoint, type SurfaceEntry } from '../shared/protocol.ts';
-import type { CredentialSurface } from '../shared/tokens.ts';
+import { credentialSurface, type CredentialSurface } from '../shared/tokens.ts';
 
 interface InstallMap {
   /** `<endpoint>\0<fingerprint>` → surface and expiry (ms). */
@@ -78,7 +78,7 @@ export class SurfaceMap {
     }
     const map: InstallMap = { entries: new Map() };
     for (const { entry, expiresAtMs } of live) {
-      map.entries.set(key(entry.endpoint, entry.fingerprint), { surface: entry.surface, expiresAtMs });
+      map.entries.set(key(entry.endpoint, entry.fingerprint), { surface: credentialSurface(entry.surface), expiresAtMs });
     }
     this.installs.set(installId, map);
     this.total += map.entries.size;
@@ -93,6 +93,13 @@ export class SurfaceMap {
   /** Whether this install's engine has synced a mapping (an empty one included). */
   synced(installId: string): boolean {
     return this.syncedInstalls.has(installId);
+  }
+
+  /** Used only for the opted-in Claude panel's CORS preflight; it authorizes no job. */
+  hasClaudeApp(installId: string): boolean {
+    const at = this.now();
+    return [...(this.installs.get(installId)?.entries.values() ?? [])]
+      .some(entry => entry.surface === 'claude-app' && entry.expiresAtMs > at);
   }
 
   /** The surface the engine named for this credential, while it has not expired. */

@@ -190,6 +190,8 @@ export interface OlympusConfig {
    */
   remote?: {
     enabled: boolean;
+    /** Show the dashboard in Claude custom connectors. Opt-in; restart the engine after changing. */
+    claudeAppEnabled?: boolean;
     relayHost?: string;
     publicBaseUrl?: string;
     /**
@@ -698,6 +700,7 @@ function applyOpenClawPluginRemote(config: OlympusConfig, env: Record<string, st
 /** The `remote` plugin-config section, kept to its known fields. */
 export function parseRemoteConfig(remote: Record<string, unknown>): NonNullable<OlympusConfig['remote']> {
   const parsed: NonNullable<OlympusConfig['remote']> = { enabled: remote.enabled === true };
+  if (remote.claudeAppEnabled !== undefined) parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
   for (const key of ['relayHost', 'publicBaseUrl'] as const) {
     const value = remote[key];
     if (typeof value === 'string' && value.trim()) parsed[key] = value.trim();
