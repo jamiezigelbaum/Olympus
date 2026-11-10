@@ -525,14 +525,50 @@ function isRoamRecord(keys: ReadonlySet<string>): boolean {
   return keys.has('title') && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || (keys.has('children') && keys.has('uid')));
 }
 
-/** Whether a record's keys say a note is Reflect's or a page is Roam's, or both. */
-function recordsFormat(records: readonly ReadonlySet<string>[], shape: 'list' | 'notes'): 'reflect' | 'roam' | undefined {
-  const reflect = records.some(isReflectRecord);
-  const roam = records.some(isRoamRecord);
-  if (reflect === roam) return undefined;
-  // Roam's export is a bare list of pages.
-  if (roam) return shape === 'list' ? 'roam' : undefined;
-  return 'reflect';
+/**
+ * A ChatGPT conversation, in the keys OpenAI's data export writes it with
+ * (`conversations.json`, or `conversations-000.json` and on in a large
+ * export): its graph of messages (`mapping`) beside its title, its times or
+ * the node it ends on. A `mapping` alone is any application's data.
+ */
+function isChatGptConversation(keys: ReadonlySet<string>): boolean {
+  return keys.has('mapping') && (keys.has('current_node') || keys.has('create_time') || keys.has('title'));
+}
+
+/**
+ * A Claude conversation, in the keys Anthropic's data export writes it with
+ * (`conversations.json`): its messages (`chat_messages`) beside its id, its
+ * name or its time. `chat_messages` alone is any application's data.
+ */
+function isClaudeConversation(keys: ReadonlySet<string>): boolean {
+  return keys.has('chat_messages') && (keys.has('uuid') || keys.has('name') || keys.has('created_at'));
+}
+
+/** The JSON exports told by the keys of their records. */
+type JsonExportKind = 'reflect' | 'roam' | 'chatgpt' | 'claude';
+
+const JSON_EXPORT_RECORDS: ReadonlyArray<readonly [JsonExportKind, (keys: ReadonlySet<string>) => boolean]> = [
+  ['reflect', isReflectRecord],
+  ['roam', isRoamRecord],
+  ['chatgpt', isChatGptConversation],
+  ['claude', isClaudeConversation],
+];
+
+/** Whether the keys seen so far say which export a record is. */
+function anyJsonExportRecord(keys: ReadonlySet<string>): boolean {
+  return JSON_EXPORT_RECORDS.some(([, is]) => is(keys));
+}
+
+/**
+ * Which export the records' keys say, when they say exactly one; records of
+ * two kinds are neither. Every export but Reflect's is a bare list (Reflect's
+ * may also be an object holding its notes).
+ */
+function recordsFormat(records: readonly ReadonlySet<string>[], shape: 'list' | 'notes'): JsonExportKind | undefined {
+  const found = JSON_EXPORT_RECORDS.filter(([, is]) => records.some(is)).map(([kind]) => kind);
+  if (found.length !== 1) return undefined;
+  const only = found[0]!;
+  return only === 'reflect' || shape === 'list' ? only : undefined;
 }
 
 /** What a probe entry can say of a JSON file: its first bytes, and the way on to the keys they did not reach. */
@@ -543,17 +579,18 @@ export interface ArchiveJsonProbe {
 }
 
 /**
- * Which notes export a JSON file is, if exactly one: judged on the keys of its
- * first records (a Reflect note says something and is titled or dated; a Roam
- * page is titled and has its times or blocks with an id), never on a word
- * anywhere else. A file that shows both, or neither, is neither: the person
- * is told what Olympus does import rather than have it guess.
+ * Which JSON export a file is, if exactly one: judged on the keys of its first
+ * records (a Reflect note says something and is titled or dated; a Roam page
+ * is titled and has its times or blocks with an id; a ChatGPT or a Claude
+ * conversation has its messages beside its title, id or times), never on a
+ * word anywhere else. A file that shows two, or none, is none: the person is
+ * told what Olympus does import rather than have it guess.
  *
  * The first bytes decide when they can. When they end inside the first record,
  * before the keys that would say, the probe reads on to the end of that record
  * (skipping values, `firstRecordKeys`) and the decision is made on all of it.
  */
-function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefined {
+function jsonExportFormat(probe: ArchiveJsonProbe): JsonExportKind | undefined {
   const parsed = headRecordKeys(probe.head);
   if (!parsed) return undefined;
   const fromHead = recordsFormat(parsed.records, parsed.shape);
@@ -561,7 +598,7 @@ function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefine
   // Every format asks about the same entry; the file is read on once.
   let scanned = SCANNED.get(probe);
   if (!scanned) {
-    const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], anyJsonExportRecord);
     scanned = { keys };
     SCANNED.set(probe, scanned);
   }
@@ -579,12 +616,12 @@ function isEmptyRecordList(head: Uint8Array | undefined, inNotes: boolean): bool
 
 /** Whether a file's first bytes are a Reflect JSON export: a list of notes (or an object holding a `notes` list) in Reflect's keys. */
 export function looksLikeReflectJson(head: Uint8Array | undefined): boolean {
-  return notesJsonFormat({ head }) === 'reflect';
+  return jsonExportFormat({ head }) === 'reflect';
 }
 
 /** Whether a file's first bytes are a Roam JSON export: a list of titled pages with Roam's keys. */
 export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
-  return notesJsonFormat({ head }) === 'roam';
+  return jsonExportFormat({ head }) === 'roam';
 }
 
 /**
@@ -593,7 +630,7 @@ export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
  * list with nothing in it, which reads as no notes and is not another thing.
  */
 export function acceptsReflectJson(probe: ArchiveJsonProbe): boolean {
-  if (notesJsonFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true)) return true;
+  if (jsonExportFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true)) return true;
   // An object whose notes list is further down than the first bytes reach may hold an empty one; a list with a record in it is not empty.
   if (!probe.listIsEmpty || SCANNED.get(probe)?.keys) return false;
   return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
@@ -601,7 +638,7 @@ export function acceptsReflectJson(probe: ArchiveJsonProbe): boolean {
 
 /** Whether a JSON file inside a zip may be read as a Roam export: a list of pages, or an empty list. */
 export function acceptsRoamJson(probe: ArchiveJsonProbe): boolean {
-  return notesJsonFormat(probe) === 'roam' || isEmptyRecordList(probe.head, false);
+  return jsonExportFormat(probe) === 'roam' || isEmptyRecordList(probe.head, false);
 }
 
 /**
@@ -622,20 +659,19 @@ function zipJsonMembers(entry: ArchiveProbeEntry): ArchiveProbeEntry[] {
 
 /**
  * A JSON export, as a .json file or as a zip holding one. A zip is this
- * format's when one of its JSON files is and none is the other notes
- * format's: a zip of both is not guessed at. (Its other JSON files are not
- * read as this format; the connector leaves them out and says so.)
+ * format's when one of its JSON files is and none is another export's: a zip
+ * of two is not guessed at. (Its other JSON files are not read as this
+ * format; the connector leaves them out and says so.)
  */
 function readsJsonExport(
   entry: ArchiveProbeEntry,
-  format: 'reflect' | 'roam',
+  format: JsonExportKind,
 ): boolean {
-  const other = format === 'reflect' ? 'roam' : 'reflect';
   if (entry.members) {
-    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
-    return members.includes(format) && !members.includes(other);
+    const members = zipJsonMembers(entry).map((member) => jsonExportFormat(member)).filter((kind) => kind !== undefined);
+    return members.includes(format) && members.every((kind) => kind === format);
   }
-  return notesJsonFormat(entry) === format;
+  return jsonExportFormat(entry) === format;
 }
 
 /** Reflect's export as one JSON file (or a zip holding it): the notes with their dates and tags. */
@@ -705,6 +741,74 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
     ready: 'Drop the .zip Roam saved, or the .json file inside it.',
   }),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'roam')),
+});
+
+// --- AI conversation exports: ChatGPT and Claude ------------------------------------
+
+/** Whether a JSON file inside a zip may be read as a ChatGPT export: a list of conversations, or an empty list. */
+export function acceptsChatGptJson(probe: ArchiveJsonProbe): boolean {
+  return jsonExportFormat(probe) === 'chatgpt' || isEmptyRecordList(probe.head, false);
+}
+
+/** Whether a JSON file inside a zip may be read as a Claude export: a list of conversations, or an empty list. */
+export function acceptsClaudeJson(probe: ArchiveJsonProbe): boolean {
+  return jsonExportFormat(probe) === 'claude' || isEmptyRecordList(probe.head, false);
+}
+
+/**
+ * The files this format reads: the chosen file itself, or for a chosen folder
+ * every file in it that is this export (a large ChatGPT export, unzipped, is
+ * several `conversations-NNN.json`), in the order of their names.
+ */
+function detectFiles(probe: ArchiveProbe, reads: (entry: ArchiveProbeEntry) => boolean): readonly string[] | undefined {
+  if (probe.chosen.kind === 'file') return reads(probe.chosen) ? [''] : undefined;
+  const found = probe.children
+    .filter((entry) => entry.kind === 'file' && !isJunkArchiveMember(entry.name) && reads(entry))
+    .map((entry) => entry.relPath)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return found.length > 0 ? found : undefined;
+}
+
+/** How OpenAI and Anthropic name the conversations of a data export; a large ChatGPT export splits them into numbered files. */
+const AI_CONVERSATION_NAMES = Object.freeze(['conversations.json', 'conversations-*.json']);
+
+/**
+ * ChatGPT's data export (Settings, Data controls, Export data): a zip whose
+ * `conversations.json` (or `conversations-000.json` and on, in a large export)
+ * is a list of conversations, each a graph of messages (`mapping`) and the
+ * node the visible thread ends on (`current_node`). Told by those keys, never
+ * by a file name. Chosen as the zip, as the JSON file, or as the unzipped
+ * folder. Pictures and files in the export are not read.
+ */
+export const CHATGPT_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'chatgpt-export',
+  label: 'ChatGPT conversations (data export)',
+  family: 'chat',
+  provider: 'chatgpt_export',
+  chooseHint: 'a ChatGPT data export (the .zip from Settings, Data controls, Export data, or the conversations.json in it)',
+  citationLabel: 'ChatGPT',
+  probeNames: Object.freeze(['*.json']),
+  signatureNames: AI_CONVERSATION_NAMES,
+  detect: (probe: ArchiveProbe) => detectFiles(probe, (entry) => readsJsonExport(entry, 'chatgpt')),
+});
+
+/**
+ * Claude's data export (Settings, Privacy, Export data): a zip whose
+ * `conversations.json` is a list of conversations, each with its messages in
+ * order (`chat_messages`, each sent by `human` or `assistant`). Told by those
+ * keys, never by a file name. Chosen as the zip, as the JSON file, or as the
+ * unzipped folder. Attachments and files in the export are not read.
+ */
+export const CLAUDE_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'claude-export',
+  label: 'Claude conversations (data export)',
+  family: 'chat',
+  provider: 'claude_export',
+  chooseHint: 'a Claude data export (the .zip from Settings, Privacy, Export data, or the conversations.json in it)',
+  citationLabel: 'Claude',
+  probeNames: Object.freeze(['*.json']),
+  signatureNames: AI_CONVERSATION_NAMES,
+  detect: (probe: ArchiveProbe) => detectFiles(probe, (entry) => readsJsonExport(entry, 'claude')),
 });
 
 // --- Evernote export (.enex) ------------------------------------------------------
@@ -833,6 +937,8 @@ export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze
   ROAM_JSON_ARCHIVE_FORMAT,
   TELEGRAM_JSON_ARCHIVE_FORMAT,
   EVERNOTE_ENEX_ARCHIVE_FORMAT,
+  CHATGPT_ARCHIVE_FORMAT,
+  CLAUDE_ARCHIVE_FORMAT,
 ]);
 
 /** One app's export guide (#660), with the formats it yields; in registry order. */

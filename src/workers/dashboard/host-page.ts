@@ -80,6 +80,7 @@ export const DASHBOARD_LOCAL_PAGES = {
   connector: 'connector',
   help: 'help',
   settings: 'settings',
+  people: 'people',
 } as const;
 
 export type DashboardLocalPage = keyof typeof DASHBOARD_LOCAL_PAGES;

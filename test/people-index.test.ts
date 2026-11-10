@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,9 @@ import {
   LocalPeopleIndex,
   OWNER_PERSON_ID,
   peopleIndexPath,
+  forgetPeopleIndexRows,
   linkPeople,
+  displayNameFromLabel,
   normalizePhone,
   strongKeysFromText,
   type PeopleCorrection,
@@ -46,6 +49,17 @@ describe('people index: strong keys', () => {
     expect(strongKeysFromText('14155550123@s.example.net')).toEqual(['email:14155550123@s.example.net', 'phone:+14155550123']);
     expect(strongKeysFromText('777')).toEqual([]);
     expect(strongKeysFromText('123456@lid')).toEqual([]);
+  });
+
+  test('an address keeps its whole local part, apostrophes and all', () => {
+    expect(strongKeysFromText("Pat O'Brien <O'Brien@example.com>")).toEqual(["email:o'brien@example.com"]);
+    expect(strongKeysFromText('first.last+tag!x#y@example.com')).toEqual(['email:first.last+tag!x#y@example.com']);
+    expect(displayNameFromLabel("o'brien@example.com")).toBeUndefined();
+    const people = linkPeople({ observations: [
+      obs('mail', "o'brien@example.com", undefined),
+      obs('mail-2', 'brien@example.com', undefined),
+    ] });
+    expect(personOf(people, "sender:mail:o'brien@example.com").identities).toHaveLength(1);
   });
 
   test('a mailbox whose name is all digits still links by its email address', () => {
@@ -122,9 +136,9 @@ describe('people index: names', () => {
 
   test('a name and a group chat with the same third person link across sources', () => {
     const people = linkPeople({ observations: [
-      // Mark is one person on both sources (same email).
-      obs('chat-a', 'mark@example.com', 'Mark', { conversationIds: ['trip'] }),
-      obs('chat-b', 'mark@example.com', 'Mark', { conversationIds: ['crew'] }),
+      // Theo is one person on both sources (same email).
+      obs('chat-a', 'theo@example.com', 'Theo', { conversationIds: ['trip'] }),
+      obs('chat-b', 'theo@example.com', 'Theo', { conversationIds: ['crew'] }),
       obs('chat-a', 'a1', 'Brianna Reyes', { conversationIds: ['trip'] }),
       obs('chat-b', 'b1', 'Brianna Reyes', { conversationIds: ['crew'] }),
     ] });
@@ -320,6 +334,46 @@ describe('people index: owner corrections', () => {
     });
   });
 
+  test('the owner is always one "You": owner-separating corrections are refused, and old ones ignored', () => {
+    const owners = [
+      obs('mail', 'me@example.com', 'Me', { isOwner: true }),
+      obs('chat-a', '42', 'Me', { isOwner: true }),
+      obs('chat-b', '777', 'Brianna Reyes'),
+    ];
+    const ME_MAIL = 'sender:mail:me@example.com';
+    const ME_CHAT = 'sender:chat-a:42';
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    try {
+      index.rebuild(owners);
+      expect(() => index.correct({ kind: 'split', identity: ME_CHAT })).toThrow();
+      expect(() => index.correct({ kind: 'not_same', identityA: ME_MAIL, identityB: ME_CHAT })).toThrow();
+      // Telling the owner apart from someone else is still the owner's call.
+      index.correct({ kind: 'not_same', identityA: ME_MAIL, identityB: 'sender:chat-b:777' });
+      expect(index.corrections()).toHaveLength(1);
+    } finally {
+      index.close();
+    }
+    // A stored correction from before this rule never wedges a rebuild.
+    const people = linkPeople({
+      observations: owners,
+      corrections: [
+        { kind: 'split', identity: ME_CHAT },
+        { kind: 'not_same', identityA: ME_MAIL, identityB: ME_CHAT },
+      ],
+    });
+    expect(people.filter((person) => person.isOwner)).toHaveLength(1);
+    expect(personOf(people, ME_CHAT).personId).toBe(OWNER_PERSON_ID);
+    const stored = new LocalPeopleIndex({ dbPath: ':memory:' });
+    try {
+      stored.rebuild([obs('mail', 'me@example.com', 'Me'), obs('chat-a', '42', 'Me')]);
+      stored.correct({ kind: 'split', identity: ME_CHAT });
+      expect(() => stored.rebuild(owners)).not.toThrow();
+      expect(stored.list().filter((person) => person.isOwner)).toHaveLength(1);
+    } finally {
+      stored.close();
+    }
+  });
+
   test('split keeps an identity on its own until the owner merges it', () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     try {
@@ -345,6 +399,64 @@ describe('people index: owner corrections', () => {
       expect(index.citationName('messages', 'brianna@example.com')).toBeUndefined();
     } finally {
       index.close();
+    }
+  });
+});
+
+describe('people index: forgetting a source', () => {
+  test('a people index from before the corrections kept their corpora still forgets, dry run included', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-forget-v1-'));
+    const dbPath = join(dir, 'people.sqlite');
+    try {
+      const index = new LocalPeopleIndex({ dbPath });
+      index.rebuild([obs('gmail', 'quinn@example.com', 'Quinn', { corpusId: 'internal.email' })]);
+      index.correct({ kind: 'rename', identity: 'sender:gmail:quinn@example.com', name: 'Quinn H.' });
+      index.close();
+      // The schema #1152 shipped: no corpus list on a correction.
+      const raw = new Database(dbPath);
+      raw.exec('ALTER TABLE people_corrections DROP COLUMN corpus_ids_json');
+      raw.close();
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] }, { dryRun: true })).toBe(2);
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] })).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a source's Delete takes the owner's corrections with it, even once its senders are gone", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-forget-'));
+    const dbPath = join(dir, 'people.sqlite');
+    try {
+      const index = new LocalPeopleIndex({ dbPath });
+      index.rebuild([obs('gmail', 'quinn@example.com', 'Quinn', { corpusId: 'internal.email' })]);
+      index.correct({ kind: 'rename', identity: 'sender:gmail:quinn@example.com', name: 'Quinn H.' });
+      // Every item of that sender was tombstoned: the identity drops out.
+      index.rebuild([]);
+      index.close();
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] }, { dryRun: true })).toBe(1);
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] })).toBe(1);
+      const reopened = new LocalPeopleIndex({ dbPath });
+      expect(reopened.corrections()).toEqual([]);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a correction is tied to every source its identities were seen in', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'people-forget-'));
+    const dbPath = join(dir, 'people.sqlite');
+    try {
+      const index = new LocalPeopleIndex({ dbPath });
+      index.correct({ kind: 'rename', identity: 'sender:gmail:quinn@example.com', name: 'Quinn H.' });
+      // Seen only after the rename, in another account's corpus.
+      index.rebuild([obs('gmail', 'quinn@example.com', 'Quinn', { corpusId: 'internal.email-2' })]);
+      index.rebuild([]);
+      index.close();
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email'] })).toBe(0);
+      expect(forgetPeopleIndexRows(dbPath, { corpusIds: ['internal.email-2'] })).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
