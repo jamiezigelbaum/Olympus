@@ -177,3 +177,91 @@ test('a bound store\'s ledger hint points at where this computer keeps the resto
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+describe('data restore keeps which account a source\'s items came from', () => {
+  // The finding on #1098: a restored Dropbox, Drive, Gmail or X source came
+  // back with no account on record, so signing in again to the SAME account
+  // was taken for a change and the account guard asked for a purge.
+  test('a same-account sign-in resumes sync; another account is still caught', async () => {
+    const { lifecycleAccountFiles, lifecycleHandleRegistryPath } = await import('../src/data-lifecycle.ts');
+    const { placeOwnedAccount, recordProviderAccount } = await import('../src/core/source-storage.ts');
+    const { recordedProviderAccount } = await import('../src/core/provider-account-history.ts');
+    const binding = await import('../src/core/source-account-binding.ts');
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-account-'));
+    const homeA = join(dir, 'a');
+    const backup = join(dir, 'backup');
+    const account = 'dbid:main-account';
+    const source = 'dropbox.files';
+    try {
+      const envA = lifecycleEnv({ homeDir: homeA });
+      placeOwnedAccount({ sourceId: source }, envA);
+      seed(lifecycleAccountFiles(source, { homeDir: homeA }).stores[0]!, 'rows', 'a file');
+      expect(recordProviderAccount({ sourceId: source }, account, envA)).toBe('recorded');
+      binding.updateSourceAccountBinding(binding.sourceAccountBindingsPath(lifecycleHandleRegistryPath({ homeDir: homeA })), source, () => ({
+        provider_account_id: account,
+        bound_at: '2026-11-01T00:00:00.000Z',
+        bound_grant: '2026-11-01T00:00:00.000Z',
+      }));
+      exportOlympusData({ destination: backup, homeDir: homeA });
+      const manifest = readFileSync(join(backup, 'manifest.json'), 'utf8');
+      expect(JSON.parse(manifest).accounts.find((entry: { source_id: string }) => entry.source_id === source))
+        .toEqual(expect.objectContaining({ provider_account_hash: account, account_binding: { provider_account_id: account } }));
+      // The grant that confirmed the account belongs to the old computer.
+      expect(manifest).not.toContain('bound_grant');
+
+      const signIn = (home: string, providerAccountId: string) => {
+        const registryPath = lifecycleHandleRegistryPath({ homeDir: home });
+        const now = new Date('2026-11-10T00:00:00.000Z');
+        binding.recordFileSourceConnectIntent({ registryPath, provider: 'dropbox', previousAccountId: undefined, now });
+        const outcome = binding.recordFileSourceConnect({ registryPath, provider: 'dropbox', providerAccountId, now });
+        const read = binding.readSourceAccountBindings(binding.sourceAccountBindingsPath(registryPath));
+        const decision = binding.decideSourceAccountAction({
+          binding: read.kind === 'ok' ? read.bindings.sources[source] : undefined,
+          grantAccountId: providerAccountId,
+          grantConnectedAt: now.toISOString(),
+          tokenAccountId: providerAccountId,
+          laneHoldsItems: true,
+          now,
+        });
+        return { outcome, decision };
+      };
+
+      const same = join(dir, 'same');
+      const restored = restoreOlympusData({ input: backup, homeDir: same });
+      expect(restored.notes.join(' ')).toContain('sign in to that same account');
+      expect(recordedProviderAccount({ sourceId: source }, lifecycleEnv({ homeDir: same }))).toBe(account);
+      const sameAccount = signIn(same, account);
+      expect(sameAccount.outcome).toBe('same_account');
+      expect(sameAccount.decision.action).toBe('proceed');
+
+      const other = join(dir, 'other');
+      restoreOlympusData({ input: backup, homeDir: other });
+      const otherAccount = signIn(other, 'dbid:someone-else');
+      expect(otherAccount.outcome).toBe('purge_required');
+      expect(otherAccount.decision).toEqual({ action: 'purge', reason: 'account_changed' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses, writing nothing, when this computer is bound to another account for the source', async () => {
+    const { lifecycleAccountFiles, lifecycleHandleRegistryPath } = await import('../src/data-lifecycle.ts');
+    const binding = await import('../src/core/source-account-binding.ts');
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-account-other-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    const source = 'dropbox.files';
+    const bindingsPath = (home: string) => binding.sourceAccountBindingsPath(lifecycleHandleRegistryPath({ homeDir: home }));
+    try {
+      seed(lifecycleAccountFiles(source, { homeDir: homeA }).stores[0]!, 'rows', 'a file');
+      binding.updateSourceAccountBinding(bindingsPath(homeA), source, () => ({ provider_account_id: 'dbid:main-account' }));
+      exportOlympusData({ destination: backup, homeDir: homeA });
+      binding.updateSourceAccountBinding(bindingsPath(homeB), source, () => ({ provider_account_id: 'dbid:someone-else' }));
+      expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('already connected to another account for dropbox.files');
+      expect(existsSync(lifecycleAccountFiles(source, { homeDir: homeB }).stores[0]!)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

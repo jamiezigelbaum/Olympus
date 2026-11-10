@@ -101959,12 +101959,14 @@ function exportOlympusData(options) {
       }
     }
   }
+  const bindingsRead = readSourceAccountBindings(sourceAccountBindingsPath(handleRegistryPathFor(options)));
+  const bindings = bindingsRead.kind === "ok" ? bindingsRead.bindings : undefined;
   writePrivateFileAtomicSync(join92(destination, "manifest.json"), JSON.stringify({
     kind: "olympus_data_export",
     version: 3,
     exported_at: new Date().toISOString(),
     source_ids: selected.map((source) => source.sourceId),
-    accounts: selected.map((source) => ({ source_id: source.sourceId, slot: source.slot, layout: source.files.account.layout })),
+    accounts: selected.map((source) => exportAccountRecord(source, bindings)),
     secrets_excluded: true,
     files,
     skipped: skipped2,
@@ -102281,6 +102283,24 @@ function forgetSharedRows(source, options, only = {}) {
     tierLedgerIds: ledgers.ids,
     unreadableTierLedgers: ledgers.unreadable
   }, { dryRun: options.dryRun === true, ...only.repeatableOnly === true ? { repeatableOnly: true } : {} });
+}
+function exportAccountRecord(source, bindings) {
+  const hash = source.entry?.state === "active" ? source.entry.provider_account_hash : undefined;
+  const bound = ACCOUNT_BOUND_SOURCE_IDS.includes(source.sourceId) ? bindings?.sources[source.sourceId] : undefined;
+  const binding = bound ? {
+    ...bound.provider_account_id ? { provider_account_id: bound.provider_account_id } : {},
+    ...bound.previous_account_folders?.length ? { previous_account_folders: [...bound.previous_account_folders] } : {}
+  } : undefined;
+  return {
+    source_id: source.sourceId,
+    slot: source.slot,
+    layout: source.files.account.layout,
+    ...hash ? { provider_account_hash: hash } : {},
+    ...binding && Object.keys(binding).length > 0 ? { account_binding: binding } : {}
+  };
+}
+function lifecycleHandleRegistryPath(context2 = {}) {
+  return handleRegistryPathFor(context2);
 }
 function handleRegistryPathFor(context2) {
   return context2.handleRegistryPath || envForContext(context2).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join92(resolveHome(context2.homeDir), ".config", "olympus", "handles.json");
@@ -103233,6 +103253,7 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  init_source_account_binding();
   ACCOUNT_FOLDER_UNEXPORTED = ["raw", "session"];
   backgroundTrashRemovals = new Set;
 });
@@ -227023,6 +227044,10 @@ init_sovereignty();
 init_tier_ledger_path();
 init_tier_rules();
 init_source_dispositions();
+init_source_account_binding();
+init_provider_account_identity();
+init_source_registry();
+init_source_storage();
 init_local_index();
 init_tier_ledger();
 init_tier_ledger_path();
@@ -227131,13 +227156,30 @@ function restoreOlympusData(options) {
       entry.keptAs = `${entry.to}.before-restore`;
   }
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === "store").map((entry) => entry.sourceId))];
+  const identities = restoredAccountIdentities(manifest2, sourceIds);
+  const bindingsPath = sourceAccountBindingsPath(lifecycleHandleRegistryPath(context2));
+  checkRestoredIdentities(identities, bindingsPath, env);
+  if (identities.length > 0) {
+    notes.push(`Restored which account the items of ${identities.map((identity2) => identity2.sourceId).join(", ")} came from: sign in to that same account to carry on syncing.`);
+  }
   if (!options.dryRun) {
+    for (const identity2 of identities) {
+      if (!identity2.historyAccount)
+        continue;
+      const layout = placeOwnedAccount({ sourceId: identity2.sourceId, slot: DEFAULT_ACCOUNT_SLOT }, env);
+      if (layout !== lifecycleAccountFiles(identity2.sourceId, context2).account.layout || !samePaths(storesOf(identity2.sourceId), lifecycleAccountFiles(identity2.sourceId, context2).stores)) {
+        throw new OperationError("invalid_params", `This install places ${identity2.sourceId} somewhere other than the restore planned, so nothing was restored.`);
+      }
+    }
     const ledgers = plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join113(input, entry.from)) }));
     for (const entry of plan) {
       if (entry.keptAs)
         copyPrivate(entry.to, entry.keptAs);
       const prepare = entry.kind === "store" ? (staged) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to) : undefined;
       copyPrivate(join113(input, entry.from), entry.to, prepare);
+    }
+    for (const sourceId of writeRestoredIdentities(identities, bindingsPath, env)) {
+      notes.push(`${sourceId}'s history came to name another account while restoring, so its account is asked again at sign-in.`);
     }
   }
   return {
@@ -227150,6 +227192,86 @@ function restoreOlympusData(options) {
     signInAgain: sourceIds,
     notes
   };
+}
+function samePaths(left, right) {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+function restoredAccountIdentities(manifest2, sourceIds) {
+  if (manifest2.version < 3 || !Array.isArray(manifest2.accounts))
+    return [];
+  const identities = [];
+  for (const raw of manifest2.accounts) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      continue;
+    const record2 = raw;
+    const sourceId = record2.source_id;
+    if (typeof sourceId !== "string" || !sourceIds.includes(sourceId) || record2.slot !== DEFAULT_ACCOUNT_SLOT)
+      continue;
+    const text3 = (value2) => typeof value2 === "string" && value2.trim() ? value2.trim() : undefined;
+    const historyAccount = text3(record2.provider_account_hash);
+    const binding = record2.account_binding && typeof record2.account_binding === "object" && !Array.isArray(record2.account_binding) ? record2.account_binding : undefined;
+    const bound = accountBoundSourceIdForSource(sourceId);
+    const boundAccount = bound ? text3(binding?.provider_account_id) : undefined;
+    const folders = bound && Array.isArray(binding?.previous_account_folders) ? binding.previous_account_folders.filter((id) => typeof id === "string") : [];
+    if (!historyAccount && !boundAccount && folders.length === 0)
+      continue;
+    identities.push({
+      sourceId,
+      ...historyAccount ? { historyAccount } : {},
+      ...boundAccount ? { boundAccount } : {},
+      ...folders.length > 0 ? { previousAccountFolders: folders } : {}
+    });
+  }
+  return identities;
+}
+function accountBoundSourceIdForSource(sourceId) {
+  return ACCOUNT_BOUND_SOURCE_IDS.includes(sourceId) ? sourceId : undefined;
+}
+function checkRestoredIdentities(identities, bindingsPath, env) {
+  if (identities.length === 0)
+    return;
+  const conflict = (sourceId) => new OperationError("invalid_params", `This computer is already connected to another account for ${sourceId} than the one this backup's items came from, so nothing was restored.`, `Disconnect ${sourceId} and delete its data with olympus data delete --source ${sourceId}, then restore.`);
+  const read = readSourceAccountBindings(bindingsPath);
+  if (identities.some((identity2) => identity2.boundAccount || identity2.previousAccountFolders) && read.kind === "malformed") {
+    throw new SourceAccountBindingsUnreadableError(bindingsPath);
+  }
+  const registry = readSourceRegistry(env);
+  for (const identity2 of identities) {
+    const bound = accountBoundSourceIdForSource(identity2.sourceId);
+    const current2 = bound && read.kind === "ok" ? read.bindings.sources[bound] : undefined;
+    if (current2?.purge_required)
+      throw conflict(identity2.sourceId);
+    if (identity2.boundAccount && current2?.provider_account_id && compareProviderAccounts(current2.provider_account_id, identity2.boundAccount) !== "same")
+      throw conflict(identity2.sourceId);
+    const entry = findRegistryAccount(registry, identity2.sourceId, DEFAULT_ACCOUNT_SLOT);
+    if (entry && entry.state !== "active")
+      throw conflict(identity2.sourceId);
+    if (identity2.historyAccount && entry?.provider_account_hash && compareProviderAccounts(entry.provider_account_hash, identity2.historyAccount) !== "same")
+      throw conflict(identity2.sourceId);
+  }
+}
+function writeRestoredIdentities(identities, bindingsPath, env) {
+  const unrecorded = [];
+  const now = new Date().toISOString();
+  for (const identity2 of identities) {
+    const bound = accountBoundSourceIdForSource(identity2.sourceId);
+    if (bound && (identity2.boundAccount || identity2.previousAccountFolders)) {
+      updateSourceAccountBinding(bindingsPath, bound, (current2) => ({
+        ...current2,
+        ...identity2.boundAccount ? {
+          provider_account_id: current2?.provider_account_id ? mergeProviderAccountIds(current2.provider_account_id, identity2.boundAccount) : identity2.boundAccount,
+          bound_at: current2?.bound_at ?? now
+        } : {},
+        ...identity2.previousAccountFolders ? { previous_account_folders: [...new Set([...current2?.previous_account_folders ?? [], ...identity2.previousAccountFolders])].slice(0, 5) } : {}
+      }));
+    }
+    if (identity2.historyAccount) {
+      const recorded = recordProviderAccount({ sourceId: identity2.sourceId, slot: DEFAULT_ACCOUNT_SLOT }, identity2.historyAccount, env);
+      if (recorded === "different" || recorded === "unproven")
+        unrecorded.push(identity2.sourceId);
+    }
+  }
+  return unrecorded;
 }
 function copyPrivate(from, to, prepare) {
   mkdirSync51(dirname87(to), { recursive: true, mode: 448 });
@@ -227187,13 +227309,14 @@ function sourceSettingsTarget(artifact, context2) {
 function storeIsTierBound(path) {
   const db = new Database24(path, { readonly: true });
   try {
+    db.exec("PRAGMA busy_timeout = 10000;");
     const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
     if (!table)
       return false;
     const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
     return Boolean(row?.cursor);
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 function repointLedgerHint(storePath, ledgerFor) {
@@ -227201,6 +227324,7 @@ function repointLedgerHint(storePath, ledgerFor) {
     return;
   const db = new Database24(storePath, { readwrite: true, create: false });
   try {
+    db.exec("PRAGMA busy_timeout = 10000;");
     const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
     const binding = JSON.parse(row.cursor);
     if (typeof binding.ledgerId !== "string")
@@ -227210,7 +227334,7 @@ function repointLedgerHint(storePath, ledgerFor) {
       return;
     db.query("UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?").run(JSON.stringify({ ...binding, ledgerPath }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 
