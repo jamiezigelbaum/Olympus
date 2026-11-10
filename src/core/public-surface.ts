@@ -347,6 +347,10 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // should be Private". Local control session only, as above
   // (workers/http.ts DASHBOARD_APPS_RECEIVED_ROUTE).
   { method: 'POST', path: '/dashboard/apps-received' },
+  // People (#1076): Same person, Not the same, Merge, Split and Rename. The
+  // people list is Private: local control session only, as above
+  // (workers/http.ts DASHBOARD_PEOPLE_PATH).
+  { method: 'POST', path: '/dashboard/people' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [
@@ -416,6 +420,9 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/chat_list.go',
+  'tools/whatsapp-bridge/chat_kinds.go',
+  'tools/whatsapp-bridge/history_sync.go',
+  'tools/whatsapp-bridge/wa_version.go',
   'tools/whatsapp-bridge/capture_status.go',
   'tools/whatsapp-bridge/media_files.go',
   'tools/whatsapp-bridge/media_serve.go',

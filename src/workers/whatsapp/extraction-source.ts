@@ -6,8 +6,11 @@
  * shared registry, queue, runner and sink own every step after that boundary.
  *
  * A child (a picture or video live capture saved, or a file an imported export
- * carries) is listed with the others and read by the locator the store keeps
- * for it, through the account's child reader (child-media.ts).
+ * carries) is listed with the others, but never read here: its bytes come
+ * through `children`, the shared connector adapter over the account's child
+ * connector (extraction-factory.ts, child-media.ts), as Gmail's attachments do.
+ * What is read here is a voice note, by its saved path, until that
+ * grandfathered path is cut over too.
  *
  * Every piece of media is kept, whatever its size (owner, 2026-10-26), so a
  * reader that takes a file is handed one (`fetchFile`): the media is copied
@@ -18,7 +21,6 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { closeSync, constants, openSync, readSync, rmSync } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
-import type { DeferredBytesAnswer } from '../file-extraction/connector-source.ts';
 import {
   discardExtractionSpoolFile,
   extractionSpoolFileName,
@@ -26,7 +28,7 @@ import {
   makeExtractionSpoolOwnerDir,
   pruneExtractionSpoolOwner,
 } from '../file-extraction/spool.ts';
-import { withConfinedFile, type WhatsAppChildReader } from './child-media.ts';
+import { withConfinedFile } from './child-media.ts';
 import { writeFully } from '../archive-import/input-media.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import {
@@ -54,6 +56,12 @@ export interface WhatsAppExtractionLocatorReader {
   ): { locatorUri?: string } | undefined | Promise<{ locatorUri?: string } | undefined>;
 }
 
+/** How a child is read: the shared connector adapter's two reads. */
+export interface WhatsAppChildExtraction {
+  fetch: FileExtractionSource['fetch'];
+  fetchFile: NonNullable<FileExtractionSource['fetchFile']>;
+}
+
 export interface WhatsAppExtractionSourceOptions {
   id: string;
   corpusId: string;
@@ -69,10 +77,12 @@ export interface WhatsAppExtractionSourceOptions {
    * (core/source-placement.ts, `whatsappMovedPathMapper`). The stored locator stays.
    */
   relocateLocator?: (path: string) => string;
-  /** What the store keeps of a child's bytes (`deferredBytesAnswerFor` of the store's state). */
-  deferredBytes?: (ref: ExtractionItemRef) => DeferredBytesAnswer;
-  /** Reads a child's bytes by its locator. Without it, children are not offered. */
-  readChild?: WhatsAppChildReader;
+  /**
+   * Where a child's bytes are read: the shared connector adapter over the
+   * account's child connector (`createConnectorFileExtractionSource`). Without
+   * it, children are not offered.
+   */
+  children?: WhatsAppChildExtraction;
 }
 
 export class WhatsAppExtractionSource implements FileExtractionSource {
@@ -86,12 +96,10 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   private readonly locators: WhatsAppExtractionLocatorReader;
   private readonly mediaRoots: readonly string[];
   private readonly relocateLocator: (path: string) => string;
-  private readonly deferredBytes: ((ref: ExtractionItemRef) => DeferredBytesAnswer) | undefined;
-  private readonly readChild: WhatsAppChildReader | undefined;
+  private readonly children: WhatsAppChildExtraction | undefined;
 
   constructor(options: WhatsAppExtractionSourceOptions) {
-    this.deferredBytes = options.deferredBytes;
-    this.readChild = options.readChild;
+    this.children = options.children;
     this.relocateLocator = options.relocateLocator ?? ((path) => path);
     this.id = requireNonEmpty(options.id, 'WhatsApp extraction source id');
     this.corpusId = requireNonEmpty(options.corpusId, 'WhatsApp extraction corpus id');
@@ -132,7 +140,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   }
 
   async fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes> {
-    if (ref.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true) return this.fetchChild(ref, options);
+    if (isChild(ref.providerItemId)) return this.childSource().fetch(ref, options);
     const located = await this.locators.localContent(ref.localItemId, 1);
     const locator = located?.locatorUri?.trim();
     if (!locator) throw new FileExtractionSourceError('source_item_not_found');
@@ -164,30 +172,17 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   }
 
   /**
-   * The item as a file in the runner's spool, copied a chunk at a time from
-   * the descriptor the confinement check opened: a child through the child
-   * reader, a voice note under the media folders. Removed by `dispose`.
+   * The item as a file in the runner's spool, removed by `dispose`: a child
+   * through the shared adapter, a voice note copied a chunk at a time from the
+   * descriptor the confinement check opened under the media folders.
    */
   async fetchFile(ref: ExtractionItemRef, options: ExtractionFetchFileOptions): Promise<FetchedFile> {
-    const child = ref.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
-    let copy: (dest: string) => number;
-    if (child) {
-      if (!this.deferredBytes || !this.readChild) throw new FileExtractionSourceError('source_item_not_found');
-      const answer = this.deferredBytes(ref);
-      if (answer === undefined) throw new FileExtractionSourceError('source_item_not_found');
-      if ('refusal' in answer) throw new FileExtractionSourceError(answer.refusal);
-      if (options.maxBytes !== undefined && answer.sizeBytes !== undefined && answer.sizeBytes > options.maxBytes) {
-        throw new FileExtractionSourceError('source_too_large');
-      }
-      const readChild = this.readChild;
-      copy = (dest) => readChild.toFile(answer.locator, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}, dest);
-    } else {
-      const located = await this.locators.localContent(ref.localItemId, 1);
-      const locator = located?.locatorUri?.trim();
-      if (!locator) throw new FileExtractionSourceError('source_item_not_found');
-      const path = this.relocateLocator(locator);
-      copy = (dest) => withConfinedFile(path, this.mediaRoots, options.maxBytes, (fd, size) => copyDescriptor(fd, size, dest));
-    }
+    if (isChild(ref.providerItemId)) return this.childSource().fetchFile(ref, options);
+    const located = await this.locators.localContent(ref.localItemId, 1);
+    const locator = located?.locatorUri?.trim();
+    if (!locator) throw new FileExtractionSourceError('source_item_not_found');
+    const path = this.relocateLocator(locator);
+    const copy = (dest: string): number => withConfinedFile(path, this.mediaRoots, options.maxBytes, (fd, size) => copyDescriptor(fd, size, dest));
     const owner = { corpusId: this.corpusId, accountScope: ref.accountScope };
     const ownerDir = extractionSpoolOwnerDir(options.spoolDir, owner);
     makeExtractionSpoolOwnerDir(ownerDir, options.spoolAnchor);
@@ -210,26 +205,18 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
     };
   }
 
-  /** A child's bytes, by the locator the store keeps for it at this version. */
-  private fetchChild(ref: ExtractionItemRef, options: ExtractionFetchOptions): FetchedBytes {
-    if (!this.deferredBytes || !this.readChild) throw new FileExtractionSourceError('source_item_not_found');
-    const answer = this.deferredBytes(ref);
-    if (answer === undefined) throw new FileExtractionSourceError('source_item_not_found');
-    if ('refusal' in answer) throw new FileExtractionSourceError(answer.refusal);
-    if (options.maxBytes !== undefined && answer.sizeBytes !== undefined && answer.sizeBytes > options.maxBytes) {
-      throw new FileExtractionSourceError('source_too_large');
-    }
-    const bytes = this.readChild(answer.locator, { ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
-    return { bytes, ...(ref.mimeType ? { mimeType: ref.mimeType } : {}), sizeBytes: bytes.byteLength };
+  /** The shared adapter a child is read through; a child is only offered when there is one. */
+  private childSource(): WhatsAppChildExtraction {
+    if (!this.children) throw new FileExtractionSourceError('source_item_not_found');
+    return this.children;
   }
 
   private refFromRow(row: ExtractionCandidateRow): ExtractionItemRef | undefined {
-    const child = row.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
     if (
       row.provider !== this.provider
       || row.accountScope !== this.accountScope
       || !row.providerItemId
-      || (child ? !this.readChild || !this.deferredBytes : !row.locatorUri)
+      || (isChild(row.providerItemId) ? !this.children : !row.locatorUri)
     ) return undefined;
     return {
       corpusId: this.corpusId,
@@ -257,6 +244,10 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
     }
     return false;
   }
+}
+
+function isChild(providerItemId: string | undefined): boolean {
+  return providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
 }
 
 function requireNonEmpty(value: string, label: string): string {

@@ -19,7 +19,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { connectorStoreExtractionCandidateReader } from '../src/workers/connector-store/extraction-candidate-reader.ts';
 import { deferredBytesAnswerFor } from '../src/workers/file-extraction/connector-source.ts';
 import { WHATSAPP_LANE_SYNC, whatsAppConnectorWithInputs } from '../src/workers/whatsapp/archive-target.ts';
-import { WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX, createWhatsAppChildReader } from '../src/workers/whatsapp/child-media.ts';
+import { WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX, createWhatsAppChildReader, whatsAppChildConnector, type WhatsAppChildReader } from '../src/workers/whatsapp/child-media.ts';
 import { WhatsAppExtractionSource } from '../src/workers/whatsapp/extraction-source.ts';
 import {
   createWhatsAppLiveSourceConnector,
@@ -41,7 +41,7 @@ import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/
 import { withFileLease } from '../src/core/file-lease.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { createHash } from 'node:crypto';
-import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
+import { whatsAppChildExtraction, whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
 import {
   WHATSAPP_LIVE_CORPUS_ID,
@@ -102,19 +102,30 @@ function lane(options: { secretLocations?: boolean } = {}) {
     const cursor = tier.set.committedCursor(connector.id)?.cursor ?? undefined;
     await tier.set.sync(connector, { ...WHATSAPP_LANE_SYNC, ...(cursor ? { cursor } : {}) });
   };
-  const extraction = new WhatsAppExtractionSource({
+  const extraction = extractionOver(store, [audio, fetched], readChild);
+  return { root, spoolDir, images, video, audio, fetched, store, readChild, pull, extraction, ledger: tier.set.ledger, set: tier.set };
+}
+
+/** The lane's extraction source: voice notes by their saved path, children through the shared connector adapter (#570). */
+function extractionOver(store: LocalConnectorStore, mediaRoots: string[], readChild: WhatsAppChildReader): WhatsAppExtractionSource {
+  const ids = {
     id: 'whatsapp-test-extraction',
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     provider: 'whatsapp',
     accountScope: 'personal',
     approvedScopeKey: 'whatsapp.personal.messages',
-    mediaRoots: [audio, fetched],
     candidates: connectorStoreExtractionCandidateReader(store),
+  };
+  return new WhatsAppExtractionSource({
+    ...ids,
+    mediaRoots,
     locators: store,
-    deferredBytes: (ref) => deferredBytesAnswerFor(store.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
-    readChild,
+    children: whatsAppChildExtraction({
+      ...ids,
+      deferredBytes: (ref) => deferredBytesAnswerFor(store.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
+      readChild,
+    }),
   });
-  return { root, spoolDir, images, video, audio, fetched, store, readChild, pull, extraction, ledger: tier.set.ledger, set: tier.set };
 }
 
 interface Row {
@@ -415,6 +426,26 @@ describe('live pictures and videos are children of their message', () => {
     expect((await withoutView.listCandidates({ limit: 10 })).candidates).toEqual([]);
   });
 
+  test('#570: a child is read through the shared connector adapter, and its child connector reads children only', async () => {
+    const target = lane();
+    const photo = join(target.images, 'P4.jpg');
+    writeFileSync(photo, 'jpeg bytes');
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'P4', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
+    await target.pull();
+    // A reader that fails without naming why: the shared adapter says the source is unavailable, never the raw error.
+    const failing = Object.assign(() => { throw new Error('disk said no'); }, { toFile: () => { throw new Error('disk said no'); } }) as unknown as WhatsAppChildReader;
+    const source = extractionOver(target.store, [target.audio], failing);
+    const ref = (await source.listCandidates({ limit: 10 })).candidates.find((candidate) => candidate.providerItemId === 'P4#child:media')!;
+    await expect(source.fetch(ref, {})).rejects.toMatchObject({ errorKind: 'source_unavailable' });
+    await expect(source.fetchFile!(ref, { spoolDir: join(target.root, 'extraction-spool') })).rejects.toMatchObject({ errorKind: 'source_unavailable' });
+    // The child connector never reads a message, nor a child without the store's locator.
+    const connector = whatsAppChildConnector({ account: 'personal', readChild: target.readChild });
+    await expect(connector.fetchItemWithin(ref.localItemId.replace('#child:media', ''), { deferredBytes: { locator: `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}` } })).rejects.toMatchObject({ errorKind: 'source_content_unavailable' });
+    await expect(connector.fetchItemWithin(ref.localItemId, {})).rejects.toMatchObject({ errorKind: 'source_content_unavailable' });
+    const item = await connector.fetchItemWithin(ref.localItemId, { deferredBytes: { locator: `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}` } });
+    expect(item.content.kind === 'bytes' && new TextDecoder().decode(item.content.bytes)).toBe('jpeg bytes');
+  });
+
   test('the media folders a read may touch are the audio folder and the bridge\'s picture and video folders', () => {
     const state = join(tmpdir(), 'olympus-wa-state-fixture');
     const roots = defaultWhatsAppMediaRoots({ OLYMPUS_WHATSAPP_STATE_DIR: state });
@@ -486,18 +517,7 @@ describe('review round 4 on #558: no Secret left in a waiting line, large media 
     // A reader that would load it into memory fails the test.
     const toFile = target.readChild.toFile;
     const guarded = Object.assign(() => { throw new Error('read into memory'); }, { toFile }) as unknown as typeof target.readChild;
-    const source = new WhatsAppExtractionSource({
-      id: 'whatsapp-test-extraction',
-      corpusId: WHATSAPP_LIVE_CORPUS_ID,
-      provider: 'whatsapp',
-      accountScope: 'personal',
-      approvedScopeKey: 'whatsapp.personal.messages',
-      mediaRoots: [target.audio],
-      candidates: connectorStoreExtractionCandidateReader(target.store),
-      locators: target.store,
-      deferredBytes: (ref) => deferredBytesAnswerFor(target.store.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
-      readChild: guarded,
-    });
+    const source = extractionOver(target.store, [target.audio], guarded);
     const ref = (await source.listCandidates({ limit: 10 })).candidates.find((candidate) => candidate.providerItemId === 'V7#child:media')!;
     const spoolDir = join(target.root, 'extraction-spool');
     const file = await source.fetchFile(ref, { spoolDir });

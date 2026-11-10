@@ -125,6 +125,15 @@ async def pair() -> dict[str, Any]:
     }
 
 
+def last_message_at(dialog: Any) -> dict[str, str]:
+    """When the dialog last had a message, so the chooser can list the most recent first."""
+    date = getattr(dialog, "date", None)
+    try:
+        return {"last_message_at": date.isoformat()} if date is not None else {}
+    except Exception:
+        return {}
+
+
 async def read_dialogs(client: Any) -> list[dict[str, Any]]:
     dialogs: list[dict[str, Any]] = []
     async for dialog in client.iter_dialogs():
@@ -145,6 +154,7 @@ async def read_dialogs(client: Any) -> list[dict[str, Any]]:
                 "chat_scope": f"telegram.personal:chat:{dialog_id}",
                 "kind": kind,
                 "title": safe_one_line(str(getattr(dialog, "name", "") or ""))[:120],
+                **last_message_at(dialog),
             }
         )
     return dialogs

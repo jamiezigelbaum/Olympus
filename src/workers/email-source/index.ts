@@ -1,3 +1,5 @@
+import type { DashboardPeopleBackend } from './dashboard-people.ts';
+import { DASHBOARD_PEOPLE_PATH, type DashboardPeopleView } from '../dashboard/pages/people.ts';
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
 import { dashboardModelsOnComputer } from '../dashboard/models-on-computer.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
@@ -27,7 +29,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { WHATSAPP_SESSION_FILE } from '../../core/olympus-layout.ts';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { isRetiredGooglePilotClientId, packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
@@ -655,7 +658,22 @@ export interface EmailSourceWorkerOptions {
      * DASHBOARD_APPS_RECEIVED_ROUTE to a locally minted control session.
      */
     appsReceived?: Pick<import('../apps-received.ts').AppsReceived, 'handle'>;
+    /**
+     * People (#1076; dashboard-people.ts): the people index as the People page
+     * shows it, and the owner's corrections. The list is Private: the page
+     * shows it and the route answers only inside a local control session
+     * (workers/http.ts). Absent: the page says it is not ready and the route
+     * answers 501.
+     */
+    people?: DashboardPeopleBackend;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
+    /**
+     * Logs this computer's WhatsApp linked device out (the bridge's `--unlink`
+     * against that state folder), which removes it from the phone's Linked
+     * devices (#761). Unpair runs it after capture has stopped and before the
+     * session is deleted. Absent: the phone keeps its entry.
+     */
+    unlinkWhatsAppDevice?: (stateDir: string) => Promise<'removed' | 'offline' | 'failed'>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
      * last report and what the grant approved (counts only). Absent for a
@@ -1728,6 +1746,24 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
+          if (page === 'people') {
+            // The people list only for a locally minted control session.
+            const localSession = controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
+            let people: DashboardPeopleView | undefined;
+            if (localSession && sourceDashboard?.people) {
+              try {
+                people = sourceDashboard.people.view();
+              } catch {
+                people = undefined;
+              }
+            }
+            return html(renderDashboardLocalPage('people', {
+              url,
+              options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) },
+              ...(people ? { people } : {}),
+              peopleLocalSession: localSession,
+            }));
+          }
           if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
           if (page === 'json' || page === 'keys' || page === 'connect' || page === 'help') {
             if (!sourceIndexStatus || !sourceDashboard) {
@@ -2540,6 +2576,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        // People (#1076): Same person, Not the same, Merge, Split, Rename.
+        // Local control session only, like Private answers below.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_PEOPLE_PATH) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'People opens only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.people) {
+            throw new EmailSourceWorkerError(501, 'people_not_supported', 'People is not available in this worker yet.');
+          }
+          const record = await parseObjectBody(request);
+          const outcome = sourceDashboard.people.handle(record);
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+        }
+
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
           const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
@@ -3185,6 +3235,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 }
               }
 
+              // WhatsApp only: sign this linked device out at WhatsApp while the
+              // session still exists, so the phone's Linked devices loses the
+              // entry instead of keeping one of its four slots (#761). Telegram's
+              // session is a login the owner ends in Telegram's Active sessions.
+              let phoneUnlinked: 'removed' | 'offline' | 'failed' | undefined;
+              const whatsappSessionDb = sourceId === 'telegram.messages'
+                ? undefined
+                : session.paths.find((path) => basename(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== 'gone');
+              if (whatsappSessionDb && sourceDashboard.unlinkWhatsAppDevice) {
+                phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname(whatsappSessionDb)).catch(() => 'failed' as const);
+              }
+              const phoneNote = phoneUnlinked === 'offline' || phoneUnlinked === 'failed'
+                ? ' Olympus could not reach WhatsApp to remove itself from your phone: remove Olympus in WhatsApp → Settings → Linked devices.'
+                : '';
+
               const removedSessionPaths: string[] = [];
               const unremovedSessionPaths: string[] = [];
               for (const target of removalPlan.plan.targets) {
@@ -3313,8 +3378,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // rendered as the ordinary "Done" was a completion claim over
                 // a session file still sitting on disk.
                 ...(outstandingSteps.length > 0 ? { failed_steps: outstandingSteps } : {}),
+                ...(phoneUnlinked ? { phone_unlinked: phoneUnlinked } : {}),
                 status_message: complete
-                  ? 'Unpaired. Waiting for the next refresh.'
+                  ? (phoneUnlinked === 'removed' ? 'Unpaired, and removed from your phone\'s linked devices. Waiting for the next refresh.' : 'Unpaired. Waiting for the next refresh.') + phoneNote
                   : outstandingPaths.length > 0
                     ? `Unpair incomplete — remove by hand: ${outstandingPaths.join(', ')}`
                     : failedSteps.includes('connected_handle')
@@ -3331,7 +3397,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   connected_handle_removed: !outstandingSteps.includes('connected_handle'),
                   indexed_data_deleted: false,
                   captured_messages_deleted: false,
-                  provider_device_still_linked: true,
+                  provider_device_still_linked: phoneUnlinked !== 'removed',
                   capture_service_stopped: false,
                   restart_required: false,
                   raw_runtime_secrets_exposed: false,
