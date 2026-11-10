@@ -2033,6 +2033,12 @@ function isTelegramJsonHead(head) {
   const text = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text) || TELEGRAM_CHAT_HEAD.test(text);
 }
+function archiveExportGuides(formats = ARCHIVE_FORMATS) {
+  return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
+}
+function archiveExportGuideLinks(formats = ARCHIVE_FORMATS) {
+  return Object.fromEntries(archiveExportGuides(formats).map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)]));
+}
 function getArchiveFormat(formatId) {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
 }
@@ -2200,6 +2206,15 @@ var init_archive_formats = __esm(() => {
     provider: "mbox",
     chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
+    exportGuide: Object.freeze({
+      title: "Gmail, from Google Takeout",
+      provider: "Google",
+      steps: Object.freeze([
+        { title: "Choose your mail", instructions: ["Choose **Deselect all**.", "Scroll to **Mail** and tick it.", "Choose **Next step** at the bottom of the page."], link: { label: "Google Takeout", url: "https://takeout.google.com/" } },
+        { title: "Ask for the export", instructions: ["Keep **Send download link via email** and **Export once**.", "Keep **.zip** as the file type.", "Choose **Create export**."] }
+      ]),
+      ready: "Google emails you a download link when the export is ready. Download it, open the zip, and drop the .mbox file from its Mail folder."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
@@ -2224,6 +2239,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "WhatsApp",
     probeNames: Object.freeze(["*.txt", "*.zip"]),
     signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    exportGuide: Object.freeze({
+      title: "A WhatsApp chat",
+      provider: "WhatsApp",
+      steps: Object.freeze([
+        { title: "Open the chat", instructions: ["On your phone, open WhatsApp and the chat you want.", "Tap the chat's name at the top (on Android, tap **⋮** then **More**)."] },
+        { title: "Export it", instructions: ["Choose **Export chat**.", "Choose **Attach media** (on Android, **Include media**) to keep photos and voice notes, or **Without media** for a smaller file.", "Send the file to this computer, for example by AirDrop or to yourself by email."] }
+      ]),
+      ready: "WhatsApp makes the file straight away. Drop the .zip or the .txt file it sent."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
@@ -2253,6 +2277,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Reflect",
+      provider: "Reflect",
+      steps: Object.freeze([
+        { title: "Export your notes", instructions: ["In Reflect, open **Settings**.", "Find the export option and choose **JSON** (Markdown works too).", "Save the file in **Downloads**."], link: { label: "Reflect", url: "https://reflect.app/" } }
+      ]),
+      ready: "Drop the .json file, or the .zip Reflect saved."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
   REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
@@ -2285,6 +2317,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Roam",
     sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Roam",
+      provider: "Roam",
+      steps: Object.freeze([
+        { title: "Export your graph", instructions: ["Open your graph in Roam.", "Choose **⋯** at the top right, then **Export All**.", "Set the format to **JSON** and choose **Export All**."], link: { label: "Roam", url: "https://roamresearch.com/" } }
+      ]),
+      ready: "Drop the .zip Roam saved, or the .json file inside it."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
   EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
@@ -2296,6 +2336,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Evernote",
     sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
     probeNames: Object.freeze(["*.enex"]),
+    exportGuide: Object.freeze({
+      title: "Evernote",
+      provider: "Evernote",
+      steps: Object.freeze([
+        { title: "Open the Evernote app", instructions: ["Export works in the Evernote app on a computer, not on the web.", "Install it if you do not have it, and sign in."], link: { label: "Evernote", url: "https://evernote.com/download" } },
+        { title: "Export a notebook", instructions: ["In **Notebooks**, choose **⋯** beside a notebook.", "Choose **Export notebook…** and keep the **ENEX** format.", "Save the file. Repeat for each notebook you want."] }
+      ]),
+      ready: "Drop the .enex file, or a folder holding several."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
@@ -2338,6 +2387,15 @@ var init_archive_formats = __esm(() => {
         advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
       })
     ]),
+    exportGuide: Object.freeze({
+      title: "Telegram",
+      provider: "Telegram",
+      steps: Object.freeze([
+        { title: "Open Telegram Desktop", instructions: ["Export works in Telegram Desktop, not in the phone app.", "Install it if you do not have it, and sign in."], link: { label: "Telegram Desktop", url: "https://desktop.telegram.org/" } },
+        { title: "Ask for the export", instructions: ["Open **Settings**, then **Advanced**.", "Choose **Export Telegram data**.", "Tick the chats you want and set the format to **Machine-readable JSON**.", "Choose **Export**. Telegram may ask you to confirm on your phone and wait before it starts."] }
+      ]),
+      ready: "Drop the folder Telegram saved, or the result.json file in it."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
@@ -58381,7 +58439,23 @@ var init_vocabulary = __esm(() => {
       unreadable: "Olympus could not read what you dropped. Try again.",
       failed: "The upload stopped before it finished. Nothing was imported. Try again.",
       several: "{n} items",
-      chooseAnother: "Start over"
+      chooseAnother: "Start over",
+      have: "I already have my archive",
+      get: {
+        title: "Get my archive",
+        line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+        step: "Step {n} of {of}",
+        open: "Open this page in {provider}",
+        next: "I've done this, next",
+        back: "Back",
+        ready: "Come back when it's ready",
+        wait: "Exports can take a few minutes, hours or days. When yours arrives, come back to this page."
+      },
+      guides: archiveExportGuides().map((entry) => ({
+        id: entry.formatId,
+        ...entry.guide,
+        steps: entry.guide.steps.map(({ link, ...step }) => link ? { ...step, link: { label: link.label } } : step)
+      }))
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
@@ -161018,8 +161092,47 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.confirming = "";
     const A = H.copy.archives;
     const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
-    const words2 = own3 ? { ...A.pick, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, account: A.account };
+    const links = own3 ? guideLinksOf([own3]) : allGuideLinks();
+    const guides = linkedGuides(A.pick.guides, links, !!own3);
+    const words2 = own3 ? { ...A.pick, guides, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, guides, account: A.account };
     picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
+  }
+  function allArchiveSourceMetas() {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2 || !Array.isArray(meta2.archiveSources))
+      return [];
+    return meta2.archiveSources.filter((entry) => !!entry);
+  }
+  function allGuideLinks() {
+    const meta2 = state.computerMeta;
+    const full = onComputer() && meta2 && meta2.archiveGuideLinks && typeof meta2.archiveGuideLinks === "object" ? meta2.archiveGuideLinks : {};
+    return guideLinksOf([...allArchiveSourceMetas(), { guideLinks: full }]);
+  }
+  function guideLinksOf(sources) {
+    const out = {};
+    for (const source of sources) {
+      const links = source && source.guideLinks;
+      if (!links || typeof links !== "object")
+        continue;
+      for (const id of Object.keys(links))
+        if (Array.isArray(links[id]))
+          out[id] = links[id];
+    }
+    return out;
+  }
+  function linkedGuides(guides, links, only) {
+    const list = Array.isArray(guides) ? guides : [];
+    return list.filter((guide) => !only || Object.prototype.hasOwnProperty.call(links, guide.id)).map((guide) => {
+      const pages = links[guide.id] || [];
+      return {
+        ...guide,
+        steps: guide.steps.map((step, index) => {
+          const { link, ...rest } = step;
+          const url2 = pages[index];
+          return link && typeof url2 === "string" && url2.slice(0, 6) === "https:" ? { ...rest, link: { label: link.label, url: url2 } } : rest;
+        })
+      };
+    });
   }
   function archiveSourceMeta(id) {
     const meta2 = state.computerMeta;
@@ -163270,7 +163383,8 @@ function chatgptPickerProgram(kit) {
       poll: null,
       paint: null,
       input: null,
-      skipped: []
+      skipped: [],
+      guide: null
     };
     kit.render("picker:back");
   }
@@ -163608,6 +163722,8 @@ function chatgptPickerProgram(kit) {
     });
   }
   function dropView() {
+    if (drop.guide && (drop.phase === "idle" || drop.phase === "error"))
+      return guideView();
     const page2 = el("main", "page picker");
     const words2 = drop.words;
     const top = el("div", "picker-top");
@@ -163627,13 +163743,100 @@ function chatgptPickerProgram(kit) {
         add(body, accessNote(drop.access, null));
     }
     const phase = drop.phase;
-    if (phase === "idle" || phase === "error")
+    if (phase === "idle" || phase === "error") {
+      const guides = Array.isArray(words2.guides) ? words2.guides : [];
+      if (guides.length && words2.have)
+        add(body, el("h2", "", words2.have));
       add(body, dropZone());
-    else if (phase === "confirm")
+      if (guides.length && words2.get)
+        add(body, guideList(guides, words2.get));
+    } else if (phase === "confirm")
       add(body, confirmBox());
     else
       add(body, progressBox());
     add(page2, body);
+    return page2;
+  }
+  function guideList(guides, words2) {
+    const section = el("section", "guide-list");
+    add(section, el("h2", "", words2.title), el("p", "muted", words2.line));
+    const list2 = el("ul", "rows");
+    guides.forEach((guide, index) => {
+      add(list2, add(el("li", "row"), kit.button(String(guide.title), "picker:guide:" + String(guide.id), () => openGuide(index, 0), "plain")));
+    });
+    return add(section, list2);
+  }
+  function openGuide(index, step) {
+    if (!drop)
+      return;
+    drop.guide = index < 0 ? null : { index, step };
+    drop.error = "";
+    drop.access = null;
+    if (drop.phase === "error")
+      drop.phase = "idle";
+    kit.render(index < 0 ? "picker:drop:zone" : "picker:guide:title");
+  }
+  function stepLine(text3) {
+    const item = el("li");
+    String(text3).split("**").forEach((part, index) => {
+      if (part)
+        add(item, el(index % 2 ? "strong" : "span", "", part));
+    });
+    return item;
+  }
+  function guideView() {
+    const words2 = drop.words;
+    const get = words2.get;
+    const guide = words2.guides[drop.guide.index];
+    const steps = guide.steps;
+    const count = steps.length + 1;
+    const at = drop.guide.step;
+    const page2 = el("main", "page picker privacy");
+    add(page2, el("h1", "", String(guide.title)));
+    const counter = fill2(get.step, { n: at + 1, of: count });
+    add(page2, el("p", "muted", counter));
+    const progress = el("progress");
+    progress.max = count;
+    progress.value = at + 1;
+    progress.setAttribute("aria-label", counter);
+    add(page2, progress);
+    const body = el("div", "picker-body drop-body");
+    if (drop.error) {
+      const banner = el("div", "banner");
+      banner.setAttribute("role", "alert");
+      add(banner, add(el("div", "banner-body"), el("p", "", drop.error)));
+      add(body, banner);
+      if (drop.access)
+        add(body, accessNote(drop.access, null));
+    }
+    if (at < steps.length) {
+      const step = steps[at];
+      const heading = el("h2", "", String(step.title));
+      heading.setAttribute("data-key", "picker:guide:title");
+      heading.setAttribute("tabindex", "-1");
+      add(body, heading);
+      const list2 = el("ol", "steps");
+      for (const line2 of step.instructions)
+        add(list2, stepLine(line2));
+      add(body, list2);
+      if (step.link && /^https:\/\//.test(String(step.link.url))) {
+        const href = String(step.link.url);
+        add(body, add(el("p"), kit.button(fill2(get.open, { provider: String(guide.provider) }), "picker:guide:open", () => kit.openLink(href), "main")));
+        const fallback = el("a", "", String(step.link.label) + " ↗");
+        fallback.href = href;
+        fallback.target = "_blank";
+        fallback.rel = "noopener noreferrer";
+        add(body, add(el("p", "fnote"), fallback));
+      }
+    } else {
+      const heading = el("h2", "", get.ready);
+      heading.setAttribute("data-key", "picker:guide:title");
+      heading.setAttribute("tabindex", "-1");
+      add(body, heading, el("p", "", String(guide.ready)), el("p", "muted", get.wait));
+      add(body, dropZone());
+    }
+    add(page2, body);
+    add(page2, add(el("div", "actions privacy-sheet-actions"), kit.button(get.back, "picker:guide:back", () => openGuide(at > 0 ? drop.guide.index : -1, at - 1), "plain"), at < steps.length ? kit.button(get.next, "picker:guide:next", () => openGuide(drop.guide.index, at + 1), "main") : null));
     return page2;
   }
   function dropZone() {
@@ -166517,6 +166720,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .drop-hint{color:var(--muted);font-size:0.875rem}
 .drop-or{margin:0;text-align:center}
 .drop-or .btn{min-height:0;padding:0.25rem 0.5rem;border:0;background:none;color:var(--accent);font-size:0.875rem;font-weight:500}
+.guide-list{margin-top:1.5rem}
+.guide-list .rows .btn{text-align:left}
+.drop-body ol.steps{padding-left:1.25rem;line-height:1.5}
 .drop-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
 .drop-progress{display:flex;flex-direction:column;gap:0.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface)}
 .drop-progress p{margin:0}
@@ -194623,6 +194829,10 @@ function archiveImportScheduling(scheduler) {
   const selected = scheduler.sourceIds.map((sourceId) => sourceId.trim());
   return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? "not_selected" : "on";
 }
+function guideLinksOf(formats) {
+  const links = archiveExportGuideLinks(formats);
+  return Object.keys(links).length > 0 ? { guideLinks: links } : {};
+}
 function fill3(template, values) {
   let out = template;
   for (const [key2, value2] of Object.entries(values))
@@ -195320,9 +195530,9 @@ function createArchiveImportDashboard(options) {
         const formats = target ? sourceFormats(target) : [];
         if (!target || formats.length === 0)
           return [];
-        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats), ...guideLinksOf(formats) }];
       });
-      const imported = archiveSourceCards().filter((card) => !live2.some((entry) => entry.sourceId === card.id)).map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
+      const imported = archiveSourceCards().filter((card) => !live2.some((entry) => entry.sourceId === card.id)).map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats), ...guideLinksOf(card.formats) }));
       return [...live2, ...imported];
     },
     cardViews() {
@@ -225042,7 +225252,7 @@ function createDashboardPanelTools(options) {
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...indexedItems > 0 ? { indexedItems } : {},
         ...setup ? { setup } : {},
-        ...archives ? { archives } : {},
+        ...archives ? { archives, archiveGuideLinks: archiveExportGuideLinks() } : {},
         ...sourceImports ? { sourceImports } : {},
         ...archiveSources ? { archiveSources } : {},
         ...archiveCards ? { archiveCards } : {}
@@ -225055,6 +225265,7 @@ function createDashboardPanelTools(options) {
 var ARCHIVE_LOCAL_SESSION_REFUSAL = "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.", UNPAIR_SOURCE_IDS, ARCHIVE_ARG_MAX = 4096;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
+  init_archive_formats();
   init_unreadable_files();
   init_mcp_surface();
   init_setup_tools();
