@@ -49,11 +49,11 @@ describe('the proposal holder', () => {
   test('a proposal lists each change and changes nothing until Apply', async () => {
     const { calls, targets: t } = targets();
     const holder = createSettingsProposalHolder(t);
-    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 } }, 'Claude Code');
+    const proposal = await holder.propose({ private_answer_mode: 'local-first', models: { venice: 'strongest' } }, 'Claude Code');
     expect(proposal.from).toBe('Claude Code');
     expect(proposal.rows).toEqual([
       { key: 'private_answer_mode', label: 'Private-answer mode', current: 'Private answers only in Olympus', proposed: 'Local models with Venice fallback' },
-      { key: 'privacy_judge', label: 'Privacy judge', current: 'Local (free)', proposed: 'Venice, up to $5' },
+      { key: 'models.venice', label: 'Venice model', current: 'Qwen 3 235B', proposed: 'Always the strongest' },
     ]);
     expect(calls).toEqual([]);
     expect(holder.current()?.id).toBe(proposal.id);
@@ -110,11 +110,12 @@ describe('the proposal holder', () => {
     expect(calls).toEqual([]);
   });
 
-  test('a model and the judge that uses it go in two proposals', async () => {
+  test('a model or the answer mode and the judge that depends on it go in two proposals', async () => {
     const { targets: t } = targets();
     const holder = createSettingsProposalHolder(t);
     await expect(holder.propose({ privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } })).rejects.toThrow('two proposals');
     await expect(holder.propose({ privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { local: 'builtin:4b' } })).rejects.toThrow('two proposals');
+    await expect(holder.propose({ private_answer_mode: 'local-only', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 } })).rejects.toThrow('two proposals');
   });
 
   test('values this computer does not offer are refused when proposed', async () => {

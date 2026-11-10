@@ -123868,7 +123868,7 @@ var init_settings_proposal = __esm(() => {
         fields: {
           choice: { type: "string", allowed: ["local", "venice"] },
           spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
-          note: { type: "note", note: "Propose a model change for the same provider (models.venice with choice venice, models.local with choice local) separately, first." }
+          note: { type: "note", note: "Propose a model change for the same provider (models.venice with choice venice, models.local with choice local) separately, first. With choice venice, propose a private_answer_mode change separately, first, too." }
         }
       },
       models: {
@@ -148382,6 +148382,9 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
     if (input.privacy_judge && input.models?.[input.privacy_judge.choice] !== undefined) {
       const provider = input.privacy_judge.choice === "venice" ? "Venice" : "local";
       throw new SettingsProposalError(`Change the ${provider} model and the privacy judge in two proposals: propose models.${input.privacy_judge.choice} first, and once it is applied, propose privacy_judge.`);
+    }
+    if (input.privacy_judge?.choice === "venice" && input.private_answer_mode) {
+      throw new SettingsProposalError("Change the Private-answer mode and Venice judging in two proposals: propose private_answer_mode first, and once it is applied, propose privacy_judge.");
     }
     if (input.privacy_judge) {
       const judge3 = targets.judge?.();
