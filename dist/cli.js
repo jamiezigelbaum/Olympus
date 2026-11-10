@@ -36750,18 +36750,6 @@ function connectorStoreFilterSql(filters) {
   return { sql: clauses.join(`
 `), params };
 }
-function candidateConceptHitsSql(placeholders, scopeSql) {
-  return `
-    SELECT DISTINCT candidate_rows.item_pk, i.local_item_id, i.source_version
-    FROM connector_store_fts_rows candidate_rows
-    CROSS JOIN connector_store_fts ON connector_store_fts.rowid = candidate_rows.fts_rowid
-    JOIN items i ON i.item_pk = candidate_rows.item_pk
-    WHERE candidate_rows.item_pk IN (${placeholders})
-      AND connector_store_fts.item_pk = candidate_rows.item_pk
-      AND connector_store_fts MATCH ?
-      ${scopeSql}
-  `;
-}
 function connectorStoreFtsScopeSql(filters) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   const contentRow = `(
@@ -44302,11 +44290,14 @@ var init_local_index = __esm(() => {
             return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
           };
           for (const [groupIndex, group] of groups.entries()) {
-            const hits = (yield {
-              mode: "all",
-              sql: candidateConceptHitsSql(placeholders, selectedFtsScope.sql),
-              params: [...pks, sourceIndexFtsGroupQuery(group, exact), ...selectedFtsScope.params]
-            }).filter(sameItem);
+            const hits = (yield { mode: "all", sql: `
+            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
             for (const hit of hits) {
               matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
               matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
@@ -44316,11 +44307,12 @@ var init_local_index = __esm(() => {
           const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact);
           const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
           const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
-          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield {
-            mode: "all",
-            sql: candidateConceptHitsSql(placeholders, selectedFtsScope.sql),
-            params: [...pks, sourceIndexFtsGroupQuery(uniqueTerms, exact), ...selectedFtsScope.params]
-          }).filter(sameItem).map((row) => row.item_pk));
+          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
           signalled = rows.filter((row) => {
             if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
               return true;
