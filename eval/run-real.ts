@@ -239,7 +239,7 @@ async function main(): Promise<void> {
         ...classifyPrecisionStage(question, pack, result, {
           ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
         }),
-        ...(detail ? { retrieval: evalRetrievalAudit(detail) } : {}),
+        ...(detail ? { retrieval: evalRetrievalAudit(detail, question) } : {}),
         answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts),
       });
     },
@@ -450,8 +450,13 @@ export function createEvalDropboxLanes(input: {
  */
 export interface EvalRetrievalAudit {
   packCandidates: number;
-  /** The store and trust domain of each pack candidate, in pack order: which store won each seat. */
-  packCandidateSources: Array<{ corpusId: string; trustDomain: string }>;
+  /**
+   * The store and trust domain of each pack candidate, in pack order: which
+   * store won each seat. `expectedItem` is the 1-based expected-evidence entry
+   * whose item id the seat holds, in whichever store, so a copy left in
+   * another store is told apart from the copy the question expects.
+   */
+  packCandidateSources: Array<{ corpusId: string; trustDomain: string; expectedItem?: number }>;
   lanes: Array<{
     laneName: string;
     laneType: string;
@@ -474,13 +479,22 @@ export interface EvalRetrievalAudit {
   secureExclusion: 'not_applied';
 }
 
-export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetrievalAudit {
+export function evalRetrievalAudit(
+  detail: EvidencePackBuildDetail,
+  question?: Pick<EvalQuestion, 'expectedEvidence'>,
+): EvalRetrievalAudit {
+  const expected = question?.expectedEvidence ?? [];
   return {
     packCandidates: detail.pack.candidates.length,
-    packCandidateSources: detail.pack.candidates.map((candidate, index) => ({
-      corpusId: detail.candidateCorpusIds[index] ?? 'unknown',
-      trustDomain: candidate.trustDomain,
-    })),
+    packCandidateSources: detail.pack.candidates.map((candidate, index) => {
+      const itemId = candidate.provenance.sourceItem.providerItemId;
+      const expectedIndex = expected.findIndex((want) => want.providerItemId !== undefined && want.providerItemId === itemId);
+      return {
+        corpusId: detail.candidateCorpusIds[index] ?? 'unknown',
+        trustDomain: candidate.trustDomain,
+        ...(expectedIndex >= 0 ? { expectedItem: expectedIndex + 1 } : {}),
+      };
+    }),
     lanes: detail.laneAudits.map((lane) => ({
       laneName: lane.laneName,
       laneType: lane.laneType,
