@@ -856,3 +856,68 @@ for (const scenario of ['same-account', 'grant-proven-account', 'grant-proven-ot
     }
   });
 }
+
+// #1075: a kind covers every chat of that kind, including chats started later; one grant list for both sources.
+describe('capture grants by chat kind', () => {
+  const pairTelegram = (approval: Record<string, unknown>) => {
+    const root = packageFixture();
+    return pairMessagingSource({
+      source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {},
+      pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, ...approval } as never,
+      runCommand: async (request) => telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH),
+      registerSession: async () => ({ ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }),
+    });
+  };
+  const pairWhatsApp = (approval: Record<string, unknown>) => {
+    const root = packageFixture();
+    const qrPath = join(root, 'home', 'qr.png');
+    return pairMessagingSource({
+      source: 'whatsapp', packageRoot: root, whatsappBridgePath: join(root, 'cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
+      homeDir: join(root, 'home'), env: {}, whatsappQrMode: 'artifact',
+      captureScopeApproval: { source: 'whatsapp', explicitApproval: true, ...approval } as never,
+      onWhatsAppQr: async () => {},
+      runCommand: async (request) => {
+        for (const line of whatsappReady(qrPath).stdoutLines) await request.onStdoutLine?.(line);
+        return whatsappReady(qrPath);
+      },
+      registerSession: async () => ({ ok: true, source: 'whatsapp', handles: ['whatsapp.personal_local'], secretRefs: [] }),
+    });
+  };
+
+  test('Telegram kinds alone, and kinds mixed with exact chats, become kind tokens in the one allowed list', async () => {
+    const kindsOnly = await pairTelegram({ chatKinds: ['dm', 'group'] });
+    if (kindsOnly.status !== 'connected') throw new Error('expected connected result');
+    expect(kindsOnly.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('kind:dm,kind:group');
+    expect(kindsOnly.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe('kind:dm,kind:group');
+    const mixed = await pairTelegram({ chatKinds: ['channel'], chatScopes: ['telegram.personal:chat:101'] });
+    if (mixed.status !== 'connected') throw new Error('expected connected result');
+    expect(mixed.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('kind:channel,telegram.personal:chat:101');
+    // Choosing chats never decides privacy: the grant carries no tier.
+    expect(JSON.stringify(mixed.producer)).not.toMatch(/tier|PROTECTED|CLASSIFICATION/);
+  });
+
+  test('WhatsApp kinds (one-to-one, groups, communities) mix with exact chats', async () => {
+    const result = await pairWhatsApp({ chatKinds: ['community', 'dm'], chatJids: ['chat-1@s.whatsapp.net'] });
+    if (result.status !== 'connected') throw new Error('expected connected result');
+    expect(result.producer.env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS).toBe('kind:community,kind:dm,chat-1@s.whatsapp.net');
+  });
+
+  for (const [name, approval] of [
+    ['whole account with a kind', { wholeAccount: true, chatKinds: ['dm'] }],
+    ['nothing chosen', { chatKinds: [] }],
+    ['a kind Telegram does not have', { chatKinds: ['community'] }],
+    ['an unknown kind', { chatKinds: ['everyone'] }],
+    ['a kind token passed as a chat', { chatScopes: ['kind:dm'] }],
+  ] as const) {
+    test(`Telegram refuses ${name}`, async () => {
+      await expect(pairTelegram(approval)).rejects.toThrow();
+    });
+  }
+
+  test('WhatsApp refuses a kind it cannot tell apart and a whole account mixed with kinds', async () => {
+    await expect(pairWhatsApp({ chatKinds: ['channel'] })).rejects.toThrow();
+    await expect(pairWhatsApp({ chatKinds: ['bot'] })).rejects.toThrow();
+    await expect(pairWhatsApp({ wholeAccount: true, chatKinds: ['group'] })).rejects.toThrow();
+  });
+});

@@ -21,7 +21,7 @@ export interface OlympusDashboardTransport {
   /** Local-only session mint; never supplied by the native or remote bridge. */
   openLocalControls?(): Promise<boolean>;
   /** Only the standalone local dashboard supplies this direct same-origin transport. */
-  messaging?(operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', params: { source: 'telegram' | 'whatsapp'; field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] }): Promise<OlympusDashboardControlResult>;
+  messaging?(operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', params: { source: 'telegram' | 'whatsapp'; field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[]; chatKinds?: string[] }): Promise<OlympusDashboardControlResult>;
   /** The control-session exchange: a pasted worker token for a session cookie. */
   unlock?(workerToken: string): Promise<{ ok: boolean; csrf_token?: string }>;
   lock?(): Promise<boolean>;
@@ -1239,22 +1239,48 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     queryAll<HTMLElement>('[data-messaging-source]').forEach(card => { if (!card.querySelector('[data-messaging-open-controls]')) void messagingRequest(card, 'status'); });
   }
 
-  async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] } = {}): Promise<void> {
-    if (!canWrite || disposed || !options.transport.messaging) return;
+  /** A pressed button shows it (#1086): busy and disabled in place, with its own words, until its request ends. */
+  const MESSAGING_BUSY_WORDS: Record<string, string> = { chats: 'Loading chats…', scope: 'Saving…', status: 'Checking…', start: 'Starting…', respond: 'Checking…', cancel: 'Cancelling…' };
+  function startButtonBusy(button: HTMLButtonElement | null | undefined, operation: string): void {
+    if (!button) return;
+    button.dataset.idleLabel = button.textContent ?? '';
+    button.textContent = MESSAGING_BUSY_WORDS[operation] ?? 'Working…';
+    button.disabled = true;
+    button.classList.add('busy');
+    button.setAttribute('aria-busy', 'true');
+  }
+  function endButtonBusy(button: HTMLButtonElement | null | undefined): void {
+    if (!button || !button.classList.contains('busy')) return;
+    button.textContent = button.dataset.idleLabel ?? button.textContent;
+    delete button.dataset.idleLabel;
+    button.disabled = false;
+    button.classList.remove('busy');
+    button.removeAttribute('aria-busy');
+  }
+  const messagingQueuedButton = new Map<HTMLElement, HTMLButtonElement>();
+
+  async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[]; chatKinds?: string[] } = {}, button?: HTMLButtonElement | null): Promise<void> {
+    if (!canWrite || disposed || !options.transport.messaging) { endButtonBusy(button); return; }
     if (messagingBusy.has(card)) {
       // A status poll is in flight: run the user's action right after it instead of dropping it.
-      if (operation !== 'status') messagingQueued.set(card, () => { void messagingRequest(card, operation, extra); });
+      if (operation !== 'status') {
+        const replaced = messagingQueuedButton.get(card);
+        if (replaced && replaced !== button) endButtonBusy(replaced);
+        if (button) messagingQueuedButton.set(card, button); else messagingQueuedButton.delete(card);
+        messagingQueued.set(card, () => { messagingQueuedButton.delete(card); void messagingRequest(card, operation, extra, button); });
+      } else endButtonBusy(button);
       return;
     }
     const source = card.dataset.messagingSource;
-    if (source !== 'telegram' && source !== 'whatsapp') return;
-    if (card.querySelector('[data-messaging-open-controls]')) return;
+    if ((source !== 'telegram' && source !== 'whatsapp') || card.querySelector('[data-messaging-open-controls]')) { endButtonBusy(button); return; }
     const timer = messagingTimers.get(card);
     if (timer) clearTimeout(timer);
     messagingTimers.delete(card);
     messagingBusy.add(card);
     const status = card.querySelector<HTMLElement>('[data-messaging-status]');
-    if (status && operation !== 'status') status.textContent = 'Working…';
+    const wasPaired = card.hasAttribute('data-messaging-paired');
+    // No separate "working" line: the pressed button itself is busy.
+    if (status && operation !== 'status') status.textContent = '';
     try {
       const params = { source: source as 'telegram' | 'whatsapp', ...extra };
       let result: OlympusDashboardControlResult;
@@ -1289,18 +1315,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const state = typeof body.state === 'string' ? body.state : '';
       messagingMisses.delete(card);
       if (PAIRING_ACTIVE(state)) messagingActive.add(card); else messagingActive.delete(card);
-      if (['paired', 'complete', 'completed'].includes(state)) {
-        const row = card.querySelector('.actionrow');
-        // A card rendered paired already has its own Check connection form; its start form stays "Pair again".
-        const hasStatus = !!row?.querySelector('form[data-messaging-kind="status"]');
-        const start = hasStatus ? null : row?.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
-        if (start) { start.dataset.messagingKind = 'status'; const button = start.querySelector('button'); if (button) { button.textContent = 'Check connection'; button.classList.remove('primary'); } }
-        const toggle = hasStatus ? null : row?.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]');
-        if (toggle) { const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'status'; toggle.removeAttribute('data-sheet-toggle'); toggle.textContent = 'Check connection'; toggle.type = 'submit'; toggle.classList.remove('primary'); toggle.replaceWith(form); form.append(toggle); }
-        row?.querySelector('[data-messaging-kind="chats"] button')?.classList.add('primary');
-        const chats = row?.querySelector('[data-messaging-kind="chats"]');
-        if (chats) row?.prepend(chats);
-        if (!card.querySelector('[data-messaging-account]')) { const account = document.createElement('p'); account.dataset.messagingAccount = ''; account.textContent = source === 'whatsapp' ? 'Your linked WhatsApp account' : 'Your linked Telegram account'; row?.before(account); }
+      if (['paired', 'complete', 'completed'].includes(state) && !card.hasAttribute('data-messaging-paired')) {
+        // Paired: the pairing explanation and Pair go; Choose chats is the one primary action, and the ⋯ menu holds the rest.
+        card.setAttribute('data-messaging-paired', '');
+        card.querySelectorAll<HTMLElement>('[data-paired-only]').forEach((element) => { element.hidden = element.matches('[data-messaging-kind="chats"]') && !!card.querySelector('[data-messaging-chats] [data-kind-picker]'); });
+        card.querySelectorAll<HTMLElement>('[data-unpaired-only]').forEach((element) => { element.hidden = true; });
+        const account = card.querySelector<HTMLElement>('[data-messaging-account]');
+        if (account && account.textContent === 'Not paired yet') account.textContent = source === 'whatsapp' ? 'Your linked WhatsApp account' : 'Your linked Telegram account';
       }
 
       const field = typeof body.field === 'string' ? body.field : '';
@@ -1360,11 +1381,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const cancelledLead = body.capturePaused === true
         ? 'Setup cancelled. Your chat choices were not changed, but capture of this account stays paused until pairing again succeeds'
         : 'Setup cancelled. Capture permission was not changed';
-      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : (body.capturePaused === true ? 'Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry.' : 'Pairing failed. Start pairing again to retry.')) + (typeof body.reason === 'string' && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : '') : state === 'not_paired' ? 'Not paired yet. Pair this account first, then choose the chats Olympus may read.' : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? (source === 'whatsapp'
+      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : (body.capturePaused === true ? 'Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry.' : 'Pairing failed. Start pairing again to retry.')) + (typeof body.reason === 'string' && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : '') : state === 'not_paired' ? 'Not paired yet. Pair this account first, then choose the chats Olympus may read.' : state === 'idle' ? '' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : (state === 'paired' || state === 'complete' || state === 'completed') && operation !== 'scope' && operation !== 'chats' ? (wasPaired ? (operation === 'status' && button ? 'Connected.' : '') : 'Paired. Choose the chats Olympus reads.') : state === 'cancelled' ? (source === 'whatsapp'
         ? (body.unlinked === 'removed' ? cancelledLead + ', and Olympus removed itself from your phone\'s linked devices.'
           : body.unlinked === 'offline' || body.unlinked === 'failed' ? cancelledLead + '. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices.'
             : cancelledLead + '. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices.')
-        : cancelledLead + '. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : typeof body.qr === 'string' && body.qr ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Preparing WhatsApp. The first time can take about a minute.') : 'Pairing is running on this computer…';
+        : cancelledLead + '. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? '' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : typeof body.qr === 'string' && body.qr ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Preparing WhatsApp. The first time can take about a minute.') : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
         // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
@@ -1388,35 +1409,22 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const choosingScope = state === 'scope_selection_required';
       const chatSlot = card.querySelector<HTMLElement>('[data-messaging-chats]');
       if (!choosingScope && chatSlot?.dataset.pendingChoice === 'true') chatSlot.replaceChildren();
-      if (chatSlot) { chatSlot.dataset.pendingChoice = String(choosingScope); chatSlot.classList.toggle('messagingchoices', choosingScope); }
+      if (chatSlot) { chatSlot.dataset.pendingChoice = String(choosingScope); }
       if (Array.isArray(body.chats) && typeof body.wholeAccount === 'boolean' && Array.isArray(body.chatScopes)) {
         const slot = card.querySelector<HTMLElement>('[data-messaging-chats]');
         if (slot) {
-          slot.replaceChildren();
-          const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'scope';
-          if (!choosingScope) {
-            const allLabel = document.createElement('label'); const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = body.wholeAccount === true; allLabel.append(all, ' Read all chats, including new chats'); form.append(allLabel);
-          }
-          const selected = Array.isArray(body.chatScopes) ? body.chatScopes : [];
-          for (const entry of body.chats) {
-            if (!entry || typeof entry !== 'object') continue;
-            const chat = entry as Record<string, unknown>;
-            if (typeof chat.chatScope !== 'string') continue;
-            const chatLabel = typeof chat.title === 'string' && chat.title.trim() ? chat.title : 'Chat ' + chat.chatScope.split(':').at(-1);
-            const line = document.createElement('label'); line.style.display = 'block'; const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'chatScope'; check.value = chat.chatScope; check.checked = selected.includes(chat.chatScope); line.append(check, ' ' + chatLabel); form.append(line);
-          }
-          const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = choosingScope ? 'Read selected chats' : 'Save chat choices'; form.append(button);
-          if (choosingScope) {
-            const pick = document.createElement('details');
-            const summary = document.createElement('summary'); summary.className = 'btn primary'; summary.textContent = 'Pick chats (recommended)'; pick.append(summary, form); slot.append(pick);
-            if (!body.chats.length) { const empty = document.createElement('p'); empty.textContent = 'No chats are available to select yet. You can cancel and try pairing again later.'; form.prepend(empty); button.disabled = true; }
-            const allForm = document.createElement('form'); allForm.method = 'dialog'; allForm.dataset.messagingKind = 'scope';
-            const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = true; all.hidden = true;
-            const allButton = document.createElement('button'); allButton.type = 'submit'; allButton.className = 'btn'; allButton.textContent = 'Everything in this account';
-            const explanation = document.createElement('p'); explanation.className = 'hint'; explanation.textContent = 'Allow Olympus to read every chat, including new chats.';
-            allForm.append(all, allButton); slot.append(allForm, explanation);
-          } else slot.append(form);
+          slot.replaceChildren(buildChatPicker(source, body, choosingScope));
+          // The chooser is the content now, and its Save the one primary action.
+          const chooseChats = card.querySelector<HTMLElement>('form[data-messaging-kind="chats"]');
+          if (chooseChats) chooseChats.hidden = true;
         }
+      }
+      // A saved choice closes the chooser, whose chat list the save used up, and
+      // brings Choose chats back so the choice can be changed again.
+      if (operation === 'scope' && ['paired', 'complete', 'completed'].includes(state)) {
+        card.querySelector<HTMLElement>('[data-messaging-chats]')?.replaceChildren();
+        const chooseChats = card.querySelector<HTMLElement>('form[data-messaging-kind="chats"]');
+        if (chooseChats) chooseChats.hidden = false;
       }
       if ((state === 'cancelled' && body.cleaning === true) || (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state))) {
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
@@ -1427,6 +1435,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       } else if (status) status.textContent = 'Could not reach pairing on this computer. Try again.';
     } finally {
       messagingBusy.delete(card);
+      endButtonBusy(button);
       const queued = messagingQueued.get(card);
       messagingQueued.delete(card);
       if (queued && !disposed) queued();
@@ -1437,15 +1446,176 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const card = form.closest<HTMLElement>('[data-messaging-source]');
     const kind = form.dataset.messagingKind;
     if (!card) return;
+    const button = form.querySelector<HTMLButtonElement>('button[type="submit"]:not([data-kind-open])');
+    // A second press while the first runs does nothing.
+    if (button?.classList.contains('busy')) return;
+    form.closest<HTMLDetailsElement>('details.rowmenu')?.removeAttribute('open');
     if (kind === 'respond') {
       const input = form.querySelector<HTMLInputElement>('input[name="value"]');
       if (!input) return;
       const value = input.value; input.value = '';
-      void messagingRequest(card, 'respond', { ...(form.dataset.field ? { field: form.dataset.field } : {}), value });
+      startButtonBusy(button, kind);
+      void messagingRequest(card, 'respond', { ...(form.dataset.field ? { field: form.dataset.field } : {}), value }, button);
     } else if (kind === 'scope') {
-      const wholeAccount = form.querySelector<HTMLInputElement>('[name="wholeAccount"]')?.checked === true;
-      void messagingRequest(card, 'scope', { wholeAccount, chatScopes: wholeAccount ? [] : Array.from(form.querySelectorAll<HTMLInputElement>('[name="chatScope"]:checked')).map(input => input.value) });
-    } else if (kind === 'start' || kind === 'chats' || kind === 'cancel' || kind === 'status') void messagingRequest(card, kind);
+      const choice = chatPickerChoice(form);
+      if (!choice) {
+        const status = card.querySelector<HTMLElement>('[data-messaging-status]');
+        if (status) status.textContent = 'Choose all chats, a kind, or at least one chat.';
+        return;
+      }
+      startButtonBusy(button, kind);
+      void messagingRequest(card, 'scope', choice, button);
+    } else if (kind === 'start' || kind === 'chats' || kind === 'cancel' || kind === 'status') {
+      startButtonBusy(button, kind);
+      void messagingRequest(card, kind, {}, button);
+    }
+  }
+
+  // The chat chooser (#1075): Read all chats on top, then one switch per kind
+  // (every chat of that kind, including new ones), each opening to a search
+  // and its chats, most recent first. Choosing chats never decides privacy.
+  const CHAT_KIND_LABELS: Record<string, [string, string]> = {
+    dm: ['One-to-one', 'one-to-one chats'], group: ['Groups', 'groups'], channel: ['Channels', 'channels'],
+    bot: ['Bots', 'bots'], community: ['Communities', 'communities'],
+  };
+  const SOURCE_KINDS: Record<string, string[]> = { telegram: ['dm', 'group', 'channel', 'bot'], whatsapp: ['dm', 'group', 'community'] };
+  /** The suggested start at first pairing: one-to-one chats and groups on, the rest off; nothing is read until Save. */
+  const SUGGESTED_KINDS = ['dm', 'group'];
+
+  function whenLabel(iso: unknown): string {
+    if (typeof iso !== 'string') return '';
+    const time = Date.parse(iso);
+    if (Number.isNaN(time)) return '';
+    const days = Math.floor((Date.now() - time) / 86_400_000);
+    if (days < 1) return 'today';
+    if (days < 2) return 'yesterday';
+    if (days < 7) return `${days} days ago`;
+    return new Date(time).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  }
+
+  function chatPickerChoice(form: HTMLFormElement): { wholeAccount: boolean; chatScopes: string[]; chatKinds: string[] } | undefined {
+    const whole = form.querySelector<HTMLInputElement>('[name="wholeAccount"]')?.checked === true;
+    if (whole) return { wholeAccount: true, chatScopes: [], chatKinds: [] };
+    const chatKinds = Array.from(form.querySelectorAll<HTMLInputElement>('[name="chatKind"]:checked')).map((input) => input.value);
+    // A chat whose whole kind is on is already covered by the kind.
+    const chatScopes = Array.from(form.querySelectorAll<HTMLInputElement>('[name="chatScope"]:checked'))
+      .filter((input) => !chatKinds.includes(input.closest<HTMLElement>('[data-kind-group]')?.dataset.kindGroup ?? ''))
+      .map((input) => input.value);
+    return chatKinds.length || chatScopes.length ? { wholeAccount: false, chatScopes, chatKinds } : undefined;
+  }
+
+  function buildChatPicker(source: string, body: Record<string, unknown>, choosingScope: boolean): HTMLFormElement {
+    const make = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] => {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    };
+    const kinds = SOURCE_KINDS[source] ?? [];
+    const selected = new Set(Array.isArray(body.chatScopes) ? body.chatScopes.filter((value): value is string => typeof value === 'string') : []);
+    const kindsOn = new Set(choosingScope
+      ? SUGGESTED_KINDS.filter((kind) => kinds.includes(kind))
+      : Array.isArray(body.chatKinds) ? body.chatKinds.filter((value): value is string => typeof value === 'string') : []);
+    const whole = !choosingScope && body.wholeAccount === true;
+    const chats = (Array.isArray(body.chats) ? body.chats : []).flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const chat = entry as Record<string, unknown>;
+      if (typeof chat.chatScope !== 'string') return [];
+      const title = typeof chat.title === 'string' && chat.title.trim() ? chat.title : 'Chat ' + chat.chatScope.split(':').at(-1);
+      return [{ scope: chat.chatScope, title, kind: typeof chat.kind === 'string' ? chat.kind : '', at: typeof chat.lastMessageAt === 'string' ? chat.lastMessageAt : '' }];
+    });
+    const form = make('form', 'kindpicker'); form.method = 'dialog'; form.dataset.messagingKind = 'scope'; form.dataset.kindPicker = '';
+    const switchInput = (name: string, value: string, checked: boolean, label: string): HTMLInputElement => {
+      const input = make('input', 'switch'); input.type = 'checkbox'; input.name = name; input.value = value; input.checked = checked;
+      input.setAttribute('role', 'switch'); input.setAttribute('aria-label', label);
+      return input;
+    };
+    const allRow = make('label', 'kindrow allrow');
+    const allText = make('span', 'kindtext');
+    allText.append(make('b', '', 'Read all chats, including new ones'), make('small', '', 'Every chat now and every chat you start or join later'));
+    const all = switchInput('wholeAccount', 'true', whole, 'Read all chats, including new ones');
+    allRow.append(allText, all);
+    form.append(allRow, make('p', 'kindcap', 'Or choose by kind'));
+    const groups: { kind: string; toggle?: HTMLInputElement; note: HTMLElement; boxes: HTMLInputElement[]; list: HTMLElement; open: HTMLButtonElement }[] = [];
+    const known = new Set(kinds);
+    const order = [...kinds, ...(chats.some((chat) => !known.has(chat.kind)) ? ['other'] : [])];
+    for (const kind of order) {
+      const members = chats.filter((chat) => kind === 'other' ? !known.has(chat.kind) : chat.kind === kind);
+      const recent = members.some((chat) => chat.at);
+      members.sort((a, b) => recent ? (b.at.localeCompare(a.at) || a.title.localeCompare(b.title)) : a.title.localeCompare(b.title));
+      const [label, plural] = CHAT_KIND_LABELS[kind] ?? ['Other chosen chats', 'chats'];
+      const group = make('div', 'kindgroup'); group.dataset.kindGroup = kind;
+      const row = make('div', 'kindrow');
+      const open = make('button', 'kindopen'); open.type = 'button'; open.dataset.kindOpen = ''; open.setAttribute('aria-expanded', 'false');
+      const title = make('span', 'kindtext');
+      const name = make('b', '', label); name.append(' ', make('span', 'kindcount', String(members.length)));
+      const note = make('small', 'kindnote');
+      title.append(name, note);
+      open.append(title, make('span', 'kindchev', '›'));
+      row.append(open);
+      const toggle = kind === 'other' ? undefined : switchInput('chatKind', kind, whole || kindsOn.has(kind), `All ${plural}, including new ones`);
+      if (toggle) row.append(toggle);
+      const list = make('div', 'kindlist'); list.hidden = true;
+      const search = make('input', 'kindsearch'); search.type = 'search'; search.placeholder = `Search ${plural}`; search.setAttribute('aria-label', `Search ${plural}`); search.dataset.kindSearch = '';
+      list.append(search, make('p', 'kindcap', members.length ? (recent ? 'Most recent first' : 'By name') : `No ${plural} yet. New ones are read when this kind is on.`));
+      const lines = make('fieldset', 'kindlines');
+      const boxes: HTMLInputElement[] = [];
+      for (const chat of members) {
+        const line = make('label', 'chatline'); line.dataset.chatTitle = chat.title.toLowerCase();
+        const box = make('input'); box.type = 'checkbox'; box.name = 'chatScope'; box.value = chat.scope; box.checked = selected.has(chat.scope);
+        boxes.push(box);
+        line.append(box, make('span', 'chatname', chat.title), make('span', 'chatwhen', whenLabel(chat.at)));
+        lines.append(line);
+      }
+      list.append(lines);
+      group.append(row, list);
+      form.append(group);
+      groups.push({ kind, ...(toggle ? { toggle } : {}), note, boxes, list, open });
+    }
+    const refresh = (): void => {
+      for (const group of groups) {
+        const [, plural] = CHAT_KIND_LABELS[group.kind] ?? ['', 'chats'];
+        const on = group.toggle?.checked === true;
+        const chosen = group.boxes.filter((box) => box.checked).length;
+        const lines = group.list.querySelector<HTMLFieldSetElement>('fieldset');
+        if (lines) lines.disabled = on;
+        group.note.classList.toggle('partial', !on && chosen > 0);
+        group.note.textContent = on ? `All ${plural}, including new ones`
+          : !group.toggle ? `${chosen} chosen`
+            : chosen > 0 ? `${chosen} of ${group.boxes.length} chosen · new ${plural} are not read` : `Off · new ${plural} are not read`;
+      }
+    };
+    form.addEventListener('change', (event) => {
+      const target = event.target as HTMLInputElement;
+      // Read all switches every kind on; turning a kind off leaves Read all.
+      if (target === all && all.checked) for (const group of groups) if (group.toggle) group.toggle.checked = true;
+      if (target.name === 'chatKind' && !target.checked) all.checked = false;
+      if (target.name === 'chatScope' && !target.checked) all.checked = false;
+      refresh();
+    });
+    form.addEventListener('input', (event) => {
+      const target = event.target as HTMLInputElement;
+      if (!target.matches('[data-kind-search]')) return;
+      const words = target.value.trim().toLowerCase();
+      target.closest('.kindlist')?.querySelectorAll<HTMLElement>('.chatline').forEach((line) => { line.hidden = !!words && !(line.dataset.chatTitle ?? '').includes(words); });
+    });
+    form.addEventListener('click', (event) => {
+      const open = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-kind-open]');
+      if (!open) return;
+      const group = groups.find((candidate) => candidate.open === open);
+      if (!group) return;
+      group.list.hidden = !group.list.hidden;
+      open.setAttribute('aria-expanded', String(!group.list.hidden));
+      if (!group.list.hidden) group.list.querySelector<HTMLInputElement>('[data-kind-search]')?.focus();
+    });
+    refresh();
+    if (body.coverage === 'contacts_and_joined_groups') form.append(make('p', 'hint', 'The list shows saved contacts and groups and may omit unsaved chats. A chat that is not listed is still read when its kind is on.'));
+    form.append(make('p', 'hint kindprivacy', 'Choosing chats never decides privacy. Every message is still judged on its own.'));
+    const bar = make('div', 'pickbar kindsave');
+    const save = make('button', 'btn primary', 'Save'); save.type = 'submit';
+    bar.append(make('span', 'hint', choosingScope ? 'Nothing is read until you press Save' : 'Changes save when you press Save'), save);
+    form.append(bar);
+    return form;
   }
 
   async function openMessagingControls(form: HTMLFormElement): Promise<void> {

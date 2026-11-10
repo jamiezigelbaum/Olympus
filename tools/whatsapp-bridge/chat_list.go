@@ -27,9 +27,10 @@ type availableChats struct {
 }
 
 // The caller must stop its capture client first: WhatsApp replaces concurrent
-// connections using the same linked-device session. No message/history handler
-// is registered, and no spool or message content is read or written here.
-func runListChatsMode(ctx context.Context, container *sqlstore.Container) error {
+// connections using the same linked-device session. No message handler is
+// registered, and no spool or message content is read or written here. A
+// history-sync notification that arrives is kept, undownloaded, for capture.
+func runListChatsMode(ctx context.Context, container *sqlstore.Container, stateDir string) error {
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		return errors.New("session_store_failed")
@@ -38,6 +39,7 @@ func runListChatsMode(ctx context.Context, container *sqlstore.Container) error 
 		return errors.New("session_not_paired")
 	}
 	client := newWhatsmeowClient(device, waLog.Noop)
+	keepHistoryForCapture(client, stateDir)
 	defer client.Disconnect()
 	stopCancellation := context.AfterFunc(ctx, client.Disconnect)
 	defer stopCancellation()
@@ -97,7 +99,11 @@ func chatListReceipt(contacts map[types.JID]types.ContactInfo, groups []*types.G
 	}
 	for _, group := range groups {
 		if group != nil && group.JID.Server == types.GroupServer {
-			add(group.JID, "group", group.Name)
+			kind := chatKindGroup
+			if groupIsCommunity(group) {
+				kind = chatKindCommunity
+			}
+			add(group.JID, kind, group.Name)
 		}
 	}
 	dialogs := make([]availableChat, 0, len(byScope))

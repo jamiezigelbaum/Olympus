@@ -1,3 +1,4 @@
+import { dashboardPeopleRow } from './people.ts';
 import { judgeArchiveEstimate, judgeChoiceUsesVenice, judgeDefaultCapDollars, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeChoice, type JudgeObserved, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
 import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
@@ -320,8 +321,9 @@ function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: 
     // lives on the row a disconnect leaves behind.
   } else if (MESSAGING_SOURCES.has(source.source_id)) {
     const dialogId = `pairing-${id}`;
-    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-label="${label} pairing"><div class="adddialoghead"><h3>${label}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`
-      + renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: true }) + '</dialog>');
+    // The card is the dialog: its header carries the name, the ⋯ menu (Check connection, Pair again) and ✕ (#1086).
+    dialogs.push(`<dialog class="adddialog msgdialog" id="${dialogId}" data-closable aria-label="${label} pairing">`
+      + renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: true }, { closable: true }) + '</dialog>');
     items.push(`<button class="menuitem" type="button" data-dialog-open="${dialogId}"${off}>Pairing and chats</button>`);
   } else if (source.connection.disconnect) {
     items.push('<hr>' + confirm('disconnect_source', `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, 'Disconnect', false));
@@ -375,6 +377,8 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
     `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
+    // People (#1076): who is who across these sources, at the bottom of Sources.
+    dashboardPeopleRow(token),
     rows.map((entry) => entry.dialogs).join(''),
     sheet,
     connectorDialog(),

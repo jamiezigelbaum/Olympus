@@ -247,6 +247,7 @@ class Config:
     whole_account = False
     account = "telegram.personal"
     approved_scopes = ["telegram.personal:chat:-1000001"]
+    approved_kinds = ()
 class Client:
     def __init__(self, messages):
         self.messages = messages
