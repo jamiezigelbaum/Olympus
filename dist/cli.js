@@ -97975,6 +97975,7 @@ var init_google_connectors = __esm(() => {
 // src/workers/source-ingestion-ledger.ts
 var exports_source_ingestion_ledger = {};
 __export(exports_source_ingestion_ledger, {
+  openSourceDashboardFileReadOnly: () => openSourceDashboardFileReadOnly,
   formatSourceIngestionLedger: () => formatSourceIngestionLedger,
   collectLocalSourceIngestionLedger: () => collectLocalSourceIngestionLedger,
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
@@ -98033,6 +98034,16 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
       castor_safe: options.safeForCastor === true
     }
   };
+}
+function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()) {
+  const db = new Database20(dbPath, { readonly: true, create: false });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+    return db;
+  } catch (error) {
+    closeSqliteStore(db, { checkpoint: false });
+    throw error;
+  }
 }
 
 class SqliteSourceIngestionLedgerStore {
@@ -201467,20 +201478,13 @@ var init_front_scheduler = __esm(() => {
 });
 
 // src/workers/engine-split/front-history.ts
-import { Database as Database26 } from "bun:sqlite";
 import { existsSync as existsSync106 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
   return new SqliteSourceDashboardHistory(path);
 }
 function openReadOnlyDashboardHistory(path) {
-  const db = new Database26(path, { readonly: true, create: false });
-  try {
-    db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-  } catch (error2) {
-    closeSqliteStore(db, { checkpoint: false });
-    throw error2;
-  }
+  const db = openSourceDashboardFileReadOnly(path);
   const methods = SqliteSourceDashboardHistory.prototype;
   const self = { db };
   return {
@@ -201521,6 +201525,7 @@ function createFrontDashboardHistory(input) {
 }
 var init_front_history = __esm(() => {
   init_store_write_guard();
+  init_source_ingestion_ledger();
   init_source_dashboard();
 });
 

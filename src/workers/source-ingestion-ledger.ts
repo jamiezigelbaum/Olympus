@@ -525,6 +525,23 @@ export function buildSourceIngestionLedgerSnapshot(
 const SAMPLE_RETENTION_MS = 24 * 60 * 60_000;
 const MAX_SAMPLES_PER_CORPUS = 720;
 
+/**
+ * The shared dashboard file on a read-only, query-only connection: the
+ * engine split's front reads dashboard progress through it
+ * (engine-split/front-history.ts), and the background, its one writer,
+ * records. The file must exist.
+ */
+export function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()): Database {
+  const db = new Database(dbPath, { readonly: true, create: false });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+    return db;
+  } catch (error) {
+    closeSqliteStore(db, { checkpoint: false });
+    throw error;
+  }
+}
+
 export class SqliteSourceIngestionLedgerStore {
   private readonly db: Database;
 

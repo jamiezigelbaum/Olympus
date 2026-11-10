@@ -79286,6 +79286,7 @@ init_atomic_file();
 
 // src/workers/engine-split/front-history.ts
 init_store_write_guard();
+init_source_ingestion_ledger();
 init_source_dashboard();
 
 // src/core/remote-access-config.ts

@@ -5,10 +5,10 @@
  * (`dashboard_samples`), which records them. No sample text exists: a
  * sample is ids, a time and counts.
  */
-import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
+import { openSourceDashboardFileReadOnly } from '../source-ingestion-ledger.ts';
 import { defaultSourceDashboardHistoryDbPath, SqliteSourceDashboardHistory, type SourceDashboardHistory, type SourceDashboardHistorySample } from '../source-dashboard.ts';
 
 /** The worker's writable dashboard history: refused in the engine split's front, which never records. */
@@ -25,13 +25,7 @@ export function openWritableDashboardHistory(path = defaultSourceDashboardHistor
  * reader borrows the class's methods over this connection instead.
  */
 export function openReadOnlyDashboardHistory(path: string): Pick<SqliteSourceDashboardHistory, 'progressFor' | 'movementFor' | 'sampleCount' | 'close'> {
-  const db = new Database(path, { readonly: true, create: false });
-  try {
-    db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-  } catch (error) {
-    closeSqliteStore(db, { checkpoint: false });
-    throw error;
-  }
+  const db = openSourceDashboardFileReadOnly(path);
   const methods = SqliteSourceDashboardHistory.prototype;
   const self = { db } as unknown as SqliteSourceDashboardHistory;
   return {
