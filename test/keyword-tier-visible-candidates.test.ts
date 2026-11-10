@@ -59,6 +59,13 @@ test('a visible keyword match ranked below a full page of superseded copies is r
   expect(detailed.saturated).toBe(false);
 });
 
+test('the read pool pages the same way (#1079 search path)', async () => {
+  const { store } = await crowdedStore(40, 'quietorchardmarker');
+  const pooled = await store.searchItemsDetailedOffThread('quietorchardmarker', 10);
+  expect(pooled.rows.map((row) => row.sourceItem.localItemId)).toEqual([localId('visible')]);
+  expect(pooled.saturated).toBe(false);
+});
+
 test('the same holds for a multi-concept query under the minimum-signal filter', async () => {
   const { store } = await crowdedStore(60, 'quietorchardmarker lanternledgerword');
   const ids = store.searchItems('quietorchardmarker lanternledgerword', 5).map((row) => row.sourceItem.localItemId);
