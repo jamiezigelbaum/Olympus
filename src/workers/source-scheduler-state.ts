@@ -86,6 +86,11 @@ export interface RecordSourceSchedulerFailureInput extends SourceSchedulerTaskSt
   degradedReason?: string;
 }
 
+export interface RecordSourceSchedulerInterruptionInput extends SourceSchedulerTaskStateKey {
+  /** When the worker's shutdown interrupted the pass; the task is due again from then. */
+  interruptedAt: string;
+}
+
 export type SourceSchedulerUnparkRefusalCode =
   | 'task_not_found'
   | 'task_identity_ambiguous'
@@ -712,6 +717,34 @@ export class LocalSourceSchedulerStateStore {
         completedAt,
         effectiveIntervalSupplied ? 1 : 0,
         degradedReasonSupplied ? 1 : 0,
+      );
+    });
+  }
+
+  /**
+   * Ends an attempt the worker's shutdown interrupted. The task is due again
+   * at once; failures, backoff and the last result are left as they were.
+   */
+  recordInterruption(input: RecordSourceSchedulerInterruptionInput): PersistedSourceSchedulerTaskState {
+    const key = requireStateKey(input);
+    const interruptedAt = requireTimestamp(input.interruptedAt, 'interruptedAt');
+    return this.writeCurrentVersion(key, () => {
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version,
+          not_before_at, attempt_in_progress, consecutive_failures, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          not_before_at = excluded.not_before_at,
+          attempt_in_progress = 0,
+          updated_at = excluded.updated_at
+      `).run(
+        key.sourceId,
+        key.corpusId,
+        key.taskId,
+        SOURCE_SCHEDULER_TASK_STATE_VERSION,
+        interruptedAt,
+        interruptedAt,
       );
     });
   }
