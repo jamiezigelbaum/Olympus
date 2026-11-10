@@ -86,6 +86,16 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     // answer is in the pack, and is said to come from the Personal store.
     expect(found.packCandidateSources).toHaveLength(found.packCandidates);
     expect(found.packCandidateSources[0]).toEqual({ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, trustDomain: 'internal' });
+    // Given the question, each seat says which expected item it holds, by
+    // item id in any store, so a stale copy in another store shows up too.
+    const detail = await buildEvalPack({
+      question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    });
+    const marked = evalRetrievalAudit(detail, {
+      expectedEvidence: [{ corpusId: DROPBOX_TIER_CORPUS_IDS.secure_local!, providerItemId: 'k1', hint: 'the invoice' }],
+    });
+    expect(marked.packCandidateSources[0]).toEqual({ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, trustDomain: 'internal', expectedItem: 1 });
+    expect(marked.packCandidateSources.slice(1).every((seat) => seat.expectedItem === undefined)).toBe(true);
 
     const empty = evalRetrievalAudit(await buildEvalPack({
       question: 'zebra quartz harmonica', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
