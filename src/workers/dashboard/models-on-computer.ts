@@ -12,8 +12,12 @@ import type { SovereigntyConfig } from '../../core/sovereignty.ts';
 import type { LocalModelReadiness } from '../../core/linux-model-readiness.ts';
 
 export interface DashboardModelsOnComputer {
-  /** `off`: Private items are never answered (the route is disabled). */
-  privateAnswers: { off: true } | { first: string; fallback?: string } | { unknown: true };
+  /**
+   * `off`: Private items are never answered (the route is disabled).
+   * `first`/`fallback`: an explicit fallback chain (the pool's `order`, or a legacy `analyst` list).
+   * `any`: a pool with no `order`, where each question goes to the healthiest, fastest member.
+   */
+  privateAnswers: { off: true } | { first: string; fallback?: string } | { any: string[] } | { unknown: true };
   builtIn?: { name: string; state: string; used: boolean };
   transcription?: { line: string };
 }
@@ -32,10 +36,21 @@ export interface DashboardModelsOnComputerInput {
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0.0.0.0']);
 
-/** The saved Private route's members, in the order they are tried. */
-function routeMembers(config: SovereigntyConfig): string[] {
+/**
+ * The saved Private route's members, and whether they are tried in that order.
+ * As the engine dispatches (sovereignty.ts resolveAnalystPool, and
+ * source-dashboard.ts modelLaneLabels): a pool's `order` (kept to its members)
+ * is a fallback chain, a legacy `analyst` list is ordered, and a pool with no
+ * `order` picks by health and latency, so none of its members is "first".
+ */
+function routeMembers(config: SovereigntyConfig): { ids: string[]; ordered: boolean } {
   const route = config.routes?.secure_local;
-  return [...(route?.pool?.order ?? route?.pool?.members ?? route?.analyst ?? [])];
+  if (route?.pool) {
+    const members = route.pool.members ?? [];
+    if (route.pool.order) return { ids: route.pool.order.filter((id) => members.includes(id)), ordered: true };
+    return { ids: [...members], ordered: members.length <= 1 };
+  }
+  return { ids: [...(route?.analyst ?? [])], ordered: true };
 }
 
 function hostOf(baseUrl: string | undefined): string | undefined {
@@ -99,12 +114,13 @@ export function dashboardModelsOnComputer(input: DashboardModelsOnComputerInput)
   if (config) {
     if (config.routes?.secure_local?.mode === 'disabled') privateAnswers = { off: true };
     else {
-      const ids = routeMembers(config);
+      const { ids, ordered } = routeMembers(config);
       usesLocal = ids.some((id) => config.modelProfiles?.[id]?.provider === 'local-openai-compatible');
       const names = ids
         .map((id) => memberName(config, id, { answers: input.builtInAnswers, ...(privateRow?.model ? { name: privateRow.model } : {}) }))
         .filter((name): name is string => !!name);
-      if (names.length) privateAnswers = { first: names[0]!, ...(names[1] ? { fallback: names[1] } : {}) };
+      if (!ordered && names.length > 1) privateAnswers = { any: names };
+      else if (names.length) privateAnswers = { first: names[0]!, ...(names[1] ? { fallback: names[1] } : {}) };
     }
   }
   const out: DashboardModelsOnComputer = { privateAnswers };

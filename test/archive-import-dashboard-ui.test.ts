@@ -1544,6 +1544,22 @@ describe('an import inside its source\'s card', () => {
     expect(lines[1]).toContain(A.inSource.alreadyThere.one);
   });
 
+  test('on a plain Home load (no landing), a source whose joined import is still running shows under In progress, with its progress and Stop (#1163 review)', async () => {
+    const page = await mount(
+      { [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 42, read: 500, alreadyThere: 0 }] }]) },
+      { host: COMPUTER },
+    );
+    const item = sourceCard(page).querySelector('li[data-source-import]')!;
+    expect(item.textContent).toContain(fill(A.inSource.importingLineNone, { percent: '42' }));
+    expect(item.querySelector('[role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('42');
+    expect(Array.from(item.querySelectorAll('button')).map((node) => node.textContent)).toContain(A.inSource.stop);
+  });
+
+  test('on a plain Home load, a source whose joined import finished is not listed: Home holds only what needs the owner or is moving', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [IMPORT] }]) }, { host: COMPUTER });
+    expect(page.doc.querySelector('li[data-source-import]')).toBeNull();
+  });
+
   test('a later read with a lower percent never moves the bar back (owner, Sparta 2026-11-04)', async () => {
     let answer = withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 42, read: 500, alreadyThere: 0 }] }]);
     const page = await mount({

@@ -1627,6 +1627,11 @@ export function chatgptDashboardClient(
     return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
   }
 
+  /** An import that joined a source and is running: In progress, with its own progress and Stop. */
+  function sourceImportsMoving(group: Any): boolean {
+    return !archiveSetting(group) && group.imports.filter(validArchive).some((entry: Any) => entry.status === 'importing');
+  }
+
   /**
    * Under a source's card: the history its inputs cover, then each import that
    * joined it with its own progress, what it found, how much of it the source
@@ -2898,8 +2903,9 @@ export function chatgptDashboardClient(
       if (state.open['home-focus:' + id]) return true;
       const archives = archivesMeta(id);
       const joined = sourceImportsMeta(id);
-      // Shown once for an archive that needs the owner, it stays for the visit, so its result is seen too.
-      if ((!!archives && archiveNeeds(archives)) || (!!joined && sourceImportsNeed(joined))) state.open['home-focus:' + id] = true;
+      // Shown once for an archive that needs the owner, or an import that joined it and is still moving (its
+      // progress and Stop), it stays for the visit, so its result is seen too.
+      if ((!!archives && archiveNeeds(archives)) || (!!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))) state.open['home-focus:' + id] = true;
       return !!state.open['home-focus:' + id];
     });
     if (!shown.length && !archivesMoving()) return null;

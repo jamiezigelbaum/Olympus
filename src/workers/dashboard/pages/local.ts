@@ -393,6 +393,9 @@ function renderModelsOnComputer(models: import('../models-on-computer.ts').Dashb
   if (answers && 'off' in answers) rows.push(row('private-answers', 'Private answers', 'off: Private items are never answered.', change));
   else if (answers && 'first' in answers) {
     rows.push(row('private-answers', 'Private answers', `answered by ${answers.first}${answers.fallback ? `, then ${answers.fallback} if it can't` : ''}.`, change));
+  } else if (answers && 'any' in answers) {
+    const names = answers.any.length > 2 ? `${answers.any.slice(0, -1).join(', ')} or ${answers.any.at(-1)}` : answers.any.join(' or ');
+    rows.push(row('private-answers', 'Private answers', `answered by ${names}, whichever is working and fastest for each question.`, change));
   } else rows.push(row('private-answers', 'Private answers', 'see how they are answered on Privacy rules.', change));
   if (models?.builtIn) {
     const built = models.builtIn;

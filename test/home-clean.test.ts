@@ -108,6 +108,20 @@ describe('Settings › Models on this computer (#1043)', () => {
     expect(models.builtIn?.used).toBe(false);
   });
 
+  test('a pool with no order is not a fallback chain: each question goes to the healthiest, fastest member, and Settings says so (#1163 review)', () => {
+    const config = remoteThenVenice();
+    delete config.routes.secure_local!.pool!.order;
+    const models = dashboardModelsOnComputer({ config, builtInAnswers: false, readiness: READY });
+    expect(models.privateAnswers).toEqual({ any: ['Qwen 3.6 35B on delphi.local', 'Venice'] });
+    const html = renderDashboardLocalPage('settings', { url: new URL('http://127.0.0.1:8787/dashboard?settings'), options: { settings: { models } } });
+    expect(html).toContain('<b>Private answers</b> — answered by Qwen 3.6 35B on delphi.local or Venice, whichever is working and fastest for each question.');
+    expect(html).not.toContain('then Venice');
+    // An order names the chain, kept to the pool's members.
+    const ordered = remoteThenVenice();
+    ordered.routes.secure_local!.pool!.order = [...ordered.routes.secure_local!.pool!.order!].reverse();
+    expect(dashboardModelsOnComputer({ config: ordered, builtInAnswers: false, readiness: READY }).privateAnswers).toEqual({ first: 'Venice', fallback: 'Qwen 3.6 35B on delphi.local' });
+  });
+
   test('transcription names the one cause that applies', () => {
     const off = dashboardModelsOnComputer({ config: undefined, builtInAnswers: false, readiness: READY });
     expect(off.transcription).toEqual({ line: 'off: OLYMPUS_BUILT_IN_TRANSCRIPTION is set to off' });
