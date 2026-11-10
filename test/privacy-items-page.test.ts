@@ -42,7 +42,7 @@ function render(options: NonNullable<Parameters<typeof renderDashboardLocalPage>
 }
 
 /** The page on a local session, its script run against a stubbed engine, on the shared test clock. */
-async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean } = {}) {
+async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean; hold?: boolean } = {}) {
   const html = render({ controlSessionCsrfToken: 'csrf-token', outsideHelpLocalSession: true });
   const window = new Window({ url: URL_ITEMS.href });
   windows.push(window);
@@ -53,10 +53,14 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
   const clock = createTestClock();
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
   const state = items.map((item) => ({ ...item, judge: item.tier }));
+  // With hold, a save answers only when the test releases it.
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
   const fetchStub = async (path: string, init: { body: string; headers: Record<string, string> }) => {
     expect(init.headers['X-Olympus-CSRF']).toBe('csrf-token');
     const request = JSON.parse(init.body) as Record<string, unknown>;
     posts.push({ path, body: request });
+    if (options.hold && path === DASHBOARD_PRIVACY_ITEMS_PATHS.set) await gate;
     let result: unknown;
     if (path === DASHBOARD_PRIVACY_ITEMS_PATHS.find) {
       const words = typeof request.query === 'string' ? request.query.toLowerCase() : '';
@@ -92,7 +96,7 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
   const sets = () => posts.filter((post) => post.path === DASHBOARD_PRIVACY_ITEMS_PATHS.set).map((post) => post.body);
   const dialogOpen = () => $('[data-pi-confirm]')!.hasAttribute('open');
   const text = (selector: string) => $(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-  return { window, document, clock, posts, sets, $, click, dialogOpen, text };
+  return { window, document, clock, posts, sets, $, click, dialogOpen, text, release };
 }
 
 describe('the Privacy tabs', () => {
@@ -205,6 +209,25 @@ describe('changing one item', () => {
     expect(p.dialogOpen()).toBe(false);
     expect(p.sets()).toEqual([{ item_id: 'oti_appt', tier: 'private' }]);
     expect(p.text('[data-pi-toast-text]')).toBe(C.toastPrivate);
+  });
+
+  test('while a change is saving, the item\'s choices wait; the next choice is sent once it has saved', async () => {
+    const p = await page([invoice()], { hold: true });
+    await p.click('[data-pi-item="oti_inv"]');
+    await p.click('[data-pi-choose="Personal"]');
+    await p.click('[data-pi-confirm-ok]');
+    expect(p.sets()).toEqual([{ item_id: 'oti_inv', tier: 'personal' }]);
+    // Saving: both choices are disabled, and a click on Private is not lost silently later.
+    expect(p.$('[data-pi-choose="Private"]')!.hasAttribute('disabled')).toBe(true);
+    expect(p.$('[data-pi-choose="Personal"]')!.hasAttribute('disabled')).toBe(true);
+    await p.click('[data-pi-choose="Private"]');
+    expect(p.sets()).toHaveLength(1);
+    p.release();
+    await flushMicrotasks();
+    expect(p.$('[data-pi-choose="Private"]')!.hasAttribute('disabled')).toBe(false);
+    expect(p.$('[data-pi-choose="Personal"]')!.getAttribute('aria-checked')).toBe('true');
+    await p.click('[data-pi-choose="Private"]');
+    expect(p.sets()).toEqual([{ item_id: 'oti_inv', tier: 'personal' }, { item_id: 'oti_inv', tier: 'private' }]);
   });
 
   test('lowering to Personal asks first; Cancel, X, Esc and a click outside each cancel', async () => {

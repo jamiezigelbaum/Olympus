@@ -247,6 +247,8 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   // This visit's changes, by item: what the owner chose and what the judge had said.
   var changes = {};
   var statusFor = {};
+  // Items with a change being saved: their choices wait, so a second click is never lost.
+  var saving = {};
 
   async function post(path, body) {
     var response;
@@ -309,7 +311,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
 
   function option(item, tier, line) {
     var on = shown(item) === tier;
-    return '<button type="button" class="piopt" role="radio" data-pi-choose="' + tier + '" aria-checked="' + (on ? 'true' : 'false') + '"' + (on ? ' tabindex="-1"' : '') + '>'
+    return '<button type="button" class="piopt" role="radio" data-pi-choose="' + tier + '" aria-checked="' + (on ? 'true' : 'false') + '"' + (on ? ' tabindex="-1"' : '') + (saving[item.item_id] ? ' disabled' : '') + '>'
       + '<b><i class="piradio" aria-hidden="true"></i>' + esc(tier) + '</b><span>' + esc(line) + '</span></button>';
   }
 
@@ -404,9 +406,16 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
 
   async function choose(id, tier) {
     var item = find(id);
-    if (!item) return;
+    if (!item || saving[id]) return;
     delete statusFor[id];
-    var response = await post(config.paths.set, { item_id: id, tier: tier === 'Personal' ? 'personal' : 'private' });
+    saving[id] = true;
+    render();
+    var response;
+    try {
+      response = await post(config.paths.set, { item_id: id, tier: tier === 'Personal' ? 'personal' : 'private' });
+    } finally {
+      delete saving[id];
+    }
     if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
@@ -421,9 +430,17 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   // Undo acts on the item id it was given, whether or not the item is still
   // in the list on screen (a search or a filter may have moved it out).
   async function undo(id) {
+    if (saving[id]) return;
     var item = find(id);
     delete statusFor[id];
-    var response = await post(config.paths.set, { item_id: id, tier: 'judge' });
+    saving[id] = true;
+    if (item) render();
+    var response;
+    try {
+      response = await post(config.paths.set, { item_id: id, tier: 'judge' });
+    } finally {
+      delete saving[id];
+    }
     if (!response.ok || response.result.ok === false) {
       if (item) statusFor[id] = response.message; else setMessage(response.message, true);
       render();
@@ -472,6 +489,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     }
     var pick = target.closest('[data-pi-choose]');
     if (pick && selected) {
+      if (saving[selected]) return;
       var item = find(selected);
       var tier = pick.getAttribute('data-pi-choose');
       if (!item || shown(item) === tier) return;
