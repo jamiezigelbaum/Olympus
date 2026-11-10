@@ -470,7 +470,7 @@ test('move note flush uses one durable append per path and retries without dupli
   const original = fs.open;
   let appends = 0;
   const opened = spyOn(fs, 'open').mockImplementation((...args: Parameters<typeof fs.open>) => {
-    if (args[1] === 'a') appends++;
+    if (args[1] === 'a+') appends++;
     return original(...args);
   });
   try { await flushTierMoveNotes(f.f.ledger); await flushTierMoveNotes(f.f.ledger); }
@@ -488,7 +488,7 @@ test('failed grouped note fsync keeps obligations, and malformed notes do not bl
   const original = fs.open;
   const opened = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
     const handle = await original(...args);
-    if (args[1] === 'a') spyOn(handle, 'sync').mockImplementation(async () => { throw new Error('Synthetic fsync failure'); });
+    if (args[1] === 'a+') spyOn(handle, 'sync').mockImplementation(async () => { throw new Error('Synthetic fsync failure'); });
     return handle;
   });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
