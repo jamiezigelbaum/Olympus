@@ -902,6 +902,13 @@ export interface PeopleObservationSource {
   peopleObservations(): PeopleSenderObservation[];
   /** The store's latest sync run, so a refresh can tell when a sync has finished. */
   lastSyncRun?(): { syncRunId: string; status: string; completedAt?: string } | undefined;
+  /**
+   * A cheap marker that moves when the store's tier visibility changes (a
+   * copy re-judged, superseded, staged or held; an item added or removed),
+   * not on every write, so a refresh can tell when a name may have stopped
+   * being shareable.
+   */
+  peopleVisibilityMarker?(): string;
   setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
 }
 
@@ -927,42 +934,68 @@ export function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly Peo
   return people;
 }
 
+/** A sync or visibility change rebuilds the people index at most this often. */
+export const PEOPLE_INDEX_MIN_REBUILD_MS = 60_000;
+
 /**
- * Keeps the index current: a rebuild right after any authored store finishes
- * a sync (`refreshIfSynced`, cheap to call often), and on demand.
+ * Keeps the index current: a rebuild soon after any authored store finishes
+ * a sync or changes its tier visibility (`refreshIfChanged`, cheap to call
+ * often), and on demand.
  */
+
 export class PeopleIndexRefresher {
   private lastFingerprint: string | undefined;
+  private lastRefreshAt: number | undefined;
+  private readonly now: () => number;
 
   constructor(
     private readonly index: LocalPeopleIndex,
     private readonly stores: () => readonly PeopleObservationSource[],
-  ) {}
+    options: { now?: () => number } = {},
+  ) {
+    this.now = options.now ?? (() => Date.now());
+  }
 
   /** Rebuild now. */
   refresh(): PeoplePerson[] {
     const stores = this.stores();
-    this.lastFingerprint = syncFingerprint(stores);
+    this.lastFingerprint = refreshFingerprint(stores);
+    this.lastRefreshAt = this.now();
     return refreshPeopleIndex(this.index, stores);
   }
 
-  /** Rebuild when a sync has completed since the last rebuild; true when it did. */
-  refreshIfSynced(): boolean {
-    const fingerprint = syncFingerprint(this.stores());
+  /**
+   * Rebuild when a sync has completed or a store's tier visibility has
+   * changed since the last rebuild, at most once every
+   * PEOPLE_INDEX_MIN_REBUILD_MS (a judging backlog moves the markers often);
+   * true when it rebuilt. Reading the markers is cheap, so call it often.
+   */
+  refreshIfChanged(): boolean {
+    const fingerprint = refreshFingerprint(this.stores());
     if (fingerprint === this.lastFingerprint) return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS) return false;
     this.refresh();
     return true;
   }
 }
 
-function syncFingerprint(stores: readonly PeopleObservationSource[]): string {
+function refreshFingerprint(stores: readonly PeopleObservationSource[]): string {
   return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+    let sync = '';
+    let visibility = '';
     try {
       const run = store.lastSyncRun?.();
-      return run && run.status === 'completed' ? `${run.syncRunId}@${run.completedAt ?? ''}` : '';
+      sync = run && run.status === 'completed' ? `${run.syncRunId}@${run.completedAt ?? ''}` : '';
     } catch {
-      return '';
+      sync = '';
     }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? '';
+    } catch {
+      // A store whose visibility cannot be read now: rebuild once it can.
+      visibility = 'unreadable';
+    }
+    return `${sync}#${visibility}`;
   }).join('|');
 }
 

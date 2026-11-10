@@ -1,4 +1,4 @@
-import { LocalPeopleIndex, peopleIndexPath, refreshPeopleIndex, type PeopleSenderIdentity } from '../../core/people-index.ts';
+import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
@@ -2298,6 +2298,8 @@ export function connectorStoreAnswerScope(input: {
 
 const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
 const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
+/** How often the worker checks whether a sync or a tier visibility change needs a rebuild. */
+const PEOPLE_INDEX_CHECK_MS = 60_000;
 
 function openPeopleIndexOrUndefined(): LocalPeopleIndex | undefined {
   try {
@@ -3845,17 +3847,23 @@ export async function main(): Promise<void> {
   // on this computer, rebuilt from every authored store's senders. Without
   // it, answers keep each item's own sender label and filters match labels.
   const peopleIndex = openPeopleIndexOrUndefined();
-  const refreshPeople = (): void => {
-    if (!peopleIndex) return;
+  const peopleRefresher = peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
+  // `force` rebuilds now; otherwise only after a sync or a tier visibility
+  // change, at most once a minute (the markers are cheap to read).
+  const refreshPeople = (force = false): void => {
+    if (!peopleRefresher) return;
     try {
-      refreshPeopleIndex(peopleIndex, connectorStores);
+      if (force) peopleRefresher.refresh();
+      else peopleRefresher.refreshIfChanged();
     } catch (error) {
       console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
-  const peopleFirstRefresh = setTimeout(refreshPeople, PEOPLE_INDEX_FIRST_REFRESH_MS);
+  const peopleFirstRefresh = setTimeout(() => refreshPeople(true), PEOPLE_INDEX_FIRST_REFRESH_MS);
   peopleFirstRefresh.unref?.();
-  const peopleRefresh = setInterval(refreshPeople, PEOPLE_INDEX_REFRESH_MS);
+  const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
+  peopleCheck.unref?.();
+  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
   peopleRefresh.unref?.();
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
