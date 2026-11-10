@@ -146067,7 +146067,7 @@ function parseOwnerTierItemId(itemId) {
 }
 function namesAbovePersonal(state) {
   const { record: record4 } = state;
-  if (!record4)
+  if (!record4 || record4.metadataPending)
     return true;
   return [record4.metadataTier, record4.targetMetadataTier, state.ownerTier].some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank("private"));
 }

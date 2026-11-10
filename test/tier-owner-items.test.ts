@@ -233,6 +233,20 @@ describe('finding an item', () => {
     expect(ownerItems().find({ query: 'orchard-plan', personalNamesOnly: true }).items).toEqual([]);
     expect(ownerItems().find({ query: 'orchard-plan' }).items).toHaveLength(1);
   });
+
+  test('for an agent, an item whose names still await their verdict is left out', async () => {
+    const install = await judged();
+    const current = install.lane.ledger.getCurrent(bankIdentity)!;
+    // The names are re-asked: pending, recorded at the default tier until answered.
+    install.lane.ledger.recordRoutedPlacement(bankIdentity, {
+      metadataTier: 'private', contentTier: current.contentTier, decidedBy: 'sniffer', reasons: [], state: 'pending',
+      contentRead: true, metadataPending: true, contentPending: false, metadataForced: false, metadataFlagged: true,
+      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: current.snifferId,
+    }, { copies: [], embedHold: false }, { staleCopiesGone: true });
+    expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ metadataPending: true, metadataTier: 'private' });
+    expect(ownerItems().find({ query: 'bank', personalNamesOnly: true }).items).toEqual([]);
+    expect(ownerItems().find({ query: 'bank' }).items).toHaveLength(1);
+  });
 });
 
 describe('one item, Private -> Personal -> Private', () => {

@@ -147,11 +147,13 @@ interface ItemState {
 
 /**
  * Whether the item's names are, or are about to be, above Personal: decided
- * so, moving there, or set so by the owner. Nothing recorded counts as above.
+ * so, moving there, set so by the owner, or still awaiting their verdict.
+ * Nothing recorded counts as above.
  */
 function namesAbovePersonal(state: ItemState): boolean {
   const { record } = state;
-  if (!record) return true;
+  // Names still awaiting their verdict are held Private, as everywhere else (createReleaseTierCheck).
+  if (!record || record.metadataPending) return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier]
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
