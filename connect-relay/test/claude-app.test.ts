@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { claudeAppDomain } from '../shared/mcp-app-client.ts';
 import { credentialSurface, SURFACE_RESPONSE_HEADER, AUTHENTICATED_RESPONSE_HEADER, type CredentialSurface } from '../shared/tokens.ts';
 import { checkResponseHead, createResponsePolicies } from '../server/response-policy.ts';
-import { SurfaceMap } from '../server/surface-map.ts';
+import { CLAUDE_APP_PANEL_GRACE_MS, SurfaceMap } from '../server/surface-map.ts';
 import { ConfirmedCredentials } from '../server/limits.ts';
 import { relayMcpResponse } from '../server/relay-mcp.ts';
 
@@ -48,5 +48,30 @@ describe('Claude App credential metadata', () => {
       expect(await response('claude-app', 'directory', 'resources/read', { uri }).text()).toBe(await response('chatgpt', 'directory', 'resources/read', { uri }).text());
     }
     expect(await response('claude-app', 'directory', 'tools/list').text()).toBe(await response('chatgpt', 'directory', 'tools/list').text());
+  });
+
+  test('Claude panels keep passing the origin check for the panel grace after the access token expires, and not after', () => {
+    let now = 1_000_000_000;
+    const map = new SurfaceMap(undefined, () => now);
+    const expiresAt = Math.floor(now / 1000) + 3600;
+    expect(map.hasClaudeApp('install')).toBe(false);
+    map.replace('install', [{ endpoint: 'default', fingerprint: 'c'.repeat(43), surface: 'claude-app', expiresAt }]);
+    expect(map.hasClaudeApp('install')).toBe(true);
+    // The token expires and the next frame no longer lists it: an open panel still delivers.
+    now = expiresAt * 1000 + 1;
+    map.replace('install', []);
+    expect(map.hasClaudeApp('install')).toBe(true);
+    now = expiresAt * 1000 + CLAUDE_APP_PANEL_GRACE_MS + 1;
+    expect(map.hasClaudeApp('install')).toBe(false);
+    // A remote-only install never passes, and a removed install forgets it at once.
+    map.replace('other', [{ endpoint: 'default', fingerprint: 'd'.repeat(43), surface: 'remote', expiresAt: Math.floor(now / 1000) + 60 }]);
+    expect(map.hasClaudeApp('other')).toBe(false);
+    map.replace('install', [{ endpoint: 'default', fingerprint: 'c'.repeat(43), surface: 'claude-app', expiresAt: Math.floor(now / 1000) + 60 }]);
+    map.remove('install');
+    expect(map.hasClaudeApp('install')).toBe(false);
+    // Switched off: the same credential named remote ends the grace at once.
+    map.replace('install', [{ endpoint: 'default', fingerprint: 'c'.repeat(43), surface: 'claude-app', expiresAt: Math.floor(now / 1000) + 60 }]);
+    map.replace('install', [{ endpoint: 'default', fingerprint: 'c'.repeat(43), surface: 'remote', expiresAt: Math.floor(now / 1000) + 60 }]);
+    expect(map.hasClaudeApp('install')).toBe(false);
   });
 });

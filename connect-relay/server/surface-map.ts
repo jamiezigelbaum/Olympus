@@ -42,12 +42,22 @@ interface InstallMap {
 export const DEFAULT_MAX_SURFACE_MAP_ENTRIES = 200_000;
 /** Default bound on installs remembered as synced: the registry's own bound (registry.ts maxInstalls). */
 export const DEFAULT_MAX_SYNCED_INSTALLS = 100_000;
+/**
+ * How long after its last live Claude App credential an install's Claude panels
+ * still pass the relay's origin check: the longest panel job (a private
+ * question, 30 minutes). A panel polls `/private/` without an MCP call, so its
+ * access token can expire, and leave the frame, while its job is still open.
+ * The engine still authorizes every job by its opening connection.
+ */
+export const CLAUDE_APP_PANEL_GRACE_MS = 30 * 60_000;
 
 export class SurfaceMap {
   /** Insertion order is sync order: the first install synced longest ago. */
   private readonly installs = new Map<string, InstallMap>();
   /** Installs whose engine has synced, oldest sync first; kept when their entries are evicted. */
   private readonly syncedInstalls = new Set<string>();
+  /** Per install: until when its Claude panels pass the origin check (ms). */
+  private readonly claudeAppUntil = new Map<string, number>();
   private total = 0;
 
   constructor(
@@ -68,6 +78,12 @@ export class SurfaceMap {
       .filter(({ expiresAtMs }) => expiresAtMs > at)
       .sort((a, b) => b.expiresAtMs - a.expiresAtMs)
       .slice(0, MAX_SURFACE_ENTRIES);
+    // A credential the engine now names with another surface means the Claude
+    // App was switched off: the panel grace ends at once. A credential that just
+    // left the frame (expired, rotated) keeps it.
+    const previous = this.installs.get(installId)?.entries;
+    const switchedOff = previous !== undefined && live.some(({ entry }) =>
+      previous.get(key(entry.endpoint, entry.fingerprint))?.surface === 'claude-app' && credentialSurface(entry.surface) !== 'claude-app');
     this.dropEntries(installId);
     this.syncedInstalls.delete(installId);
     this.syncedInstalls.add(installId);
@@ -77,9 +93,14 @@ export class SurfaceMap {
       this.remove(oldest);
     }
     const map: InstallMap = { entries: new Map() };
+    let claudeUntil = switchedOff ? 0 : this.claudeAppUntil.get(installId) ?? 0;
     for (const { entry, expiresAtMs } of live) {
-      map.entries.set(key(entry.endpoint, entry.fingerprint), { surface: credentialSurface(entry.surface), expiresAtMs });
+      const surface = credentialSurface(entry.surface);
+      map.entries.set(key(entry.endpoint, entry.fingerprint), { surface, expiresAtMs });
+      if (surface === 'claude-app') claudeUntil = Math.max(claudeUntil, expiresAtMs + CLAUDE_APP_PANEL_GRACE_MS);
     }
+    if (claudeUntil > at) this.claudeAppUntil.set(installId, claudeUntil);
+    else this.claudeAppUntil.delete(installId);
     this.installs.set(installId, map);
     this.total += map.entries.size;
     while (this.total > this.maxEntries) {
@@ -97,9 +118,7 @@ export class SurfaceMap {
 
   /** Used only for the opted-in Claude panel's CORS preflight; it authorizes no job. */
   hasClaudeApp(installId: string): boolean {
-    const at = this.now();
-    return [...(this.installs.get(installId)?.entries.values() ?? [])]
-      .some(entry => entry.surface === 'claude-app' && entry.expiresAtMs > at);
+    return (this.claudeAppUntil.get(installId) ?? 0) > this.now();
   }
 
   /** The surface the engine named for this credential, while it has not expired. */
@@ -121,6 +140,7 @@ export class SurfaceMap {
   remove(installId: string): void {
     this.dropEntries(installId);
     this.syncedInstalls.delete(installId);
+    this.claudeAppUntil.delete(installId);
   }
 
   private dropEntries(installId: string): void {
