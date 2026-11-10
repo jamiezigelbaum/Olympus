@@ -250,6 +250,8 @@ export interface StoreSnapshot {
 /** Every byte a tier change could touch, for one store file, optionally limited to some items. */
 export function snapshotStore(dbPath: string, localItemIds?: readonly string[]): StoreSnapshot {
   const db = new Database(dbPath, { readonly: true });
+  // The real worker may be writing: wait for its lock like the stores do (#908).
+  db.exec('PRAGMA busy_timeout = 10000');
   const only = (rows: Array<Record<string, unknown>>) => localItemIds
     ? rows.filter((row) => localItemIds.includes(String(row['local_item_id'])))
     : rows;
