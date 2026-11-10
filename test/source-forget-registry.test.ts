@@ -256,10 +256,10 @@ const seededFile = (stepId: string): SeededFile => SEEDED_FILES.find((file) => f
 describe('steps the worker repeats before its restart', () => {
   test('only the steps its own background writers can write back are marked', () => {
     // The private answers (asked of the deleted stores' open handles), what
-    // AI apps received from those handles, the dashboard history poll and the
-    // watch pass; no owner-choice step.
+    // AI apps received from those handles, the dashboard history poll, the
+    // people refresh and the watch pass; no owner-choice step.
     expect(FORGET_STEPS.filter((step) => step.repeatBeforeRestart).map((step) => step.id))
-      .toEqual(['waiting-private-questions', 'app-release-log', 'source-dashboard', 'source-watches']);
+      .toEqual(['waiting-private-questions', 'app-release-log', 'source-dashboard', 'people-index', 'source-watches']);
   });
 
   test('a repeat-only run forgets the marked steps\' rows and no others', () => {

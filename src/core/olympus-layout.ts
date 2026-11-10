@@ -77,6 +77,8 @@ export const SHARED_DATA_FILES = {
   // What each AI app received (core/app-release-log.ts), beside them too.
   'app-release-log': 'app-release-log.sqlite',
   'tier-migration': 'tier-migration',
+  // One person across sources (#1076): Private, on this computer only.
+  'people-index': 'people-index.sqlite',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
   'built-in-reasoning': 'models/built-in-reasoning',

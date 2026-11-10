@@ -1,3 +1,4 @@
+import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { APP_RELEASE_LOG_STORE_ID, appReleaseLogDbPath } from './core/app-release-log.ts';
 import { spawnSync } from 'node:child_process';
@@ -1200,6 +1201,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // connection token at once. Named on its own because XDG_DATA_HOME can put
     // it outside the known roots below.
     ...remoteConnectionsDeleteTargets(context),
+    // The people index (#1076): who is who across sources, and the owner's
+    // corrections. Named on its own because XDG_DATA_HOME can put it outside
+    // the known roots below.
+    ...sqliteDeleteTargets(peopleIndexPath(envForContext(context)), PEOPLE_INDEX_STORE_ID, context),
     // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
     // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
     // the known roots; it is always a directory Olympus created for itself.
