@@ -58,6 +58,7 @@ import {
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_APPROVED_SCOPE_FILTER_CODEC } from '../src/workers/dropbox-files/index.ts';
 import {
+  DEFAULT_MAX_CHARS_PER_CANDIDATE as PRODUCT_MAX_CHARS_PER_CANDIDATE,
   releaseAnalystAnswer,
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
@@ -92,7 +93,10 @@ const DEFAULT_DATASET_PATH = 'eval/private/held-out.real.json';
 const DEFAULT_REPORT_PATH = 'eval/private/report.latest.json';
 const DEFAULT_QUESTION_TIMEOUT_MS = 240_000;
 const DEFAULT_MAX_RESULTS = 5;
-const DEFAULT_MAX_CHARS_PER_CANDIDATE = 1_500;
+// The product's own per-candidate budget, so the eval reads each item the way
+// Ask does (rerun 16: at 1,500 a summary question's seat carried only a
+// 455-character tail of the right item).
+const DEFAULT_MAX_CHARS_PER_CANDIDATE = PRODUCT_MAX_CHARS_PER_CANDIDATE;
 const DEFAULT_EMBEDDING_WARM_TIMEOUT_MS = 180_000;
 const INTERNAL_QUESTION_INDEX_ENV = 'OLYMPUS_EVAL_INTERNAL_QUESTION_INDEX';
 type EvalAnalystProvider = 'local' | 'venice';

@@ -291,7 +291,7 @@ const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
 const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
 const TEMPORAL_INTENT_MIN_RESULTS = 8;
-const DEFAULT_MAX_CHARS_PER_CANDIDATE = 3_000;
+export const DEFAULT_MAX_CHARS_PER_CANDIDATE = 3_000;
 const DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20_000;
 // Generous local-analyst ceiling. Decoupled from the OpenClaw tool watchdog
 // (which the skill passes as request.timeout_ms, e.g. 600s): local reasoning
