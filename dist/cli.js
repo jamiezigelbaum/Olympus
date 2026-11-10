@@ -103149,29 +103149,29 @@ class JudgeObservations {
     };
   }
 }
-function completionTier(completion) {
+function completionTier(completion, decisionBar) {
   const verdict = completion.decisionVerdict ?? parseSnifferBatchResponse(completion.text, new Set([1])).get(1);
   if (!verdict)
     return;
-  return snifferTierKey({ ...verdict, failSafe: false }) === "private" ? "personal" : "held";
+  return snifferTierKey({ ...verdict, failSafe: false }, decisionBar) === "private" ? "personal" : "held";
 }
-function observedJudge(model, observations) {
+function observedJudge(model, observations, decisionBar) {
   return { ...model, complete: async (request) => {
     observations.started();
     let tier;
     try {
       const completion = await model.complete(request);
-      tier = completionTier(completion);
+      tier = completionTier(completion, decisionBar);
       return completion;
     } finally {
       observations.finished(tier);
     }
   } };
 }
-function secondRoundJudge(local, venice, counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed) {
+function secondRoundJudge(local, venice, counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed, localDecisionBar) {
   return { ...local, secondRound: counts, complete: async (request) => {
     const first = await local.complete(request);
-    if (completionTier(first) !== "held" || request.snifferItem?.pass !== "content" || request.signal?.aborted)
+    if (completionTier(first, localDecisionBar) !== "held" || request.snifferItem?.pass !== "content" || request.signal?.aborted)
       return first;
     const digest4 = SecondRoundConfirmed.digest(request);
     if (confirmed?.has(digest4))
@@ -227918,7 +227918,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
     requestModelReload();
   } });
-  const snifferModel = rawSnifferModel && snifferLane?.kind === "local" ? observedJudge(rawSnifferModel, judgeObservations) : rawSnifferModel;
+  const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
+  const snifferModel = rawSnifferModel && snifferLane?.kind === "local" ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === "built_in" ? "built_in" : snifferLane?.kind === "local" ? localModelResourceKey(snifferLane.profile) : undefined;
   const judgeChoice = judgeSpending.status();
   const secondRoundVenice = snifferModel && snifferLane?.kind === "local" && judgeChoice.choice === "local-then-venice" && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== "off" && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
@@ -227940,7 +227941,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const secondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
   let lastSecondRoundLog = "";
   const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
-  const withSecondRound = (model) => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed) : model;
+  const withSecondRound = (model) => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
   const tierSniffer = snifferLane && snifferModel ? new TierSnifferService({
     installed: installedTierClassification,
     lane: snifferLane,

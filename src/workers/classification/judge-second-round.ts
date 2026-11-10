@@ -113,21 +113,25 @@ export class JudgeObservations {
   }
 }
 
-/** Personal, Private (held) or no verdict, as the resolver will read this one answer. */
-export function completionTier(completion: SnifferModelCompletion): 'personal' | 'held' | undefined {
+/**
+ * Personal, Private (held) or no verdict, as the resolver will read this one
+ * answer: a decision verdict at its lane's bar (snifferDecisionBar), which the
+ * caller passes for the local judge.
+ */
+export function completionTier(completion: SnifferModelCompletion, decisionBar?: number): 'personal' | 'held' | undefined {
   const verdict = completion.decisionVerdict ?? parseSnifferBatchResponse(completion.text, new Set([1])).get(1);
   if (!verdict) return undefined;
-  return snifferTierKey({ ...verdict, failSafe: false }) === 'private' ? 'personal' : 'held';
+  return snifferTierKey({ ...verdict, failSafe: false }, decisionBar) === 'private' ? 'personal' : 'held';
 }
 
 /** Times and counts the local judge's own answers; the answers pass through unchanged. */
-export function observedJudge<T extends SnifferModel>(model: T, observations: JudgeObservations): T {
+export function observedJudge<T extends SnifferModel>(model: T, observations: JudgeObservations, decisionBar?: number): T {
   return { ...model, complete: async (request: SnifferModelRequest) => {
     observations.started();
     let tier: 'personal' | 'held' | undefined;
     try {
       const completion = await model.complete(request) as SnifferModelCompletion;
-      tier = completionTier(completion);
+      tier = completionTier(completion, decisionBar);
       return completion;
     } finally { observations.finished(tier); }
   } };
@@ -139,11 +143,11 @@ export interface SecondRoundCounts { asked: number; released: number; kept: numb
  * The local answer stands unless it held the item Private and Venice answers
  * Personal. A Venice stop or failure keeps the local answer: Private.
  */
-export function secondRoundJudge<T extends SnifferModel>(local: T, venice: AnalystModel, counts: SecondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed?: Pick<SecondRoundConfirmed, 'has' | 'add'>): T & { secondRound: SecondRoundCounts } {
+export function secondRoundJudge<T extends SnifferModel>(local: T, venice: AnalystModel, counts: SecondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 }, confirmed?: Pick<SecondRoundConfirmed, 'has' | 'add'>, localDecisionBar?: number): T & { secondRound: SecondRoundCounts } {
   return { ...local, secondRound: counts, complete: async (request: SnifferModelRequest) => {
     const first = await local.complete(request) as SnifferModelCompletion;
     // Text questions only: an item held Private on its names alone never goes to Venice.
-    if (completionTier(first) !== 'held' || request.snifferItem?.pass !== 'content' || request.signal?.aborted) return first;
+    if (completionTier(first, localDecisionBar) !== 'held' || request.snifferItem?.pass !== 'content' || request.signal?.aborted) return first;
     const digest = SecondRoundConfirmed.digest(request);
     if (confirmed?.has(digest)) return first;
     counts.asked += 1;

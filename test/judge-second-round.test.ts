@@ -13,7 +13,7 @@ import { createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { JudgeCloudStopped, JudgeSpending, judgeArchiveEstimate, judgeDefaultCapDollars, SECOND_ROUND_HELD_ASSUMPTION } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { readClassificationLedger, isClassifierApproved } from '../src/workers/classification-ledger.ts';
-import { CachedTierSniffer, snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
+import { CachedTierSniffer, SNIFFER_DECISION_CATEGORY, snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
@@ -374,4 +374,24 @@ test('deleting a source forgets its sweep positions and keeps the others', () =>
   expect(forgetSecondRoundCursors(statePath, source)).toBe(0);
   expect(forgetSecondRoundCursors(statePath, { ledgerPaths: [] })).toBe(0);
   expect(forgetSecondRoundCursors(join(dir, 'missing.json'), source)).toBe(0);
+});
+
+test('a decision judge held Private at its own bar goes to Venice, and the observed held share counts it (#1136 review)', async () => {
+  // Held at a 0.15 bar with P(Private) 0.3: below an even chance, so only the lane's own bar holds it.
+  const held = { tier: 'private' as const, category: SNIFFER_DECISION_CATEGORY, confidence: 0.3, failSafe: false };
+  const local = { complete: async () => ({ text: '', modelId: 'synthetic-local', decisionVerdict: held }) };
+  const request = { system: 's', prompt: 'Lowchance', localOnly: true, snifferItem: { pass: 'content' as const, material: 'Lowchance' } } as AnalystModelRequest;
+  const sent: string[] = [];
+  const counts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
+  await secondRoundJudge(local, veniceJudge(sent), counts, undefined, 0.15).complete(request);
+  expect(sent).toEqual(['Lowchance']);
+  expect(counts.asked).toBe(1);
+  // At an even-chance bar the same answer reads Personal and is not double-checked.
+  const unsent: string[] = [];
+  await secondRoundJudge(local, veniceJudge(unsent), undefined, undefined, 0.5).complete(request);
+  expect(unsent).toEqual([]);
+  const observations = new JudgeObservations(undefined);
+  const observed = observedJudge(local, observations, 0.15);
+  for (let i = 0; i < OBSERVED_MIN_VERDICTS; i += 1) await observed.complete(request);
+  expect(observations.observed().heldFraction).toBe(1);
 });
