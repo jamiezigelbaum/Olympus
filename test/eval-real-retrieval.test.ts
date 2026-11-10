@@ -113,9 +113,28 @@ describe('the real eval report says where an expected value was lost (#1234)', (
         { inPack: false, inAnalystAnswer: false, inReleasedAnswer: false },
       ],
     });
-    // The value was in the pack and the Analyst missed it.
-    expect(evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.')).expected[0])
-      .toEqual({ inPack: true, inAnalystAnswer: false, inReleasedAnswer: false });
+    // The value was in the pack and in the prompt, and the Analyst missed it.
+    expect(evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.'), ['Evidence 1: total is 4182 dollars']).expected[0])
+      .toEqual({ inPack: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false });
+  });
+
+  test('a value only in a locator, a fact or a table counts as in the pack (#1239 review)', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({
+      question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    });
+    const answer = (text: string): AnalystResult => ({ answer: text, citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult);
+    // The fixture's locator ends in the file name.
+    expect(evalAnswerStageAudit({ expectedAnswerContains: ['kestrel-invoice.txt'] }, pack, answer('x'), answer('x')).expected[0]!.inPack).toBe(true);
+    const withStructure = {
+      ...pack,
+      candidates: pack.candidates.map((candidate, index) => index === 0
+        ? { ...candidate, chunks: [], facts: [{ key: 'policy', value: 'ZX-4471' }], tables: [{ rows: [['slip', 'B-17']] }] }
+        : candidate),
+    } as unknown as typeof pack;
+    const audit = evalAnswerStageAudit({ expectedAnswerContains: ['ZX-4471', 'B-17'] }, withStructure, answer('x'), answer('x'));
+    expect(audit.expected.map((entry) => entry.inPack)).toEqual([true, true]);
   });
 });
 

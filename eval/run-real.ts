@@ -185,7 +185,15 @@ async function main(): Promise<void> {
     config,
     env: process.env,
   });
-  const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+  // Each run evaluates one question, so every prompt recorded here is that
+  // question's: the answer-stage audit checks the values against it.
+  const analystPrompts: string[] = [];
+  const analyst = createAnalyst({
+    complete(request) {
+      analystPrompts.push(request.prompt);
+      return model.complete(request);
+    },
+  }, { auditSuspiciousDrafts: true });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
@@ -232,7 +240,7 @@ async function main(): Promise<void> {
           ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
         }),
         ...(detail ? { retrieval: evalRetrievalAudit(detail) } : {}),
-        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result),
+        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts),
       });
     },
     onProgress(event) {
@@ -481,7 +489,13 @@ export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetriev
  * the released one is the release step removing it.
  */
 export interface EvalAnswerStageAudit {
-  expected: Array<{ inPack: boolean; inAnalystAnswer: boolean; inReleasedAnswer: boolean }>;
+  expected: Array<{
+    inPack: boolean;
+    /** In the prompt the Analyst model was sent; absent when no prompt was recorded. */
+    inAnalystPrompt?: boolean;
+    inAnalystAnswer: boolean;
+    inReleasedAnswer: boolean;
+  }>;
 }
 
 export function evalAnswerStageAudit(
@@ -489,14 +503,21 @@ export function evalAnswerStageAudit(
   pack: EvidencePack,
   analystResult: AnalystResult | undefined,
   releasedResult: AnalystResult,
+  analystPrompts?: readonly string[],
 ): EvalAnswerStageAudit {
+  // Every evidence field the Analyst can be shown: citation metadata
+  // (title, locator, dates), chunk text, extracted facts and tables.
   const packText = pack.candidates.map((candidate) => [
-    candidate.provenance.citation?.title ?? '',
+    JSON.stringify(candidate.provenance.citation ?? {}),
     ...candidate.chunks,
+    JSON.stringify(candidate.facts ?? []),
+    JSON.stringify(candidate.tables ?? []),
   ].join('\n')).join('\n');
+  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
   return {
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
+      ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
       inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
       inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
     })),
