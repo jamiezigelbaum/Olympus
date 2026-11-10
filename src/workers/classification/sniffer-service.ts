@@ -29,7 +29,7 @@ import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from '
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-  SNIFFER_MAX_CONCURRENT_CALLS,
+  SNIFFER_MAX_CONCURRENT_CLOUD_CALLS,
   SnifferCallBudget,
   runSnifferPass,
   DEFAULT_SNIFFER_PASS_TIME_MS,
@@ -1955,7 +1955,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   intervalMs: number;
   /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
-  /** Calls in flight at once (default 1, at most SNIFFER_MAX_CONCURRENT_CALLS). */
+  /** Calls in flight at once (default 1; a pass holds a local lane to SNIFFER_MAX_CONCURRENT_CALLS). */
   concurrentCalls?: number;
   maxCallsPerDay?: number;
 } {
@@ -1968,7 +1968,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
       : {}),
     ...(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim()
-      ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
+      ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CLOUD_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
       : {}),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim()
       ? { maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}),
