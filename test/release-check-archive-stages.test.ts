@@ -152,7 +152,7 @@ class FakeMachine implements ArchiveHost {
         return super.probe(frame, call);
       }
     }
-    const driver = new Driver(async () => (await mountPanel(this.serve())).win);
+    const driver = new Driver(async (path) => (await mountPanel(this.serve(), path)).win);
     await driver.go();
     return await work({ driver, pid: undefined, requests: [] });
   }

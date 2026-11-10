@@ -28,7 +28,7 @@ import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type BesideLive
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
 import { OPEN_ALL_SOURCES } from './journeys.ts';
-import { DASHBOARD_OPEN_FRAGMENT_KEY, dashboardSourceLandingToken } from '../../src/core/open-targets.ts';
+import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardSourceLandingToken } from '../../src/core/open-targets.ts';
 import type { CheckResult } from './report.ts';
 
 // ---------------------------------------------------------------------------
@@ -451,8 +451,10 @@ const OPEN_S = 60;
 const BEFORE_NAME = (template: string): string => template.split('{name}')[0] ?? '';
 const rowTarget = (fileName: string) => ({ css: 'li.archive:not(.request)', text: fileName, contains: true });
 
-/** The dashboard opened, All sources unfolded, then what the step must find there (within the opening's bound). */
-function openDashboardSteps(name: string, expect: Journey['steps'][number]['expect'], timeoutMs: number, path = '/dashboard'): Journey['steps'] {
+/** Home's "Imported archives and details" landing, where every archive is listed. */
+export const ALL_SOURCES_PATH = `/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`;
+/** That landing opened, then what the step must find there (within the opening's bound). */
+function openDashboardSteps(name: string, expect: Journey['steps'][number]['expect'], timeoutMs: number, path = ALL_SOURCES_PATH): Journey['steps'] {
   return [
     { name: 'Open the dashboard', do: { go: path }, expect: [], timeoutMs },
     OPEN_ALL_SOURCES,

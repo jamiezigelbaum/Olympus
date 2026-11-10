@@ -15,7 +15,7 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
+  ALL_SOURCES_PATH, ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
   type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
@@ -370,7 +370,7 @@ async function drainWait(host: ArchiveHost, driver: JourneyDriver, fx: LegFixtur
   const ms = host.now() - started;
   let row: RowView | undefined;
   try {
-    await driver.go('/dashboard');
+    await driver.go(ALL_SOURCES_PATH);
     row = await rowNow(host, driver, fx.fileName, 30_000);
   } catch { /* the row stays unread; the check says so */ }
   host.say(`drain: ${drained ? 'done' : 'NOT done'} after ${Math.round(ms / 1000)} s (${last.waiting ?? '?'} waiting)`);
