@@ -323,6 +323,24 @@ interface StoredRejudgeQuestion extends TierRejudgeQuestion {
   decidedBy: string;
 }
 
+/**
+ * The SQL that narrows `state = 'moving'` rows of `tier_items` to raises or
+ * lowerings (empty for both). Shared with read-only counts that open the
+ * ledger file themselves (classification/sniffer-service.ts).
+ */
+export function tierMovingDirectionClause(direction?: 'raise' | 'lower'): string {
+  if (!direction) return '';
+  // A hide-first move also wins if it was retargeted at the same tiers.
+  const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+  const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
+    OR ${rank('target_content_tier')} > ${rank('content_tier')}
+    OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+      AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+      AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+      AND c.superseded_by_generation = tier_items.generation + 1))`;
+  return `AND ${direction === 'lower' ? 'NOT' : ''} ${raising}`;
+}
+
 export class TierLedgerGenerationConflictError extends Error {
   constructor(message = 'Tier ledger generation changed; re-read the row before flipping.') {
     super(message);
@@ -922,17 +940,9 @@ export class TierLedger {
   }
 
   private movingDirectionClause(direction?: 'raise' | 'lower'): string {
-    if (!direction) return '';
-    // A hide-first move also wins if it was retargeted at the same tiers.
-    const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
-    const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
-      OR ${rank('target_content_tier')} > ${rank('content_tier')}
-      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
-        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
-        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
-        AND c.superseded_by_generation = tier_items.generation + 1))`;
-    return `AND ${direction === 'lower' ? 'NOT' : ''} ${raising}`;
+    return tierMovingDirectionClause(direction);
   }
+
 
   /**
    * Items with a queued move (state `moving`): the fewest failed attempts
