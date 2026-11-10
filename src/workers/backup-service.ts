@@ -268,11 +268,14 @@ export function createBackupService(options: BackupServiceOptions): BackupServic
       // The chosen disk, asked again before writing and again before older backups are removed.
       const folder = folderNow(current);
       if (!folder) throw new OperationError('invalid_params', BACKUP_DISK_ABSENT);
+      // The export can take a while: the disk can go, or be replaced, in that time.
+      const sameDisk = () => {
+        if (folderNow(settings()) !== folder) throw new OperationError('invalid_params', BACKUP_DISK_ABSENT);
+      };
       const result = await backupOlympusData({
         folder,
-        beforePrune: () => {
-          if (folderNow(settings()) !== folder) throw new OperationError('invalid_params', BACKUP_DISK_ABSENT);
-        },
+        beforeWrite: sameDisk,
+        beforePrune: sameDisk,
         ...(key ? { key } : {}),
         now: startedAt,
         keep: options.keep ?? BACKUP_KEEP,

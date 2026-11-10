@@ -130741,6 +130741,7 @@ async function backupOlympusData(options) {
     mkdirSync53(staging, { mode: 448 });
     const exportDir = join117(staging, "export");
     await options.exportInto(exportDir);
+    options.beforeWrite?.();
     const written = await writeBackupFile({ exportDir, folder, ...options.key ? { key: options.key } : {}, ...options.now ? { now: options.now } : {} });
     if (options.keep)
       options.beforePrune?.();
@@ -175417,12 +175418,14 @@ function createBackupService(options) {
       const folder = folderNow(current2);
       if (!folder)
         throw new OperationError("invalid_params", BACKUP_DISK_ABSENT);
+      const sameDisk = () => {
+        if (folderNow(settings()) !== folder)
+          throw new OperationError("invalid_params", BACKUP_DISK_ABSENT);
+      };
       const result = await backupOlympusData({
         folder,
-        beforePrune: () => {
-          if (folderNow(settings()) !== folder)
-            throw new OperationError("invalid_params", BACKUP_DISK_ABSENT);
-        },
+        beforeWrite: sameDisk,
+        beforePrune: sameDisk,
         ...key2 ? { key: key2 } : {},
         now: startedAt,
         keep: options.keep ?? BACKUP_KEEP,

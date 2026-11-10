@@ -641,6 +641,8 @@ export async function backupOlympusData(options: {
   now?: Date;
   /** Keep only this many backups in the folder afterwards. */
   keep?: number;
+  /** Throws to write nothing: asked after the export, just before the backup file is created in `folder`. */
+  beforeWrite?: () => void;
   /** Throws to keep every older backup: asked after the new one is written, before any is removed. */
   beforePrune?: () => void;
   exportInto: (destination: string) => unknown | Promise<unknown>;
@@ -651,6 +653,7 @@ export async function backupOlympusData(options: {
     mkdirSync(staging, { mode: 0o700 });
     const exportDir = join(staging, 'export');
     await options.exportInto(exportDir);
+    options.beforeWrite?.();
     const written = await writeBackupFile({ exportDir, folder, ...(options.key ? { key: options.key } : {}), ...(options.now ? { now: options.now } : {}) });
     if (options.keep) options.beforePrune?.();
     const removed = options.keep ? pruneBackups(folder, options.keep) : [];

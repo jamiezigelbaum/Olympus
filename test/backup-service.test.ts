@@ -335,10 +335,17 @@ describe('backup routes', () => {
     expect(absent.lastError?.message).toContain('isn\'t connected');
     expect(readdirSync(folder)).toEqual([kept!]);
 
-    // Gone between the backup and the clean-up: the new backup stays, nothing is pruned.
+    // Gone while the export is prepared: the vacated path gets nothing.
     mounted = folder;
     resolutions = 0;
     unmountAfter = 1;
+    const duringExport = await service.runNow();
+    expect(duringExport.lastError?.message).toContain('isn\'t connected');
+    expect(readdirSync(folder)).toEqual([kept!]);
+
+    // Gone between the backup and the clean-up: the new backup stays, nothing is pruned.
+    resolutions = 0;
+    unmountAfter = 2;
     const midway = await service.runNow();
     expect(midway.lastError?.message).toContain('isn\'t connected');
     expect(readdirSync(folder).filter((name) => name.endsWith('.olympusbackup'))).toHaveLength(2);
