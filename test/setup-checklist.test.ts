@@ -236,6 +236,15 @@ describe('the worker reads the facts the dashboard reads', () => {
     expect(facts.findableItems).toBe(7);
   });
 
+  test('an import-only source counts once its import landed, and is left out before (#1127)', () => {
+    const imported = setupFactsFromView(view([
+      card('chatgpt.conversations', 'ChatGPT', { connection: { state: 'connected', label: '', action: { kind: 'archive_import' }, handles: [] }, coverage: { indexed_items: 4 } }),
+      card('claude.conversations', 'Claude', { connection: { state: 'not_connected', label: '', action: { kind: 'archive_import' }, handles: [] } }),
+    ]), worker);
+    expect(imported.sources).toEqual([{ id: 'chatgpt.conversations', name: 'ChatGPT', state: 'connected' }]);
+    expect(step(buildSetupChecklist(imported), 'sources').state).toBe('done');
+  });
+
   test('a paired chat app counts its chats chosen only once capture was approved', () => {
     const paired = setupChecklistFromView(view([card('whatsapp.personal.messages', 'WhatsApp', connected())]), worker);
     expect(step(paired, 'messaging_chats')).toMatchObject({ state: 'next', title: 'Choose your WhatsApp chats' });

@@ -37,7 +37,10 @@ function sourceState(card: DashboardSourceCard): SetupSourceEntry['state'] {
 }
 
 export function setupFactsFromView(view: SourceDashboardViewModel | undefined, worker: SetupWorkerFacts): SetupFacts {
-  const cards = (view?.sources ?? []).filter((card) => !NOT_A_SOURCE.has(card.source_id) && card.connection.action.kind !== 'archive_import');
+  // An import-only source has no account to connect: its imports are its
+  // connection, so it counts once an import has landed and is left out before.
+  const cards = (view?.sources ?? []).filter((card) => !NOT_A_SOURCE.has(card.source_id)
+    && (card.connection.action.kind !== 'archive_import' || CONNECTED.has(card.connection.state)));
   const sources: SetupSourceEntry[] = cards.map((card) => ({ id: card.source_id, name: card.label, state: sourceState(card) }));
   const messaging: SetupMessagingFact[] = cards.filter((card) => MESSAGING.has(card.source_id)).map((card) => ({
     name: card.label,

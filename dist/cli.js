@@ -220010,7 +220010,7 @@ function sourceState(card) {
   return "connected";
 }
 function setupFactsFromView(view3, worker) {
-  const cards = (view3?.sources ?? []).filter((card) => !NOT_A_SOURCE.has(card.source_id) && card.connection.action.kind !== "archive_import");
+  const cards = (view3?.sources ?? []).filter((card) => !NOT_A_SOURCE.has(card.source_id) && (card.connection.action.kind !== "archive_import" || CONNECTED.has(card.connection.state)));
   const sources = cards.map((card) => ({ id: card.source_id, name: card.label, state: sourceState(card) }));
   const messaging = cards.filter((card) => MESSAGING.has(card.source_id)).map((card) => ({
     name: card.label,
