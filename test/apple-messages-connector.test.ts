@@ -260,6 +260,8 @@ describe('Apple Messages SourceConnector (Contract 1)', () => {
     expect(item.content).toEqual({ kind: 'text', text: 'Lisbon next month?' });
     expect(item.metadata).toEqual({
       sender: 'jordan@example.com',
+      senderId: 'jordan@example.com',
+      senderIsOwner: false,
       chat_identifier: CHAT_IDENTIFIER,
       sent_at: '2026-06-01T10:00:00.000Z',
       service: 'iMessage',
@@ -271,6 +273,8 @@ describe('Apple Messages SourceConnector (Contract 1)', () => {
     const item = itemByGuid(items, 'guid-outbound-seconds');
 
     expect(item.metadata.sender).toBe('me');
+    expect(item.metadata.senderIsOwner).toBe(true);
+    expect(item.metadata.senderId).toBeUndefined();
     expect(item.content).toEqual({ kind: 'text', text: 'Booked the flat for June.' });
   });
 
