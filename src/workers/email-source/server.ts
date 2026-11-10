@@ -9,7 +9,7 @@ import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
-import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
+import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
@@ -47,7 +47,7 @@ import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/wo
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -158,6 +158,7 @@ import {
   type LoadSovereigntyOptions,
   type SovereigntyModelProfile,
   type SovereigntyResolvedProfile,
+  validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import {
@@ -6187,6 +6188,19 @@ export async function main(): Promise<void> {
               if (!result.ok || !result.changed) return false;
               requestModelReload();
               return true;
+            },
+            savePrivateAnswerMode: (choice) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return { ok: false, message: 'This Olympus has no policy file to change.' };
+              // The policy on disk, not the boot copy: an earlier change may already be saved.
+              let current;
+              try { current = validateSovereigntyConfig(JSON.parse(readFileSync(sovereigntyEngine.path, 'utf8'))); }
+              catch { return { ok: false, message: 'The privacy policy file cannot be read.' }; }
+              let result;
+              try { result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current); }
+              catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'The Private-answer mode could not be saved.' }; }
+              if (!result.ok) return { ok: false, message: 'The privacy policy changed while saving. Refresh and try again.' };
+              if (!result.changed) return { ok: true, message: 'Already in use.' };
+              return { ok: true, message: requestModelReload() ? 'Saved. Olympus is applying it.' : 'Saved. Restart Olympus to apply it.' };
             },
             connectModelKey,
             // The panel's tools on the computer; bound late (set up further
