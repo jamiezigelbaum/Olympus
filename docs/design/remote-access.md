@@ -170,12 +170,14 @@ The user-facing page is docs/openclaw-node-setup.md.
   the token" held for the tunnel but not for local programs until #1153: the
   dashboard's local-only mint (`POST /dashboard/control/session/local`, for
   Outside help) gave a local-grade control session to any request from a
-  loopback peer with a loopback `Origin`, with no secret. Without the Linux
-  owner socket (so on a Mac, and through a tunnel, whose peer is sshd on
-  loopback) the mint now also needs a live control session in the same
-  browser, which only the owner's launch ticket or the worker token opens.
-  Another program or account that can open 127.0.0.1:PORT, but has neither,
-  gets no session.
+  loopback peer with a loopback `Origin`, with no secret. The mint now also
+  needs a live control session in the same browser, which only the owner's
+  launch ticket or the worker token opens (#1153 on a Mac, #1188 on Linux).
+  On Linux the owner socket is necessary but not sufficient: the tunnel
+  forwards that socket, one socket connection per TCP connection, so a
+  request through it reaches the engine exactly as a local socket client's
+  does. Another program or account that can open 127.0.0.1:PORT, but has
+  neither ticket nor token, gets no session.
 
 - **Who can trigger it.** Only the owner in a direct session (OpenClaw's
   `senderIsOwner` and a direct session key); the tunnel still needs the
