@@ -7120,6 +7120,25 @@ function closeSqliteStore(db, options = {}) {
   db.close();
 }
 
+// src/core/store-write-guard.ts
+function writableStoreOpensForbidden() {
+  return forbidden;
+}
+function assertWritableStoreOpenAllowed(kind, dbPath) {
+  if (forbidden && dbPath !== ":memory:")
+    throw new FrontStoreWriteError(kind);
+}
+var FrontStoreWriteError, forbidden = false;
+var init_store_write_guard = __esm(() => {
+  FrontStoreWriteError = class FrontStoreWriteError extends Error {
+    code = "front_store_write";
+    constructor(kind) {
+      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
+      this.name = "FrontStoreWriteError";
+    }
+  };
+});
+
 // src/core/people-index.ts
 function normalizePhone(value) {
   const trimmed = value.trim();
@@ -7151,6 +7170,7 @@ var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_store_write_guard();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
     phone: "Linked by phone number",
@@ -9585,25 +9605,6 @@ var init_delphi_scorer = __esm(() => {
     '{"tier":"internal"|"secure","category":"financial"|"health"|"legal"|"identity"|"personal"|"work"|"other","confidence":<number between 0 and 1>}'
   ].join(`
 `);
-});
-
-// src/core/store-write-guard.ts
-function writableStoreOpensForbidden() {
-  return forbidden;
-}
-function assertWritableStoreOpenAllowed(kind, dbPath) {
-  if (forbidden && dbPath !== ":memory:")
-    throw new FrontStoreWriteError(kind);
-}
-var FrontStoreWriteError, forbidden = false;
-var init_store_write_guard = __esm(() => {
-  FrontStoreWriteError = class FrontStoreWriteError extends Error {
-    code = "front_store_write";
-    constructor(kind) {
-      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
-      this.name = "FrontStoreWriteError";
-    }
-  };
 });
 
 // src/core/sqlite-rows.ts

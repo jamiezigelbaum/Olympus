@@ -252,9 +252,23 @@ export async function runUnderDataOwnerLock(main: () => unknown, env: LayoutEnv 
  * when the process exits.
  */
 export function takeWorkerDataOwnerLock(
+  env?: LayoutEnv,
+  options?: { waitMs?: number; exit?: (code: number) => never; report?: (line: string) => void },
+): HeldDataOwnerLock;
+/**
+ * With `engineRole`: the engine split's front takes no lock (its background
+ * holds it, and the front opens nothing for writing), so it gets undefined;
+ * every other role takes it as above.
+ */
+export function takeWorkerDataOwnerLock(
+  env: LayoutEnv,
+  options: { waitMs?: number; exit?: (code: number) => never; report?: (line: string) => void; engineRole: 'single' | 'background' | 'front' },
+): HeldDataOwnerLock | undefined;
+export function takeWorkerDataOwnerLock(
   env: LayoutEnv = process.env,
-  options: { waitMs?: number; exit?: (code: number) => never; report?: (line: string) => void } = {},
-): HeldDataOwnerLock {
+  options: { waitMs?: number; exit?: (code: number) => never; report?: (line: string) => void; engineRole?: 'single' | 'background' | 'front' } = {},
+): HeldDataOwnerLock | undefined {
+  if (options.engineRole === 'front') return undefined;
   try {
     return holdDataOwnerLock(env, { waitMs: options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS });
   } catch (error) {

@@ -34,6 +34,7 @@ import { createFrontDashboardHistory } from '../src/workers/engine-split/front-h
 import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
 import { LocalSourceWatchStore } from '../src/core/source-watch.ts';
+import { LocalPeopleIndex } from '../src/core/people-index.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import {
   createEngineFrontRoutes,
@@ -568,6 +569,25 @@ describe('the front writes nothing the background owns', () => {
     new SqliteSourceDashboardHistory(dashboard, { readOnly: true }).close();
     new LocalSourceWatchStore(watches, { readOnly: true }).close();
     new LocalFileExtractionJobStore(jobs, { readonly: true }).close();
+  });
+
+  test('the people index is the background\'s: the front opens it read-only and picks up each rebuild', () => {
+    const root = tempRoot();
+    const path = join(root, 'people-index.sqlite');
+    const writer = new LocalPeopleIndex({ dbPath: path });
+    writer.rebuild([]);
+    forbidWritableStoreOpens();
+    expect(() => new LocalPeopleIndex({ dbPath: path })).toThrow(FrontStoreWriteError);
+    const reader = new LocalPeopleIndex({ dbPath: path, readOnly: true });
+    expect(reader.list()).toEqual([]);
+    expect(() => reader.rebuild([])).toThrow();
+    resetStoreWriteGuardForTests();
+    writer.rebuild([{ provider: 'gmail', senderId: 'ada@example.com', senderLabel: 'Ada Lovelace', corpusId: 'gmail', itemCount: 2, isOwner: false } as never]);
+    reader.reload();
+    expect(reader.list().map((person) => person.displayName)).toEqual(writer.list().map((person) => person.displayName));
+    expect(reader.list().length).toBeGreaterThan(0);
+    reader.close();
+    writer.close();
   });
 
   test('the front reads dashboard progress read-only and sends its samples for the background to record', async () => {

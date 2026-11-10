@@ -2307,9 +2307,12 @@ export function connectorStoreAnswerScope(input: {
 const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
 const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
 
-function openPeopleIndexOrUndefined(): LocalPeopleIndex | undefined {
+function openPeopleIndexOrUndefined(options: { readOnly?: boolean } = {}): LocalPeopleIndex | undefined {
+  const dbPath = peopleIndexPath(process.env);
+  // The engine split's front reads the index the background rebuilds, once it exists.
+  if (options.readOnly && !existsSync(dbPath)) return undefined;
   try {
-    return new LocalPeopleIndex({ dbPath: peopleIndexPath(process.env) });
+    return new LocalPeopleIndex({ dbPath, ...(options.readOnly ? { readOnly: true } : {}) });
   } catch (error) {
     console.warn(`[olympus] people index unavailable: ${error instanceof Error ? error.message : String(error)}`);
     return undefined;
@@ -2492,25 +2495,23 @@ function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
 }
 
 export async function main(): Promise<void> {
-  // The engine split (core/engine-split.ts): `single` unless the host runs
-  // this worker as the background writer or the read-only front.
+  // First, before anything mounts or opens a store: this worker owns the data
+  // root. A second worker on it waits a short while (restarts overlap), then
+  // exits without mounting anything (core/data-owner-lock.ts). The engine
+  // split's front (core/engine-split.ts) takes no lock: its background holds it.
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
   if (engineRole === 'front') {
-    // The front takes no lock and does none of the boot work that needs the
-    // data root to itself: it waits until the background has done it, and
-    // from then on opens no background-owned store for writing.
+    // The front does none of the boot work that needs the data root to
+    // itself: it waits until the background has done it, and from then on
+    // opens no background-owned store for writing.
     const frontToken = workerAuthTokenFromEnv(process.env);
     if (!frontToken) throw new Error('The engine front needs the worker auth token.');
     forbidWritableStoreOpens();
     await waitForEngineBackground({ socketPath: engineSocketPath!, authToken: frontToken });
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
-  } else {
-  // First, before anything mounts or opens a store: this worker owns the data
-  // root. A second worker on it waits a short while (restarts overlap), then
-  // exits without mounting anything (core/data-owner-lock.ts).
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   }
   // A retired per-store path setting would open empty stores beside the
   // account's real files: refuse to start, naming each, before anything opens
@@ -3873,8 +3874,23 @@ export async function main(): Promise<void> {
   // One person across sources (#1076): the shared people index, Private and
   // on this computer, rebuilt from every authored store's senders. Without
   // it, answers keep each item's own sender label and filters match labels.
-  const peopleIndex = openPeopleIndexOrUndefined();
+  // In the engine split the background rebuilds it; the front reads each rebuild.
+  let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
   const refreshPeople = (): void => {
+    if (engineFront) {
+      peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
+      if (!peopleIndex) return;
+      try {
+        peopleIndex.reload();
+        const people = peopleIndex;
+        const resolver = (provider: string, senderId: string | undefined, senderLabel: string | undefined) =>
+          people.citationName(provider, senderId, senderLabel);
+        for (const store of connectorStores) store.setPeopleNames?.(resolver);
+      } catch (error) {
+        console.warn(`[olympus] people index reload failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
     if (!peopleIndex) return;
     try {
       refreshPeopleIndex(peopleIndex, connectorStores);

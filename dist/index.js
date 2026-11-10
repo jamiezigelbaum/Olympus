@@ -16054,6 +16054,7 @@ var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_store_write_guard();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
     phone: "Linked by phone number",

@@ -13466,6 +13466,8 @@ function tryDataOwnerLock(env = process.env) {
   }
 }
 function takeWorkerDataOwnerLock(env = process.env, options = {}) {
+  if (options.engineRole === "front")
+    return;
   try {
     return holdDataOwnerLock(env, { waitMs: options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS });
   } catch (error) {
@@ -44026,13 +44028,27 @@ class LocalPeopleIndex {
   people;
   bySender;
   now;
+  readOnly;
   constructor(options) {
     this.people = [];
     this.bySender = new Map;
+    this.now = options.now ?? (() => new Date);
+    this.readOnly = options.readOnly === true;
+    if (this.readOnly) {
+      this.db = new Database8(options.dbPath, { readonly: true, create: false, strict: true });
+      try {
+        this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;");
+        this.loadPeople();
+      } catch (error) {
+        closeSqliteStore(this.db, { checkpoint: false });
+        throw error;
+      }
+      return;
+    }
+    assertWritableStoreOpenAllowed("people index", options.dbPath);
     if (options.dbPath !== ":memory:")
       mkdirSync21(dirname35(options.dbPath), { recursive: true, mode: 448 });
     this.db = new Database8(options.dbPath, { create: true, strict: true });
-    this.now = options.now ?? (() => new Date);
     try {
       if (options.dbPath !== ":memory:")
         chmodSync11(options.dbPath, 384);
@@ -44048,7 +44064,10 @@ class LocalPeopleIndex {
     this.loadPeople();
   }
   close() {
-    closeSqliteStore(this.db);
+    closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : {});
+  }
+  reload() {
+    this.loadPeople();
   }
   rebuild(observations) {
     const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
@@ -44300,6 +44319,7 @@ var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You"
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_store_write_guard();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
     phone: "Linked by phone number",
@@ -224209,9 +224229,12 @@ function connectorStoreAnswerScope(input) {
     ...Object.keys(filters).length > 0 ? { filters } : {}
   };
 }
-function openPeopleIndexOrUndefined() {
+function openPeopleIndexOrUndefined(options = {}) {
+  const dbPath = peopleIndexPath(process.env);
+  if (options.readOnly && !existsSync108(dbPath))
+    return;
   try {
-    return new LocalPeopleIndex({ dbPath: peopleIndexPath(process.env) });
+    return new LocalPeopleIndex({ dbPath, ...options.readOnly ? { readOnly: true } : {} });
   } catch (error2) {
     console.warn(`[olympus] people index unavailable: ${error2 instanceof Error ? error2.message : String(error2)}`);
     return;
@@ -224323,6 +224346,7 @@ function lazySecretStore(env) {
   };
 }
 async function main() {
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
   const engineSocketPath = engineRole === "single" ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront;
@@ -224333,8 +224357,6 @@ async function main() {
     forbidWritableStoreOpens();
     await waitForEngineBackground({ socketPath: engineSocketPath, authToken: frontToken });
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath, authToken: frontToken });
-  } else {
-    dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   }
   const retired = retiredPathSettings(process.env);
   if (retired.length > 0) {
@@ -225349,8 +225371,23 @@ ${key2}`;
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
-  const peopleIndex = openPeopleIndexOrUndefined();
+  let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
   const refreshPeople = () => {
+    if (engineFront) {
+      peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
+      if (!peopleIndex)
+        return;
+      try {
+        peopleIndex.reload();
+        const people = peopleIndex;
+        const resolver = (provider, senderId, senderLabel) => people.citationName(provider, senderId, senderLabel);
+        for (const store of connectorStores)
+          store.setPeopleNames?.(resolver);
+      } catch (error2) {
+        console.warn(`[olympus] people index reload failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+      return;
+    }
     if (!peopleIndex)
       return;
     try {
