@@ -100,6 +100,7 @@ import { BESIDE_LIVE_FORMATS, EXTRA_FORMATS, STRESS_FORMAT, legFixture, type Fix
 import { checkZkapiConfinement } from './zkapi-confinement.ts';
 import { runServerModeLeg } from './server-mode.ts';
 import { checkMacOwnerProof } from './mac-owner-proof.ts';
+import { checkMacConsentOwnerProof } from './mac-consent-owner-proof.ts';
 import { checkForwardedSocketOwnerProof } from './forwarded-socket-owner-proof.ts';
 import {
   ARCHIVE_BOUNDS, BULK_SIZES, besideLiveChecks, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, seedLiveChecks,
@@ -1408,6 +1409,8 @@ async function runConfinementCheck(run: Run): Promise<void> {
   run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
   // Mac only (a skip on Linux): a second account's local unlock is refused, the owner's still works (#1153).
   run.add(await run.phase('mac-owner-proof', () => checkMacOwnerProof(run.machine!)));
+  // Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
+  run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
   // Linux only (a skip on a Mac): the owner socket, which `olympus remote open` forwards, is not an owner proof by itself (#1188).
   run.add(await run.phase('forwarded-socket-owner-proof', () => checkForwardedSocketOwnerProof(run.machine!)));
 }
