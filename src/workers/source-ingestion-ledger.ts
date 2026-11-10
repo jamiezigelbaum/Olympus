@@ -2,6 +2,7 @@ import { hasFolderLayout, placedRosterStores } from '../core/source-placement.ts
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
+import { assertWritableStoreOpenAllowed } from '../core/store-write-guard.ts';
 import type { ContentExtractionThroughputSignal } from '../core/ingestion-throughput.ts';
 import { defaultConfig, type OlympusConfig } from '../core/config.ts';
 import {
@@ -528,6 +529,7 @@ export class SqliteSourceIngestionLedgerStore {
   private readonly db: Database;
 
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
+    assertWritableStoreOpenAllowed('ingestion ledger', dbPath);
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');

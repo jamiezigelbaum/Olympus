@@ -155,14 +155,21 @@ const FRONT_REFUSED_POSTS = new Set([
   '/dashboard/messaging/respond',
   '/dashboard/messaging/cancel',
   '/dashboard/messaging/scope',
+  // Source watches are the background's (it runs their passes); creating or
+  // cancelling one has no command yet.
+  '/source/watch/create',
+  '/source/watch/cancel',
 ]);
+
+/** Extraction queue writes, under the generic path or a family's alias. The background owns the queue. */
+const FRONT_REFUSED_EXTRACTION = /^\/source\/index\/(?:files\/(?:plan|transcribe|recycle-leases|janitor-requeue|extract-pdfs|extract)|dropbox\/(?:content\/(?:plan|recycle-leases|janitor-requeue|extract)|transcribe))$/;
 
 export const ENGINE_FRONT_REFUSAL_CODE = 'not_available_in_split_mode';
 
 export function engineFrontRefusal(request: Request): Response | undefined {
   if (request.method !== 'POST') return undefined;
   const path = new URL(request.url).pathname.replace(/^\/v1(?=\/)/, '').replace(/\/$/, '');
-  if (!FRONT_REFUSED_POSTS.has(path)) return undefined;
+  if (!FRONT_REFUSED_POSTS.has(path) && !FRONT_REFUSED_EXTRACTION.test(path)) return undefined;
   return Response.json({
     error: ENGINE_FRONT_REFUSAL_CODE,
     message: 'This action is not available while Olympus runs its engine split (worker.engineSplit) yet. Turn the switch off to use it.',

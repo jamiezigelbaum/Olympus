@@ -211,6 +211,11 @@ export interface FileExtractionRuntimeOptions {
   /** Where a dropped corpus is reported. Defaults to `console.warn`. */
   warn?: (message: string) => void;
   jobsDbPath?: string;
+  /**
+   * The engine split's front: the queue is opened read-only and no spool is
+   * prepared. The front reads extraction state; only the background runs jobs.
+   */
+  readOnly?: boolean;
 }
 
 export interface FileExtractionRuntime {
@@ -317,8 +322,12 @@ export function createFileExtractionRuntime(
   // before it mutates the corpus, and a sink is built once per corpus rather
   // than once per job. The cost is that a roster where nothing resolves now
   // opens the queue before it bails, so that path closes it explicitly.
+  const jobsDbPath = options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env);
+  // A front reads the queue the background created; before that there is nothing to read.
+  if (options.readOnly === true && !existsSync(jobsDbPath)) return undefined;
   const jobs = new LocalFileExtractionJobStore(
-    options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env),
+    jobsDbPath,
+    options.readOnly === true ? { readonly: true } : {},
   );
 
   // Each account keeps the scratch files a file reader's input is written to in its own folder
@@ -328,6 +337,7 @@ export function createFileExtractionRuntime(
   // account scope or source that has no job left).
   const preparedSpools = new Map<string, string | undefined>();
   const prepareSpool = (root: string): string | undefined => {
+    if (options.readOnly === true) return undefined;
     if (!preparedSpools.has(root)) {
       preparedSpools.set(root, prepareExtractionSpool(root, {
         ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey)),

@@ -38,8 +38,30 @@ export interface EngineItemIdentity {
   providerConversationId?: string;
 }
 
+/** Messaging capture operations the dashboard runs (dashboard-messaging-service.ts). */
+export const ENGINE_CAPTURE_OPERATIONS = ['start', 'respond', 'cancel', 'scope'] as const;
+export type EngineCaptureOperation = typeof ENGINE_CAPTURE_OPERATIONS[number];
+/** Pairing placement and account commands (cli-operations.ts). */
+export const ENGINE_STORAGE_REGISTRY_OPERATIONS = ['pairing-placement', 'pairing-account'] as const;
+export type EngineStorageRegistryOperation = typeof ENGINE_STORAGE_REGISTRY_OPERATIONS[number];
+
+/**
+ * Commands that carry a request body run the code that served the route
+ * before, in the background, which parses and checks that body exactly as it
+ * did; the front has already authenticated the request.
+ */
+export const ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
+export const ENGINE_DASHBOARD_SAMPLES_MAX = 500;
+
 export type EngineCommand =
-  | { kind: 'reload'; target: EngineReloadKind }
+  | { kind: 'reload'; target: EngineReloadKind; corpora?: string[] }
+  | { kind: 'archive_changed' }
+  | { kind: 'dashboard_samples'; samples: Record<string, unknown>[] }
+  | { kind: 'delete_source_data'; source: string; body: Record<string, unknown> }
+  | { kind: 'tier_override'; body: Record<string, unknown> }
+  | { kind: 'capture'; operation: EngineCaptureOperation; body: Record<string, unknown> }
+  | { kind: 'storage_registry'; operation: EngineStorageRegistryOperation; body: Record<string, unknown> }
+  | { kind: 'embed_chunks'; body: Record<string, unknown> }
   | { kind: 'sync_now'; source: string; manual: boolean }
   | { kind: 'start_approved'; source: string }
   | { kind: 'owner_busy'; resource: string }
@@ -87,6 +109,29 @@ function boundedString(value: unknown, max = 512): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= max ? value : undefined;
 }
 
+/** A dashboard progress sample: ids, a time and counts; never text. */
+function dashboardSample(value: unknown): boolean {
+  const sample = asRecord(value);
+  if (!sample) return false;
+  for (const [key, entry] of Object.entries(sample)) {
+    if (key === 'source_id' || key === 'corpus_id' || key === 'sampled_at') {
+      if (!boundedString(entry, 200)) return false;
+    } else if (typeof entry === 'number') {
+      if (!Number.isFinite(entry)) return false;
+    } else if (typeof entry !== 'boolean') {
+      return false;
+    }
+  }
+  return typeof sample.corpus_id === 'string' && typeof sample.source_id === 'string';
+}
+
+function body(value: unknown): Record<string, unknown> {
+  const record = asRecord(value ?? {});
+  if (!record) throw new EngineCommandError(400, 'A command body must be an object.');
+  if (JSON.stringify(record).length > ENGINE_BODY_MAX_BYTES) throw new EngineCommandError(413, 'The command body is too large.');
+  return record;
+}
+
 /** Validate one envelope from the wire. Anything unexpected is a 400; nothing is coerced. */
 export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelope {
   const record = asRecord(value);
@@ -99,7 +144,38 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'reload': {
       const target = command!.target;
       if (!ENGINE_RELOAD_KINDS.includes(target as EngineReloadKind)) fail('reload needs a known kind.');
-      return { id, command: { kind, target: target as EngineReloadKind } };
+      const corpora = command!.corpora;
+      if (corpora !== undefined && (!Array.isArray(corpora) || corpora.length > 200 || corpora.some((entry) => typeof entry !== 'string' || !SOURCE.test(entry)))) {
+        fail('reload corpora must be corpus ids.');
+      }
+      return { id, command: { kind, target: target as EngineReloadKind, ...(Array.isArray(corpora) ? { corpora: corpora as string[] } : {}) } };
+    }
+    case 'archive_changed':
+      return { id, command: { kind } };
+    case 'dashboard_samples': {
+      const samples = command!.samples;
+      if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {
+        fail('dashboard_samples takes count samples only.');
+      }
+      return { id, command: { kind, samples: samples as Record<string, unknown>[] } };
+    }
+    case 'delete_source_data': {
+      const source = command!.source;
+      if (typeof source !== 'string' || !SOURCE.test(source)) fail('delete_source_data needs a source.');
+      return { id, command: { kind, source: source as string, body: body(command!.body) } };
+    }
+    case 'tier_override':
+    case 'embed_chunks':
+      return { id, command: { kind, body: body(command!.body) } };
+    case 'capture': {
+      const operation = command!.operation;
+      if (!ENGINE_CAPTURE_OPERATIONS.includes(operation as EngineCaptureOperation)) fail('capture needs a known operation.');
+      return { id, command: { kind, operation: operation as EngineCaptureOperation, body: body(command!.body) } };
+    }
+    case 'storage_registry': {
+      const operation = command!.operation;
+      if (!ENGINE_STORAGE_REGISTRY_OPERATIONS.includes(operation as EngineStorageRegistryOperation)) fail('storage_registry needs a known operation.');
+      return { id, command: { kind, operation: operation as EngineStorageRegistryOperation, body: body(command!.body) } };
     }
     case 'sync_now':
     case 'start_approved': {

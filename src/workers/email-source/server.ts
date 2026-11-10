@@ -441,7 +441,7 @@ import {
   telegramMediaLanes,
 } from '../telegram-messages/media-extraction.ts';
 import { readArchiveInputMedia } from '../archive-import/input-media.ts';
-import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
+import { defaultSourceDashboardHistoryDbPath, SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
@@ -546,6 +546,7 @@ import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, engineBackgroundSocketFromEnv, engineFrontRefusal, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, type EngineFront } from '../engine-split/runtime.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
+import { createFrontDashboardHistory } from '../engine-split/front-history.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -4069,6 +4070,8 @@ export async function main(): Promise<void> {
   };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
+    // The split's front reads the queue; the background owns it and runs the jobs.
+    ...(engineRole === 'front' ? { readOnly: true } : {}),
     enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled
       || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
@@ -4891,7 +4894,8 @@ export async function main(): Promise<void> {
         },
       }
     : undefined;
-  const sourceWatchStore = new LocalSourceWatchStore();
+  // The background owns source watches and runs their passes; the front lists them.
+  const sourceWatchStore = engineFront ? new LocalSourceWatchStore(undefined, { readOnly: true }) : new LocalSourceWatchStore();
   const sourceWatchExecutor = createSourceWatchExecutorCapability({ executorId: 'source-watch-scheduler' });
   const sourceWatchSearch = sourceAnswerLanes
     ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes)
@@ -5115,10 +5119,13 @@ export async function main(): Promise<void> {
       ...(extractionReadinessLedger ? { readinessLedger: extractionReadinessLedger } : {}),
     })
     : undefined;
-  const sourceDashboardHistory = sourceIndexReadEnabled
-    ? new SqliteSourceDashboardHistory()
-    : undefined;
-  const sourceIngestionLedger = sourceIndexReadEnabled
+  // The split's background owns source-dashboard.sqlite: the front reads
+  // progress read-only and sends its samples to be recorded.
+  const sourceDashboardHistory = !sourceIndexReadEnabled ? undefined
+    : engineFront ? createFrontDashboardHistory({ path: defaultSourceDashboardHistoryDbPath(), client: engineFront.client })
+    : new SqliteSourceDashboardHistory();
+  // Written by the scheduler's ticks, which run in the background only.
+  const sourceIngestionLedger = sourceIndexReadEnabled && !engineFront
     ? new SqliteSourceIngestionLedgerStore()
     : undefined;
   const currentXBookmarksRuntime = (): XBookmarksConnectorStoreRuntime | undefined => {
@@ -5756,17 +5763,21 @@ export async function main(): Promise<void> {
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
     refreshScheduler: () => {
+      // The split's front writes the request and state files only; the
+      // background resumes checks and runs imports.
+      if (engineFront) { void engineFront.client.post({ kind: 'archive_changed' }).catch(() => undefined); return; }
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
         activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
       ).sources);
     },
+    ...(engineFront ? { checksElsewhere: () => { void engineFront!.client.post({ kind: 'archive_changed' }).catch(() => undefined); } } : {}),
     privateModel: () => archivePrivateModelState(),
     // Without the scheduler, or with a source list that leaves archives out,
     // nothing runs an import or a removal: approving one is refused, and one
     // already waiting says which setting under Needs you.
     scheduling: () => (sourceScheduler ? archiveImportScheduling(olympusConfig.worker.scheduler) : 'disabled'),
   });
-  archiveImportDashboard.resume();
+  if (!engineFront) archiveImportDashboard.resume();
   // Built-in transcription installs only when the chosen sources contain
   // audio (each approved extraction lane checks at scheduler start, and each
   // plan pass after a sync), and once ready wakes every extraction task so
@@ -6050,7 +6061,10 @@ export async function main(): Promise<void> {
       let invalidatedJobs = 0;
       // A replayed save (the same request delivered twice) changed nothing:
       // re-invalidating would cancel the jobs its first delivery just queued.
-      if (fileExtractionRuntime && approval.replayed !== true) {
+      if (engineFront && approval.replayed !== true) {
+        // The background owns the queue: it invalidates these corpora's unsettled jobs.
+        await engineFront.client.send({ kind: 'reload', target: 'scope', corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: 30_000 });
+      } else if (fileExtractionRuntime && approval.replayed !== true) {
         invalidatedJobs = definition.corpusIdsToInvalidate.reduce(
           (total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId),
           0,
@@ -7426,10 +7440,25 @@ export async function main(): Promise<void> {
       log: (line) => console.warn(line),
       handlers: {
         // A config file the front wrote: re-read it and wake what it governs.
-        reload: ({ target }) => {
+        reload: ({ target, corpora }) => {
+          // A scope approval cancels the unsettled jobs it no longer covers.
+          const invalidated = target === 'scope' && fileExtractionRuntime
+            ? (corpora ?? []).reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0)
+            : 0;
           refreshSchedulerSources();
           if (target === 'scope' || target === 'extraction') sourceScheduler?.wakeTasksOfKind('extract');
-          return { reloaded: target };
+          return { reloaded: target, ...(target === 'scope' ? { invalidated_jobs: invalidated } : {}) };
+        },
+        // The front changed an archive request or state file: resume checks and hand the scheduler the tasks.
+        archive_changed: () => {
+          archiveImportDashboard.resume();
+          refreshSchedulerSources();
+          return { resumed: true };
+        },
+        // The front's render samples, recorded by the file's one writer.
+        dashboard_samples: ({ samples }) => {
+          sourceDashboardHistory?.record(samples as unknown as Parameters<NonNullable<typeof sourceDashboardHistory>['record']>[0]);
+          return { recorded: samples.length };
         },
         // Starts the pass and answers; the pass reports through the scheduler status.
         sync_now: ({ source, manual }) => {

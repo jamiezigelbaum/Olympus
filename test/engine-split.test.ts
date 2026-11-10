@@ -29,6 +29,11 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
+import { createFrontDashboardHistory } from '../src/workers/engine-split/front-history.ts';
+import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
+import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
+import { LocalSourceWatchStore } from '../src/core/source-watch.ts';
+import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { engineFrontRefusal, waitForEngineBackground } from '../src/workers/engine-split/runtime.ts';
 import { ENGINE_STATUS_SNAPSHOT_SCHEMA, readEngineStatusSnapshot, startEngineStatusPublisher } from '../src/workers/engine-split/snapshot.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
@@ -185,7 +190,7 @@ describe('commands from the front to the background', () => {
     const item = (n: number) => ({ provider: 'p', accountScope: 'a', providerItemId: `i${n}` });
     expect(parseEngineCommandEnvelope({ id: 'command-0007', command: { kind: 'judge_boost', identities: Array.from({ length: 20 }, (_, n) => item(n)) } }).command.kind).toBe('judge_boost');
     expect(() => parseEngineCommandEnvelope({ id: 'command-0008', command: { kind: 'judge_boost', identities: Array.from({ length: 21 }, (_, n) => item(n)) } })).toThrow('1 to 20');
-    expect(() => parseEngineCommandEnvelope({ id: 'command-0009', command: { kind: 'delete_source_data', source: 'x' } })).toThrow('Unknown command');
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0009', command: { kind: 'drop_everything' } })).toThrow('Unknown command');
     expect(() => parseEngineCommandEnvelope({ id: 'short', command: { kind: 'reload', target: 'sources' } })).toThrow('id');
   });
 });
@@ -265,13 +270,60 @@ describe('the front writes nothing the background owns', () => {
     new TierLedger({ dbPath: ledgerPath, readOnly: true }).close();
   });
 
+  test('the shared files the background owns: writable opens throw in the front, read-only opens work', () => {
+    const root = tempRoot();
+    const dashboard = join(root, 'source-dashboard.sqlite');
+    const watches = join(root, 'source-watches.sqlite');
+    const jobs = join(root, 'file-extraction-jobs.sqlite');
+    new SqliteSourceDashboardHistory(dashboard).close();
+    new LocalSourceWatchStore(watches).close();
+    new LocalFileExtractionJobStore(jobs).close();
+    forbidWritableStoreOpens();
+    expect(() => new SqliteSourceDashboardHistory(dashboard)).toThrow(FrontStoreWriteError);
+    expect(() => new SqliteSourceIngestionLedgerStore(dashboard)).toThrow(FrontStoreWriteError);
+    expect(() => new LocalSourceWatchStore(watches)).toThrow(FrontStoreWriteError);
+    expect(() => new LocalFileExtractionJobStore(jobs)).toThrow(FrontStoreWriteError);
+    new SqliteSourceDashboardHistory(dashboard, { readOnly: true }).close();
+    new LocalSourceWatchStore(watches, { readOnly: true }).close();
+    new LocalFileExtractionJobStore(jobs, { readonly: true }).close();
+  });
+
+  test('the front reads dashboard progress read-only and sends its samples for the background to record', async () => {
+    const root = tempRoot();
+    const path = join(root, 'source-dashboard.sqlite');
+    const writer = new SqliteSourceDashboardHistory(path);
+    const sent: EngineCommand[] = [];
+    const clock = createTestClock();
+    const history = createFrontDashboardHistory({
+      path, now: clock.now, minIntervalMs: 30_000,
+      client: { post: async (command) => { sent.push(command); return { id: 'x', state: 'received', instance_id: 'b' }; } },
+    });
+    const sample = { source_id: 'gmail.email', corpus_id: 'gmail', sampled_at: clock.date().toISOString(), indexed_items: 5, content_ready_items: 5, queue_waiting: 0, queue_active: 0, queue_attention: 0 };
+    forbidWritableStoreOpens();
+    history.record([sample]);
+    history.record([sample]);
+    expect(sent).toEqual([{ kind: 'dashboard_samples', samples: [sample] }]);
+    expect(history.sampleCount()).toBe(0);
+    writer.record([sample]);
+    expect(history.sampleCount()).toBe(1);
+    await clock.advance(30_000);
+    history.record([sample]);
+    expect(sent).toHaveLength(2);
+    writer.close();
+    // Text never travels as a sample.
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0010', command: { kind: 'dashboard_samples', samples: [{ ...sample, title: 'secret' }] } })).toThrow('count samples');
+  });
+
   test('owner actions without a command yet are refused in the front, everything else passes', () => {
-    for (const path of ['/dashboard/delete-source-data', '/v1/cli/tier', '/v1/source/index/embed', '/dashboard/messaging/start']) {
+    for (const path of ['/dashboard/delete-source-data', '/v1/cli/tier', '/v1/source/index/embed', '/dashboard/messaging/start',
+      '/v1/source/watch/create', '/v1/source/index/files/extract', '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/transcribe']) {
       expect(engineFrontRefusal(new Request(`http://127.0.0.1${path}`, { method: 'POST' }))?.status, path).toBe(503);
     }
     expect(engineFrontRefusal(new Request('http://127.0.0.1/dashboard/sync-now', { method: 'POST' }))).toBeUndefined();
     expect(engineFrontRefusal(new Request('http://127.0.0.1/dashboard/messaging/status', { method: 'POST' }))).toBeUndefined();
     expect(engineFrontRefusal(new Request('http://127.0.0.1/v1/cli/tier'))).toBeUndefined();
+    expect(engineFrontRefusal(new Request('http://127.0.0.1/v1/source/index/files/status', { method: 'POST' }))).toBeUndefined();
+    expect(engineFrontRefusal(new Request('http://127.0.0.1/v1/source/watches', { method: 'POST' }))).toBeUndefined();
   });
 });
 

@@ -16,6 +16,7 @@ import {
   type SqliteMigration,
 } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from './store-write-guard.ts';
 import { filterFor, forgetSqliteRows } from './sqlite-forget.ts';
 
 export const SOURCE_WATCH_STORE_ID = 'source-watch';
@@ -471,10 +472,17 @@ export class LocalSourceWatchStore {
 
   constructor(
     dbPath = defaultSourceWatchDbPath(),
-    options: { clock?: SourceWatchClock } = {},
+    options: { clock?: SourceWatchClock; readOnly?: boolean } = {},
   ) {
     this.dbPath = dbPath;
     this.clock = options.clock ?? SYSTEM_CLOCK;
+    if (options.readOnly === true) {
+      // The engine split's front lists watches; the background owns the file.
+      this.db = new Database(dbPath, { readonly: true, create: false });
+      this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      return;
+    }
+    assertWritableStoreOpenAllowed('source watch store', dbPath);
     hardenPrivateDatabasePath(dbPath);
     this.db = new Database(dbPath, { create: true });
     try {

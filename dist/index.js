@@ -5634,6 +5634,8 @@ var init_operation_caller = __esm(() => {
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
+// src/core/store-write-guard.ts
+var init_store_write_guard = () => {};
 // src/core/source-watch.ts
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -5649,6 +5651,7 @@ var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MI
 var init_source_watch = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_store_write_guard();
   SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
   SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
   SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
@@ -17852,9 +17855,6 @@ var init_fts = __esm(() => {
   INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
 });
 
-// src/core/store-write-guard.ts
-var init_store_write_guard = () => {};
-
 // src/core/secret-patterns.ts
 var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
@@ -22357,6 +22357,7 @@ var init_extraction_factory = __esm(() => {
 var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
+  init_store_write_guard();
   init_job_names();
   NETWORK_ERROR_KINDS = new Set([
     "network_unreachable",
@@ -23341,6 +23342,7 @@ var init_source_dashboard = __esm(() => {
   init_phases();
   init_credential_health();
   init_status();
+  init_store_write_guard();
   init_public_source_capabilities();
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
@@ -24455,6 +24457,7 @@ function formatNumber(value) {
 var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_source_placement();
+  init_store_write_guard();
   init_config();
   init_source_corpus_registry();
   init_source_ingestion_exclusions();

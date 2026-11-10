@@ -78,6 +78,7 @@ import type {
   SourceIngestionLedgerSnapshot,
 } from './source-ingestion-ledger.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from '../core/store-write-guard.ts';
 import { filterFor, forgetSqliteRows } from '../core/sqlite-forget.ts';
 import {
   renderPublicSourceCapabilityForDashboard,
@@ -2214,7 +2215,17 @@ function phaseAtParity(sample: SourceDashboardHistorySample, counter: string, va
 export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
   private readonly db: Database;
 
-  constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
+  /**
+   * `readOnly`: the engine split's front, which reads progress and never
+   * records (the background owns this file; engine-split/front-history.ts).
+   */
+  constructor(dbPath = defaultSourceDashboardHistoryDbPath(), options: { readOnly?: boolean } = {}) {
+    if (options.readOnly === true) {
+      this.db = new Database(dbPath, { readonly: true, create: false });
+      this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      return;
+    }
+    assertWritableStoreOpenAllowed('dashboard history', dbPath);
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');

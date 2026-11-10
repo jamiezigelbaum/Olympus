@@ -39753,6 +39753,7 @@ var init_extraction_factory = __esm(() => {
 var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
+  init_store_write_guard();
   init_job_names();
   NETWORK_ERROR_KINDS = new Set([
     "network_unreachable",
@@ -40513,6 +40514,7 @@ var init_source_dashboard = __esm(() => {
   init_phases();
   init_credential_health();
   init_status();
+  init_store_write_guard();
   init_public_source_capabilities();
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
@@ -44254,6 +44256,7 @@ var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MI
 var init_source_watch = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_store_write_guard();
   SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
   SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
   SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
@@ -51322,6 +51325,7 @@ var init_data_lifecycle = __esm(() => {
 var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
   init_source_placement();
+  init_store_write_guard();
   init_config();
   init_source_corpus_registry();
   init_source_ingestion_exclusions();
@@ -78030,7 +78034,7 @@ init_engine_split();
 init_engine_split();
 init_http();
 var ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
-
+var ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
 class EngineCommandError extends Error {
   status;
   constructor(status, message2) {
@@ -78178,8 +78182,13 @@ var FRONT_REFUSED_POSTS = new Set([
   "/dashboard/messaging/start",
   "/dashboard/messaging/respond",
   "/dashboard/messaging/cancel",
-  "/dashboard/messaging/scope"
+  "/dashboard/messaging/scope",
+  "/source/watch/create",
+  "/source/watch/cancel"
 ]);
+
+// src/workers/engine-split/front-history.ts
+init_source_dashboard();
 
 // src/core/remote-access-config.ts
 init_http();

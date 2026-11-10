@@ -40,6 +40,7 @@ import {
   type SqliteMigration,
 } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
   SECRET_ITEM_REDACTION_CLAIMS_TABLE,
   SECRET_RESTORED_REREADS_TABLE,
@@ -631,6 +632,7 @@ export class LocalFileExtractionJobStore {
     this.dbPath = dbPath;
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ':memory:';
+    if (!this.readonly) assertWritableStoreOpenAllowed('extraction job store', dbPath);
     if (!inMemory && !this.readonly) {
       mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     }
