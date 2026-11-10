@@ -14,6 +14,12 @@
  * Retention is the owner's choice: 7, 30 (default) or 90 days, or 0 (don't
  * keep), which also clears what is kept.
  *
+ * Each item keeps its account scope, so removing one imported archive (whose
+ * items share their family's corpora with the other archives) takes only that
+ * archive's rows (forgetAppReleaseItems with `accountScopes`). A row written
+ * before the scope was kept has none: it is not matched by a removal and
+ * leaves with retention, a source Delete or Delete all.
+ *
  * An item that becomes Secret keeps its location only here too
  * (docs/TRUST_MODEL.md): the Secrets disposition
  * (workers/connector-store/secrets-disposition.ts) clears its recorded titles
@@ -33,7 +39,7 @@ import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } 
 import { closeSqliteStore } from './sqlite-store.ts';
 
 export const APP_RELEASE_LOG_STORE_ID = 'app-release-log';
-export const APP_RELEASE_LOG_SCHEMA_VERSION = 2;
+export const APP_RELEASE_LOG_SCHEMA_VERSION = 3;
 export const APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0] as const;
 export type AppReleaseRetentionDays = (typeof APP_RELEASE_RETENTION_DAYS)[number];
 export const APP_RELEASE_DEFAULT_RETENTION_DAYS: AppReleaseRetentionDays = 30;
@@ -104,8 +110,8 @@ export interface AppReleaseLogStore {
    * computer, at that generation (privateQuestionKey); how many rows it marked.
    */
   markAnsweredPrivately(privateQuestionKey: string): number;
-  /** Removes (or, dry, counts) the items of these corpora. */
-  forgetCorpora(corpusIds: readonly string[], dryRun: boolean): number;
+  /** Removes (or, dry, counts) the items of these corpora; with `accountScopes`, only those accounts' items in them. */
+  forgetCorpora(corpusIds: readonly string[], dryRun: boolean, accountScopes?: readonly string[]): number;
   /**
    * The item became Secret: its recorded titles and locators are cleared and
    * a marker keeps a later receipt from writing them back. `proceed`, checked
@@ -175,15 +181,15 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
           record.question.slice(0, 2_000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0,
           record.privateQuestionKey ?? null,
         );
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         // Read in this write: a receipt built before its item became Secret keeps no name.
         const secret = db.query(`SELECT 1 FROM app_release_secret_items
           WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
         record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
           const named = !(item.provider && item.providerItemId && secret.get(item.provider, item.providerItemId, item.providerConversationId ?? '', item.providerConversationId ?? ''));
           insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null,
-            item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+            item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
         });
       })();
       expire();
@@ -247,11 +253,13 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
       // The stored key carries the generation, so an earlier answer never marks a later ask.
       return db.query('UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0').run(privateQuestionKey).changes;
     },
-    forgetCorpora(corpusIds, dryRun) {
-      if (corpusIds.length === 0) return 0;
-      const marks = corpusIds.map(() => '?').join(', ');
-      if (dryRun) return (db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds) as { n: number }).n;
-      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
+    forgetCorpora(corpusIds, dryRun, accountScopes) {
+      if (corpusIds.length === 0 || accountScopes?.length === 0) return 0;
+      const marks = (values: readonly string[]) => values.map(() => '?').join(', ');
+      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ''}`;
+      const params = [...corpusIds, ...(accountScopes ?? [])];
+      if (dryRun) return (db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params) as { n: number }).n;
+      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
     },
     forgetSecretItem(item, options = {}) {
       const conversation = item.providerConversationId ?? '';
@@ -283,14 +291,19 @@ export function openAppReleaseLog(dbPath: string, options: { now?: () => number 
 }
 
 /**
- * Forgets the rows of a deleted source's corpora (core/source-forget-registry.ts).
- * A request left with no item keeps its question and counts; its titles go.
+ * Forgets the rows of a deleted source's corpora (core/source-forget-registry.ts),
+ * or, with `accountScopes`, of those accounts only inside them (one imported
+ * archive removed). A request left with no item keeps its question and counts; its titles go.
  */
-export function forgetAppReleaseItems(dbPath: string, selector: { corpusIds: readonly string[] }, options: { dryRun?: boolean } = {}): number {
+export function forgetAppReleaseItems(
+  dbPath: string,
+  selector: { corpusIds: readonly string[]; accountScopes?: readonly string[] },
+  options: { dryRun?: boolean } = {},
+): number {
   if (!existsSync(dbPath) || selector.corpusIds.length === 0) return 0;
   const store = openAppReleaseLog(dbPath);
   try {
-    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+    return store.forgetCorpora(selector.corpusIds, options.dryRun === true, selector.accountScopes);
   } finally {
     store.close();
   }
@@ -376,6 +389,16 @@ function migrations(): SqliteMigration[] {
           PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
         );
         CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
+      `);
+    },
+  }, {
+    version: 3,
+    name: 'app_release_items_account_scope',
+    // Existing rows keep a NULL scope: no removal of one archive matches them.
+    up(db) {
+      db.exec(`
+        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
+        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
       `);
     },
   }];
