@@ -1966,16 +1966,23 @@ function isReflectRecord(keys) {
 function isRoamRecord(keys) {
   return keys.has("title") && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || keys.has("children") && keys.has("uid"));
 }
-function recordsFormat(records, shape) {
-  const reflect = records.some(isReflectRecord);
-  const roam = records.some(isRoamRecord);
-  if (reflect === roam)
-    return;
-  if (roam)
-    return shape === "list" ? "roam" : undefined;
-  return "reflect";
+function isChatGptConversation(keys) {
+  return keys.has("mapping") && (keys.has("current_node") || keys.has("create_time") || keys.has("title"));
 }
-function notesJsonFormat(probe) {
+function isClaudeConversation(keys) {
+  return keys.has("chat_messages") && (keys.has("uuid") || keys.has("name") || keys.has("created_at"));
+}
+function anyJsonExportRecord(keys) {
+  return JSON_EXPORT_RECORDS.some(([, is]) => is(keys));
+}
+function recordsFormat(records, shape) {
+  const found = JSON_EXPORT_RECORDS.filter(([, is]) => records.some(is)).map(([kind]) => kind);
+  if (found.length !== 1)
+    return;
+  const only = found[0];
+  return only === "reflect" || shape === "list" ? only : undefined;
+}
+function jsonExportFormat(probe) {
   const parsed = headRecordKeys(probe.head);
   if (!parsed)
     return;
@@ -1984,7 +1991,7 @@ function notesJsonFormat(probe) {
     return fromHead;
   let scanned = SCANNED.get(probe);
   if (!scanned) {
-    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], anyJsonExportRecord);
     scanned = { keys };
     SCANNED.set(probe, scanned);
   }
@@ -1995,14 +2002,14 @@ function isEmptyRecordList(head, inNotes) {
   return parsed !== undefined && parsed.empty && (inNotes || parsed.shape === "list");
 }
 function acceptsReflectJson(probe) {
-  if (notesJsonFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true))
+  if (jsonExportFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true))
     return true;
   if (!probe.listIsEmpty || SCANNED.get(probe)?.keys)
     return false;
   return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
 }
 function acceptsRoamJson(probe) {
-  return notesJsonFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
+  return jsonExportFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
 }
 function detectFile(probe, reads) {
   if (probe.chosen.kind === "file")
@@ -2014,12 +2021,23 @@ function zipJsonMembers(entry) {
   return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
 }
 function readsJsonExport(entry, format) {
-  const other = format === "reflect" ? "roam" : "reflect";
   if (entry.members) {
-    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
-    return members.includes(format) && !members.includes(other);
+    const members = zipJsonMembers(entry).map((member) => jsonExportFormat(member)).filter((kind) => kind !== undefined);
+    return members.includes(format) && members.every((kind) => kind === format);
   }
-  return notesJsonFormat(entry) === format;
+  return jsonExportFormat(entry) === format;
+}
+function acceptsChatGptJson(probe) {
+  return jsonExportFormat(probe) === "chatgpt" || isEmptyRecordList(probe.head, false);
+}
+function acceptsClaudeJson(probe) {
+  return jsonExportFormat(probe) === "claude" || isEmptyRecordList(probe.head, false);
+}
+function detectFiles(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return found.length > 0 ? found : undefined;
 }
 function looksLikeEnex(head) {
   const text = archiveHeadText(head).replace(/^\ufeff/, "");
@@ -2189,7 +2207,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, JSON_EXPORT_RECORDS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, AI_CONVERSATION_NAMES, CHATGPT_ARCHIVE_FORMAT, CLAUDE_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -2242,6 +2260,12 @@ var init_archive_formats = __esm(() => {
   REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
   REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
   ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  JSON_EXPORT_RECORDS = [
+    ["reflect", isReflectRecord],
+    ["roam", isRoamRecord],
+    ["chatgpt", isChatGptConversation],
+    ["claude", isClaudeConversation]
+  ];
   SCANNED = new WeakMap;
   REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
     id: "reflect-json",
@@ -2285,6 +2309,29 @@ var init_archive_formats = __esm(() => {
     sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  AI_CONVERSATION_NAMES = Object.freeze(["conversations.json", "conversations-*.json"]);
+  CHATGPT_ARCHIVE_FORMAT = Object.freeze({
+    id: "chatgpt-export",
+    label: "ChatGPT conversations (data export)",
+    family: "chat",
+    provider: "chatgpt_export",
+    chooseHint: "a ChatGPT data export (the .zip from Settings, Data controls, Export data, or the conversations.json in it)",
+    citationLabel: "ChatGPT",
+    probeNames: Object.freeze(["*.json"]),
+    signatureNames: AI_CONVERSATION_NAMES,
+    detect: (probe) => detectFiles(probe, (entry) => readsJsonExport(entry, "chatgpt"))
+  });
+  CLAUDE_ARCHIVE_FORMAT = Object.freeze({
+    id: "claude-export",
+    label: "Claude conversations (data export)",
+    family: "chat",
+    provider: "claude_export",
+    chooseHint: "a Claude data export (the .zip from Settings, Privacy, Export data, or the conversations.json in it)",
+    citationLabel: "Claude",
+    probeNames: Object.freeze(["*.json"]),
+    signatureNames: AI_CONVERSATION_NAMES,
+    detect: (probe) => detectFiles(probe, (entry) => readsJsonExport(entry, "claude"))
   });
   EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
     id: "evernote-enex",
@@ -2351,7 +2398,9 @@ var init_archive_formats = __esm(() => {
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
     TELEGRAM_JSON_ARCHIVE_FORMAT,
-    EVERNOTE_ENEX_ARCHIVE_FORMAT
+    EVERNOTE_ENEX_ARCHIVE_FORMAT,
+    CHATGPT_ARCHIVE_FORMAT,
+    CLAUDE_ARCHIVE_FORMAT
   ]);
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
@@ -99380,7 +99429,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names", "ChatGPT data exports (the .zip, or its conversations.json)", "Claude data exports (the .zip, or its conversations.json)", "each conversation's title, dates and turns as shown (your prompts and the assistant's replies)"]
     },
     {
       source_id: "x.bookmarks",
@@ -121945,6 +121994,7 @@ var init_operations = __esm(() => {
       description: [
         "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
         "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
+        "AI conversation exports work too: a ChatGPT data export (the .zip from Settings, Data controls, Export data) or a Claude data export (the .zip from Settings, Privacy, Export data), or the conversations.json inside either. Each conversation is imported as one item with its title, dates and turns as shown; pictures and attached files are not imported. Each conversation is judged on its own like mail.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
         "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
@@ -171579,12 +171629,15 @@ function buildNoteItem(input, draft, place, savedAt) {
 `);
   const providerItemId = sha2569(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
   const contentHash = sha2569(text4);
+  const conversation = draft.conversation;
+  const threadId = conversation ? `conversation:${providerItemId}` : undefined;
   const item = {
     identity: {
       family: input.format.family,
       provider: input.format.provider,
       accountScope: input.accountScope,
       providerItemId,
+      ...threadId ? { providerThreadId: threadId, providerConversationId: threadId } : {},
       localItemId: `${input.accountScope}:${providerItemId}`,
       sourceVersion: contentHash.slice(0, 32)
     },
@@ -171597,6 +171650,14 @@ function buildNoteItem(input, draft, place, savedAt) {
       ...draft.createdAt ? { createdAt: draft.createdAt } : {},
       ...draft.updatedAt ? { updatedAt: draft.updatedAt } : {},
       ...draft.blockCount !== undefined ? { blockCount: draft.blockCount } : {},
+      ...conversation ? {
+        chat: title || "(untitled)",
+        sender: conversation.ownerLabel,
+        senderLabel: conversation.ownerLabel,
+        senderIsOwner: true,
+        fromMe: true,
+        participants: conversation.participants
+      } : {},
       contentHash
     }),
     fetchedAt: new Date().toISOString()
@@ -190818,6 +190879,250 @@ var init_connector11 = __esm(() => {
   })();
 });
 
+// src/workers/archive-import/ai-chats/conversation.ts
+function conversationNote(read, assistantLabel) {
+  const merged = [];
+  for (const turn of read.turns) {
+    const text4 = turn.text.trim();
+    if (text4 === "")
+      continue;
+    const last = merged[merged.length - 1];
+    if (last && last.speaker === turn.speaker)
+      last.text = `${last.text}
+
+${text4}`;
+    else
+      merged.push({ speaker: turn.speaker, text: text4 });
+  }
+  if (merged.length === 0)
+    return read.unsupported > 0 ? { kind: "unsupported" } : { kind: "empty" };
+  const label = (speaker) => speaker === "owner" ? AI_CHAT_OWNER_LABEL : assistantLabel;
+  return {
+    kind: "note",
+    note: {
+      ...read.key !== undefined ? { key: read.key } : {},
+      title: firstString(read.title) ?? "",
+      body: merged.map((turn) => `${label(turn.speaker)}: ${turn.text}`).join(`
+
+`),
+      tags: [],
+      ...read.createdAt !== undefined ? { createdAt: read.createdAt } : {},
+      ...read.updatedAt !== undefined ? { updatedAt: read.updatedAt } : {},
+      ...read.unsupported > 0 ? { unsupported: read.unsupported } : {},
+      conversation: { ownerLabel: AI_CHAT_OWNER_LABEL, participants: [AI_CHAT_OWNER_LABEL, assistantLabel] }
+    }
+  };
+}
+var AI_CHAT_OWNER_LABEL = "You";
+var init_conversation = __esm(() => {
+  init_note();
+});
+
+// src/workers/archive-import/ai-chats/chatgpt.ts
+function contentText(content) {
+  if (!isRecord11(content))
+    return { text: "", unsupported: true };
+  const type = content.content_type;
+  if (typeof type === "string" && UNSHOWN_CONTENT.has(type))
+    return { text: "", unsupported: false };
+  if (type === "code") {
+    const code = typeof content.text === "string" ? content.text.trim() : "";
+    return { text: code === "" ? "" : `\`\`\`
+${code}
+\`\`\``, unsupported: typeof content.text !== "string" };
+  }
+  if (!Array.isArray(content.parts)) {
+    return typeof content.text === "string" ? { text: content.text, unsupported: false } : { text: "", unsupported: true };
+  }
+  const pieces = [];
+  let unsupported = false;
+  for (const part of content.parts) {
+    if (typeof part === "string") {
+      pieces.push(part);
+    } else if (isRecord11(part) && typeof part.text === "string") {
+      pieces.push(part.text);
+    } else if (isRecord11(part) && typeof part.content_type === "string" && part.content_type.includes("image")) {
+      pieces.push(IMAGE_NOT_IMPORTED);
+    } else if (isRecord11(part) && typeof part.content_type === "string" && /audio|video/.test(part.content_type)) {
+      continue;
+    } else if (part !== null && part !== undefined) {
+      unsupported = true;
+    }
+  }
+  return { text: pieces.join(`
+`).trim(), unsupported };
+}
+function visibleThread(mapping, current2) {
+  if (typeof current2 !== "string" || !isRecord11(mapping[current2]))
+    return;
+  const path = [];
+  const seen = new Set;
+  let id = current2;
+  while (typeof id === "string" && isRecord11(mapping[id])) {
+    if (seen.has(id))
+      return;
+    seen.add(id);
+    path.push(id);
+    id = mapping[id].parent;
+  }
+  return path.reverse();
+}
+function parseChatGptConversation(record8) {
+  if (!isRecord11(record8))
+    return { kind: "unreadable" };
+  if (!isRecord11(record8.mapping))
+    return { kind: "unsupported" };
+  const mapping = record8.mapping;
+  const thread3 = visibleThread(mapping, record8.current_node);
+  if (!thread3)
+    return { kind: "unsupported" };
+  const turns = [];
+  let unsupported = 0;
+  for (const id of thread3) {
+    const message2 = mapping[id].message;
+    if (message2 === null || message2 === undefined)
+      continue;
+    if (!isRecord11(message2)) {
+      unsupported += 1;
+      continue;
+    }
+    const role = isRecord11(message2.author) ? message2.author.role : undefined;
+    if (role !== "user" && role !== "assistant")
+      continue;
+    if (isRecord11(message2.metadata) && message2.metadata.is_visually_hidden_from_conversation === true)
+      continue;
+    if (typeof message2.recipient === "string" && message2.recipient !== "all")
+      continue;
+    const read = contentText(message2.content);
+    if (read.unsupported)
+      unsupported += 1;
+    turns.push({ speaker: role === "user" ? "owner" : "assistant", text: read.text });
+  }
+  return conversationNote({
+    key: idText(record8.conversation_id) ?? idText(record8.id),
+    title: record8.title,
+    createdAt: isoTime2(record8.create_time),
+    updatedAt: isoTime2(record8.update_time),
+    turns,
+    unsupported
+  }, CHATGPT_ASSISTANT_LABEL);
+}
+var CHATGPT_ASSISTANT_LABEL = "ChatGPT", UNSHOWN_CONTENT, IMAGE_NOT_IMPORTED = "[A picture was here; it was not imported.]";
+var init_chatgpt = __esm(() => {
+  init_note();
+  init_conversation();
+  UNSHOWN_CONTENT = new Set([
+    "thoughts",
+    "reasoning_recap",
+    "user_editable_context",
+    "model_editable_context",
+    "tether_browsing_display",
+    "tether_quote",
+    "execution_output",
+    "system_error",
+    "computer_output",
+    "super_widget"
+  ]);
+});
+
+// src/workers/archive-import/ai-chats/claude.ts
+function attachmentLines(message2) {
+  const lines = [];
+  for (const key2 of ["attachments", "files"]) {
+    const list = message2[key2];
+    if (!Array.isArray(list))
+      continue;
+    for (const file of list) {
+      const name = isRecord11(file) && typeof file.file_name === "string" && file.file_name.trim() !== "" ? file.file_name.trim() : undefined;
+      lines.push(name ? `[Attached file ${name}; it was not imported.]` : "[An attached file; it was not imported.]");
+    }
+  }
+  return lines;
+}
+function blocksText(content) {
+  if (!Array.isArray(content))
+    return { text: undefined, unsupported: false };
+  const pieces = [];
+  let unsupported = false;
+  for (const block of content) {
+    if (!isRecord11(block)) {
+      unsupported = true;
+    } else if (block.type === "text" && typeof block.text === "string") {
+      pieces.push(block.text);
+    } else if (!(typeof block.type === "string" && UNSHOWN_BLOCKS.has(block.type))) {
+      unsupported = true;
+    }
+  }
+  return { text: pieces.length > 0 ? pieces.join(`
+
+`) : undefined, unsupported };
+}
+function parseClaudeConversation(record8) {
+  if (!isRecord11(record8))
+    return { kind: "unreadable" };
+  const messages = record8.chat_messages;
+  if (messages !== undefined && messages !== null && !Array.isArray(messages))
+    return { kind: "unsupported" };
+  const turns = [];
+  let unsupported = 0;
+  for (const message2 of Array.isArray(messages) ? messages : []) {
+    if (!isRecord11(message2) || message2.sender !== "human" && message2.sender !== "assistant") {
+      unsupported += 1;
+      continue;
+    }
+    const blocks = blocksText(message2.content);
+    const words2 = blocks.text ?? (typeof message2.text === "string" ? message2.text : undefined);
+    if (words2 === undefined && (blocks.unsupported || !Array.isArray(message2.content)))
+      unsupported += 1;
+    else if (blocks.unsupported)
+      unsupported += 1;
+    const text4 = [words2 ?? "", ...attachmentLines(message2)].filter((part) => part.trim() !== "").join(`
+`);
+    turns.push({ speaker: message2.sender === "human" ? "owner" : "assistant", text: text4 });
+  }
+  return conversationNote({
+    key: idText(record8.uuid),
+    title: record8.name,
+    createdAt: isoTime2(record8.created_at),
+    updatedAt: isoTime2(record8.updated_at),
+    turns,
+    unsupported
+  }, CLAUDE_ASSISTANT_LABEL);
+}
+var CLAUDE_ASSISTANT_LABEL = "Claude", UNSHOWN_BLOCKS;
+var init_claude = __esm(() => {
+  init_note();
+  init_conversation();
+  UNSHOWN_BLOCKS = new Set(["thinking", "redacted_thinking", "tool_use", "tool_result", "server_tool_use", "web_search_tool_result", "token_budget"]);
+});
+
+// src/workers/archive-import/ai-chats/connector.ts
+function createChatGptArchiveConnector(input) {
+  return createNoteArchiveConnector(input, CHATGPT_SPEC);
+}
+function createClaudeArchiveConnector(input) {
+  return createNoteArchiveConnector(input, CLAUDE_SPEC);
+}
+function registerAiChatArchiveConnectors() {
+  registerArchiveFormatConnector("chatgpt-export", createChatGptArchiveConnector);
+  registerArchiveFormatConnector("claude-export", createClaudeArchiveConnector);
+}
+var CHATGPT_CURSOR_PREFIX = "chatgpt1:", CLAUDE_CURSOR_PREFIX = "claude1:", listOnly = (root) => root === "array" ? [[]] : undefined, CHATGPT_SPEC, CLAUDE_SPEC;
+var init_connector12 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_chatgpt();
+  init_claude();
+  CHATGPT_SPEC = {
+    cursorPrefix: CHATGPT_CURSOR_PREFIX,
+    source: { kind: "json", itemPaths: listOnly, accepts: acceptsChatGptJson, parse: parseChatGptConversation }
+  };
+  CLAUDE_SPEC = {
+    cursorPrefix: CLAUDE_CURSOR_PREFIX,
+    source: { kind: "json", itemPaths: listOnly, accepts: acceptsClaudeJson, parse: parseClaudeConversation }
+  };
+});
+
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
@@ -190826,6 +191131,7 @@ function registerArchiveFormatConnectors() {
   registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
   registerEvernoteArchiveConnector();
+  registerAiChatArchiveConnectors();
 }
 var init_format_connectors = __esm(() => {
   init_connector7();
@@ -190834,6 +191140,7 @@ var init_format_connectors = __esm(() => {
   init_connector10();
   init_connector4();
   init_connector11();
+  init_connector12();
 });
 
 // src/workers/archive-import/source-targets.ts
