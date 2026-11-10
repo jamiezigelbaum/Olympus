@@ -39103,31 +39103,43 @@ var init_local_index = __esm(() => {
     *hiddenChildSteps() {
       if (!this.hasChildItems())
         return [];
-      const groups = this.db.query(`
-      SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
-      GROUP BY provider, account_scope, parent_local_item_id
-    `).all();
-      const parents = groups.map((group) => ({
-        provider: group.provider,
-        accountScope: group.account_scope,
-        parentLocalItemId: group.parent_local_item_id,
-        ...parentIdentityField({
-          provider: group.provider,
-          accountScope: group.account_scope,
-          providerItemId: group.child_item_id,
-          ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
-        })
-      }));
       const lane = this.childVisibilityLane();
       const hiddenParents = [];
-      for (let offset = 0;offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+      let from = "";
+      let inclusive = true;
+      while (true) {
         yield;
-        const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+        const window2 = this.db.query(`
+        SELECT parent_local_item_id AS parent FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? ">=" : ">"} ?
+        GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
+      `).all(from, HIDDEN_CHILD_PARENT_SLICE).map((row) => row.parent);
+        if (window2.length === 0)
+          break;
+        const groups = this.db.query(`
+        SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+        WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND tombstoned = 0
+        GROUP BY provider, account_scope, parent_local_item_id
+      `).all(JSON.stringify(window2));
+        const slice = groups.map((group) => ({
+          provider: group.provider,
+          accountScope: group.account_scope,
+          parentLocalItemId: group.parent_local_item_id,
+          ...parentIdentityField({
+            provider: group.provider,
+            accountScope: group.account_scope,
+            providerItemId: group.child_item_id,
+            ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
+          })
+        }));
         const verdicts = parentVerdicts(lane, slice);
         for (const parent of slice)
           if (verdicts.get(parentKey(parent))?.visible !== true)
             hiddenParents.push(parent);
+        if (window2.length < HIDDEN_CHILD_PARENT_SLICE)
+          break;
+        from = window2[window2.length - 1];
+        inclusive = false;
       }
       const pks = [];
       for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
