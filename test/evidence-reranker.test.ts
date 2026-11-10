@@ -191,6 +191,18 @@ describe('buildEvidencePackDetailed with a reranker', () => {
     expect(detail.policyDeniedCoverageGaps).toHaveLength(1);
   });
 
+  test('a secure item the reranker read but cut still marks the build as having read secure content', async () => {
+    const calls: string[][] = [];
+    // doc-5 is upgraded to S4 by its provider and is irrelevant, so it is scored and cut.
+    const input = packInput(overlapReranker(10, calls), [], undefined, (id) => id === 'doc-5'
+      ? { sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }), chunks: ['Private note.'] }
+      : undefined);
+    const detail = await buildEvidencePackDetailed(input);
+    expect(calls[0]).toContain('doc-5 Private note.');
+    expect(packIds(detail)).not.toContain('doc-5');
+    expect(detail.encounteredSecureLocal).toBe(true);
+  });
+
   test('a question about recency keeps its newest-first order and is not reranked', async () => {
     const requested: number[] = [];
     const detail = await buildEvidencePackDetailed(packInput(overlapReranker(10), requested, 'What is the latest invoice?'));

@@ -69365,8 +69365,11 @@ async function buildPreparedEvidencePackDetailed(input) {
       assertModelTrustTierAllowed(sensitivity.trustTier);
       for (const fact of entry.content?.facts ?? [])
         assertModelTrustTierAllowed(fact.sensitivity.trustTier);
-      if (input.excludeSecureSensitivity && isSecureSensitivity(sensitivity))
-        continue;
+      if (isSecureSensitivity(sensitivity)) {
+        if (input.excludeSecureSensitivity)
+          continue;
+        encounteredSecureLocal = true;
+      }
       scorable.push(entry);
     }
     const reranked = await rerankCandidates({

@@ -414,8 +414,13 @@ async function buildPreparedEvidencePackDetailed(
       assertNoTrustDomainDowngrade(entry.hit, sensitivity);
       assertModelTrustTierAllowed(sensitivity.trustTier);
       for (const fact of entry.content?.facts ?? []) assertModelTrustTierAllowed(fact.sensitivity.trustTier);
-      // An exclusion rebuild drops secure items below, so they are not scored.
-      if (input.excludeSecureSensitivity && isSecureSensitivity(sensitivity)) continue;
+      if (isSecureSensitivity(sensitivity)) {
+        // An exclusion rebuild drops secure items below, so they are not scored.
+        if (input.excludeSecureSensitivity) continue;
+        // The reranker reads every scorable item, so secure text it reads
+        // counts even when the cut drops it.
+        encounteredSecureLocal = true;
+      }
       scorable.push(entry);
     }
     const reranked = await rerankCandidates({
