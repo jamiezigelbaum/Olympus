@@ -152614,20 +152614,24 @@ function createDecisionSnifferModel(lane, full, options = {}) {
     }
   };
   const readWeights = async () => {
+    if (sharedState.weightsRead || Date.now() - (sharedState.weightsTriedAt ?? -Infinity) < 60000)
+      return;
+    sharedState.weightsTriedAt = Date.now();
     try {
       const response = await fetchModelEndpoint(fetch, `${endpoint}/props`, {
         method: "GET",
         headers: options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {},
         signal: AbortSignal.timeout(1e4)
       });
-      return response.ok ? servedWeightsName(await response.json()) : undefined;
-    } catch {
-      return;
-    }
+      if (!response.ok)
+        return;
+      sharedState.weights = servedWeightsName(await response.json());
+      sharedState.weightsRead = true;
+    } catch {}
   };
   const noteBar = () => {
     lane.servedWeights = sharedState.weights;
-    if (sharedState.barNoted || lane.snifferMode !== "decision")
+    if (sharedState.barNoted || !sharedState.weightsRead || lane.snifferMode !== "decision")
       return;
     sharedState.barNoted = true;
     if (lane.decisionBar !== undefined || measuredSnifferDecisionBar(lane) !== undefined)
@@ -152648,10 +152652,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
   })).prompt;
   const prepare = async () => {
     if (lane.profile.snifferMode === "decision") {
-      if (!sharedState.weightsRead) {
-        sharedState.weights = await readWeights();
-        sharedState.weightsRead = true;
-      }
+      await readWeights();
       lane.snifferMode = "decision";
       lane.rejudgeReady = true;
       noteBar();
@@ -152666,10 +152667,6 @@ function createDecisionSnifferModel(lane, full, options = {}) {
         sharedState.supported = replyTokens(reply).length > 0;
         if (sharedState.supported)
           await decisionDivergence(post2);
-        if (sharedState.supported) {
-          sharedState.weights = await readWeights();
-          sharedState.weightsRead = true;
-        }
         sharedState.rejudgeReady = true;
       } catch (error2) {
         sharedState.supported = false;
@@ -152678,6 +152675,8 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       sharedState.probedAt = Date.now();
       reset();
     }
+    if (sharedState.supported)
+      await readWeights();
     lane.snifferMode = sharedState.supported ? "decision" : "full";
     lane.rejudgeReady = sharedState.rejudgeReady !== false;
     noteBar();
