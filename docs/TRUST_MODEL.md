@@ -1,7 +1,7 @@
 # Olympus Trust Model
 
 Status: active
-Updated: 2026-09-13
+Updated: 2026-11-10
 
 ## Purpose
 
@@ -84,7 +84,7 @@ Examples: a personal IBAN used regularly to receive payment, ordinary
 preferences, low-sensitivity travel or workflow preferences, and light business
 context.
 
-Default posture: available to Castor and ordinary private-work context.
+Default posture: available to your agent and ordinary private-work context.
 
 ### S2 Sensitive Personal
 
@@ -94,7 +94,7 @@ damaging.
 Examples: non-public plans, moderate personal context, and identifiers used in
 ordinary bureaucracy that are not high-harm on their own.
 
-Default posture: available to Castor inside normal private-work posture, not
+Default posture: available to your agent inside normal private-work posture, not
 public by default.
 
 ### S3 Restricted Personal
@@ -321,7 +321,7 @@ Suggested surface split:
 - structured or forensic financial evidence, account statements, tax records,
   and detailed banking records tend toward `S4`
 - credentials that move money or expose broad account authority are `S5`
-- Castor access to a selected identifier should be modeled as an explicit
+- Your agent's access to a selected identifier should be modeled as an explicit
   classified record or bounded answer, not as broad access to a financial vault
   or banking surface
 
@@ -340,7 +340,7 @@ normalized them.
 
 The current OPSEC design names that normalization step Structured Evidence
 Extraction, followed by a Release Gate before evidence-derived content crosses
-from local/private handling to Castor, user-facing output, logs, memory, or
+from local/private handling to your agent, user-facing output, logs, memory, or
 actions.
 
 ## Model Routing Posture
@@ -361,9 +361,9 @@ call the local lane, and that local lane can later become the basis for
 sensitive work.
 
 For the reference v0.2 email milestone, raw email should be treated as
-local/private-lane material. The cloud-facing assistant may ask Argus for an
+local/private-lane material. The cloud-facing assistant may ask the local model for an
 answer about email, but the raw message body should be fetched and inspected by
-Delphi/local models rather than placed directly in ordinary cloud-model
+local models rather than placed directly in ordinary cloud-model
 context.
 
 See [SOVEREIGNTY_CONFIG.md](SOVEREIGNTY_CONFIG.md) for the future config shape
@@ -422,7 +422,7 @@ Rules:
   before changing an existing corpus's model or provider.
 - `S4` may have full search quality, but only inside `secure_local` search
   spaces and secure-custodian routes.
-- Ordinary Castor/cloud-led sessions may receive deliberately distilled `S3`
+- Ordinary agent and cloud-model sessions may receive deliberately distilled `S3`
   derivatives of `S4` evidence and citations to it when policy allows; they
   must not query or receive raw `S4` collections by default.
 - Item metadata and content are tiered separately (owner ruling 2026-09-23).
@@ -430,14 +430,14 @@ Rules:
   Personal by default; content is what is Private. A citation's labels are
   therefore releasable beside an answer derived from Private content.
 - `source_answer` searches `secure_local` corpora by default when the active
-  sovereignty policy approves a private analyst route for them (Argus: a local
+  sovereignty policy approves a private analyst route for them (a local
   model or Venice Private, per preset). That evidence is reasoned over only by
-  the approved route. For Private evidence Castor receives the Argus-derived
+  the approved route. For Private evidence your agent receives the privately derived
   answer, which passes the OPSEC release gate, and one citation per cited
   item: its identifiers plus its labels (title, locator such as a path or
   link, source, conversation, author). The labels are scanned for secret-like text and withheld on a
-  match, and are released because item metadata defaults to Personal. Castor
-  never receives Private source text. Once the per-item four-tier ledger
+  match, and are released because item metadata defaults to Personal. Your
+  agent never receives Private source text. Once the per-item four-tier ledger
   lands, an item whose metadata tier is Private will be cited by opaque
   identifiers only. With no approved route (for example `no-sensitive`), or
   when the private analyst is down, the corpora are left out and the answer's
