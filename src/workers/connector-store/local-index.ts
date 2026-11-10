@@ -6041,6 +6041,22 @@ export class LocalConnectorStore {
 
   private peopleNames: ConnectorStorePeopleNames | undefined;
 
+  /**
+   * Moves when this store's tier visibility may have changed: the tier
+   * ledger's visibility feed and this store's own item-visibility feed. Both
+   * are cursors on bounded change tables, so reading them is cheap; neither
+   * moves for embedding, status or other bookkeeping writes.
+   */
+  peopleVisibilityMarker(): string {
+    const ledger = this.visibilityLedger();
+    const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
+    // A handle without the journal (read-only) sees other connections' writes by data_version.
+    const storeCursor = this.visibilityJournal
+      ? String(this.itemVisibilityChangesSince().cursor)
+      : `v${(this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version}`;
+    return `${ledgerCursor}:${storeCursor}`;
+  }
+
   peopleObservations(): PeopleSenderObservation[] {
     // A copy the tier ledger keeps out of view (superseded, staged, or held
     // for classification) never names anyone: an old Personal copy of an item

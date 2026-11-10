@@ -1,8 +1,11 @@
+import type { MessagingChatKind } from '../../core/messaging-chat-kinds.ts';
+
 /** Local dashboard pairing state. Credentials only cross the helper's pipes. */
 export type MessagingSource = 'telegram' | 'whatsapp';
 export type PairingField = 'api_id' | 'api_hash' | 'phone' | 'code' | 'password';
-export interface PairingChat { chatScope: string; title: string; kind: string }
-type ChatSelection = { wholeAccount: boolean; chatScopes: string[] };
+export interface PairingChat { chatScope: string; title: string; kind: string; lastMessageAt?: string }
+/** Whole account alone, or any non-empty mix of kinds (every chat of that kind, including new ones) and exact chats. */
+type ChatSelection = { wholeAccount: boolean; chatScopes: string[]; chatKinds?: MessagingChatKind[] };
 export interface PairingHooks {
   signal: AbortSignal;
   prompt(field: PairingField, reply: (value: string) => void): void;
@@ -60,7 +63,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       // A cancel returns at once; cleanup (such as unlinking the phone) may still be running, so the card keeps asking.
       ...(item.state === 'cancelled' && item.task ? { cleaning: true } : {}),
       ...(item.chats ? { chats: item.chats } : {}),
-      ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [] } : {}),
+      ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [], chatKinds: [] } : {}),
       ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),
       ...(item.state === 'failed' ? { details: pairingDetails({
         source, state: item.state, reason: item.reason, linked: item.linked === true, unlinked: item.unlinked,
@@ -140,7 +143,8 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
     select(source: MessagingSource, selection: ChatSelection) {
       const item = states.get(source);
       if (!item || item.state !== 'scope_selection_required' || !item.selection) throw new Error('No pending chat choice.');
-      if (selection.wholeAccount ? selection.chatScopes.length > 0 : selection.chatScopes.length === 0) throw new Error('Choose all chats or at least one chat.');
+      const chosen = selection.chatScopes.length + (selection.chatKinds?.length ?? 0);
+      if (selection.wholeAccount ? chosen > 0 : chosen === 0) throw new Error('Choose all chats, a kind, or at least one chat.');
       if (selection.chatScopes.some(scope => !item.chats?.some(chat => chat.chatScope === scope))) throw new Error('Chat list changed.');
       item.selection(selection);
       return status(source);

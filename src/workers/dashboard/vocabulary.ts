@@ -17,7 +17,7 @@ import type {
 } from '../source-dashboard.ts';
 import type { DashboardLivePassErrorKind, DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
-import { ARCHIVE_FORMATS } from '../../core/archive-formats.ts';
+import { ARCHIVE_FORMATS, archiveExportGuides } from '../../core/archive-formats.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { displayText } from './display-text.ts';
@@ -25,10 +25,36 @@ import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
 export const DASHBOARD_UPDATE_COPY = {
-  notice: (version: string) => `Olympus ${version} is available. To update, run this in Terminal:`,
+  notice: (version: string) => `Olympus ${version} is available.`,
+  updateNow: 'Update now',
+  terminal: 'Update in Terminal instead',
+  terminalHow: 'Run this in Terminal:',
   copy: 'Copy command',
   copied: 'Copied',
   copyFailed: 'Select the command and copy it.',
+  /** Update now's four steps (core/self-update.ts), as "step N of 4: …". */
+  steps: ['downloading the update', "checking the download's signature", 'installing', 'restarting Olympus'] as const,
+  updating: (version: string) => `Updating to Olympus ${version}`,
+  step: (step: number, words: string) => `step ${step} of 4: ${words}`,
+  pause: (to: string, from: string) => `Your sources pause for about a minute while Olympus restarts. If ${to} doesn't start, Olympus puts ${from} back by itself.`,
+  done: (version: string) => `Olympus ${version} is running.`,
+  rolledBack: (to: string, from: string) => `Olympus ${to} didn't start, so Olympus put ${from} back. Nothing else changed.`,
+  failures: {
+    download_failed: 'Olympus could not download the update. Check the internet connection and try again.',
+    bad_signature: "The update's signature did not check out, so Olympus did not use it. Nothing changed.",
+    installer_mismatch: 'The downloaded installer did not match its signed release, so Olympus did not run it. Nothing changed.',
+    launch_failed: 'Olympus could not start the installer. Nothing changed.',
+    install_failed: 'The update did not finish. Try again, or update in Terminal.',
+    interrupted: 'Olympus restarted before the update began. Nothing changed. Try again.',
+    did_not_finish: 'The update did not finish. Try again, or update in Terminal.',
+  } as Record<string, string>,
+  refusals: {
+    no_release_key: "This version of Olympus can't check an update's signature yet, so it won't update itself. Update in Terminal instead.",
+    not_available: 'Olympus can update itself only when it was installed with the Olympus installer. Update in Terminal instead.',
+    no_update: 'Olympus is already up to date.',
+  } as Record<string, string>,
+  unreachable: 'Olympus is restarting…',
+  failedFallback: 'The update could not start. Update in Terminal instead.',
 };
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
@@ -2246,6 +2272,29 @@ export const DASHBOARD_ARCHIVE_COPY = {
     failed: 'The upload stopped before it finished. Nothing was imported. Try again.',
     several: '{n} items',
     chooseAnother: 'Start over',
+    /**
+     * The two paths (#660, owner 2026-10-31): the drop zone first for an
+     * archive already on this computer, then one step-by-step guide per app,
+     * from each format's registry entry, for asking that app for its export.
+     */
+    have: 'I already have my archive',
+    get: {
+      title: 'Get my archive',
+      line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+      step: 'Step {n} of {of}',
+      open: 'Open this page in {provider}',
+      next: "I've done this, next",
+      back: 'Back',
+      ready: "Come back when it's ready",
+      wait: 'Exports can take a few minutes, hours or days. When yours arrives, come back to this page.',
+    },
+    // The words only: each step's page reaches the picker in the computer
+    // meta (archiveSources guideLinks), so this page names no outside origin.
+    guides: archiveExportGuides().map((entry) => ({
+      id: entry.formatId,
+      ...entry.guide,
+      steps: entry.guide.steps.map(({ link, ...step }) => (link ? { ...step, link: { label: link.label } } : step)),
+    })),
   },
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },
@@ -2629,17 +2678,31 @@ export const DASHBOARD_PRIVACY_SETTINGS_COPY = {
   judgeLegend: 'Who sorts your items',
   judgeNow: 'Sorting now',
   judgeLocal: 'On this computer',
-  judgeLocalLead: 'Nothing leaves this computer.',
-  judgeLocalWhen: 'In the background while Olympus runs, using this computer',
+  judgeLocalLead: 'Nothing leaves this computer. When unsure, it keeps an item Private.',
+  judgeLocalWhen: 'On this computer',
   judgeLocalFit: 'Best if you can wait, or your archive is small.',
-  judgeVenice: 'Venice',
+  judgeMeasuredHere: 'Measured on this computer: {n} items a minute',
+  judgeMeasuredElsewhere: 'Measured on an {computer} on {date}, not on this computer yet',
+  judgeSecond: 'This computer, then Venice double-checks',
+  judgeSecondLead: 'This computer sorts everything. Venice re-reads only the items it kept Private, and frees the ones that are really Personal.',
+  judgeSecondWhen: 'Here first; about {n} items go to Venice',
+  judgeSecondWhenNote: 'These are the items most likely to be Private.',
+  judgeSecondFit: 'Best if you have a Venice account: fewer everyday items stuck as Private, for little money.',
+  judgeVenice: 'Venice sorts everything',
+  judgeVeniceLead: 'Venice reads every item to sort it, including items it marks Private.',
   judgeVeniceWhen: "In Venice's cloud, without slowing this computer",
-  judgeVeniceFit: 'Best for a big archive you want sorted soon. You set a spending limit and Olympus never goes past it.',
+  judgeVeniceFit: 'Best for a big archive you want sorted soon.',
   judgeCost: 'Cost',
   judgeTime: 'Time',
   judgeWhen: 'Where',
   judgeModel: 'Model',
-  judgeCap: 'Venice spending limit, in total (US dollars)',
+  judgeCap: 'Venice spending limit (total) $',
+  judgeCapDefault: 'Set to the estimate plus 25%. Olympus stops before going past it; anything not yet sorted stays Private and waits for this computer.',
+  judgeCapStops: 'Olympus stops before going past this limit; anything not yet sorted stays Private and waits for this computer.',
+  judgeOrder: 'Items you ask about are sorted first, so a question finds them within minutes. Then the newest items, taking turns between your sources.',
+  judgeToSecond: 'Have Venice double-check?',
+  judgeToSecondLine: 'This computer keeps sorting everything. Venice then re-reads only the items this computer kept Private, including those already sorted. Those are the items most likely to be Private, and Venice reads them to check. It frees an item to Personal only when it judges it Personal.',
+  judgeToSecondButton: 'Turn on the double-check',
   judgeToVenice: 'Switch sorting to Venice?',
   judgeToVeniceButton: 'Switch to Venice',
   judgeToLocal: 'Switch sorting to this computer?',

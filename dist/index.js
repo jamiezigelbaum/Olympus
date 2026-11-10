@@ -1235,6 +1235,8 @@ var init_public_surface = __esm(() => {
     "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
+    "privacy_item_find",
+    "privacy_item_set",
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
@@ -1248,7 +1250,9 @@ var init_public_surface = __esm(() => {
     "olympus_doctor",
     "olympus_setup_status",
     "ask_anonymously",
-    "archive_import"
+    "archive_import",
+    "privacy_item_find",
+    "privacy_item_set"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -1260,7 +1264,9 @@ var init_public_surface = __esm(() => {
     "olympus_doctor",
     "olympus_setup_status",
     "ask_anonymously",
-    "archive_import"
+    "archive_import",
+    "privacy_item_find",
+    "privacy_item_set"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
@@ -6097,16 +6103,23 @@ function isReflectRecord(keys) {
 function isRoamRecord(keys) {
   return keys.has("title") && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || keys.has("children") && keys.has("uid"));
 }
-function recordsFormat(records, shape) {
-  const reflect = records.some(isReflectRecord);
-  const roam = records.some(isRoamRecord);
-  if (reflect === roam)
-    return;
-  if (roam)
-    return shape === "list" ? "roam" : undefined;
-  return "reflect";
+function isChatGptConversation(keys) {
+  return keys.has("mapping") && (keys.has("current_node") || keys.has("create_time") || keys.has("title"));
 }
-function notesJsonFormat(probe) {
+function isClaudeConversation(keys) {
+  return keys.has("chat_messages") && (keys.has("uuid") || keys.has("name") || keys.has("created_at"));
+}
+function anyJsonExportRecord(keys) {
+  return JSON_EXPORT_RECORDS.some(([, is]) => is(keys));
+}
+function recordsFormat(records, shape) {
+  const found = JSON_EXPORT_RECORDS.filter(([, is]) => records.some(is)).map(([kind]) => kind);
+  if (found.length !== 1)
+    return;
+  const only = found[0];
+  return only === "reflect" || shape === "list" ? only : undefined;
+}
+function jsonExportFormat(probe) {
   const parsed = headRecordKeys(probe.head);
   if (!parsed)
     return;
@@ -6115,7 +6128,7 @@ function notesJsonFormat(probe) {
     return fromHead;
   let scanned = SCANNED.get(probe);
   if (!scanned) {
-    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], anyJsonExportRecord);
     scanned = { keys };
     SCANNED.set(probe, scanned);
   }
@@ -6131,12 +6144,17 @@ function zipJsonMembers(entry) {
   return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
 }
 function readsJsonExport(entry, format) {
-  const other = format === "reflect" ? "roam" : "reflect";
   if (entry.members) {
-    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
-    return members.includes(format) && !members.includes(other);
+    const members = zipJsonMembers(entry).map((member) => jsonExportFormat(member)).filter((kind) => kind !== undefined);
+    return members.includes(format) && members.every((kind) => kind === format);
   }
-  return notesJsonFormat(entry) === format;
+  return jsonExportFormat(entry) === format;
+}
+function detectFiles(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return found.length > 0 ? found : undefined;
 }
 function looksLikeEnex(head) {
   const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
@@ -6148,6 +6166,9 @@ function isTelegramJsonHead(head) {
     return false;
   const text2 = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
+}
+function archiveExportGuides(formats = ARCHIVE_FORMATS) {
+  return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
 }
 function archiveSourceCards(formats = ARCHIVE_FORMATS) {
   const cards = new Map;
@@ -6172,7 +6193,7 @@ function archiveCorpusId(trustDomain, family) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, JSON_EXPORT_RECORDS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, AI_CONVERSATION_NAMES, CHATGPT_ARCHIVE_FORMAT, CLAUDE_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -6182,6 +6203,15 @@ var init_archive_formats = __esm(() => {
     provider: "mbox",
     chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
+    exportGuide: Object.freeze({
+      title: "Gmail, from Google Takeout",
+      provider: "Google",
+      steps: Object.freeze([
+        { title: "Choose your mail", instructions: ["Choose **Deselect all**.", "Scroll to **Mail** and tick it.", "Choose **Next step** at the bottom of the page."], link: { label: "Google Takeout", url: "https://takeout.google.com/" } },
+        { title: "Ask for the export", instructions: ["Keep **Send download link via email** and **Export once**.", "Keep **.zip** as the file type.", "Choose **Create export**."] }
+      ]),
+      ready: "Google emails you a download link when the export is ready. Download it, open the zip, and drop the .mbox file from its Mail folder."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
@@ -6206,6 +6236,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "WhatsApp",
     probeNames: Object.freeze(["*.txt", "*.zip"]),
     signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    exportGuide: Object.freeze({
+      title: "A WhatsApp chat",
+      provider: "WhatsApp",
+      steps: Object.freeze([
+        { title: "Open the chat", instructions: ["On your phone, open WhatsApp and the chat you want.", "Tap the chat's name at the top (on Android, tap **⋮** then **More**)."] },
+        { title: "Export it", instructions: ["Choose **Export chat**.", "Choose **Attach media** (on Android, **Include media**) to keep photos and voice notes, or **Without media** for a smaller file.", "Send the file to this computer, for example by AirDrop or to yourself by email."] }
+      ]),
+      ready: "WhatsApp makes the file straight away. Drop the .zip or the .txt file it sent."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
@@ -6225,6 +6264,12 @@ var init_archive_formats = __esm(() => {
   REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
   REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
   ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  JSON_EXPORT_RECORDS = [
+    ["reflect", isReflectRecord],
+    ["roam", isRoamRecord],
+    ["chatgpt", isChatGptConversation],
+    ["claude", isClaudeConversation]
+  ];
   SCANNED = new WeakMap;
   REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
     id: "reflect-json",
@@ -6235,6 +6280,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Reflect",
+      provider: "Reflect",
+      steps: Object.freeze([
+        { title: "Export your notes", instructions: ["In Reflect, open **Settings**.", "Find the export option and choose **JSON** (Markdown works too).", "Save the file in **Downloads**."], link: { label: "Reflect", url: "https://reflect.app/" } }
+      ]),
+      ready: "Drop the .json file, or the .zip Reflect saved."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
   REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
@@ -6267,7 +6320,38 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Roam",
     sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Roam",
+      provider: "Roam",
+      steps: Object.freeze([
+        { title: "Export your graph", instructions: ["Open your graph in Roam.", "Choose **⋯** at the top right, then **Export All**.", "Set the format to **JSON** and choose **Export All**."], link: { label: "Roam", url: "https://roamresearch.com/" } }
+      ]),
+      ready: "Drop the .zip Roam saved, or the .json file inside it."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  AI_CONVERSATION_NAMES = Object.freeze(["conversations.json", "conversations-*.json"]);
+  CHATGPT_ARCHIVE_FORMAT = Object.freeze({
+    id: "chatgpt-export",
+    label: "ChatGPT conversations (data export)",
+    family: "chat",
+    provider: "chatgpt_export",
+    chooseHint: "a ChatGPT data export (the .zip from Settings, Data controls, Export data, or the conversations.json in it)",
+    citationLabel: "ChatGPT",
+    probeNames: Object.freeze(["*.json"]),
+    signatureNames: AI_CONVERSATION_NAMES,
+    detect: (probe) => detectFiles(probe, (entry) => readsJsonExport(entry, "chatgpt"))
+  });
+  CLAUDE_ARCHIVE_FORMAT = Object.freeze({
+    id: "claude-export",
+    label: "Claude conversations (data export)",
+    family: "chat",
+    provider: "claude_export",
+    chooseHint: "a Claude data export (the .zip from Settings, Privacy, Export data, or the conversations.json in it)",
+    citationLabel: "Claude",
+    probeNames: Object.freeze(["*.json"]),
+    signatureNames: AI_CONVERSATION_NAMES,
+    detect: (probe) => detectFiles(probe, (entry) => readsJsonExport(entry, "claude"))
   });
   EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
     id: "evernote-enex",
@@ -6278,6 +6362,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Evernote",
     sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
     probeNames: Object.freeze(["*.enex"]),
+    exportGuide: Object.freeze({
+      title: "Evernote",
+      provider: "Evernote",
+      steps: Object.freeze([
+        { title: "Open the Evernote app", instructions: ["Export works in the Evernote app on a computer, not on the web.", "Install it if you do not have it, and sign in."], link: { label: "Evernote", url: "https://evernote.com/download" } },
+        { title: "Export a notebook", instructions: ["In **Notebooks**, choose **⋯** beside a notebook.", "Choose **Export notebook…** and keep the **ENEX** format.", "Save the file. Repeat for each notebook you want."] }
+      ]),
+      ready: "Drop the .enex file, or a folder holding several."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
@@ -6320,6 +6413,15 @@ var init_archive_formats = __esm(() => {
         advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
       })
     ]),
+    exportGuide: Object.freeze({
+      title: "Telegram",
+      provider: "Telegram",
+      steps: Object.freeze([
+        { title: "Open Telegram Desktop", instructions: ["Export works in Telegram Desktop, not in the phone app.", "Install it if you do not have it, and sign in."], link: { label: "Telegram Desktop", url: "https://desktop.telegram.org/" } },
+        { title: "Ask for the export", instructions: ["Open **Settings**, then **Advanced**.", "Choose **Export Telegram data**.", "Tick the chats you want and set the format to **Machine-readable JSON**.", "Choose **Export**. Telegram may ask you to confirm on your phone and wait before it starts."] }
+      ]),
+      ready: "Drop the folder Telegram saved, or the result.json file in it."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
@@ -6334,7 +6436,9 @@ var init_archive_formats = __esm(() => {
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
     TELEGRAM_JSON_ARCHIVE_FORMAT,
-    EVERNOTE_ENEX_ARCHIVE_FORMAT
+    EVERNOTE_ENEX_ARCHIVE_FORMAT,
+    CHATGPT_ARCHIVE_FORMAT,
+    CLAUDE_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -15404,7 +15508,23 @@ var init_vocabulary = __esm(() => {
       unreadable: "Olympus could not read what you dropped. Try again.",
       failed: "The upload stopped before it finished. Nothing was imported. Try again.",
       several: "{n} items",
-      chooseAnother: "Start over"
+      chooseAnother: "Start over",
+      have: "I already have my archive",
+      get: {
+        title: "Get my archive",
+        line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+        step: "Step {n} of {of}",
+        open: "Open this page in {provider}",
+        next: "I've done this, next",
+        back: "Back",
+        ready: "Come back when it's ready",
+        wait: "Exports can take a few minutes, hours or days. When yours arrives, come back to this page."
+      },
+      guides: archiveExportGuides().map((entry) => ({
+        id: entry.formatId,
+        ...entry.guide,
+        steps: entry.guide.steps.map(({ link, ...step }) => link ? { ...step, link: { label: link.label } } : step)
+      }))
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
@@ -16306,6 +16426,25 @@ function senderAddress(from) {
   }
   return parseAddrSpec(scanned.text);
 }
+function addressSpansIn(text2) {
+  const found = [];
+  for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text2[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text2.length && DOMAIN_CHAR.test(text2[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text2.slice(at + 1, end));
+    if (!domain)
+      continue;
+    const local = text2.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
+  }
+  return found;
+}
 function addressMatches(sender, normalizedRule) {
   if (normalizedRule.startsWith("@")) {
     const domain = normalizedRule.slice(1);
@@ -16459,9 +16598,8 @@ function strongKeysFromText(value) {
   if (!value)
     return [];
   const keys = new Set;
-  for (const match of value.matchAll(ADDRESS)) {
-    const local = match[1];
-    keys.add(`email:${match[0].toLowerCase()}`);
+  for (const { address, local } of addressesIn(value)) {
+    keys.add(`email:${address}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith("0"))
       keys.add(`phone:+${local}`);
   }
@@ -16472,9 +16610,10 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
   init_olympus_layout();
+  init_sender_rules();
   init_sqlite_migrations();
   init_store_write_guard();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
@@ -16486,7 +16625,6 @@ var init_people_index = __esm(() => {
     name_and_shared_group: "Linked by name and shared group chat",
     merged_by_owner: "Merged by you"
   });
-  ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
   PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
 });
 
@@ -19921,7 +20059,10 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_parent_context();
+  init_stored_names();
   init_tier_rejudge();
+  init_tier_rules_sweep();
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
@@ -22626,6 +22767,7 @@ var COPY_CHUNK_BYTES;
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
+  init_spool();
   COPY_CHUNK_BYTES = 1024 * 1024;
 });
 
@@ -23621,7 +23763,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names", "ChatGPT data exports (the .zip, or its conversations.json)", "Claude data exports (the .zip, or its conversations.json)", "each conversation's title, dates and turns as shown (your prompts and the assistant's replies)"]
     },
     {
       source_id: "x.bookmarks",
@@ -23655,7 +23797,7 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
+      contextual_scopes: ["live linked-device traffic", "the recent history WhatsApp sends at pairing, for the chats you choose", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
@@ -24197,6 +24339,19 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/classification-ledger.ts
+var init_classification_ledger = __esm(() => {
+  init_tier_ledger_path();
+});
+
+// src/workers/classification/judge-second-round.ts
+var init_judge_second_round = __esm(() => {
+  init_atomic_file();
+  init_classification_ledger();
+  init_tier_rejudge();
+  init_sniffer();
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -24223,6 +24378,7 @@ var init_source_forget_registry = __esm(() => {
   init_job_names();
   init_spool();
   init_olympus_layout();
+  init_judge_second_round();
   init_source_placement();
   init_olympus_layout();
   init_live_control2();
@@ -27510,6 +27666,25 @@ class EmailClient {
         ...options.path !== undefined ? { path: options.path } : {},
         ...options.archiveId !== undefined ? { archive_id: options.archiveId } : {}
       })
+    });
+  }
+  async privacyItem(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError("source_index_not_enabled", "Privacy labels cannot be changed because the source index is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up.");
+    }
+    const body = options.action === "find" ? {
+      ...options.query !== undefined ? { query: options.query } : {},
+      ...options.recent !== undefined ? { recent: options.recent } : {},
+      ...options.limit !== undefined ? { limit: options.limit } : {}
+    } : { item_id: options.itemId };
+    return this.transport.requestJson(`${this.config.email.baseUrl}/privacy-item/${options.action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
+      body: JSON.stringify(body)
     });
   }
   async sourceAnswer(options) {
@@ -35513,7 +35688,8 @@ function judgeStep(facts) {
   if (!fact.chosen) {
     return { id: "privacy_judge", title: "Choose your privacy judge", status: "open", detail: "Not chosen yet: on this computer for free, or Venice.", forward };
   }
-  const detail = fact.choice === "venice" ? typeof fact.limitDollars === "number" ? `Venice, up to ${dollars(fact.limitDollars)}` : "Venice, no spending limit set" : "On this computer, free";
+  const limit = typeof fact.limitDollars === "number" ? `up to ${dollars(fact.limitDollars)}` : "no spending limit set";
+  const detail = fact.choice === "venice" ? `Venice, ${limit}` : fact.choice === "local-then-venice" ? `This computer, then Venice double-checks, ${limit}` : "On this computer, free";
   return { id: "privacy_judge", title: "Privacy judge", status: "done", detail, forward };
 }
 function sourcesStep(facts) {
@@ -35774,6 +35950,15 @@ var ARCHIVE_IMPORT_PARAMS = {
   },
   path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, a WhatsApp chat export: its .txt or .zip, or a folder of them, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
   archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
+};
+var PRIVACY_ITEM_FIND_PARAMS = {
+  query: { type: "string", description: "Words from the item's title, sender or file name, as the user named it. Omit with recent." },
+  recent: { type: "boolean", description: "true lists the items Olympus sorted most recently instead of searching." },
+  limit: { type: "number", description: "Max items (default 20, at most 50)." }
+};
+var PRIVACY_ITEM_SET_PARAMS = {
+  item_id: { type: "string", required: true, description: "The item_id privacy_item_find returned." },
+  tier: { type: "string", required: true, enum: ["private"], description: 'Always "private": an AI app can only make an item Private.' }
 };
 var operations = [
   {
@@ -36226,6 +36411,7 @@ var operations = [
     description: [
       "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
       "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
+      "AI conversation exports work too: a ChatGPT data export (the .zip from Settings, Data controls, Export data) or a Claude data export (the .zip from Settings, Privacy, Export data), or the conversations.json inside either. Each conversation is imported as one item with its title, dates and turns as shown; pictures and attached files are not imported. Each conversation is judged on its own like mail.",
       "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
       "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
       "Never open, read or copy the file yourself, and never retry to get around the approval.",
@@ -36261,6 +36447,57 @@ var operations = [
         ...archiveId !== undefined ? { archiveId } : {},
         ...ctx.signal ? { signal: ctx.signal } : {}
       });
+    }
+  },
+  {
+    name: "privacy_item_find",
+    description: [
+      "Find one of the user's items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).",
+      "Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge's category and confidence) where the judge decided it.",
+      "Items whose names are Private, and Secret items, are never listed here.",
+      "Use it when the user says an item should be private, then call privacy_item_set."
+    ].join(" "),
+    params: PRIVACY_ITEM_FIND_PARAMS,
+    mutating: false,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "privacy item find", positional: ["query"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_FIND_PARAMS, params, "Privacy item find");
+      const query = optionalString4(params.query);
+      const recent = optionalBoolean(params.recent, "recent");
+      const limit = optionalNumber2(params.limit, "limit");
+      if (query === undefined === (recent !== true)) {
+        throw new OperationError("invalid_params", "Give query, or recent: true, not both.");
+      }
+      return ctx.email.privacyItem({
+        action: "find",
+        ...query !== undefined ? { query } : {},
+        ...recent !== undefined ? { recent } : {},
+        ...limit !== undefined ? { limit } : {},
+        ...ctx.signal ? { signal: ctx.signal } : {}
+      });
+    }
+  },
+  {
+    name: "privacy_item_set",
+    description: [
+      'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
+      "It is the user's decision on that one item, never a rule for its sender, chat or folder.",
+      "Making an item Personal, or putting it back to the judge's label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.",
+      "Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words."
+    ].join(" "),
+    params: PRIVACY_ITEM_SET_PARAMS,
+    mutating: true,
+    nativeExposure: "sourceIndexEnabledOnly",
+    cliHints: { name: "privacy item set", positional: ["item_id", "tier"] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_SET_PARAMS, params, "Privacy item set");
+      const itemId = asString(params.item_id, "item_id");
+      const tier = asString(params.tier, "tier");
+      if (tier !== "private") {
+        throw new OperationError("invalid_params", "An AI app can only make an item Private.", "To make it Personal, or put it back to the judge's label, use Privacy on the Olympus dashboard on this computer.");
+      }
+      return ctx.email.privacyItem({ action: "raise", itemId, ...ctx.signal ? { signal: ctx.signal } : {} });
     }
   },
   {

@@ -1,13 +1,16 @@
-import { LocalPeopleIndex, peopleIndexPath, refreshPeopleIndex, type PeopleSenderIdentity } from '../../core/people-index.ts';
+import { createDashboardPeople } from './dashboard-people.ts';
+import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
-import { snifferPromptVersions } from '../classification/sniffer.ts';
+import { snifferDecisionBar, snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
@@ -20,6 +23,7 @@ import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } fr
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
+import { createSelfUpdater } from '../../core/self-update.ts';
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync, openLinuxDesktopPath } from '../../core/linux-desktop-opener.ts';
@@ -42,6 +46,7 @@ import {
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { unlinkHelper } from './dashboard-messaging-service.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -106,6 +111,7 @@ import {
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
 import {
+  dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
@@ -556,6 +562,7 @@ import { frontArchiveViews, frontCaptureStop, frontJudgeBoost, frontJudgeState, 
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -2306,6 +2313,8 @@ export function connectorStoreAnswerScope(input: {
 
 const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
 const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
+/** How often the worker checks whether a sync or a tier visibility change needs a rebuild. */
+const PEOPLE_INDEX_CHECK_MS = 60_000;
 
 function openPeopleIndexOrUndefined(options: { readOnly?: boolean } = {}): LocalPeopleIndex | undefined {
   const dbPath = peopleIndexPath(process.env);
@@ -2602,6 +2611,8 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  // The local judge's own speed and held share on this install, for the setup estimates (#891).
+  const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
@@ -2682,6 +2693,10 @@ export async function main(): Promise<void> {
   const stopMessagingCapture = engineFront
     ? frontCaptureStop(engineFront.client)
     : async (source: 'telegram' | 'whatsapp') => { await captureOwnership.stopForUnpair(source); };
+  const unlinkWhatsAppDevice = (stateDir: string) => unlinkHelper(
+    whatsappBridgePathForPackage(packageRoot, { env: process.env }),
+    { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir },
+  );
 
   const fileSourceScopeAuthority = connectedHandleRegistryPath
     ? new FileSourceScopeAuthority({
@@ -3883,7 +3898,11 @@ export async function main(): Promise<void> {
   // it, answers keep each item's own sender label and filters match labels.
   // In the engine split the background rebuilds it; the front reads each rebuild.
   let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
-  const refreshPeople = (): void => {
+  const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
+  // After every scheduler tick (below) and on a one-minute check: a
+  // rebuild only after a sync or a tier visibility change, at most once a
+  // minute (the markers are cheap to read); `force` rebuilds now.
+  const refreshPeople = (force = false): void => {
     if (engineFront) {
       peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
       if (!peopleIndex) return;
@@ -3898,16 +3917,19 @@ export async function main(): Promise<void> {
       }
       return;
     }
-    if (!peopleIndex) return;
+    if (!peopleRefresher) return;
     try {
-      refreshPeopleIndex(peopleIndex, connectorStores);
+      if (force) peopleRefresher.refresh();
+      else peopleRefresher.refreshIfChanged();
     } catch (error) {
       console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
-  const peopleFirstRefresh = setTimeout(refreshPeople, PEOPLE_INDEX_FIRST_REFRESH_MS);
+  const peopleFirstRefresh = setTimeout(() => refreshPeople(true), PEOPLE_INDEX_FIRST_REFRESH_MS);
   peopleFirstRefresh.unref?.();
-  const peopleRefresh = setInterval(refreshPeople, PEOPLE_INDEX_REFRESH_MS);
+  const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
+  peopleCheck.unref?.();
+  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
   peopleRefresh.unref?.();
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
@@ -5841,11 +5863,19 @@ export async function main(): Promise<void> {
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
       sources: schedulerSources,
+      ...(!(sourceIndexStatus && sourceIngestionLedger)
+        ? {
+            afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
+            afterTick: () => refreshPeople(),
+          }
+        : {}),
       ...(sourceIndexStatus && sourceIngestionLedger
         ? {
             // Each delivery reads every store's status; at most one every 30 s.
             afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
             afterTick: async (schedulerStatus) => {
+              // A sync that just completed brings new senders: link them now.
+              refreshPeople();
               const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
@@ -6226,8 +6256,16 @@ export async function main(): Promise<void> {
     runningVersion: runningOlympusVersion(), platform: process.platform,
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
+  // Update now (#1063): only the standalone engine the installer put in place updates itself.
+  const selfUpdater = createSelfUpdater({
+    platform: process.platform, runningVersion: runningOlympusVersion(),
+    stateDir: join(engineServicePaths().logDir, 'updates'),
+    standaloneEngine: isStandaloneEngineProcess(process.env),
+    available: () => updateChecker.available(),
+  });
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
+    ...(isStandaloneEngineProcess(process.env) ? { selfUpdate: selfUpdater } : {}),
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
     agentConnections: {
@@ -6248,6 +6286,9 @@ export async function main(): Promise<void> {
     pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
+    // One item's privacy label (issue #1060): the same stores and ledgers
+    // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
+    ownerTierItems: createOwnerTierItems(),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -6325,6 +6366,8 @@ export async function main(): Promise<void> {
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
               credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
               requestReload: () => requestModelReload(),
+              observed: () => judgeObservations.observed(),
+              secondRoundStatePath: judgeSecondRoundStatePath(process.env),
             }),
             modelSetup: getModelSetup,
             setupStatus: async () => {
@@ -6377,6 +6420,10 @@ export async function main(): Promise<void> {
                 return dashboardPanelTools.call(name, args, context);
               },
             },
+            // People (#1076): the people index and the owner's corrections.
+            ...(peopleIndex
+              ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) }
+              : {}),
             // Private answers on this computer; bound late like the panel's tools.
             ...(sourceAnswerLanes
               ? {
@@ -6410,6 +6457,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            unlinkWhatsAppDevice,
             withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
             captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
@@ -7426,6 +7474,9 @@ export async function main(): Promise<void> {
         requireOwnerSocket: !!socketPath,
         // Any marker, verified or not, refuses approval (fails closed).
         isRelayed: carriesRelayMarker,
+        // Approving from a browser off the owner socket needs the owner's
+        // dashboard session, checked with the same keys that sign it (#1186).
+        ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
@@ -7545,30 +7596,65 @@ export async function main(): Promise<void> {
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const snifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
+  const rawSnifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+  // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
+  const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
+  const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
   // The owner's own call on the shared model, as the split's front reported it
   // (owner_busy / owner_idle), until it says idle or ten minutes pass.
   const remoteOwnerMarks = new OwnerBusyMarks();
   const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
+  // This computer, then Venice double-checks (#891): the local judge sorts everything, and
+  // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
+  const judgeChoice = judgeSpending.status();
+  // The front judges nothing, so it runs no double-check either.
+  const secondRoundVenice = !engineFront && snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
+    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
+      lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
+      promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
+    })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    : undefined;
+  if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
+    console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
+  }
+  const secondRoundSweep = secondRoundVenice ? new SecondRoundSweep({
+    statePath: judgeSecondRoundStatePath(process.env),
+    setFor: tierSetForLedger,
+    unanswered: (ledgerPath, id) => installedTierClassification.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered,
+  }) : undefined;
+  const secondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
+  let lastSecondRoundLog = '';
+  const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
+  const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
   // The front judges nothing: the background is the only judge.
   const tierSniffer = !engineFront && snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
-        model: snifferResource ? {
+        model: withSecondRound(snifferResource ? {
           ...snifferModel,
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
           // The completion says how long it waited for the model slot (#893).
           complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
-        } : snifferModel,
+        } : snifferModel),
+        ...(secondRoundSweep ? { secondRound: async (ledgerPaths, autoMovesFor) => {
+          const reopened = await secondRoundSweep.run(ledgerPaths, autoMovesFor, ingestionTurn);
+          const counts = JSON.stringify(secondRoundCounts);
+          if (reopened > 0 || counts !== lastSecondRoundLog) {
+            lastSecondRoundLog = counts;
+            console.log(`Olympus privacy judge: Venice double-check: ${reopened} held item(s) re-opened this tick; ${secondRoundCounts.asked} asked, ${secondRoundCounts.released} released to Personal, ${secondRoundCounts.kept} kept Private, ${secondRoundCounts.failed} failed and ${secondRoundCounts.stopped} stopped (kept Private).`);
+          }
+        } } : {}),
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         ...(snifferRuntime.source === 'built_in'

@@ -266,6 +266,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .drop-hint{color:var(--muted);font-size:0.875rem}
 .drop-or{margin:0;text-align:center}
 .drop-or .btn{min-height:0;padding:0.25rem 0.5rem;border:0;background:none;color:var(--accent);font-size:0.875rem;font-weight:500}
+.guide-list{margin-top:1.5rem}
+.guide-list .rows .btn{text-align:left}
+.drop-body ol.steps{padding-left:1.25rem;line-height:1.5}
 .drop-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
 .drop-progress{display:flex;flex-direction:column;gap:0.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface)}
 .drop-progress p{margin:0}

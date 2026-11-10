@@ -50,12 +50,19 @@ export const PROBE_SOURCE = String.raw`(() => {
     }
     return false;
   };
+  // An open modal dialog leaves the rest of the page inert under its backdrop: a press there lands on the backdrop, never on the
+  // control (2026-11-10: Lock in the top bar behind the open Build a connector dialog was "pressed" and the page still offered it).
+  const isModal = (dialog) => { try { return dialog.matches(':modal'); } catch (error) { return false; } };
+  const behindModal = (el) => {
+    const modal = Array.from(document.querySelectorAll('dialog[open]')).filter(isModal).pop();
+    return !!modal && !modal.contains(el);
+  };
   const isVisible = (el) => {
     if (!el || !el.getBoundingClientRect) return false;
     const box = el.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) return false;
     const style = getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.display !== 'none' && !insideClosed(el);
+    return style.visibility !== 'hidden' && style.display !== 'none' && !insideClosed(el) && !behindModal(el);
   };
   const nameOf = (el) => {
     const labelled = el.getAttribute && el.getAttribute('aria-labelledby');

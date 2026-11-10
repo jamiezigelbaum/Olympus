@@ -20,7 +20,7 @@
  */
 import { homedir } from 'node:os';
 import { posix } from 'node:path';
-import { archiveSourceCardOf, archiveSourceCards, getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
+import { archiveExportGuideLinks, archiveSourceCardOf, archiveSourceCards, getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
 import { realpathSync } from 'node:fs';
 import type {
@@ -281,6 +281,13 @@ export const ARCHIVE_NOT_RUNNING_COPY = {
   disabled: "Background syncing is turned off in Olympus's settings, so imports and removals can't run. The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it.",
   not_selected: "Background syncing in Olympus's settings leaves out archives, so imports and removals can't run. The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it.",
 } as const;
+
+// The export guides a source's picker offers (#660), by format id, with each
+// step's page; nothing when its formats have none.
+function guideLinksOf(formats: readonly ArchiveFormatDefinition[]): { guideLinks?: Record<string, Array<string | null>> } {
+  const links = archiveExportGuideLinks(formats);
+  return Object.keys(links).length > 0 ? { guideLinks: links } : {};
+}
 
 function fill(template: string, values: Record<string, string>): string {
   let out = template;
@@ -1112,12 +1119,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         const target = options.runtime.targets.forSource(sourceId);
         const formats = target ? sourceFormats(target) : [];
         if (!target || formats.length === 0) return [];
-        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats), ...guideLinksOf(formats) }];
       });
       // Import-only sources: their card imports their formats (a source that reads one live wins it).
       const imported = archiveSourceCards()
         .filter((card) => !live.some((entry) => entry.sourceId === card.id))
-        .map((card): ComputerArchiveSourceMeta => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
+        .map((card): ComputerArchiveSourceMeta => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats), ...guideLinksOf(card.formats) }));
       return [...live, ...imported];
     },
 

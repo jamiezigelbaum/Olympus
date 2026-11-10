@@ -181,6 +181,12 @@ export class TierSnifferStore {
     );
   }
 
+  /** Forget one cached verdict, so its question is asked again (a second round, judge-second-round.ts). */
+  deleteVerdict(key: SnifferVerdictKey): void {
+    this.db.query('DELETE FROM sniffer_verdicts WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?')
+      .run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+  }
+
   /** Only a model answer applied to a final item may answer another item's content. */
   markFinalModelContent(key: SnifferVerdictKey, contentHash: string): void {
     this.db.query(`UPDATE sniffer_verdicts SET content_hash = ?

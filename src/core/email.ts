@@ -75,6 +75,10 @@ export interface ArchiveImportClientOptions {
   signal?: AbortSignal;
 }
 
+export type PrivacyItemClientOptions =
+  | { action: 'find'; query?: string; recent?: boolean; limit?: number; signal?: AbortSignal }
+  | { action: 'raise'; itemId: string; signal?: AbortSignal };
+
 /**
  * A zkAPI session may take many minutes: the owner's writer (up to its
  * timeout, 3 min by default), the route becoming ready (2 min), the consult
@@ -492,6 +496,41 @@ export class EmailClient {
         ...(options.path !== undefined ? { path: options.path } : {}),
         ...(options.archiveId !== undefined ? { archive_id: options.archiveId } : {}),
       }),
+    });
+  }
+
+  /**
+   * The agent's side of the one-item privacy change (privacy_item_find,
+   * privacy_item_set): find items whose names are Personal, or raise one to
+   * Private. The worker route has no way to lower an item.
+   */
+  async privacyItem(options: PrivacyItemClientOptions): Promise<unknown> {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) {
+      throw new OperationError(
+        'source_index_not_enabled',
+        'Privacy labels cannot be changed because the source index is disabled.',
+        'Enable sourceIndex.enabled to turn on the source read surface.',
+      );
+    }
+    if (!this.config.email.enabled) {
+      throw new OperationError(
+        'email_not_configured',
+        'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up.',
+      );
+    }
+    const body = options.action === 'find'
+      ? {
+          ...(options.query !== undefined ? { query: options.query } : {}),
+          ...(options.recent !== undefined ? { recent: options.recent } : {}),
+          ...(options.limit !== undefined ? { limit: options.limit } : {}),
+        }
+      : { item_id: options.itemId };
+    return this.transport.requestJson(`${this.config.email.baseUrl}/privacy-item/${options.action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(options.signal ? { signal: options.signal } : {}),
+      body: JSON.stringify(body),
     });
   }
 

@@ -33,6 +33,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { addressSpansIn } from './sender-rules.ts';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from './store-write-guard.ts';
@@ -135,7 +136,7 @@ export type PeopleCorrection =
 /** At most this many senders in one conversation make it a group signal. */
 const MAX_GROUP_SIGNAL_MEMBERS = 50;
 const MAX_NAMES_PER_IDENTITY = 8;
-const PEOPLE_SCHEMA_VERSION = 1;
+const PEOPLE_SCHEMA_VERSION = 2;
 export const PEOPLE_INDEX_STORE_ID = 'people-index';
 
 function peopleIndexMigrations(): SqliteMigration[] {
@@ -183,6 +184,18 @@ function peopleIndexMigrations(): SqliteMigration[] {
         );
       `);
     },
+  }, {
+    version: 2,
+    name: 'people_corrections_corpora',
+    up(db: Database) {
+      // The corpora a correction's identities were seen in, kept on the
+      // correction itself: a source's Delete finds it even after a rebuild
+      // has dropped those identities (every item of the sender tombstoned).
+      const columns = db.query(`PRAGMA table_info(people_corrections)`).all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'corpus_ids_json')) {
+        db.exec(`ALTER TABLE people_corrections ADD COLUMN corpus_ids_json TEXT NOT NULL DEFAULT '[]'`);
+      }
+    },
   }];
 }
 
@@ -207,7 +220,9 @@ export function normalizePhone(value: string): string | undefined {
   return digits.length >= 8 && digits.length <= 15 && !digits.startsWith('0') ? `+${digits}` : undefined;
 }
 
-const ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
+/** Labels and ids longer than this are read only this far for addresses. */
+const MAX_ADDRESS_TEXT_CHARS = 4_096;
+const addressesIn = (value: string) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS));
 
 /**
  * The strong keys an id or a label carries, read as address formats only:
@@ -218,13 +233,12 @@ const ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
 export function strongKeysFromText(value: string | undefined): string[] {
   if (!value) return [];
   const keys = new Set<string>();
-  for (const match of value.matchAll(ADDRESS)) {
-    const local = match[1]!;
+  for (const { address, local } of addressesIn(value)) {
     // An address is always an email key, even with an all-digit mailbox
     // (123456789@qq.com). A digit-only local part also reads as a phone
     // number (a chat id such as 14155550123@s.whatsapp.net); a phone key
     // shared by two such addresses on different domains is a known limit.
-    keys.add(`email:${match[0]!.toLowerCase()}`);
+    keys.add(`email:${address}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith('0')) keys.add(`phone:+${local}`);
   }
   if (keys.size === 0) {
@@ -237,7 +251,9 @@ export function strongKeysFromText(value: string | undefined): string[] {
 /** A label as a person's name, or undefined when it is an address, number or id. */
 export function displayNameFromLabel(label: string | undefined): string | undefined {
   if (!label) return undefined;
-  const withoutAddress = label.replace(/<[^>]*>/g, ' ').replace(ADDRESS, ' ').replace(/["']/g, ' ');
+  let withoutAddress = label;
+  for (const span of addressesIn(label).reverse()) withoutAddress = `${withoutAddress.slice(0, span.start)} ${withoutAddress.slice(span.end)}`;
+  withoutAddress = withoutAddress.replace(/<[^>]*>/g, ' ').replace(/["']/g, ' ');
   const name = withoutAddress.replace(/\s+/g, ' ').trim();
   if (!name || normalizePhone(name)) return undefined;
   if (!/\p{L}/u.test(name)) return undefined;
@@ -346,7 +362,14 @@ export function linkPeople(input: {
   }
 
   const pairKey = (a: string, b: string) => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
-  const { merges, rejected, splits, renames } = replayCorrections(input.corrections ?? [], pairKey);
+  // The owner is always one "You": a stored split of an owner identity, or a
+  // Not the same between two of them, is ignored (correct() refuses new
+  // ones), so an old one can never leave two people named You.
+  const ownerKeys = new Set([...identities.values()].filter((identity) => identity.isOwner).map((identity) => identity.identityKey));
+  const { merges, rejected, splits, renames } = replayCorrections(
+    (input.corrections ?? []).filter((correction) => !separatesOwner(correction, ownerKeys)),
+    pairKey,
+  );
 
   const uf = new UnionFind();
   for (const key of identities.keys()) uf.add(key);
@@ -509,6 +532,21 @@ export function linkPeople(input: {
   return people.sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || b.itemCount - a.itemCount || a.personId.localeCompare(b.personId));
 }
 
+/** A correction that would split the owner into more than one person. */
+function separatesOwner(correction: PeopleCorrection, ownerKeys: ReadonlySet<string>): boolean {
+  if (correction.kind === 'split') return ownerKeys.has(correction.identity);
+  if (correction.kind === 'not_same') return ownerKeys.has(correction.identityA) && ownerKeys.has(correction.identityB);
+  return false;
+}
+
+/** The owner's correction cannot be kept (it would make two people named You). */
+export class PeopleCorrectionRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PeopleCorrectionRefusedError';
+  }
+}
+
 interface ReplayedCorrections {
   /** The owner's merges still in force, oldest first. */
   merges: Array<[string, string]>;
@@ -600,7 +638,7 @@ function bestName(members: readonly WorkingIdentity[]): string {
   for (const member of members) {
     for (const [name, count] of member.publicNames) counts.set(name, (counts.get(name) ?? 0) + count);
   }
-  // A real name before a handle ("Mark Alexander" before "@xandoru"), then the most used.
+  // A real name before a handle ("Theo Lindqvist" before "@lindqvist_t"), then the most used.
   const handle = (name: string) => Number(name.startsWith('@'));
   const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
   if (named) return named;
@@ -716,10 +754,33 @@ export class LocalPeopleIndex {
           );
         }
       }
+      this.tagCorrectionCorpora();
       this.db.query(`INSERT OR REPLACE INTO people_meta (key, value) VALUES ('rebuilt_at', ?)`).run(this.now().toISOString());
     })();
     this.setPeople(people);
     return people;
+  }
+
+  /**
+   * Add to each correction the corpora its identities are seen in now. Only
+   * adds: a corpus stays on the correction until that source's Delete.
+   */
+  private tagCorrectionCorpora(): void {
+    this.db.exec(`
+      UPDATE people_corrections SET corpus_ids_json = (
+        SELECT json_group_array(DISTINCT value) FROM (
+          SELECT value FROM json_each(people_corrections.corpus_ids_json)
+          UNION
+          SELECT c.value FROM people_identities i, json_each(i.corpus_ids_json) c
+          WHERE i.identity_key IN (people_corrections.identity_a, people_corrections.identity_b)
+        )
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM people_identities i, json_each(i.corpus_ids_json) c
+        WHERE i.identity_key IN (people_corrections.identity_a, people_corrections.identity_b)
+          AND c.value NOT IN (SELECT value FROM json_each(people_corrections.corpus_ids_json))
+      )
+    `);
   }
 
   list(): PeoplePerson[] {
@@ -809,6 +870,11 @@ export class LocalPeopleIndex {
    * same observations to `rebuild` to see it at once) and every one after.
    */
   correct(correction: PeopleCorrection): void {
+    const ownerKeys = new Set((this.db.query('SELECT identity_key FROM people_identities WHERE is_owner = 1').all() as Array<{ identity_key: string }>)
+      .map((row) => row.identity_key));
+    if (separatesOwner(correction, ownerKeys)) {
+      throw new PeopleCorrectionRefusedError('Your own accounts are always You; they cannot be split apart.');
+    }
     const at = this.now().toISOString();
     const insert = this.db.query(`
       INSERT INTO people_corrections (kind, identity_a, identity_b, name, created_at) VALUES (?, ?, ?, ?, ?)
@@ -833,6 +899,7 @@ export class LocalPeopleIndex {
         if (!name) throw new Error('A person needs a name.');
         insert.run('rename', correction.identity, null, name, at);
       }
+      this.tagCorrectionCorpora();
     })();
   }
 
@@ -923,6 +990,13 @@ export interface PeopleObservationSource {
   peopleObservations(): PeopleSenderObservation[];
   /** The store's latest sync run, so a refresh can tell when a sync has finished. */
   lastSyncRun?(): { syncRunId: string; status: string; completedAt?: string } | undefined;
+  /**
+   * A cheap marker that moves when the store's tier visibility changes (a
+   * copy re-judged, superseded, staged or held; an item added or removed),
+   * not on every write, so a refresh can tell when a name may have stopped
+   * being shareable.
+   */
+  peopleVisibilityMarker?(): string;
   setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
 }
 
@@ -948,42 +1022,68 @@ export function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly Peo
   return people;
 }
 
+/** A sync or visibility change rebuilds the people index at most this often. */
+export const PEOPLE_INDEX_MIN_REBUILD_MS = 60_000;
+
 /**
- * Keeps the index current: a rebuild right after any authored store finishes
- * a sync (`refreshIfSynced`, cheap to call often), and on demand.
+ * Keeps the index current: a rebuild soon after any authored store finishes
+ * a sync or changes its tier visibility (`refreshIfChanged`, cheap to call
+ * often), and on demand.
  */
+
 export class PeopleIndexRefresher {
   private lastFingerprint: string | undefined;
+  private lastRefreshAt: number | undefined;
+  private readonly now: () => number;
 
   constructor(
     private readonly index: LocalPeopleIndex,
     private readonly stores: () => readonly PeopleObservationSource[],
-  ) {}
+    options: { now?: () => number } = {},
+  ) {
+    this.now = options.now ?? (() => Date.now());
+  }
 
   /** Rebuild now. */
   refresh(): PeoplePerson[] {
     const stores = this.stores();
-    this.lastFingerprint = syncFingerprint(stores);
+    this.lastFingerprint = refreshFingerprint(stores);
+    this.lastRefreshAt = this.now();
     return refreshPeopleIndex(this.index, stores);
   }
 
-  /** Rebuild when a sync has completed since the last rebuild; true when it did. */
-  refreshIfSynced(): boolean {
-    const fingerprint = syncFingerprint(this.stores());
+  /**
+   * Rebuild when a sync has completed or a store's tier visibility has
+   * changed since the last rebuild, at most once every
+   * PEOPLE_INDEX_MIN_REBUILD_MS (a judging backlog moves the markers often);
+   * true when it rebuilt. Reading the markers is cheap, so call it often.
+   */
+  refreshIfChanged(): boolean {
+    const fingerprint = refreshFingerprint(this.stores());
     if (fingerprint === this.lastFingerprint) return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS) return false;
     this.refresh();
     return true;
   }
 }
 
-function syncFingerprint(stores: readonly PeopleObservationSource[]): string {
+function refreshFingerprint(stores: readonly PeopleObservationSource[]): string {
   return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+    let sync = '';
+    let visibility = '';
     try {
       const run = store.lastSyncRun?.();
-      return run && run.status === 'completed' ? `${run.syncRunId}@${run.completedAt ?? ''}` : '';
+      sync = run && run.status === 'completed' ? `${run.syncRunId}@${run.completedAt ?? ''}` : '';
     } catch {
-      return '';
+      sync = '';
     }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? '';
+    } catch {
+      // A store whose visibility cannot be read now: rebuild once it can.
+      visibility = 'unreadable';
+    }
+    return `${sync}#${visibility}`;
   }).join('|');
 }
 
@@ -1009,12 +1109,18 @@ export function forgetPeopleIndexRows(
       SELECT identity_key FROM people_identities
       WHERE EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?)))
     `).all(corpora) as Array<{ identity_key: string }>).map((row) => row.identity_key);
-    if (keys.length === 0) return 0;
     const keyList = JSON.stringify(keys);
-    const corrections = (db.query(`
-      SELECT COUNT(*) AS n FROM people_corrections
-      WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-    `).get(keyList) as { n: number }).n;
+    // A correction goes when it names a forgotten identity, or when its
+    // identities were ever seen in these corpora (kept on the correction, so
+    // it is found after a rebuild dropped a sender whose items are all gone).
+    // An index written before corrections kept their corpora (schema v1) has
+    // no such column; this path never migrates, and a dry run is read-only.
+    const keepsCorpora = (db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('people_corrections') WHERE name = 'corpus_ids_json'`).get() as { n: number }).n > 0;
+    const correctionMatch = `identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
+      ${keepsCorpora ? 'OR EXISTS (SELECT 1 FROM json_each(corpus_ids_json) c WHERE c.value IN (SELECT value FROM json_each(?2)))' : 'OR ?2 IS NULL'}`;
+    const corrections = (db.query(`SELECT COUNT(*) AS n FROM people_corrections WHERE ${correctionMatch}`)
+      .get(keyList, corpora) as { n: number }).n;
+    if (keys.length === 0 && corrections === 0) return 0;
     const cards = (db.query(`
       SELECT card_id FROM people_contact_cards
       WHERE EXISTS (SELECT 1 FROM json_each(keys_json) k WHERE k.value IN (SELECT value FROM json_each(?)))
@@ -1022,10 +1128,7 @@ export function forgetPeopleIndexRows(
     if (dryRun) return keys.length + corrections + cards;
     db.transaction(() => {
       db.query(`DELETE FROM people_identities WHERE identity_key IN (SELECT value FROM json_each(?))`).run(keyList);
-      db.query(`
-        DELETE FROM people_corrections
-        WHERE identity_a IN (SELECT value FROM json_each(?1)) OR identity_b IN (SELECT value FROM json_each(?1))
-      `).run(keyList);
+      db.query(`DELETE FROM people_corrections WHERE ${correctionMatch}`).run(keyList, corpora);
       // A card keeps its other entries; only the deleted source's are taken out.
       const rows = db.query(`SELECT card_id, keys_json FROM people_contact_cards`).all() as Array<{ card_id: string; keys_json: string }>;
       const gone = new Set(keys);
