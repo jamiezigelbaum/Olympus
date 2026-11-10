@@ -25,10 +25,36 @@ import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
 export const DASHBOARD_UPDATE_COPY = {
-  notice: (version: string) => `Olympus ${version} is available. To update, run this in Terminal:`,
+  notice: (version: string) => `Olympus ${version} is available.`,
+  updateNow: 'Update now',
+  terminal: 'Update in Terminal instead',
+  terminalHow: 'Run this in Terminal:',
   copy: 'Copy command',
   copied: 'Copied',
   copyFailed: 'Select the command and copy it.',
+  /** Update now's four steps (core/self-update.ts), as "step N of 4: …". */
+  steps: ['downloading the update', "checking the download's signature", 'installing', 'restarting Olympus'] as const,
+  updating: (version: string) => `Updating to Olympus ${version}`,
+  step: (step: number, words: string) => `step ${step} of 4: ${words}`,
+  pause: (to: string, from: string) => `Your sources pause for about a minute while Olympus restarts. If ${to} doesn't start, Olympus puts ${from} back by itself.`,
+  done: (version: string) => `Olympus ${version} is running.`,
+  rolledBack: (to: string, from: string) => `Olympus ${to} didn't start, so Olympus put ${from} back. Nothing else changed.`,
+  failures: {
+    download_failed: 'Olympus could not download the update. Check the internet connection and try again.',
+    bad_signature: "The update's signature did not check out, so Olympus did not use it. Nothing changed.",
+    installer_mismatch: 'The downloaded installer did not match its signed release, so Olympus did not run it. Nothing changed.',
+    launch_failed: 'Olympus could not start the installer. Nothing changed.',
+    install_failed: 'The update did not finish. Try again, or update in Terminal.',
+    interrupted: 'Olympus restarted before the update began. Nothing changed. Try again.',
+    did_not_finish: 'The update did not finish. Try again, or update in Terminal.',
+  } as Record<string, string>,
+  refusals: {
+    no_release_key: "This version of Olympus can't check an update's signature yet, so it won't update itself. Update in Terminal instead.",
+    not_available: 'Olympus can update itself only when it was installed with the Olympus installer. Update in Terminal instead.',
+    no_update: 'Olympus is already up to date.',
+  } as Record<string, string>,
+  unreachable: 'Olympus is restarting…',
+  failedFallback: 'The update could not start. Update in Terminal instead.',
 };
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
