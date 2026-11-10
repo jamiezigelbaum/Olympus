@@ -28,6 +28,7 @@ import { withPriorityQueryEmbedding } from './embeddings.ts';
 // - The Castor-visible result carries the gated answer, citation locators, and
 //   audits — never raw chunks, packets, or pack internals.
 
+import type { EvidenceReranker } from '../../core/evidence-reranker.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
@@ -145,6 +146,12 @@ export interface AnalystAnswerLanes {
    * retrieval, and probePrivateMatch reads it as not checked.
    */
   excludedCorpusIds?: ReadonlySet<string>;
+  /**
+   * Registered corpora with no store mounted on this computer: nothing here
+   * could search them, and nothing here holds them (an answer on this
+   * computer does not name them as left out).
+   */
+  unmountedCorpusIds?: ReadonlySet<string>;
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
@@ -165,6 +172,9 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   // Optional multi-query retrieval expansion (core/query-planner.ts), passed
   // through to the EvidencePack builder. Absent = single literal query.
   queryPlanner?: (question: string) => Promise<readonly string[]>;
+  // Optional local cross-encoder over the fused candidates (core/evidence-reranker.ts),
+  // passed through to the EvidencePack builder. Absent = fused order, unchanged.
+  reranker?: EvidenceReranker;
   defaultMaxResults?: number;
   maxCharsPerCandidate?: number;
   // Total passage UTF-8 bytes across the evidence pack; see DEFAULT_EVIDENCE_BYTE_BUDGET.
@@ -428,6 +438,7 @@ export function createAnalystSourceIndexAnswerHandler(
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
           ...(request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {}),
           ...(options.queryPlanner ? { queryPlanner: options.queryPlanner } : {}),
+          ...(options.reranker ? { reranker: options.reranker } : {}),
           maxResults,
           ...(requestedCorpusIds ? { corpusIds: requestedCorpusIds } : {}),
           searchContext: {

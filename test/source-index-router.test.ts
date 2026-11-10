@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import {
   buildSourceIndexCorpusRegistry,
   defineSourceIndexCorpus,
@@ -265,6 +266,78 @@ describe('source-index router per-lane retrieval deadline', () => {
       reason: 'lane_timeout',
     });
     expect(result.rawExposed).toBe(false);
+  });
+
+  // #1079: a lane must not be dropped because something else (another lane's
+  // synchronous keyword search, a judging pass) held the thread past its
+  // deadline. Sparta had every lane time out together this way while each had
+  // found candidates. The test clock plays the held thread: time jumps past the
+  // deadline before its timer gets a turn, so the timer fires late.
+  test('keeps a lane whose deadline passed only because the thread was held', async () => {
+    const clock = createTestClock();
+    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));
+    const calls: string[] = [];
+    let finish!: () => void;
+    const ready = new Promise<void>((resolve) => { finish = resolve; });
+    const routed = routeSourceIndexSearch({
+      registry,
+      laneTimeoutMs: 10_000,
+      laneClock: clock,
+      adapters: {
+        'public_safe.fast': async (request) => {
+          await ready;
+          return adapterFor(calls, 'public_safe.fast', 'file', 'fast-1')(request);
+        },
+      },
+      request: { query: 'q', maxResults: 5, context },
+    });
+    await waitFor(() => clock.pendingTimers() === 1);
+    clock.set(clock.now() + 40_000);
+    await clock.advance(0); // the deadline fires 30 s late: the thread was held
+    finish(); // the lane's I/O completes as soon as the thread is free
+    const result = await routed;
+
+    expect(result.searchedCorpora).toEqual(['public_safe.fast']);
+    expect(result.skippedCorpora).toEqual([]);
+  });
+
+  test('a lane still unfinished when its grace fires on time is dropped', async () => {
+    const clock = createTestClock();
+    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));
+    const routed = routeSourceIndexSearch({
+      registry,
+      laneTimeoutMs: 10_000,
+      laneClock: clock,
+      adapters: { 'public_safe.fast': () => new Promise<SourceIndexCorpusSearchResponse>(() => {}) },
+      request: { query: 'q', maxResults: 5, context },
+    });
+    await waitFor(() => clock.pendingTimers() === 1);
+    clock.set(clock.now() + 40_000);
+    await clock.advance(0); // late: a grace instead of a drop
+    expect(clock.pendingTimers()).toBe(1);
+    await clock.advance(1_000); // the grace fires on time: the lane had its turn
+    const result = await routed;
+
+    expect(result.searchedCorpora).toEqual([]);
+    expect(result.skippedCorpora).toContainEqual({ corpusId: 'public_safe.fast', trustDomain: 'public_safe', reason: 'lane_timeout' });
+  });
+
+  test('a thread held past the hard stop drops the lane at its first late timer', async () => {
+    const clock = createTestClock();
+    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));
+    const routed = routeSourceIndexSearch({
+      registry,
+      laneTimeoutMs: 10_000,
+      laneClock: clock,
+      adapters: { 'public_safe.fast': () => new Promise<SourceIndexCorpusSearchResponse>(() => {}) },
+      request: { query: 'q', maxResults: 5, context },
+    });
+    await waitFor(() => clock.pendingTimers() === 1);
+    clock.set(clock.now() + 61_000);
+    await clock.advance(0);
+    const result = await routed;
+
+    expect(result.skippedCorpora).toContainEqual({ corpusId: 'public_safe.fast', trustDomain: 'public_safe', reason: 'lane_timeout' });
   });
 
   test('total fan-out time is bounded by the lane budget, not the slowest lane', async () => {

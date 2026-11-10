@@ -43,6 +43,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/archive-live-one-dataset.md',
   'docs/design/consult-gate-false-refusals.md',
   'docs/design/consult-m1-measurement.md',
+  'docs/design/engine-split.md',
   'docs/design/consult-pii-bakeoff.md',
   'docs/design/consult-m1-results/run-1.json',
   'docs/design/consult-m1-results/runs-2-10.json',
