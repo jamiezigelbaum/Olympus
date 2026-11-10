@@ -1,6 +1,6 @@
 {
   "name": "olympus-source-checkout",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "private": true,
   "description": "Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees.",
   "license": "MIT",

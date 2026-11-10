@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.4 - 2026-11-10
+
+- **On a Mac, only the account that runs Olympus gets the owner controls.** Another standard account on the same Mac could open the dashboard as the owner. Olympus now checks that a local dashboard session comes from the account that runs it, and refuses any other (#1153, #1179).
+
 ## 1.4.3 - 2026-11-10
 
 - **Ask answers while Olympus is busy judging.** On a large install that was judging privacy, an Ask could freeze the dashboard for over a minute and then say every source was left out. Search no longer rebuilds each store's hidden copies on every question, a source isn't dropped just because the engine was busy when its time ran out, and the dashboard status no longer rebuilds them on each refresh either (#1079, #1091, #1056).
