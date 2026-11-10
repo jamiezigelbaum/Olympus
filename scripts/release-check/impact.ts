@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
 
-export const LEGS = ['suite', 'relay', 'inbox', 'screenshots', 'journeys', 'explore', 'archive'] as const;
+export const LEGS = ['suite', 'relay', 'inbox', 'screenshots', 'journeys', 'explore', 'archive', 'restore'] as const;
 export type Leg = (typeof LEGS)[number];
 
 /** The run.ts flag that leaves each leg out. */
@@ -22,6 +22,7 @@ export const SKIP_FLAG: Record<Leg, string> = {
   journeys: '--skip-journeys',
   explore: '--skip-explore',
   archive: '--skip-archive',
+  restore: '--skip-restore',
 };
 
 /** Legs whose results depend on another leg's having run first, so running one runs the others too. */
@@ -31,10 +32,12 @@ const NEEDS: Partial<Record<Leg, Leg[]>> = {
   journeys: ['suite', 'relay', 'inbox', 'screenshots'],
   // The Inbox leg lists the tools with the connection token the suite creates.
   inbox: ['suite'],
+  // The clean machine looks for the item the journeys changed on the first one (journeys.ts restore-clean-machine).
+  restore: ['journeys', 'suite', 'relay', 'inbox', 'screenshots'],
 };
 
 // The archive leg drives the dashboard too: it presses Import on the pending request and removes imports there.
-const SCREEN_LEGS: Leg[] = ['screenshots', 'inbox', 'journeys', 'explore', 'archive'];
+const SCREEN_LEGS: Leg[] = ['screenshots', 'inbox', 'journeys', 'explore', 'archive', 'restore'];
 
 interface Rule { test: (file: string) => boolean; legs: Leg[] | 'all'; why: string }
 
@@ -55,6 +58,7 @@ const RULES: Rule[] = [
   { test: under('connect-relay/'), legs: [], why: 'the check uses the production relay, not this commit\'s relay code' },
   { test: under('chatgpt-plugin/'), legs: [], why: 'the ChatGPT listing is not in the package' },
   { test: under('src/workers/archive-import/'), legs: ['archive'], why: 'archive import' },
+  { test: (f) => f === 'src/data-backup.ts' || f === 'src/data-restore.ts', legs: ['restore'], why: 'back up and restore' },
   { test: under('src/workers/dashboard/'), legs: SCREEN_LEGS, why: 'the dashboard pages' },
   { test: (f) => f === 'src/core/linux-owner-bridge.ts', legs: SCREEN_LEGS, why: 'how the owner\'s browser opens the dashboard' },
   { test: (f) => f === 'src/workers/email-source/local-private-answers.ts' || f === 'src/core/waiting-private-questions.ts', legs: ['inbox', ...SCREEN_LEGS], why: 'Private questions and the Inbox' },

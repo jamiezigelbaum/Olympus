@@ -267,3 +267,9 @@ for (const [sheet, step, text] of [
   await browser.happyDOM.waitUntilComplete();
   expect(visiblePanel(f.root)?.textContent).toContain(text);
 });
+
+test("What's private › Open lands on the privacy settings, not plain Home (#1223)", () => {
+  const html = renderDashboardKeysPage(buildDashboardPreviewView('first-run'));
+  const section = html.slice(html.indexOf('<section id="whats-private">'), html.indexOf('</section>', html.indexOf('<section id="whats-private">')));
+  expect(section).toContain('href="/dashboard#olympus-open=privacy" data-privacy-open>');
+});

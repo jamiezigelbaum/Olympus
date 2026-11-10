@@ -46395,7 +46395,7 @@ function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -46879,6 +46879,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     unreadablePages: {},
     landing: "",
     landingImport: false,
+    landingPrivacy: false,
     landed: null,
     lastFailure: null
   };
@@ -46987,6 +46988,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       if (landing.sourceId === config.allSourcesId)
         state.open["home-all"] = true;
+      else if (landing.sourceId === config.privacyLandingId)
+        state.landingPrivacy = true;
       else {
         state.landing = landing.sourceId;
         state.landingImport = landing.import === true;
@@ -48707,6 +48710,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(list, sourceRow(source));
     return add(section, list);
   }
+  function applyPrivacyLanding() {
+    if (!state.data || state.relayDown || editorOpen() || compact() || !onComputer())
+      return;
+    state.landingPrivacy = false;
+    if (globalReason())
+      return;
+    openPrivacy("privacy:edit");
+  }
   function openPrivacy(returnKey) {
     if (!privacy)
       return;
@@ -49344,6 +49355,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     reportHeight();
     if (state.landing && !picking && !privacyOpen)
       applyLanding();
+    if (state.landingPrivacy && !picking && !privacyOpen)
+      applyPrivacyLanding();
   }
   function reportHeight() {
     const height = Math.ceil(doc.documentElement.scrollHeight || doc.body.scrollHeight || 0);
@@ -53303,6 +53316,7 @@ function chatgptDashboardPageHtml(options = {}) {
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
     allSourcesId: DASHBOARD_ALL_SOURCES_ID,
+    privacyLandingId: DASHBOARD_PRIVACY_LANDING_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,

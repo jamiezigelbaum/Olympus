@@ -18,9 +18,14 @@ import {
   DASHBOARD_CHATGPT_PAGE_COPY as PANEL,
   DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY as PRIVACY_SETUP,
+  DASHBOARD_PRIVACY_ITEMS_COPY as ITEMS,
   DASHBOARD_PRIVATE_ANSWERS_COPY as ASK,
+  DASHBOARD_UPDATE_COPY as UPDATE,
 } from '../../src/workers/dashboard/vocabulary.ts';
-import type { Journey, StepContext } from './journey.ts';
+import { BACKUP_COPY as BACKUP } from '../../src/workers/dashboard/backup-section.ts';
+import type { Journey, JourneyStep, StepContext } from './journey.ts';
+import { RESTORE_BACKUP_FOLDER, RESTORE_BACKUP_PATH, RESTORE_PASSPHRASE } from './restore.ts';
+import { STAND_IN_FROM, STAND_IN_TO } from './update-stand-in.ts';
 import { wireTarget, type Target } from './probe.ts';
 
 /** The words on the page that mean something is stuck or broken for the person reading it. */
@@ -70,9 +75,53 @@ const OPEN_SOURCES_TAB: Journey['steps'][number] = {
 };
 /** "Connect an agent", or "Connect another agent" once one is connected (the suite's own connection). */
 const CONNECT_AGENT: Target = { role: 'button', name: /^Connect (an|another) agent$/ };
-/** The top bar's tabs (Home, Sources, Privacy, Settings): links on the page around the panel. */
-const tab = (name: string): Target => ({ role: 'link', name });
 const DISCARDED_SENDER = 'release-check@example.com';
+
+// --- Fix one item (#1060): Privacy › Your items.
+
+/** One item's row on Your items, by the id an earlier step remembered. */
+const itemRow = (vars: Record<string, string | number>) => ({ css: `[data-pi-item="${String(vars.itemId)}"]` });
+const PI_ROWS = { css: '[data-pi-item]' };
+const piFilter = (id: '' | 'private' | 'personal' | 'changed') => ({ css: `[data-pi-filter="${id}"]` });
+/** The remembered item is listed, with this label (and, once the owner set it, "Changed by you" beside it). */
+const itemListedAs = (tier: 'Personal' | 'Private', changedByYou: boolean) => async ({ count, vars }: StepContext): Promise<{ ok: boolean; expected: string; actual: string }> => {
+  const row = `[data-pi-item="${String(vars.itemId)}"]`;
+  const listed = await count({ css: row }, 'host');
+  const labelled = await count({ css: `${row} .pipill.${tier}` }, 'host');
+  const marked = await count({ css: `${row} .piyou` }, 'host');
+  const ok = listed === 1 && labelled === 1 && (!changedByYou || marked === 1);
+  return {
+    ok,
+    expected: `the item is listed as ${tier}${changedByYou ? ', marked Changed by you' : ''}`,
+    actual: listed === 0 ? 'the item is not listed' : `it is listed${labelled === 1 ? ` as ${tier}` : ` but not as ${tier}`}${changedByYou ? (marked === 1 ? ', Changed by you' : ', not marked Changed by you') : ''}`,
+  };
+};
+const OPEN_ITEM_PANEL: JourneyStep = {
+  name: 'Open the item',
+  do: { click: itemRow, frame: 'host' },
+  expect: [{ present: { css: '[data-pi-detail] [data-pi-preview]' }, frame: 'host' }, { present: { role: 'radio', name: /^Personal/ }, frame: 'host' }],
+};
+
+// --- Update from the dashboard (#1063): the update stand-in (update-stand-in.ts).
+
+const UPDATE_NOW = { role: 'button', name: UPDATE.updateNow } as const;
+/** The stand-in's engine answers 502 once while it restarts, as the proxy in front of a restarting engine does. */
+const RESTART_502 = [{ url: /\/dashboard\/engine\/update\/status$/, status: 502 }];
+const offered = (outcome: string, index: number): JourneyStep => ({
+  name: `An update is offered (${outcome})`,
+  do: index === 0 ? { open: 'update' } : { go: `/?outcome=${outcome}` },
+  expect: [{ text: UPDATE.notice(STAND_IN_TO), frame: 'host' }, { present: UPDATE_NOW, frame: 'host' }],
+});
+const pressUpdateNow: JourneyStep = {
+  name: 'Press Update now',
+  do: { click: UPDATE_NOW, frame: 'host' },
+  // The four steps begin: the page says what it is updating to and that the old version comes back if the new one does not start.
+  expect: [{ text: UPDATE.updating(STAND_IN_TO), frame: 'host' }, { text: UPDATE.pause(STAND_IN_TO, STAND_IN_FROM), frame: 'host' }],
+};
+
+// --- Restore on a clean machine (#1065): restore.ts and run.ts runRestoreLeg.
+
+const tab = (name: string): Target => ({ role: 'link', name });
 
 export const JOURNEYS: readonly Journey[] = [
   {
@@ -504,14 +553,150 @@ export const JOURNEYS: readonly Journey[] = [
       },
     ],
   },
+  {
+    id: 'fix-one-item',
+    title: 'The owner corrects one item\'s label on Your items, and the change sticks across a reload, both ways',
+    source: 'owner 1.5 plan, Owner controls: fix one item\'s privacy label (#1060, Your items #1154)',
+    mutates: true,
+    steps: [
+      { name: 'Open the Privacy page', do: { open: 'private' }, expect: [{ present: tab(ITEMS.tab), frame: 'host' }] },
+      {
+        name: 'Press Your items',
+        do: { click: tab(ITEMS.tab), frame: 'host' },
+        timeoutMs: 45_000,
+        expect: [{ url: /\/dashboard\?privacy-items/ }, { noNewWindow: true }, { text: ITEMS.intro, frame: 'host' }, { count: PI_ROWS, atLeast: 1, frame: 'host' }],
+      },
+      {
+        name: 'Show only Personal items',
+        do: { click: piFilter('personal'), frame: 'host' },
+        expect: [{ present: { css: '[data-pi-filter="personal"][aria-pressed="true"]' }, frame: 'host' }, { count: PI_ROWS, atLeast: 1, frame: 'host' }],
+      },
+      { ...OPEN_ITEM_PANEL, name: 'Open the first Personal item', do: { click: { css: '[data-pi-item]', nth: 0 }, frame: 'host' }, remember: { itemId: { attrOf: { css: '[data-pi-item]', nth: 0 }, attr: 'data-pi-item', frame: 'host' } } },
+      {
+        name: 'Make it Private',
+        do: { click: { css: '[data-pi-detail] [data-pi-choose="Private"]' }, frame: 'host' },
+        // Raising only adds protection, so nothing asks first.
+        expect: [{ text: ITEMS.toastPrivate, frame: 'host' }, { absent: { css: 'dialog[data-pi-confirm][open]' }, frame: 'host' }, { custom: itemListedAs('Private', true) }],
+      },
+      { name: 'Reload the page', do: { reload: true }, timeoutMs: 45_000, expect: [{ count: PI_ROWS, atLeast: 1, frame: 'host' }] },
+      {
+        name: 'Show the items changed by you: it is there, still Private',
+        do: { click: piFilter('changed'), frame: 'host' },
+        expect: [{ present: { css: '[data-pi-filter="changed"][aria-pressed="true"]' }, frame: 'host' }, { custom: itemListedAs('Private', true) }],
+      },
+      OPEN_ITEM_PANEL,
+      {
+        name: 'Make it Personal again',
+        do: { click: { css: '[data-pi-detail] [data-pi-choose="Personal"]' }, frame: 'host' },
+        // Lowering asks first, and says what changes.
+        expect: [{ text: ITEMS.confirmTitle, frame: 'host' }, { present: { role: 'button', name: ITEMS.makePersonal }, frame: 'host' }],
+      },
+      {
+        name: 'Press Make Personal',
+        do: { click: { role: 'button', name: ITEMS.makePersonal }, frame: 'host' },
+        expect: [{ text: ITEMS.toastPersonal, frame: 'host' }, { custom: itemListedAs('Personal', true) }],
+      },
+      { name: 'Reload the page again', do: { reload: true }, timeoutMs: 45_000, expect: [{ count: PI_ROWS, atLeast: 1, frame: 'host' }] },
+      {
+        name: 'Show the items changed by you: it is there, now Personal',
+        do: { click: piFilter('changed'), frame: 'host' },
+        expect: [{ custom: itemListedAs('Personal', true) }],
+      },
+    ],
+  },
+  {
+    id: 'update-from-dashboard',
+    title: 'Update now runs a signed update from the dashboard: one that does not start is put back, one that does runs, and a bad signature runs nothing',
+    source: 'owner 1.5 plan, Owner controls: update with one button (#1063, #1144); the engine\'s own updater behind the release check\'s stand-in',
+    allowRequests: RESTART_502,
+    steps: [
+      offered('rolled-back', 0),
+      pressUpdateNow,
+      {
+        name: 'The new version does not start: the previous one is put back',
+        do: { observe: true },
+        timeoutMs: 60_000,
+        expect: [{ text: UPDATE.rolledBack(STAND_IN_TO, STAND_IN_FROM), frame: 'host' }, { present: UPDATE_NOW, frame: 'host' }],
+      },
+      offered('done', 1),
+      pressUpdateNow,
+      {
+        name: 'The new version starts: the page says it is running',
+        do: { observe: true },
+        timeoutMs: 60_000,
+        expect: [{ text: UPDATE.done(STAND_IN_TO), frame: 'host' }, { absent: UPDATE_NOW, frame: 'host' }],
+      },
+      offered('bad-signature', 1),
+      {
+        name: 'Press Update now on an update whose signature does not check out',
+        do: { click: UPDATE_NOW, frame: 'host' },
+        timeoutMs: 30_000,
+        expect: [{ text: UPDATE.failures.bad_signature!, frame: 'host' }],
+      },
+    ],
+  },
+  {
+    id: 'backup-for-restore',
+    title: 'Settings offers Back up and restore, and a backup of this install is made with a passphrase',
+    source: 'owner 1.5 plan, Owner controls: back up and restore (#1065, #1098, #1149); the first half of restore-clean-machine',
+    machine: 'restore-from',
+    steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: tab('Settings'), frame: 'host' }] },
+      { name: 'Press Settings', do: { click: tab('Settings'), frame: 'host' }, expect: [{ url: /\/dashboard\?settings/ }, { present: tab(BACKUP.title), frame: 'host' }] },
+      {
+        name: 'Open Back up and restore',
+        do: { click: tab(BACKUP.title), frame: 'host' },
+        expect: [{ text: BACKUP.intro, frame: 'host' }, { present: { role: 'button', name: BACKUP.backUpNow }, frame: 'host' }, { text: BACKUP.restoreButton, frame: 'host' }],
+      },
+      {
+        name: 'Make a backup with a passphrase',
+        do: { run: { argv: ['data', 'backup', '--output', RESTORE_BACKUP_FOLDER, '--passphrase-stdin'], stdin: `${RESTORE_PASSPHRASE}\n`, timeoutMs: 600_000 } },
+        expect: [{ exit: 0 }, { output: /\.olympusbackup\b/ }],
+      },
+    ],
+  },
+  {
+    id: 'restore-clean-machine',
+    title: 'A backup restored into an empty install on a clean machine brings back the sources and the owner\'s own decisions',
+    source: 'owner 1.5 plan, Owner controls: back up and restore (#1065, #1098); restore.ts compares the stores and rules',
+    machine: 'restore-to',
+    mutates: true,
+    steps: [
+      { name: 'Stop Olympus', do: { run: { argv: ['engine', 'stop'], timeoutMs: 300_000 } }, expect: [{ exit: 0 }] },
+      {
+        name: 'Restore the backup',
+        do: { run: { argv: ['data', 'restore', '--input', RESTORE_BACKUP_PATH, '--passphrase-stdin'], stdin: `${RESTORE_PASSPHRASE}\n`, timeoutMs: 600_000 } },
+        expect: [{ exit: 0 }, { output: /readwise/i }],
+      },
+      { name: 'Start Olympus', do: { run: { argv: ['engine', 'start'], timeoutMs: 300_000 } }, expect: [{ exit: 0 }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, timeoutMs: 120_000, expect: [{ present: tab('Sources'), frame: 'host' }] },
+      // The source is back; its sign-in never travels, so it asks for one again rather than syncing.
+      { name: 'Press Sources: Readwise is back', do: { click: tab('Sources'), frame: 'host' }, expect: [{ url: /\/dashboard\?connect/ }, { text: 'Readwise', frame: 'host' }] },
+      { name: 'Open the Privacy page', do: { open: 'private' }, expect: [{ present: tab(ITEMS.tab), frame: 'host' }] },
+      { name: 'Press Your items', do: { click: tab(ITEMS.tab), frame: 'host' }, timeoutMs: 45_000, expect: [{ count: PI_ROWS, atLeast: 1, frame: 'host' }] },
+      {
+        // fix-one-item set one item on the first machine; nothing on a clean machine was changed by the owner, so this came from the backup.
+        name: 'Show the items changed by you: the owner\'s decision came back',
+        do: { click: piFilter('changed'), frame: 'host' },
+        expect: [{ count: { css: '[data-pi-item] .piyou' }, atLeast: 1, frame: 'host' }],
+      },
+    ],
+  },
 ];
 
 export const journeyIds = (): string[] => JOURNEYS.map((journey) => journey.id);
 
-/** The journeys for a run, in order: those that leave the install as it was first, then those that change it. */
-export function selectJourneys(only?: readonly string[], skip: readonly string[] = []): Journey[] {
+/** Which machine a journey is walked on: the run's own (`main`), or one side of the restore leg. */
+export type JourneyMachine = 'main' | 'restore-from' | 'restore-to';
+
+/**
+ * The journeys for a run on one machine, in order: those that leave the install as it was first, then those that change it. The
+ * restore leg's journeys are walked only by that leg, each on its own machine.
+ */
+export function selectJourneys(only?: readonly string[], skip: readonly string[] = [], machine: JourneyMachine = 'main'): Journey[] {
   const unknown = [...(only ?? []), ...skip].filter((id) => !JOURNEYS.some((journey) => journey.id === id));
   if (unknown.length > 0) throw new Error(`unknown journey id(s): ${unknown.join(', ')}; known: ${journeyIds().join(', ')}`);
-  const chosen = (only === undefined || only.length === 0 ? [...JOURNEYS] : JOURNEYS.filter((journey) => only.includes(journey.id))).filter((journey) => !skip.includes(journey.id));
+  const here = JOURNEYS.filter((journey) => (journey.machine ?? 'main') === machine);
+  const chosen = (only === undefined || only.length === 0 ? here : here.filter((journey) => only.includes(journey.id))).filter((journey) => !skip.includes(journey.id));
   return [...chosen.filter((journey) => journey.mutates !== true), ...chosen.filter((journey) => journey.mutates === true)];
 }
