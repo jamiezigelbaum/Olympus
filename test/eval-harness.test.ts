@@ -221,6 +221,25 @@ describe('held-out eval harness wiring', () => {
     expect(answerCorrect('Your most recent total testosterone was 612.00 ng/dL.')).toBe(true);
   });
 
+  test('a value written with its unit matches with or without the space, and a bare number still does not take a unit', () => {
+    const grade = (expected: string, answer: string) => gradeAnswer(
+      { id: 'unit', shape: 'value_lookup', question: 'What was the reading?', expectedAnswerContains: [expected] },
+      { answer, citations: [], unanswered: [] },
+    ).answerCorrect;
+    // The dataset names the unit: a document or answer may write it either way.
+    expect(grade('3.5 V', 'The cell read 3.5V at rest.')).toBe(true);
+    expect(grade('3.5 V', 'The cell read 3.5 V at rest.')).toBe(true);
+    expect(grade('5kg', 'The parcel was 5 kg.')).toBe(true);
+    expect(grade('5kg', 'The parcel was 5kg.')).toBe(true);
+    // Still a different value, or a different unit.
+    expect(grade('3.5 V', 'The cell read 13.5V at rest.')).toBe(false);
+    expect(grade('3.5 V', 'The cell read 3.55V at rest.')).toBe(false);
+    expect(grade('3.5 V', 'The cell read 3.5 mV at rest.')).toBe(false);
+    expect(grade('5kg', 'The parcel was 5 kgs.')).toBe(false);
+    // A bare number does not take a unit it was not given (as above).
+    expect(grade('612', 'The transfer size was 612GB.')).toBe(false);
+  });
+
   test('refuted expected values fail when the answer gives a different actual value', () => {
     const grade = gradeAnswer(
       {
