@@ -99,7 +99,11 @@ func chatListReceipt(contacts map[types.JID]types.ContactInfo, groups []*types.G
 	}
 	for _, group := range groups {
 		if group != nil && group.JID.Server == types.GroupServer {
-			add(group.JID, "group", group.Name)
+			kind := chatKindGroup
+			if groupIsCommunity(group) {
+				kind = chatKindCommunity
+			}
+			add(group.JID, kind, group.Name)
 		}
 	}
 	dialogs := make([]availableChat, 0, len(byScope))

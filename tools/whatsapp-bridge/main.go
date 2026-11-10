@@ -840,6 +840,14 @@ func approvedCaptureChats(required bool) (map[string]struct{}, error) {
 	allowed := make(map[string]struct{})
 	for _, candidate := range strings.Split(value, ",") {
 		candidate = strings.TrimSpace(candidate)
+		if strings.HasPrefix(candidate, "kind") {
+			// A kind covers every chat of that kind, including new ones (#1075).
+			if kind, ok := strings.CutPrefix(candidate, kindTokenPrefix); !ok || !validChatKind(kind) {
+				return nil, errors.New("invalid_approved_chat_scope")
+			}
+			allowed[candidate] = struct{}{}
+			continue
+		}
 		if candidate != "" {
 			jid, err := types.ParseJID(candidate)
 			if err != nil || jid.IsEmpty() || jid.User == "" {
@@ -854,15 +862,22 @@ func approvedCaptureChats(required bool) (map[string]struct{}, error) {
 	return allowed, nil
 }
 
+// chatCaptureAllowed decides a chat without asking WhatsApp anything: a group
+// whose community membership would decide it is refused (captureAllowed with a
+// lookup decides those during capture).
 func chatCaptureAllowed(chatJID string, allowed map[string]struct{}) bool {
 	if allowed == nil {
 		return true
 	}
-	if _, all := allowed["*"]; all {
+	if _, ok := allowed[chatJID]; ok {
 		return true
 	}
-	_, ok := allowed[chatJID]
-	return ok
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		_, all := allowed["*"]
+		return all
+	}
+	return captureAllowed(jid, allowed, nil)
 }
 
 func existingSessionConnectedLogLine() string {
@@ -1041,7 +1056,7 @@ func connectWithBackoff(client *whatsmeow.Client) {
 func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audioMediaStore, writer *spoolWriter, fatalEvents chan<- string, markReady func(), allowed map[string]struct{}, evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
-		if !chatCaptureAllowed(v.Info.Chat.String(), allowed) {
+		if !captureAllowed(v.Info.Chat, allowed, communityLookupFor(ctx, client)) {
 			return
 		}
 		if rec, ok := recordFromMessage(ctx, client, audioStore, v); ok {
