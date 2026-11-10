@@ -257,6 +257,69 @@ describe('olympus_open_remote', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  /** The worker's own mint and redeem routes, in process, so the ticket's bound origin is the real one. */
+  function workerFetchFor(seen: Array<{ url: string; origin: string | null }>) {
+    const handler = withWorkerBearerAuth(async () => new Response('dashboard'), { authToken: TOKEN });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(String(input), init);
+      seen.push({ url: request.url, origin: request.headers.get('Origin') });
+      return await handler(request);
+    }) as unknown as typeof fetch;
+    const redeem = async (link: string, origin: string) => {
+      const ticket = new URLSearchParams(new URL(link).hash.slice(1)).get(DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY)!;
+      const response = await handler(new Request(`${origin}${DASHBOARD_LAUNCH_REDEEM_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: origin },
+        body: JSON.stringify({ ticket }),
+      }));
+      return { status: response.status, code: (await response.json() as { error?: { code: string } }).error?.code };
+    };
+    return { fetchImpl, redeem };
+  }
+
+  async function openOverOwnerSocket(baseUrl: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'opener-remote-'));
+    const seen: Array<{ url: string; origin: string | null }> = [];
+    const worker = workerFetchFor(seen);
+    const value = config();
+    value.email.baseUrl = baseUrl;
+    try {
+      const result = await openRemote({ config: value, ownerAgentSession: true }, { target: 'dashboard', computer: 'linux' }, {
+        ...serverDeps([]), platform: 'linux', env: { XDG_RUNTIME_DIR: dir }, fetchImpl: worker.fetchImpl,
+      });
+      const link = String(result.open).replace(/^xdg-open '|'$/g, '');
+      return { result, link, seen, redeem: worker.redeem };
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  test('a localhost engine address: the link and the ticket name the tunnel\'s literal 127.0.0.1 origin (#1211)', async () => {
+    const { result, link, seen, redeem } = await openOverOwnerSocket('http://localhost:8123/v1');
+    expect(seen).toEqual([{ url: 'http://127.0.0.1:8123/dashboard/control/launch?purpose=remote', origin: 'http://127.0.0.1:8123' }]);
+    expect(new URL(link).origin).toBe('http://127.0.0.1:8123');
+    expect(String(result.tunnel)).toContain('-L 127.0.0.1:8123:');
+    // Bound to that origin, and redemption still requires it: a page on localhost is refused without using the ticket up.
+    expect(await redeem(link, 'http://localhost:8123')).toEqual({ status: 403, code: 'dashboard_launch_origin_mismatch' });
+    expect((await redeem(link, 'http://127.0.0.1:8123')).status).toBe(200);
+  });
+
+  test('port 80: the link origin and the ticket binding are the same normalized origin', async () => {
+    const { result, link, seen, redeem } = await openOverOwnerSocket('http://localhost:80/v1');
+    const origin = new URL('http://127.0.0.1:80').origin;
+    expect(result.engine_port).toBe(80);
+    expect(seen.map((entry) => entry.origin)).toEqual([origin]);
+    expect(new URL(link).origin).toBe(origin);
+    expect(link.startsWith(`${origin}/dashboard/launch#`)).toBe(true);
+    expect((await redeem(link, origin)).status).toBe(200);
+  });
+
+  test('over TCP, a localhost engine address is refused before any bearer is sent', async () => {
+    const calls: string[] = [];
+    const value = config();
+    value.email.baseUrl = 'http://localhost:8123/v1';
+    await expect(openRemote({ config: value, ownerAgentSession: true }, { target: 'dashboard', computer: 'macos' }, serverDeps(calls))).rejects.toThrow(/127\.0\.0\.1/);
+    expect(calls).toEqual([]);
+  });
+
   test('without a known SSH name, says so and leaves the placeholder to replace', async () => {
     const result = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard', computer: 'linux' }, serverDeps([], { OLYMPUS_SERVER_MODE: 'on' }));
     expect(result.ssh_target).toBeNull();

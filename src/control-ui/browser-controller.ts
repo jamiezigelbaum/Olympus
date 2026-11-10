@@ -2054,6 +2054,24 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const radio = current ? form?.querySelector<HTMLInputElement>(`input[name="choice"][value="${current}"]`) : null;
     if (radio) radio.checked = true;
   };
+  // Go easy on this computer (#922): the checkbox saves by itself, apart from
+  // the sorting choice, and goes back if the save is refused.
+  const onGoEasyChange = (event: Event): void => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !input.matches('[data-go-easy]') || !canWrite) return;
+    const line = input.closest('.judgeeasy')?.querySelector<HTMLElement>('[data-go-easy-message]');
+    const on = input.checked;
+    input.disabled = true;
+    void options.transport.control({ action: 'set_go_easy', on })
+      .catch((): OlympusDashboardControlResult => ({ status: 0, body: {} }))
+      .then((result) => {
+        if (disposed) return;
+        input.disabled = false;
+        const ok = result.status >= 200 && result.status < 300 && result.body.ok === true;
+        if (!ok) input.checked = !on;
+        if (line) line.textContent = ok ? (typeof result.body.status_message === 'string' ? result.body.status_message : 'Saved.') : errorMessage(result);
+      });
+  };
   const echoJudgeCap = (form: HTMLFormElement, scope: ParentNode): void => {
     const value = Number(form.querySelector<HTMLInputElement>('input[name="cap_dollars"]')?.value.trim() || NaN);
     const text = Number.isFinite(value) && value >= 0 ? value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'not set';
@@ -2183,6 +2201,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
   root.addEventListener('change', onJudgePick);
+  root.addEventListener('change', onGoEasyChange);
   root.addEventListener('input', onJudgeCapInput);
   root.addEventListener('click', onJudgeDialogClick);
   root.addEventListener('cancel', onJudgeDialogCancel, true);
@@ -2230,6 +2249,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onJudgePick);
+    root.removeEventListener('change', onGoEasyChange);
     root.removeEventListener('input', onJudgeCapInput);
     root.removeEventListener('click', onJudgeDialogClick);
     root.removeEventListener('cancel', onJudgeDialogCancel, true);
