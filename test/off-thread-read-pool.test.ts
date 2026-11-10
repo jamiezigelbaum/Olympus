@@ -16,6 +16,7 @@ import {
   READ_POOL_SIZE,
   readOnPool,
   readPoolThreadsForTests,
+  releaseOffThreadReads,
   setReadPoolClockForTests,
   setReadPoolObserverForTests,
   setReadPoolWorkerFactoryForTests,
@@ -225,5 +226,25 @@ describe('read pool', () => {
     } finally {
       store.close();
     }
+  });
+
+  test("a store's release cancels its snapshots that wait for a thread or have one reserved but not yet open", async () => {
+    const busyPath = storeFile();
+    const path = storeFile();
+    const started: string[] = [];
+    setReadPoolObserverForTests((_, read) => started.push(read.sql));
+    // Reserved but not yet open: the release lands before the snapshot sends its open.
+    const reserved = withOffThreadSnapshot(path, async (read) => read(COUNT)).then(() => 'answered', (error) => error);
+    releaseOffThreadReads(path);
+    expect(await reserved).toBeInstanceOf(OffThreadReadBusyError);
+    // Waiting: both threads run queries on another store.
+    const holders = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(busyPath, SLOW));
+    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'both threads busy' });
+    const waiting = withOffThreadSnapshot(path, async (read) => read(COUNT)).then(() => 'answered', (error) => error);
+    releaseOffThreadReads(path);
+    expect(await waiting).toBeInstanceOf(OffThreadReadBusyError);
+    await Promise.all(holders);
+    // The store, opened again, is read as usual.
+    expect(((await withOffThreadSnapshot(path, async (read) => read(COUNT))) as { c: number }).c).toBe(3);
   });
 });

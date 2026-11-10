@@ -18284,9 +18284,10 @@ var init_control_path_headroom = __esm(() => {
 });
 
 // src/workers/connector-store/off-thread-reads.ts
-var queues;
+var queues, releases;
 var init_off_thread_reads = __esm(() => {
   queues = new Map;
+  releases = new Map;
 });
 
 // src/core/store-identity.ts

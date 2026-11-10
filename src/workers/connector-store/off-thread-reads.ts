@@ -294,7 +294,15 @@ export async function withOffThreadSnapshot<T>(
   work: (read: (query: StoreRead) => Promise<unknown>) => Promise<T>,
 ): Promise<T> {
   if (!runtimeHasWorkers()) throw new Error('off-thread reads are unavailable');
-  const reader = await snapshotThread();
+  // Tied to the store's lifetime: a release while the snapshot waits for a
+  // thread, or between its reservation and its open, cancels it.
+  const generation = releases.get(dbPath) ?? 0;
+  const reader = await snapshotThread(dbPath);
+  if ((releases.get(dbPath) ?? 0) !== generation) {
+    reader.snapshots -= 1;
+    dispatch();
+    throw new OffThreadReadBusyError();
+  }
   const snapshot = nextId++;
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath });
@@ -310,7 +318,9 @@ export async function withOffThreadSnapshot<T>(
 }
 
 // Snapshots waiting for a thread that no pool query is running on.
-const snapshotWaiters: Array<{ resolve: (reader: ReaderThread) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+const snapshotWaiters: Array<{ store: string; resolve: (reader: ReaderThread) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+// How many times each store's pool connections were released.
+const releases = new Map<string, number>();
 
 /**
  * A live thread with no pool query running on it, for a snapshot: the least
@@ -327,7 +337,7 @@ function snapshotThreadNow(): ReaderThread | undefined {
 }
 
 /** Reserves a thread for a snapshot, waiting while every thread runs a pool query. */
-function snapshotThread(): Promise<ReaderThread> {
+function snapshotThread(store: string): Promise<ReaderThread> {
   const reader = snapshotThreadNow();
   if (reader) {
     reader.snapshots += 1;
@@ -335,6 +345,7 @@ function snapshotThread(): Promise<ReaderThread> {
   }
   return new Promise((resolve, reject) => {
     const waiter = {
+      store,
       resolve,
       reject,
       timer: setTimeout(() => {
@@ -385,8 +396,14 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
 
 /** Closes every pool connection to `dbPath` and drops its waiting queries (its store is closing). */
 export function releaseOffThreadReads(dbPath: string): void {
-  // Its waiting queries go too: sent after the release, one would open a
-  // connection that nothing releases again.
+  // Its waiting queries and snapshots go too: sent after the release, one
+  // would open a connection that nothing releases again.
+  releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
+  for (const waiter of snapshotWaiters.filter((entry) => entry.store === dbPath)) {
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
+    clearTimeout(waiter.timer);
+    waiter.reject(new OffThreadReadBusyError());
+  }
   const waiting = queues.get(dbPath);
   if (waiting) {
     queues.delete(dbPath);

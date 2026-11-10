@@ -27310,7 +27310,13 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
 async function withOffThreadSnapshot(dbPath, work) {
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
-  const reader = await snapshotThread();
+  const generation = releases.get(dbPath) ?? 0;
+  const reader = await snapshotThread(dbPath);
+  if ((releases.get(dbPath) ?? 0) !== generation) {
+    reader.snapshots -= 1;
+    dispatch();
+    throw new OffThreadReadBusyError;
+  }
   const snapshot = nextId++;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
@@ -27332,7 +27338,7 @@ function snapshotThreadNow() {
     return best;
   return startThread() ?? best;
 }
-function snapshotThread() {
+function snapshotThread(store) {
   const reader = snapshotThreadNow();
   if (reader) {
     reader.snapshots += 1;
@@ -27340,6 +27346,7 @@ function snapshotThread() {
   }
   return new Promise((resolve10, reject) => {
     const waiter = {
+      store,
       resolve: resolve10,
       reject,
       timer: setTimeout(() => {
@@ -27381,6 +27388,12 @@ function readOnPool(dbPath, read, options = {}) {
   });
 }
 function releaseOffThreadReads(dbPath) {
+  releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
+  for (const waiter of snapshotWaiters.filter((entry) => entry.store === dbPath)) {
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
+    clearTimeout(waiter.timer);
+    waiter.reject(new OffThreadReadBusyError);
+  }
   const waiting = queues.get(dbPath);
   if (waiting) {
     queues.delete(dbPath);
@@ -27511,7 +27524,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 };
-`, threads, nextId = 1, queues, turns, snapshotWaiters;
+`, threads, nextId = 1, queues, turns, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -27530,6 +27543,7 @@ var init_off_thread_reads = __esm(() => {
   queues = new Map;
   turns = [];
   snapshotWaiters = [];
+  releases = new Map;
 });
 
 // src/core/classification-signals.ts
