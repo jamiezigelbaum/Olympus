@@ -37121,6 +37121,9 @@ var init_local_index = __esm(() => {
     tierLedgerPathInUse() {
       return this.tierLedgerHandle?.dbPath ?? tierLedgerPathForStore(this.dbPath);
     }
+    governingTierLedger() {
+      return this.visibilityLedger();
+    }
     tierLedger() {
       if (this.tierLedgerDisabled === true)
         return;
@@ -202023,6 +202026,26 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
     }
   };
 }
+function registerGovernedStore(lanes, store, newLane, log = () => {}) {
+  if (lanes.some((lane) => lane.corpusIds.has(store.corpusId)))
+    return "already";
+  let ledger;
+  try {
+    ledger = store.governingTierLedger();
+  } catch (error2) {
+    log(`[tier] ${store.corpusId}: its tier ledger is unavailable; registered when it is readable (${error2 instanceof Error ? error2.name : "error"})`);
+    return "unavailable";
+  }
+  if (!ledger)
+    return "no_ledger";
+  const sharing = lanes.find((lane) => lane.ledger.dbPath === ledger.dbPath);
+  if (sharing) {
+    sharing.corpusIds.add(store.corpusId);
+    return "joined";
+  }
+  lanes.push(newLane(ledger));
+  return "registered";
+}
 var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -207580,18 +207603,20 @@ function createEngineFront(input) {
     fetch: input.fetch ?? createUnixSocketFetch(input.socketPath),
     authToken: input.authToken,
     onInstance: (instanceId) => {
-      answering = instanceId;
+      answering = { instance: instanceId, at: now() };
       relay?.observeInstance(instanceId);
     }
   });
   relay = new OwnerBusyRelay(client, (line2) => console.warn(line2));
   const path = engineStatusSnapshotPath(input.env);
   let cached3;
-  const judged = (read, age) => ({
-    ...read,
-    age_ms: age,
-    stale: age > ENGINE_STATUS_STALE_MS || answering !== undefined && answering !== read.snapshot.instance_id
-  });
+  const judged = (read, age) => {
+    const old = age > ENGINE_STATUS_STALE_MS;
+    if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
+      answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
+    }
+    return { ...read, age_ms: age, stale: old || answering !== undefined && answering.instance !== read.snapshot.instance_id };
+  };
   const status = () => {
     const at = now();
     if (cached3 && at - cached3.at < 1000) {
@@ -207890,8 +207915,12 @@ function createFrontScheduler(options) {
   const sleep5 = options.sleep ?? ((ms) => new Promise((resolve31) => {
     setTimeout(resolve31, ms).unref?.();
   }));
+  const current3 = () => {
+    const read = options.snapshot();
+    return read && !read.stale ? read : undefined;
+  };
   const status = () => {
-    const scheduler = options.snapshot()?.snapshot.scheduler;
+    const scheduler = current3()?.snapshot.scheduler;
     return scheduler?.kind === "source_scheduler_status" ? scheduler : emptyStatus2(now());
   };
   const post2 = (command2) => options.client.post(command2).catch((error2) => {
@@ -207907,7 +207936,7 @@ function createFrontScheduler(options) {
         return status();
       const deadline = pressed + (options.manualSyncWaitMs ?? 30 * 60000);
       for (;; ) {
-        const run2 = options.snapshot()?.snapshot.manual_syncs?.[sourceIdOrCorpusId];
+        const run2 = current3()?.snapshot.manual_syncs?.[sourceIdOrCorpusId];
         if (run2 && Date.parse(run2.started_at) >= pressed - 1000 && run2.state !== "running") {
           if (run2.state === "failed")
             throw new BackgroundSyncFailedError(run2.failure_code);
@@ -232228,6 +232257,11 @@ ${key2}`;
   });
   const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
+  const registerConfiguredTierStore = (store) => {
+    registerGovernedStore(tierLanes, store, (ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line2) => console.warn(line2));
+  };
+  for (const store of configuredConnectorStores)
+    registerConfiguredTierStore(store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
     ...laneConnectorStores
@@ -232674,6 +232708,7 @@ ${key2}`;
       if (!connectorStores.includes(mount.store))
         sourceLaneMounted([mount.store]);
       adoptConfiguredPrincipal(mount);
+      registerConfiguredTierStore(mount.store);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0))
@@ -233956,6 +233991,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available()
   });
+  let inProcessFetch = (request) => worker.fetch(request);
+  const workerFetchInProcess = (request) => inProcessFetch(request);
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
     ...isStandaloneEngineProcess(process.env) ? { selfUpdate: selfUpdater } : {},
@@ -234656,7 +234693,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...createInProcessOperationContext2({
         config: olympusConfig,
         sourceIndexReadEnabled,
-        workerFetch: worker.fetch,
+        workerFetch: workerFetchInProcess,
         caller,
         signal,
         sourceAnswerJobs
@@ -234714,7 +234751,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       } };
     } }),
     pendingClassificationCount,
-    workerFetch: worker.fetch,
+    workerFetch: workerFetchInProcess,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
     ...fileSourceScopes ? { scopeSummaries: () => fileSourceScopes.summaries() } : {},
@@ -234914,7 +234951,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     setupChecklist: (view4) => setupChecklistFromView2(view4, setupWorkerFacts()),
     surface: () => chatgptSurface,
     setup: chatgptSetup,
-    workerFetch: worker.fetch,
+    workerFetch: workerFetchInProcess,
     makeContext: (signal) => remoteAgentOptions.makeOperationContext({ surface: "native", displayName: "Olympus dashboard" }, signal),
     indexFasterState: async () => {
       const runtime = await readEmbeddingRuntime({ env: process.env });
@@ -234946,6 +234983,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }
   }) : undefined;
   const frontWorkerFetch = frontRoutes ? async (request) => await frontRoutes(request) ?? worker.fetch(request) : worker.fetch;
+  inProcessFetch = frontWorkerFetch;
   if (listens && releaseSystemdWorkerSocket())
     console.warn("[olympus:worker] removed the socket left by the previous worker run");
   const socketPath = listens ? prepareWorkerSocket() : undefined;

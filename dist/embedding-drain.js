@@ -23020,6 +23020,9 @@ var init_local_index = __esm(() => {
     tierLedgerPathInUse() {
       return this.tierLedgerHandle?.dbPath ?? tierLedgerPathForStore(this.dbPath);
     }
+    governingTierLedger() {
+      return this.visibilityLedger();
+    }
     tierLedger() {
       if (this.tierLedgerDisabled === true)
         return;
