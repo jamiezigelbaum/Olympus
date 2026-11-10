@@ -6646,7 +6646,7 @@ export async function main(): Promise<void> {
   const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { withRequestPeer } = await import('../../core/request-peer.ts');
   const { createRelaySurfacesHandler, withRelaySurfacesRoute } = await import('../relay-surfaces.ts');
-  const { isChatGptGrant, grantMcpSurface } = await import('../remote-oauth/pinned-clients.ts');
+  const { isChatGptGrant, grantMcpSurface, pinnedGrantProvider } = await import('../remote-oauth/pinned-clients.ts');
   const { isDemoGrant } = await import('../remote-oauth/demo-consent.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
   const { resolveDemoConsent } = await import('../remote-oauth/demo-consent.ts');
@@ -7000,19 +7000,29 @@ export async function main(): Promise<void> {
   }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
-  // with the caller placed as OpenAI-hosted, since ChatGPT opened the panel.
+  // with the caller placed by the host that opened the panel: Anthropic for a
+  // Claude grant (so the same-provider refusal and claudeFrontierModel apply),
+  // otherwise OpenAI-hosted, since ChatGPT opened it.
+  const panelHost = (connectionId: string | undefined): { provider: 'openai' | 'anthropic'; label: string } => {
+    const connection = connectionId ? remoteConnections()?.list().find((record) => record.id === connectionId) : undefined;
+    return connection && pinnedGrantProvider(connection) === 'anthropic'
+      ? { provider: 'anthropic', label: '@local:Claude' }
+      : { provider: 'openai', label: '@local:ChatGPT' };
+  };
   const privateQuestions = new PrivateQuestionJobs({
     installId: () => remotePublicUrls()?.installId,
-    ask: (input) => (askAnonymouslyNow
-      ? askWithAnonymousInbox({
+    ask: (input) => {
+      if (!askAnonymouslyNow) return Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' });
+      const host = panelHost(input.connectionId);
+      return askWithAnonymousInbox({
         question: input.question,
         level: input.level,
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
-        callerProvider: 'openai',
+        callerProvider: host.provider,
         signal: input.signal,
         stillAuthorized: input.stillAuthorized,
-      }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: '@local:ChatGPT', ask: askAnonymouslyNow })
-      : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
+      }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: host.label, ask: askAnonymouslyNow });
+    },
     // The panel's default choice: the dashboard's saved level and Standard preparation (consult.json, read at every open).
     choice: () => {
       const read = readConsultSettings();

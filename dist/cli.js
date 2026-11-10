@@ -231051,7 +231051,8 @@ class PrivateQuestionJobs {
           level: plaintext.level,
           ...plaintext.cleanup !== undefined ? { cleanup: plaintext.cleanup } : {},
           signal: job.abort.signal,
-          stillAuthorized: () => this.originActive(job)
+          stillAuthorized: () => this.originActive(job),
+          ...job.origin.connectionId !== undefined ? { connectionId: job.origin.connectionId } : {}
         });
         result = resultOf(outcome);
       } catch {
@@ -238088,7 +238089,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { carriesRelayMarker: carriesRelayMarker2, createRemotePublicUrlSource: createRemotePublicUrlSource2, isRelayedRequest: isRelayedRequest2 } = await Promise.resolve().then(() => (init_remote_access(), exports_remote_access));
   const { withRequestPeer: withRequestPeer2 } = await Promise.resolve().then(() => (init_request_peer(), exports_request_peer));
   const { createRelaySurfacesHandler: createRelaySurfacesHandler2, withRelaySurfacesRoute: withRelaySurfacesRoute2 } = await Promise.resolve().then(() => (init_relay_surfaces(), exports_relay_surfaces));
-  const { isChatGptGrant: isChatGptGrant2, grantMcpSurface: grantMcpSurface2 } = await Promise.resolve().then(() => (init_pinned_clients(), exports_pinned_clients));
+  const { isChatGptGrant: isChatGptGrant2, grantMcpSurface: grantMcpSurface2, pinnedGrantProvider: pinnedGrantProvider2 } = await Promise.resolve().then(() => (init_pinned_clients(), exports_pinned_clients));
   const { isDemoGrant: isDemoGrant2 } = await Promise.resolve().then(() => (init_demo_consent(), exports_demo_consent));
   const { createRemoteOAuthHandler: createRemoteOAuthHandler2, withRemoteOAuthRoutes: withRemoteOAuthRoutes2 } = await Promise.resolve().then(() => (init_handler(), exports_handler));
   const { resolveDemoConsent: resolveDemoConsent2 } = await Promise.resolve().then(() => (init_demo_consent(), exports_demo_consent));
@@ -238380,16 +238381,25 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (frontOwnsPrivateAnswerQueue)
       localPrivateAnswers.start();
   }
+  const panelHost = (connectionId) => {
+    const connection = connectionId ? remoteConnections()?.list().find((record8) => record8.id === connectionId) : undefined;
+    return connection && pinnedGrantProvider2(connection) === "anthropic" ? { provider: "anthropic", label: "@local:Claude" } : { provider: "openai", label: "@local:ChatGPT" };
+  };
   const privateQuestions = new PrivateQuestionJobs2({
     installId: () => remotePublicUrls()?.installId,
-    ask: (input) => askAnonymouslyNow ? askWithAnonymousInbox({
-      question: input.question,
-      level: input.level,
-      ...input.cleanup !== undefined ? { cleanup: input.cleanup } : {},
-      callerProvider: "openai",
-      signal: input.signal,
-      stillAuthorized: input.stillAuthorized
-    }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: "@local:ChatGPT", ask: askAnonymouslyNow }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
+    ask: (input) => {
+      if (!askAnonymouslyNow)
+        return Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." });
+      const host = panelHost(input.connectionId);
+      return askWithAnonymousInbox({
+        question: input.question,
+        level: input.level,
+        ...input.cleanup !== undefined ? { cleanup: input.cleanup } : {},
+        callerProvider: host.provider,
+        signal: input.signal,
+        stillAuthorized: input.stillAuthorized
+      }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: host.label, ask: askAnonymouslyNow });
+    },
     choice: () => {
       const read = readConsultSettings3();
       const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS2;

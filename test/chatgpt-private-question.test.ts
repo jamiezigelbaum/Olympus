@@ -118,6 +118,30 @@ describe('the crypto: a question sealed to the engine key, opened with the engin
 });
 
 describe('the jobs: begin → ask → collect', () => {
+  test('the ask lane gets the opening connection, for the job and its Ask another successor, so the host decides the caller provider', async () => {
+    const seen: Array<string | undefined> = [];
+    const jobs = new PrivateQuestionJobs({
+      installId: () => INSTALL,
+      ask: (input) => { seen.push(input.connectionId); return Promise.resolve(ANSWERED); },
+      choice: () => ({ level: 'strict', cleanup: 'as_written', customInstruction: false }),
+      connectionActive: () => true,
+    });
+    const meta = (await jobs.begin({ connectionId: 'claude-conn' })) as PrivateQuestionMetaV1;
+    const first = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
+    expect((await jobs.ask(meta.jobId, first.body)).status).toBe(202);
+    await settle();
+    const opened = await jobs.another(meta.jobId, first.panel.publicKey);
+    const next = (opened.body as unknown as { meta: PrivateQuestionMetaV1 }).meta;
+    const second = await panelAsk(next, { v: 1, question: 'q2', level: 'strict' });
+    expect((await jobs.ask(next.jobId, second.body)).status).toBe(202);
+    await settle();
+    const anonymous = (await jobs.begin())!;
+    const third = await panelAsk(anonymous, { v: 1, question: 'q3', level: 'strict' });
+    expect((await jobs.ask(anonymous.jobId, third.body)).status).toBe(202);
+    await settle();
+    expect(seen).toEqual(['claude-conn', 'claude-conn', undefined]);
+  });
+
   test('a sealed question runs the ask lane and the outcome comes back sealed to the asking key only', async () => {
     const h = harness();
     const meta = (await h.jobs.begin())!;
