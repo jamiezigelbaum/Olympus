@@ -11,13 +11,12 @@ import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { exposedOperations, type OperationSurface } from '../src/core/operation-exposure.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES, V0_4_PUBLIC_REMOTE_MCP_TOOLS } from '../src/core/public-surface.ts';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import type { OwnerTierItems, OwnerTierItemFindInput, OwnerTierItemSetInput } from '../src/workers/classification/tier-owner-items.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
-  DASHBOARD_LOCAL_CONTROL_SESSION_PATH,
   DASHBOARD_PRIVACY_ITEM_PATHS,
   withWorkerBearerAuth,
 } from '../src/workers/http.ts';
@@ -130,9 +129,7 @@ function post(path: string, headers: Record<string, string>, body: unknown): Req
 }
 
 async function localSession(fetch: (request: Request) => Promise<Response>) {
-  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-  recordRequestPeer(request, '127.0.0.1');
-  const mint = await fetch(request);
+  const mint = await ownerLocalMint(fetch, ORIGIN, TOKEN);
   expect(mint.status).toBe(200);
   return { Cookie: cookieOf(mint), 'X-Olympus-CSRF': ((await mint.json()) as { csrf_token: string }).csrf_token };
 }

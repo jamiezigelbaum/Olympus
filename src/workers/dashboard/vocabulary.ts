@@ -515,9 +515,12 @@ export function dashboardAttentionParts(
   // is in, because the row exists and has to explain itself; it just stops
   // quantifying a fault nobody can act on by the size of it.
   if (source.queue_health.needs_attention > 0) return withCapture('some items could not be read');
-  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture('a sync is retrying on its own');
+  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture(DASHBOARD_RETRYING_ON_ITS_OWN);
   return withCapture('');
 }
+
+/** A sync that failed and is trying again by itself: progress, not the owner's (#1044). */
+export const DASHBOARD_RETRYING_ON_ITS_OWN = 'a sync is retrying on its own';
 
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
@@ -1851,8 +1854,15 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     itemsOne: '1 item',
     itemsMany: '{n} items',
     checked: 'checked {when}',
-    allSources: 'All sources',
     progress: 'In progress',
+    /** A first index's time left, after its percent: "about 40 min left". */
+    left: 'about {duration} left',
+    /** Privacy items waiting to be checked: the Needs you line's button (#1085). */
+    openPrivacy: 'Open Privacy',
+    /** A source Olympus parked on its own budget (#1044), and when it resumes. */
+    waitBudget: 'daily {api} API budget used',
+    waitRateLimit: '{api} rate limit reached',
+    resumes: 'resumes at {local} ({utc} UTC)',
   },
   needsYou: 'Needs you',
   sources: 'Sources',
@@ -1959,10 +1969,12 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
   /**
    * The page-wide progress line names what stopped instead of a bare
-   * "stalled" (2026-10-10): "Dropbox paused", "Dropbox and Gmail paused",
-   * "Dropbox, Gmail and 2 more paused".
+   * "stalled" (2026-10-10), by why: a sync that keeps failing retries on its
+   * own; a lane the owner switched off says so. "Paused" is only an owner
+   * pause, and a source idle between runs is not named at all (#1044).
    */
-  stalledSources: '{sources} paused',
+  stalledRetrying: '{sources} retrying',
+  stalledOff: '{sources} switched off',
   stalledAnd: '{first} and {last}',
   stalledMore: '{count} more',
   /**

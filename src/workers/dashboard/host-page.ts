@@ -43,7 +43,7 @@ import {
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
 import {
-  DASHBOARD_IMPORT_LANDING_PREFIX,
+  DASHBOARD_IMPORT_LANDING_PREFIX, DASHBOARD_SOURCE_LANDING_PREFIX, DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_ALL_SOURCES_ID,
   DASHBOARD_OPEN_FRAGMENT_KEY,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
@@ -119,7 +119,6 @@ export interface ComputerHostPageInput {
   updateAvailable?: UpdateAvailable | undefined;
   /** The running worker platform; unsupported installers never render or poll. */
   platform?: string;
-  modelReadiness?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   /** The panel HTML, exactly as ChatGPT loads it (dashboard-resource.ts dashboardResourceHtml). */
   panelHtml: string;
   /** This browser's request origin, e.g. http://127.0.0.1:8787. */
@@ -235,6 +234,10 @@ function hostProgram(input: {
   landings: Record<string, string>;
   /** `import.`: a Keys link's landing on one card's Import an archive; the panel checks the card. */
   importLanding: string;
+  /** `source.`: the Sources tab's Details on one row; the panel shows that source's row on Home. */
+  sourceLanding: string;
+  /** `sources`: the Sources tab's Archives and details; the panel shows every source's row. */
+  allSourcesLanding: { token: string; id: string };
   hasReadToken: boolean;
   toolsCallPath: string;
   /** Where one file of an archive upload goes, and the local tool whose unlock opens the session it needs. */
@@ -415,6 +418,9 @@ function hostProgram(input: {
     if (Object.prototype.hasOwnProperty.call(input.landings, wanted)) landing = { sourceId: input.landings[wanted]! };
     const card = wanted.indexOf(input.importLanding) === 0 ? wanted.slice(input.importLanding.length) : '';
     if (/^[a-z0-9_.]{1,64}$/.test(card)) landing = { sourceId: card, import: true };
+    const row = wanted.indexOf(input.sourceLanding) === 0 ? wanted.slice(input.sourceLanding.length) : '';
+    if (/^[a-z0-9_.]{1,64}$/.test(row)) landing = { sourceId: row };
+    if (wanted === input.allSourcesLanding.token) landing = { sourceId: input.allSourcesLanding.id };
   }
   /** Opens a local-grade session (the messaging routes need one); true once it is. */
   function openLocalSession(): Promise<boolean> {
@@ -693,6 +699,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
     landings: panelOpenTargetSources(),
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
+    sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
+    allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
@@ -728,7 +736,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     lockedGate(!locked),
     `<section class="gate" data-open-offer role="alert" hidden><p>${text(DASHBOARD_HOST_GATE_COPY.openBlocked)} `
     + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
-    ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
+    // Built-in models are status, not something to act on: Settings › Models on this computer (#1085).
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,

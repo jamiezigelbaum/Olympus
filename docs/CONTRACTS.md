@@ -355,6 +355,14 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-11-10 (no contract type version change; native sniffer cache stays
+  `decision-v2`): **every decision judge leans Private (#1184).** The
+  decision-mode P(Private) bar is per lane (`snifferDecisionBar`): Qwen3.5 4B
+  at 0.15, every other judge at 0.5 until measured, never above 0.5. It is
+  applied when a cached verdict is read, and a non-default bar is part of
+  `snifferId` but not the verdict cache key, so a bar change re-tiers stored
+  decisions through the existing re-judge pass with no judge call. Full mode
+  and its 0.9 Personal threshold are unchanged.
 - 2026-11-07 (no contract shape or version change): the shared queued-content
   resolver can settle Personal from the item's complete own stored vector at
   p(Private) < 0.05. Per-install training uses only final judge labels; owner
@@ -1016,3 +1024,15 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   answer's unanswered notes AND read into the Analyst prompt, so a corpus-wide
   count placed there would hedge every answer whose corpus holds one unread
   document. No frozen interface changed shape.
+- 2026-11-10 (no version change, #1172): a semantic lane that should have run
+  for a question and did not (`semantic_lane_skipped`: the query embedding
+  failed, timed out or came back unusable, or the vectors could not be read)
+  now adds one `coverage.extractionGaps` entry per corpus, naming the corpus
+  and the lane's reason token. It belongs there, unlike corpus readability:
+  it is a per-question loss of meaning-based matches, and an answer built
+  without it looks complete when it is not. A corpus with no vectors yet
+  (`semantic_lane_unservable`) or one answered by keyword by design
+  (`semantic_lane_not_run`) adds nothing. Before that, the router gives a
+  local embedding model that is still starting a bounded wait (15 s, within
+  the 45 s source-answer hand-off) so the first question after idle keeps its
+  vector lane. No frozen interface changed shape.

@@ -1,4 +1,5 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
@@ -151,12 +152,14 @@ import {
 } from '../../core/source-index/corpus.ts';
 import { FileLeaseBusyError, withFileLease } from '../../core/file-lease.ts';
 import {
+  awaitStartingQueryEmbedding,
   cosineSimilarity,
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  type QueryEmbeddingWaitTimers,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -201,6 +204,10 @@ import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 export const DEFAULT_MAX_CHUNK_CHARS = 4_000;
 const MAX_MAX_CHUNK_CHARS = 32_000;
 const MAX_SEARCH_RESULTS = 50;
+// The most raw keyword matches one query reads while looking for rows the tier
+// filter serves (#1174). Bounds the work in a store that is mostly superseded
+// copies: at most a handful of page queries per search.
+const KEYWORD_CANDIDATE_SCAN_CAP = 1_000;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
 // text also matches, without changing the query or candidate budget.
@@ -2552,6 +2559,12 @@ export interface ConnectorStoreSearchFilters {
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
+  /**
+   * The senders of the people a person filter names (#1076), from the shared
+   * people index. With `senderLabel`, an item matches either; alone, an item
+   * must come from one of them.
+   */
+  senderIdentities?: readonly PeopleSenderIdentity[];
   authoredAfter?: string;
   authoredBefore?: string;
   /**
@@ -2575,6 +2588,13 @@ export interface ConnectorStoreSearchFilters {
   /** These approved folder identities are searchable by metadata rows only. */
   metadataOnlySourceScopeFolderKeys?: readonly string[];
 }
+
+/** The people index's answer for one sender (see LocalConnectorStore.setPeopleNames). */
+export type ConnectorStorePeopleNames = (
+  provider: string,
+  senderId: string | undefined,
+  senderLabel: string | undefined,
+) => PeopleCitationName | undefined;
 
 export interface ConnectorStoreSenderAggregationOptions {
   accountScope: string;
@@ -5332,6 +5352,109 @@ export class LocalConnectorStore {
       candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
       truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8,
     };
+  }
+
+  /**
+   * Who sent what in this store, for the shared people index (#1076): one
+   * row per sender and label, with the conversations it spoke in. Names and
+   * ids only, never text. A label seen only on rows Private by their own tier
+   * is marked `privateOnly`, so the index never shows it as a citation name.
+   */
+  /**
+   * Where a citation finds the person behind a sender (#1076): the shared
+   * people index, set once by the worker that owns it. Unset, citations keep
+   * each item's own label.
+   */
+  setPeopleNames(resolver: ConnectorStorePeopleNames | undefined): void {
+    this.peopleNames = resolver;
+  }
+
+  /** The person's display name for a non-owner sender linked to one, when it may be shown. */
+  personCitationName(row: Pick<ConnectorStoreSearchRow, 'sourceItem' | 'senderId' | 'authorLabel' | 'senderIsOwner'>): string | undefined {
+    if (!this.peopleNames || row.senderIsOwner === true) return undefined;
+    if (!row.senderId && !row.authorLabel) return undefined;
+    try {
+      return this.peopleNames(row.sourceItem.provider, row.senderId, row.authorLabel)?.displayName;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private peopleNames: ConnectorStorePeopleNames | undefined;
+
+  peopleObservations(): PeopleSenderObservation[] {
+    // A copy the tier ledger keeps out of view (superseded, staged, or held
+    // for classification) never names anyone: an old Personal copy of an item
+    // now judged Private must not make its sender's name shareable.
+    const tierHidden = this.tierHiddenItemPks();
+    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
+    const rows = this.db.query(`
+      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
+        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
+      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
+    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
+      provider: string;
+      sender_id: string | null;
+      sender_label: string | null;
+      conversation_id: string | null;
+      trust_tier: string;
+      is_owner: number;
+      item_count: number;
+    }>;
+    const bySender = new Map<string, PeopleSenderObservation & { conversations: Set<string>; anyPublic: boolean }>();
+    for (const row of rows) {
+      const key = `${row.provider}\u0000${row.sender_id ?? ''}\u0000${row.sender_label ?? ''}`;
+      let entry = bySender.get(key);
+      if (!entry) {
+        entry = {
+          provider: row.provider,
+          ...(row.sender_id?.trim() ? { senderId: row.sender_id.trim() } : {}),
+          ...(row.sender_label?.trim() ? { senderLabel: row.sender_label.trim() } : {}),
+          isOwner: false,
+          itemCount: 0,
+          corpusId: this.corpusId,
+          conversations: new Set(),
+          anyPublic: false,
+        };
+        bySender.set(key, entry);
+      }
+      entry.isOwner ||= row.is_owner === 1;
+      entry.itemCount += row.item_count;
+      if (row.conversation_id) entry.conversations.add(row.conversation_id);
+      const tier = SOURCE_TRUST_TIERS.find((candidate) => candidate === row.trust_tier);
+      if (tier && !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: tier })) entry.anyPublic = true;
+    }
+    return [...bySender.values()].map(({ conversations, anyPublic, ...observation }) => ({
+      ...observation,
+      ...(anyPublic ? {} : { privateOnly: true }),
+      ...(conversations.size > 0 ? { conversationIds: [...conversations].sort() } : {}),
+    }));
+  }
+
+  /**
+   * Author coverage (#1076): per provider, how many active items carry no
+   * author (no sender id and no sender label). Counts only.
+   */
+  authorCoverage(): Array<{ provider: string; items: number; itemsWithoutAuthor: number }> {
+    return (this.db.query(`
+      SELECT provider, COUNT(*) AS items,
+        SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
+          THEN 1 ELSE 0 END) AS without_author
+      FROM items
+      WHERE tombstoned = 0 AND parent_local_item_id IS NULL
+      GROUP BY provider
+      ORDER BY provider
+    `).all() as Array<{ provider: string; items: number; without_author: number | null }>).map((row) => ({
+      provider: row.provider,
+      items: row.items,
+      itemsWithoutAuthor: row.without_author ?? 0,
+    }));
   }
 
   /**
@@ -12059,39 +12182,6 @@ export class LocalConnectorStore {
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const rows = (yield { mode: 'all', sql: `
-      SELECT
-        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
-        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
-        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
-        i.trust_tier, i.sync_run_id,
-        -- Bare column beside a single MIN(): SQLite takes it from the very row
-        -- that produced the minimum, so this is the BEST-RANKING chunk for the
-        -- item rather than an arbitrary one. That is exactly the chunk the
-        -- citation should point at.
-        connector_store_fts.chunk_pk AS chunk_pk,
-        MIN(connector_store_fts.rank) AS rank
-      FROM connector_store_fts
-      JOIN items i ON i.item_pk = connector_store_fts.item_pk
-      WHERE connector_store_fts MATCH ?
-        AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-        AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
-        ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
-        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
-        ${selectedFilters.sql}
-        ${selectedFtsScope.sql}
-      GROUP BY i.item_pk
-      ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
-      LIMIT ?
-    `, params: [
-      terms,
-      ...(selectedAccount ? [selectedAccount] : []),
-      ...selectedFilters.params,
-      ...selectedFtsScope.params,
-      fetchLimit,
-    ] }) as ItemRow[];
     // Minimum signal: for a multi-concept query, a candidate matching a
     // single common concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
@@ -12106,83 +12196,149 @@ export class LocalConnectorStore {
     // "June 2026 blood work" matched a diet guide on "blood" and "work", and
     // "omega-3 level" matched every guide that says "3" and "level".
     const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
-    let selected = rows;
     const matchedGroups = new Map<number, number>();
     const matchedGroupIndexes = new Map<number, number[]>();
-    if (minimumSignal && rows.length > 0) {
-      const pks = rows.map((row) => row.item_pk);
-      const placeholders = pks.map(() => '?').join(', ');
-      // On the read pool each read is its own transaction, so a pk the FTS
-      // read returned may name another item by the time a follow-up read
-      // runs (ingestion writes in between), or the same item at a newer
-      // version. A hit counts only for the item and version the row was read
-      // as; on one connection they always agree.
-      const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
-      const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
-        const row = itemAt.get(hit.item_pk);
-        return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
-      };
-      for (const [groupIndex, group] of groups.entries()) {
-        const hits = ((yield { mode: 'all', sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts
-          JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ?
-            AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
-          .filter(sameItem);
-        for (const hit of hits) {
-          matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-          matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
-        }
-      }
-      const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-      const weights = rows.every(enough) ? undefined : yield* this.conceptWeightsSteps(groups, exact);
-      // One unique literal topic word can identify a record when a question
-      // combines neighbouring records (#710). The shared stopwords exclude
-      // scaffolding such as "my"; synonyms alone cannot earn this exception.
-      // Keep the population floor and all SQL scope/tier checks. A common
-      // term or a word shared by several items still needs the ordinary floor.
-      const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
-      const uniqueTerms = weights && weights.population >= 10
-        ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
-        : [];
-      const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
-        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+    // Store-wide concept rarity, counted at most once per query.
+    let conceptWeights: { of: number[]; total: number; counts: number[]; population: number } | undefined;
+    // Candidates are read in pages until `limit` visible rows survive (#1174).
+    // In a store where most matches are superseded or staged copies, one
+    // page of the best-ranked matches can hold almost none the tier filter
+    // serves, and a visible match ranked below them was never considered.
+    // The first page is the same single fetch as before, so a store whose
+    // top matches are visible pays nothing extra. Later pages grow fourfold,
+    // and the whole scan stops at KEYWORD_CANDIDATE_SCAN_CAP raw rows, so the
+    // work per query stays bounded however much of the store is hidden. The
+    // filters themselves are unchanged: this decides how many candidates are
+    // looked at, never which of them may be served.
+    const selected: ItemRow[] = [];
+    const seen = new Set<number>();
+    let scanned = 0;
+    let pageSize = fetchLimit;
+    let exhausted = false;
+    while (true) {
+      const page = (yield { mode: 'all', sql: `
+        SELECT
+          i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+          i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+          i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+          i.mime_type, i.authored_at, i.updated_at,
+          i.trust_tier, i.sync_run_id,
+          -- Bare column beside a single MIN(): SQLite takes it from the very row
+          -- that produced the minimum, so this is the BEST-RANKING chunk for the
+          -- item rather than an arbitrary one. That is exactly the chunk the
+          -- citation should point at.
+          connector_store_fts.chunk_pk AS chunk_pk,
+          MIN(connector_store_fts.rank) AS rank
+        FROM connector_store_fts
+        JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          AND i.tombstoned = 0
+          AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
+          ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
+          ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+          ${selectedFilters.sql}
           ${selectedFtsScope.sql}
-      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
-        .filter(sameItem)
-        .map(row => row.item_pk));
-      selected = rows.filter((row) => {
-        if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
-        if (!weights) return false;
-        const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-        // Two rare topic concepts can identify an item even when the question
-        // adds words it never used. Rarity is evidence in every source family.
-        // Keep the strict floor for common words and small corpora. This uses
-        // the same scoped FTS candidates and tier filter.
-        if (groups.length >= 3 && weights.population >= 10
-          && indexes.length >= 2 && indexes.length * 2 >= groups.length
-          && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
-        const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
-        return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
-      });
+        GROUP BY i.item_pk
+        ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
+        LIMIT ? OFFSET ?
+      `, params: [
+        terms,
+        ...(selectedAccount ? [selectedAccount] : []),
+        ...selectedFilters.params,
+        ...selectedFtsScope.params,
+        pageSize,
+        scanned,
+      ] }) as ItemRow[];
+      scanned += page.length;
+      exhausted = page.length < pageSize;
+      // OFFSET pages over one ordering. On the read pool each page is its own
+      // read, so a row an earlier page already returned is not counted twice.
+      const rows = page.filter((row) => !seen.has(row.item_pk));
+      for (const row of rows) seen.add(row.item_pk);
+      let signalled = rows;
+      if (minimumSignal && rows.length > 0) {
+        const pks = rows.map((row) => row.item_pk);
+        const placeholders = pks.map(() => '?').join(', ');
+        // On the read pool each read is its own transaction, so a pk the FTS
+        // read returned may name another item by the time a follow-up read
+        // runs (ingestion writes in between), or the same item at a newer
+        // version. A hit counts only for the item and version the row was read
+        // as; on one connection they always agree.
+        const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
+        const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
+          const row = itemAt.get(hit.item_pk);
+          return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
+        };
+        for (const [groupIndex, group] of groups.entries()) {
+          const hits = ((yield { mode: 'all', sql: `
+            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+            .filter(sameItem);
+          for (const hit of hits) {
+            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+            matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+          }
+        }
+        const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+        const weights = rows.every(enough) ? undefined : (conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact));
+        // One unique literal topic word can identify a record when a question
+        // combines neighbouring records (#710). The shared stopwords exclude
+        // scaffolding such as "my"; synonyms alone cannot earn this exception.
+        // Keep the population floor and all SQL scope/tier checks. A common
+        // term or a word shared by several items still needs the ordinary floor.
+        const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
+        const uniqueTerms = weights && weights.population >= 10
+          ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
+          : [];
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+          .filter(sameItem)
+          .map(row => row.item_pk));
+        signalled = rows.filter((row) => {
+          if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
+          if (!weights) return false;
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          // Two rare topic concepts can identify an item even when the question
+          // adds words it never used. Rarity is evidence in every source family.
+          // Keep the strict floor for common words and small corpora. This uses
+          // the same scoped FTS candidates and tier filter.
+          if (groups.length >= 3 && weights.population >= 10
+            && indexes.length >= 2 && indexes.length * 2 >= groups.length
+            && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
+          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+        });
+      }
+      const visible = this.tierVisibleRows(
+        signalled,
+        (row) => ({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        }),
+        // A metadata-only FTS row carries no chunk. Chunk rows are the content
+        // layer (they are seasoned with the names, as they always were).
+        (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
+      );
+      selected.push(...visible);
+      // Only rows the tier filter hid earn another page. A page it hid nothing
+      // from was cut by the minimum-signal filter alone, which has always
+      // stopped at one page, and the cost of that common case stays as it was.
+      if (exhausted || selected.length >= limit || visible.length === signalled.length
+        || scanned >= KEYWORD_CANDIDATE_SCAN_CAP) break;
+      pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
     }
-    selected = this.tierVisibleRows(
-      selected,
-      (row) => ({
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-      }),
-      // A metadata-only FTS row carries no chunk. Chunk rows are the content
-      // layer (they are seasoned with the names, as they always were).
-      (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
-    );
     const spanTerms = queryTermsForSpan(query);
     const kept = selected.slice(0, limit);
     const located: ConnectorStoreSearchRow[] = [];
@@ -12205,7 +12361,7 @@ export class LocalConnectorStore {
     }
     return {
       rows: located,
-      saturated: rows.length >= fetchLimit || selected.length > limit,
+      saturated: !exhausted || selected.length > limit,
       // How many of the query's concepts each row matched (in its name or its
       // text). A single-concept query has nothing to count: every row matched it.
       concepts: {
@@ -13471,6 +13627,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   filters?: ConnectorStoreSearchFilters;
   /** Optional declared projection applied only to final eligible hits. */
   resultProjector?: ConnectorStoreResultProjector;
+  /** Time seams for waiting on a starting embedding model; tests pass a test clock. */
+  timers?: QueryEmbeddingWaitTimers;
 }
 
 // Membrane-safe routed search: hits carry identity + provenance with a
@@ -13734,6 +13892,19 @@ export function createConnectorStoreCorpusAdapter(
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
+  // A local model that is still starting gets the router's preparation budget
+  // to finish before the vector lane runs (#1172). Only when this adapter will
+  // run the vector lane for the request, and without reading the store: the
+  // router asks only after hybridAvailability said the lane is servable. Only
+  // a local provider can report a starting model; a cloud one is never waited
+  // for, so a stalled remote call cannot hold every lane for the budget.
+  if (
+    embeddingProvider
+    && embeddingProvider.backend === 'local'
+    && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+  ) {
+    expanded.prepareSemantic = (query, budgetMs) => awaitStartingQueryEmbedding(embeddingProvider, query, budgetMs, options.timers);
+  }
   return expanded;
 }
 
@@ -13785,7 +13956,7 @@ function connectorStoreHitFromRow(
   return {
     ...(projection ?? {}),
     sourceItem: row.sourceItem,
-    provenance: provenanceFromSearchRow(store.corpusId, row),
+    provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
     // Every lane's hit (keyword, semantic, recency, pinned) is built here.
@@ -14254,7 +14425,10 @@ function assertConnectorStoreCorpusRequest(store: LocalConnectorStore, request: 
   }
 }
 
-function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow): SourceIndexProvenance {
+function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow, personName?: string): SourceIndexProvenance {
+  // The owner reads as "You" (#1073); anyone else as their one linked name
+  // across sources when there is one (#1076), else the item's own label.
+  const authorLabel = row.senderIsOwner === true ? citationAuthorLabel(row) : (personName ?? row.authorLabel);
   return {
     sourceItem: row.sourceItem,
     // The frozen provenance shape has carried an optional `chunk` since the
@@ -14288,11 +14462,25 @@ function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow)
       ...(row.title ? { title: row.title } : {}),
       sourceLabel: row.sourceItem.provider,
       ...(row.conversationLabel ? { conversationLabel: row.conversationLabel } : {}),
-      ...(row.authorLabel ? { authorLabel: row.authorLabel } : {}),
+      ...(authorLabel ? { authorLabel } : {}),
       ...(row.authoredAt ? { authoredAt: row.authoredAt } : {}),
       ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
     },
   };
+}
+
+/**
+ * Who a citation says wrote the item. The owner's own messages read "You"
+ * whatever name or id the source recorded for the owner's account (#1073):
+ * the answer is written to the owner, and a stored label (a profile name, a
+ * phone id) next to a chat titled with the other person's name let the owner's
+ * words be attributed to someone else.
+ */
+export const OWNER_AUTHOR_LABEL = 'You';
+
+function citationAuthorLabel(row: ConnectorStoreSearchRow): string | undefined {
+  if (row.senderIsOwner === true) return OWNER_AUTHOR_LABEL;
+  return row.authorLabel;
 }
 
 function connectorStoreKeywordLaneAudit(
@@ -15827,6 +16015,7 @@ interface NormalizedConnectorStoreSearchFilters {
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
+  senderIdentities?: readonly PeopleSenderIdentity[];
   authoredAfter?: string;
   authoredBefore?: string;
   searchTextExactLines?: readonly string[];
@@ -15852,6 +16041,7 @@ export function normalizeConnectorStoreSearchFilters(
   if (senderId && senderLabel) {
     throw new Error('Connector store search accepts senderId or senderLabel, not both.');
   }
+  const senderIdentities = normalizeSenderIdentities(value.senderIdentities);
   const authoredAfter = normalizeFilterTimestamp(value.authoredAfter, 'authoredAfter');
   const authoredBefore = normalizeFilterTimestamp(value.authoredBefore, 'authoredBefore');
   if (authoredAfter && authoredBefore && Date.parse(authoredAfter) > Date.parse(authoredBefore)) {
@@ -15879,6 +16069,7 @@ export function normalizeConnectorStoreSearchFilters(
     ...(conversationId ? { conversationId } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderLabel ? { senderLabel } : {}),
+    ...(senderIdentities.length > 0 ? { senderIdentities } : {}),
     ...(authoredAfter ? { authoredAfter } : {}),
     ...(authoredBefore ? { authoredBefore } : {}),
     ...(searchTextExactLines.length > 0 ? { searchTextExactLines } : {}),
@@ -16013,9 +16204,30 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.sender_id = ?');
     params.push(normalized.senderId);
   }
+  const senderIdentityMatch = normalized.senderIdentities?.length
+    ? `EXISTS (
+      SELECT 1 FROM json_each(?) person_sender
+      WHERE json_extract(person_sender.value, '$.p') = i.provider
+        AND (json_extract(person_sender.value, '$.s') = i.sender_id
+          OR (i.sender_id IS NULL AND json_extract(person_sender.value, '$.l') = i.sender_label))
+    )`
+    : undefined;
+  const senderIdentityParam = normalized.senderIdentities?.length
+    ? JSON.stringify(normalized.senderIdentities.map((identity) => ({
+      p: identity.provider,
+      ...(identity.senderId ? { s: identity.senderId } : {}),
+      ...(identity.senderLabel ? { l: identity.senderLabel } : {}),
+    })))
+    : undefined;
   if (normalized.senderLabel) {
-    clauses.push("AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
+    clauses.push(senderIdentityMatch
+      ? `AND (LOWER(i.sender_label) LIKE ? ESCAPE '\\' OR ${senderIdentityMatch})`
+      : "AND LOWER(i.sender_label) LIKE ? ESCAPE '\\'");
     params.push(`%${escapeSqlLike(normalized.senderLabel.toLowerCase())}%`);
+    if (senderIdentityParam) params.push(senderIdentityParam);
+  } else if (senderIdentityMatch && senderIdentityParam) {
+    clauses.push(`AND ${senderIdentityMatch}`);
+    params.push(senderIdentityParam);
   }
   if (normalized.authoredAfter) {
     clauses.push('AND julianday(i.authored_at) >= julianday(?)');
@@ -16212,6 +16424,28 @@ function normalizeFilterTimestamp(value: string | undefined, label: string): str
     throw new Error(`Connector store ${label} filter must be an ISO timestamp with a timezone.`);
   }
   return new Date(normalized).toISOString();
+}
+
+const MAX_PERSON_SENDER_IDENTITIES = 500;
+
+function normalizeSenderIdentities(value: readonly PeopleSenderIdentity[] | undefined): PeopleSenderIdentity[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_PERSON_SENDER_IDENTITIES) {
+    throw new Error(`Connector store sender identities must be an array of at most ${MAX_PERSON_SENDER_IDENTITIES}.`);
+  }
+  // A stored label can carry characters a typed filter may not; such a
+  // sender is left out of the expansion rather than failing the search.
+  const safe = (text: string | undefined): string | undefined => {
+    const trimmed = typeof text === 'string' ? text.trim() : undefined;
+    return trimmed && trimmed.length <= 1_000 && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : undefined;
+  };
+  return value.flatMap((identity) => {
+    const provider = safe(identity?.provider);
+    const senderId = safe(identity?.senderId);
+    const senderLabel = safe(identity?.senderLabel);
+    if (!provider || (!senderId && !senderLabel)) return [];
+    return [{ provider, ...(senderId ? { senderId } : { senderLabel: senderLabel! }) }];
+  });
 }
 
 function escapeSqlLike(value: string): string {

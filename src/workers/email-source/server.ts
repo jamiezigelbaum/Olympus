@@ -1,3 +1,4 @@
+import { LocalPeopleIndex, peopleIndexPath, refreshPeopleIndex, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
@@ -2196,6 +2197,11 @@ export function connectorStoreAnswerScope(input: {
   request: SourceIndexAnswerRequest;
   principal?: ConnectorStoreDeclaredPrincipal;
   capabilities?: ConnectorStoreFilterCapabilityRegistry;
+  /**
+   * The shared people index (#1076): a sender label that names a person also
+   * matches every sender linked to that person, on every source.
+   */
+  people?: { senderIdentitiesFor(query: string): PeopleSenderIdentity[] };
 }): ConnectorStoreAnswerScope {
   const { store, principal, request } = input;
   const capabilities = (input.capabilities ?? CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES).resolve({
@@ -2260,12 +2266,21 @@ export function connectorStoreAnswerScope(input: {
   const senderLabel = request.sender_label?.trim() || undefined;
   const authoredAfter = request.authored_after?.trim() || undefined;
   const authoredBefore = request.authored_before?.trim() || undefined;
+  let senderIdentities: PeopleSenderIdentity[] = [];
+  if (senderLabel && !senderId && input.people) {
+    try {
+      senderIdentities = input.people.senderIdentitiesFor(senderLabel);
+    } catch {
+      senderIdentities = [];
+    }
+  }
   const filters: ConnectorStoreSearchFilters = {
     ...(provider ? { provider } : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
     ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderLabel ? { senderLabel } : {}),
+    ...(senderIdentities.length > 0 ? { senderIdentities } : {}),
     ...(authoredAfter ? { authoredAfter } : {}),
     ...(authoredBefore ? { authoredBefore } : {}),
   };
@@ -2282,6 +2297,18 @@ export function connectorStoreAnswerScope(input: {
 
 
 
+
+const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
+const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
+
+function openPeopleIndexOrUndefined(): LocalPeopleIndex | undefined {
+  try {
+    return new LocalPeopleIndex({ dbPath: peopleIndexPath(process.env) });
+  } catch (error) {
+    console.warn(`[olympus] people index unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
 
 export function accountFromDropboxCredentialHandle(value: string | undefined): string | undefined {
   const handle = value?.trim();
@@ -3816,6 +3843,22 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  // One person across sources (#1076): the shared people index, Private and
+  // on this computer, rebuilt from every authored store's senders. Without
+  // it, answers keep each item's own sender label and filters match labels.
+  const peopleIndex = openPeopleIndexOrUndefined();
+  const refreshPeople = (): void => {
+    if (!peopleIndex) return;
+    try {
+      refreshPeopleIndex(peopleIndex, connectorStores);
+    } catch (error) {
+      console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const peopleFirstRefresh = setTimeout(refreshPeople, PEOPLE_INDEX_FIRST_REFRESH_MS);
+  peopleFirstRefresh.unref?.();
+  const peopleRefresh = setInterval(refreshPeople, PEOPLE_INDEX_REFRESH_MS);
+  peopleRefresh.unref?.();
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
   // whose connector store is also configured here, so it cannot half-exist: a
@@ -4870,7 +4913,12 @@ export async function main(): Promise<void> {
           readScope: connectorStoreReadScope,
           answerScope: (store, request) => {
             const principal = connectorStorePrincipals.get(store.corpusId);
-            return connectorStoreAnswerScope({ store, request, ...(principal ? { principal } : {}) });
+            return connectorStoreAnswerScope({
+              store,
+              request,
+              ...(principal ? { principal } : {}),
+              ...(peopleIndex ? { people: peopleIndex } : {}),
+            });
           },
           accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
           semanticRelevanceBar: (store) => (store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined),
