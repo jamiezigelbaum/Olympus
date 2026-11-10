@@ -171,6 +171,9 @@ interface QuestionResult {
   anyAt: Record<number, boolean>;
   allAt: Record<number, boolean>;
   latencyMs: number;
+  // A hybrid run whose semantic lane skipped this question (for example the
+  // query embedding timed out) scored it on keywords alone.
+  semanticSkipped?: string;
 }
 
 const CORPUS_ID = 'benchmark.longmemeval';
@@ -211,7 +214,11 @@ async function scoreQuestion(
     anyAt[k] = [...evidence].some((id) => top.has(id));
     allAt[k] = [...evidence].every((id) => top.has(id));
   }
+  const skip = provider
+    ? response.laneAudits?.find((audit) => audit.laneType === 'semantic' && audit.skippedReason)?.skippedReason
+    : undefined;
   return {
+    ...(skip ? { semanticSkipped: skip } : {}),
     questionId: question.question_id,
     questionType: question.question_type,
     evidence: evidence.size,
@@ -272,6 +279,13 @@ async function main(): Promise<void> {
     }
   } finally {
     shared?.close();
+  }
+  // A hybrid score must mean every question used the semantic lane. Refuse to
+  // report one otherwise, rather than label a partly keyword-only run hybrid.
+  const degraded = results.filter((row) => row.semanticSkipped);
+  if (degraded.length > 0) {
+    const reasons = [...new Set(degraded.map((row) => row.semanticSkipped))].join(', ');
+    throw new Error(`semantic lane skipped for ${degraded.length}/${results.length} questions (${reasons}); no hybrid score reported`);
   }
   const report = {
     benchmark: 'LongMemEval',
