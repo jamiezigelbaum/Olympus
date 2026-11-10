@@ -34,7 +34,23 @@ import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
 import { LocalSourceWatchStore } from '../src/core/source-watch.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
-import { engineFrontRefusal, waitForEngineBackground } from '../src/workers/engine-split/runtime.ts';
+import {
+  createEngineFrontRoutes,
+  createFrontGate,
+  engineFrontRefusal,
+  tierCommandOnlyReads,
+  waitForEngineBackground,
+  waitForProcessExit,
+} from '../src/workers/engine-split/runtime.ts';
+import {
+  forwardedRequestToRequest,
+  requestToForwarded,
+  responseToForwarded,
+  type EngineCommandReceipt,
+  type EngineForwardedRequest,
+} from '../src/workers/engine-split/commands.ts';
+import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
+import { FIXTURE_PLACEMENT, fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
 import { ENGINE_STATUS_SNAPSHOT_SCHEMA, readEngineStatusSnapshot, startEngineStatusPublisher } from '../src/workers/engine-split/snapshot.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 
@@ -212,6 +228,180 @@ describe('the owner-busy signal across the split', () => {
   });
 });
 
+describe('owner busy stays current through a long owner call', () => {
+  test('the front says busy again every three minutes while the call runs, and stops when it ends', async () => {
+    const clock = createTestClock();
+    const sent: EngineCommand[] = [];
+    const relay = new OwnerBusyRelay(
+      { post: async (command) => { sent.push(command); return { id: 'x', state: 'done', instance_id: 'b' }; } },
+      () => {},
+      { setInterval: (callback, ms) => clock.setInterval(callback, ms), clearInterval: (timer) => clock.clearInterval(timer as never) },
+    );
+    relay.busy('built_in');
+    expect(sent).toEqual([{ kind: 'owner_busy', resource: 'built_in' }]);
+    // A call longer than the background's ten-minute lapse is renewed before it lapses.
+    await clock.advance(12 * 60_000);
+    expect(sent.filter((command) => command.kind === 'owner_busy')).toHaveLength(5);
+    relay.idle('built_in');
+    expect(sent.at(-1)).toEqual({ kind: 'owner_idle', resource: 'built_in' });
+    const settled = sent.length;
+    await clock.advance(30 * 60_000);
+    expect(sent).toHaveLength(settled);
+    expect(clock.pendingTimers()).toBe(0);
+  });
+});
+
+describe('owner actions the background runs, forwarded from the front', () => {
+  function sentReceipt(result: { status: number; body: unknown }): EngineCommandReceipt {
+    return { id: 'c', state: 'done', instance_id: 'b', result: { status: result.status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(result.body) } };
+  }
+
+  test('a forwarded route crosses the socket whole, and a kind carries only its own routes', async () => {
+    const original = new Request('http://127.0.0.1:8787/v1/cli/tier', {
+      method: 'POST',
+      headers: { authorization: 'Bearer owner', 'content-type': 'application/json', connection: 'keep-alive', 'x-olympus-relay': 'marker' },
+      body: JSON.stringify({ args: ['set', 'm7', 'private'] }),
+    });
+    const forwarded = await requestToForwarded(original);
+    expect(forwarded.path).toBe('/v1/cli/tier');
+    expect(forwarded.headers.connection).toBeUndefined();
+    // Headers a route checks (the relay marker among them) travel with it.
+    expect(forwarded.headers['x-olympus-relay']).toBe('marker');
+    const envelope = parseEngineCommandEnvelope(JSON.parse(JSON.stringify({ id: 'command-0001', command: { kind: 'tier_override', request: forwarded } })));
+    expect(envelope.command).toEqual({ kind: 'tier_override', request: forwarded });
+    const rebuilt = forwardedRequestToRequest('http://olympus-worker.internal', (envelope.command as { request: EngineForwardedRequest }).request);
+    expect(new URL(rebuilt.url).pathname).toBe('/v1/cli/tier');
+    expect(await rebuilt.json()).toEqual({ args: ['set', 'm7', 'private'] });
+    const answer = await responseToForwarded(new Response('{"ok":true}', { status: 201, headers: { 'content-type': 'application/json', 'set-cookie': 'x=1' } }));
+    expect(answer).toEqual({ status: 201, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' });
+
+    // A kind cannot carry another kind's route, and only a delete names the front's process.
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0002', command: { kind: 'capture', request: forwarded } })).toThrow();
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0003', command: { kind: 'tier_override', request: forwarded, frontPid: 42 } })).toThrow();
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0004', command: { kind: 'tier_override', request: { ...forwarded, body: { args: [] } } } })).toThrow();
+    const deleting = { path: '/dashboard/delete-source-data', headers: {}, body: '{}' };
+    expect(parseEngineCommandEnvelope({ id: 'command-0005', command: { kind: 'delete_source_data', request: deleting, frontPid: 42 } }).command)
+      .toEqual({ kind: 'delete_source_data', request: deleting, frontPid: 42 });
+  });
+
+  test('tier reads stay in the front; every tier write and the other owner actions go to the background', async () => {
+    const sent: EngineCommand[] = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command) => { sent.push(command); return sentReceipt({ status: 200, body: { ran: command.kind } }); } },
+      gate: createFrontGate(),
+      restartFront: () => { throw new Error('no restart'); },
+    });
+    const post = (path: string, body: unknown) => new Request(`http://127.0.0.1${path}`, { method: 'POST', body: JSON.stringify(body) });
+    expect(tierCommandOnlyReads(JSON.stringify({ args: ['explain', 'm7'] }))).toBe(true);
+    expect(tierCommandOnlyReads(JSON.stringify({ args: ['migrate', 'status'] }))).toBe(true);
+    expect(tierCommandOnlyReads(JSON.stringify({ args: ['migrate', 'plan'] }))).toBe(false);
+    expect(tierCommandOnlyReads('not json')).toBe(false);
+    expect(await routes(post('/v1/cli/tier', { args: ['explain', 'm7'] }))).toBeUndefined();
+    expect(sent).toEqual([]);
+    for (const [path, kind] of [
+      ['/v1/cli/tier', 'tier_override'],
+      ['/v1/cli/pairing-placement', 'storage_registry'],
+      ['/dashboard/messaging/respond', 'capture'],
+      ['/v1/source/index/embed', 'embed_chunks'],
+    ] as const) {
+      const response = await routes(post(path, { args: ['set', 'm7', 'private'] }));
+      expect(await response!.json(), path).toEqual({ ran: kind });
+    }
+    expect(sent.map((command) => command.kind)).toEqual(['tier_override', 'storage_registry', 'capture', 'embed_chunks']);
+    // Not a forwarded route, or not a POST: the front's own handler serves it.
+    expect(routes(new Request('http://127.0.0.1/v1/cli/tier'))).toBeUndefined();
+    expect(routes(post('/dashboard/messaging/status', {}))).toBeUndefined();
+    // The background's failure and its absence read as such.
+    const failing = createEngineFrontRoutes({ client: { send: async () => ({ id: 'c', state: 'failed', instance_id: 'b', error: 'no' }) }, gate: createFrontGate(), restartFront: () => {} });
+    expect((await failing(post('/v1/cli/pairing-account', {})))!.status).toBe(502);
+    const away = createEngineFrontRoutes({ client: { send: async () => { throw new Error('gone'); } }, gate: createFrontGate(), restartFront: () => {} });
+    expect((await away(post('/v1/cli/pairing-account', {})))!.status).toBe(503);
+  });
+
+  test('tier explain runs in the front on read-only opens', async () => {
+    const workspace = tempDir('olympus-engine-split-tier-');
+    roots.push(workspace.dir);
+    const dbPath = join(workspace.dir, 'chat-store.sqlite');
+    const store = new LocalConnectorStore({ dbPath, corpusId: 'secure_local.fixture.chat', family: 'file', trustDomain: 'secure_local' });
+    await store.syncFromConnector(fixtureConnector(() => [{ id: 'm7', name: 'hello', text: 'See you at noon.', legacyDomain: 'secure_local' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    store.close();
+    forbidWritableStoreOpens();
+    expect(await runTierCommand(['explain', 'm7'], { storePaths: [dbPath] })).toMatchObject({ item: { providerItemId: 'm7' }, stores: [{ recorded: true }] });
+    await expect(runTierCommand(['set', 'm7', 'private'], { storePaths: [dbPath] })).rejects.toBeInstanceOf(FrontStoreWriteError);
+  });
+
+  test('a delete closes the gate before it is sent, drops reads in flight, and restarts the front once answered', async () => {
+    const gate = createFrontGate();
+    let answer!: (receipt: EngineCommandReceipt) => void;
+    const sent: EngineCommand[] = [];
+    let restarts = 0;
+    const routes = createEngineFrontRoutes({
+      client: { send: (command) => { sent.push(command); return new Promise((resolve) => { answer = resolve; }); } },
+      gate,
+      restartFront: () => { restarts += 1; },
+      pid: 4242,
+    });
+    // The front's handler: forwarded routes first, then the reads.
+    let releaseRead!: () => void;
+    const reading = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const serve = gate.wrap(async (request: Request, _server: undefined) => {
+      const routed = routes(request);
+      if (routed) { const response = await routed; if (response) return response; }
+      if (new URL(request.url).pathname === '/slow-read') await reading;
+      return Response.json({ rows: ['private'] });
+    });
+    const inFlight = serve(new Request('http://127.0.0.1/slow-read'), undefined);
+    await flushMicrotasks();
+    const deleting = serve(new Request('http://127.0.0.1/dashboard/delete-source-data', { method: 'POST', body: JSON.stringify({ source_id: 'gmail:a', acknowledge: true }) }), undefined);
+    await flushMicrotasks();
+    // Closed before the background is asked; the front's process goes with the command.
+    expect(gate.isOpen()).toBe(false);
+    expect(sent).toEqual([expect.objectContaining({ kind: 'delete_source_data', frontPid: 4242 })]);
+    expect((await serve(new Request('http://127.0.0.1/read'), undefined)).status).toBe(503);
+    releaseRead();
+    const dropped = await inFlight;
+    expect(dropped.status).toBe(503);
+    expect(await dropped.json()).toMatchObject({ error: { code: 'worker_restarting' } });
+    answer(sentReceipt({ status: 200, body: { ok: true, worker_restarting: true } }));
+    const response = await deleting;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, worker_restarting: true });
+    expect(restarts).toBe(1);
+    expect(gate.isOpen()).toBe(false);
+  });
+
+  test('a delete the background refuses, or a dry run, reopens the gate without a restart', async () => {
+    for (const reply of [
+      sentReceipt({ status: 409, body: { error: { code: 'disconnect_first' } } }),
+      sentReceipt({ status: 200, body: { ok: true, worker_restarting: false } }),
+      { id: 'c', state: 'failed', instance_id: 'b', error: 'boom' } as EngineCommandReceipt,
+    ]) {
+      const gate = createFrontGate();
+      let restarts = 0;
+      const routes = createEngineFrontRoutes({ client: { send: async () => reply }, gate, restartFront: () => { restarts += 1; } });
+      await routes(new Request('http://127.0.0.1/v1/cli/data-delete', { method: 'POST', body: '{}' }));
+      expect(gate.isOpen()).toBe(true);
+      expect(restarts).toBe(0);
+    }
+  });
+
+  test('the background waits out the front before it restarts to delete', async () => {
+    const clock = createTestClock();
+    let alive = true;
+    let ended: boolean | undefined;
+    void waitForProcessExit(4242, { now: clock.now, sleep: clock.sleep, alive: () => alive }).then((value) => { ended = value; });
+    await clock.advance(5_000);
+    expect(ended).toBeUndefined();
+    alive = false;
+    await clock.advance(250);
+    expect(ended).toBe(true);
+    let gaveUp: boolean | undefined;
+    void waitForProcessExit(4243, { now: clock.now, sleep: clock.sleep, alive: () => true, timeoutMs: 60_000 }).then((value) => { gaveUp = value; });
+    await clock.advance(61_000);
+    expect(gaveUp).toBe(false);
+  });
+});
+
 describe('the status snapshot', () => {
   test('published atomically every interval and read with its age', async () => {
     const root = tempRoot();
@@ -315,9 +505,12 @@ describe('the front writes nothing the background owns', () => {
   });
 
   test('owner actions without a command yet are refused in the front, everything else passes', () => {
-    for (const path of ['/dashboard/delete-source-data', '/v1/cli/tier', '/v1/source/index/embed', '/dashboard/messaging/start',
-      '/v1/source/watch/create', '/v1/source/index/files/extract', '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/transcribe']) {
+    for (const path of ['/v1/source/watch/create', '/v1/source/index/files/extract', '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/transcribe']) {
       expect(engineFrontRefusal(new Request(`http://127.0.0.1${path}`, { method: 'POST' }))?.status, path).toBe(503);
+    }
+    // The forwarded owner actions are no longer refused: they run in the background.
+    for (const path of ['/dashboard/delete-source-data', '/v1/cli/tier', '/v1/source/index/embed', '/dashboard/messaging/start']) {
+      expect(engineFrontRefusal(new Request(`http://127.0.0.1${path}`, { method: 'POST' })), path).toBeUndefined();
     }
     expect(engineFrontRefusal(new Request('http://127.0.0.1/dashboard/sync-now', { method: 'POST' }))).toBeUndefined();
     expect(engineFrontRefusal(new Request('http://127.0.0.1/dashboard/messaging/status', { method: 'POST' }))).toBeUndefined();

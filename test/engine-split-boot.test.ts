@@ -72,9 +72,17 @@ describe('the engine split boots as two processes', () => {
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     await health.body?.cancel();
-    const refused = await workerFetch(`http://127.0.0.1:${port}/v1/cli/tier`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
+    // An owner action with no command yet is refused in the front.
+    const refused = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
     expect(refused.status).toBe(503);
     await refused.body?.cancel();
+    // A forwarded one passes the front's authorization first, then the background's route answers it.
+    const unauthorized = await workerFetch(`http://127.0.0.1:${port}/v1/cli/tier`, { method: 'POST', body: '{}' });
+    expect(unauthorized.status).toBe(401);
+    await unauthorized.body?.cancel();
+    const forwarded = await workerFetch(`http://127.0.0.1:${port}/v1/cli/tier`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
+    expect(forwarded.status).toBe(409);
+    expect(JSON.stringify(await forwarded.json())).toContain('did not say which Olympus data');
 
     const backgroundFetch = createUnixSocketFetch(env.OLYMPUS_ENGINE_BACKGROUND_SOCKET);
     const posted = await backgroundFetch(`${ENGINE_BACKGROUND_ORIGIN}/engine/commands`, {

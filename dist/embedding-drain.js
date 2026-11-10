@@ -71230,6 +71230,7 @@ init_data_lifecycle();
 init_mail_source_scope();
 init_connected_handles();
 init_operation_error();
+init_store_write_guard();
 init_classification_ledger();
 init_sniffer();
 init_privacy_profile();
@@ -78043,6 +78044,7 @@ class EngineCommandError extends Error {
     this.name = "EngineCommandError";
   }
 }
+var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
 function orderKey(command) {
   return "source" in command ? `source:${command.source}` : `kind:${command.kind}`;
 }
@@ -78135,18 +78137,37 @@ class OwnerBusyRelay {
   log;
   busyResources = new Set;
   instanceId;
-  constructor(client, log = () => {}) {
+  renewal;
+  renewEveryMs;
+  setTimer;
+  clearTimer;
+  constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
+    this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
+    this.setTimer = options.setInterval ?? ((callback, ms) => {
+      const timer = setInterval(callback, ms);
+      timer.unref?.();
+      return timer;
+    });
+    this.clearTimer = options.clearInterval ?? ((timer) => clearInterval(timer));
   }
   busy(resource) {
     this.busyResources.add(resource);
     this.deliver({ kind: "owner_busy", resource });
+    if (this.renewal === undefined) {
+      this.renewal = this.setTimer(() => {
+        for (const busy of this.busyResources)
+          this.deliver({ kind: "owner_busy", resource: busy });
+      }, this.renewEveryMs);
+    }
   }
   idle(resource) {
     if (!this.busyResources.delete(resource))
       return;
     this.deliver({ kind: "owner_idle", resource });
+    if (this.busyResources.size === 0)
+      this.stopRenewal();
   }
   observeInstance(instanceId) {
     if (instanceId === this.instanceId)
@@ -78157,6 +78178,15 @@ class OwnerBusyRelay {
       return;
     for (const resource of this.busyResources)
       this.deliver({ kind: "owner_busy", resource });
+  }
+  stop() {
+    this.stopRenewal();
+  }
+  stopRenewal() {
+    if (this.renewal === undefined)
+      return;
+    this.clearTimer(this.renewal);
+    this.renewal = undefined;
   }
   isBusy(resource) {
     return this.busyResources.has(resource);
@@ -78173,16 +78203,6 @@ init_atomic_file();
 
 // src/workers/engine-split/runtime.ts
 var FRONT_REFUSED_POSTS = new Set([
-  "/dashboard/delete-source-data",
-  "/cli/data-delete",
-  "/cli/tier",
-  "/cli/pairing-placement",
-  "/cli/pairing-account",
-  "/source/index/embed",
-  "/dashboard/messaging/start",
-  "/dashboard/messaging/respond",
-  "/dashboard/messaging/cancel",
-  "/dashboard/messaging/scope",
   "/source/watch/create",
   "/source/watch/cancel"
 ]);

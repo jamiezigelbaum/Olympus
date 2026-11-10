@@ -123,17 +123,41 @@ export class EngineCommandClient {
 export class OwnerBusyRelay {
   private readonly busyResources = new Set<string>();
   private instanceId: string | undefined;
+  private renewal: unknown;
+  private readonly renewEveryMs: number;
+  private readonly setTimer: (callback: () => void, ms: number) => unknown;
+  private readonly clearTimer: (timer: unknown) => void;
 
-  constructor(private readonly client: Pick<EngineCommandClient, 'post'>, private readonly log: (line: string) => void = () => {}) {}
+  /**
+   * The background lets an owner-busy mark lapse after 10 minutes, so a front
+   * that died mid-call cannot hold the judge back for good. While an owner
+   * call is still running the front says busy again every `renewEveryMs`
+   * (3 minutes), so a long call keeps the judge preempted to its end.
+   */
+  constructor(
+    private readonly client: Pick<EngineCommandClient, 'post'>,
+    private readonly log: (line: string) => void = () => {},
+    options: { renewEveryMs?: number; setInterval?: (callback: () => void, ms: number) => unknown; clearInterval?: (timer: unknown) => void } = {},
+  ) {
+    this.renewEveryMs = options.renewEveryMs ?? 3 * 60_000;
+    this.setTimer = options.setInterval ?? ((callback, ms) => { const timer = setInterval(callback, ms); timer.unref?.(); return timer; });
+    this.clearTimer = options.clearInterval ?? ((timer) => clearInterval(timer as ReturnType<typeof setInterval>));
+  }
 
   busy(resource: string): void {
     this.busyResources.add(resource);
     this.deliver({ kind: 'owner_busy', resource });
+    if (this.renewal === undefined) {
+      this.renewal = this.setTimer(() => {
+        for (const busy of this.busyResources) this.deliver({ kind: 'owner_busy', resource: busy });
+      }, this.renewEveryMs);
+    }
   }
 
   idle(resource: string): void {
     if (!this.busyResources.delete(resource)) return;
     this.deliver({ kind: 'owner_idle', resource });
+    if (this.busyResources.size === 0) this.stopRenewal();
   }
 
   /** Each background instance id the front sees (command answers, the status snapshot). */
@@ -143,6 +167,16 @@ export class OwnerBusyRelay {
     this.instanceId = instanceId;
     if (!restarted) return;
     for (const resource of this.busyResources) this.deliver({ kind: 'owner_busy', resource });
+  }
+
+  stop(): void {
+    this.stopRenewal();
+  }
+
+  private stopRenewal(): void {
+    if (this.renewal === undefined) return;
+    this.clearTimer(this.renewal);
+    this.renewal = undefined;
   }
 
   isBusy(resource: string): boolean {

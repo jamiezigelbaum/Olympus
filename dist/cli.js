@@ -123813,7 +123813,7 @@ function locateTierItem(locator, context2 = {}) {
     localItemId,
     ...boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath) } : {}
   });
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity2) !== undefined, boundIds.get(path)));
+  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity2) !== undefined, boundIds.get(path), true));
   if (deciding.length > 0)
     return deciding.map(located);
   const fallback = matches2[0];
@@ -123822,8 +123822,8 @@ function locateTierItem(locator, context2 = {}) {
 function identityKey2(identity2) {
   return tierLedgerIdentityKey(identity2);
 }
-function withLedgerAt(ledgerPath, now, run, expectedId) {
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {} });
+function withLedgerAt(ledgerPath, now, run, expectedId, readsOnly = false) {
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {}, ...readsOnly && writableStoreOpensForbidden() ? { readOnly: true } : {} });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
       throw new OperationError("source_index_error", "The tier ledger for that item was replaced while it was being read, so nothing was changed.", "Run the command again.");
@@ -123929,11 +123929,11 @@ function runTierExplain(args, context2 = {}) {
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity)
-    }), item.boundLedgerId);
+    }), item.boundLedgerId, true);
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
     if (existsSync82(snifferPath)) {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...writableStoreOpensForbidden() ? { readOnly: true } : {} });
       try {
         waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
       } finally {
@@ -124142,6 +124142,7 @@ var init_tier_cli = __esm(() => {
   init_mail_source_scope();
   init_connected_handles();
   init_operation_error();
+  init_store_write_guard();
   init_classification_ledger();
   init_sniffer();
   init_privacy_profile();
@@ -197747,13 +197748,40 @@ function dashboardSample(value2) {
   }
   return typeof sample.corpus_id === "string" && typeof sample.source_id === "string";
 }
-function body(value2) {
-  const record8 = asRecord19(value2 ?? {});
-  if (!record8)
-    throw new EngineCommandError(400, "A command body must be an object.");
-  if (JSON.stringify(record8).length > ENGINE_BODY_MAX_BYTES)
+function forwardedRequest(kind, value2) {
+  const request = asRecord19(value2);
+  const path = request?.path;
+  if (typeof path !== "string" || !ENGINE_FORWARDED_ROUTES[kind].includes(path)) {
+    throw new EngineCommandError(400, `${kind} does not carry that route.`);
+  }
+  const headers = asRecord19(request.headers);
+  if (!headers || Object.values(headers).some((entry) => typeof entry !== "string"))
+    throw new EngineCommandError(400, "Forwarded headers must be strings.");
+  const body = request.body;
+  if (typeof body !== "string")
+    throw new EngineCommandError(400, "A forwarded body is text.");
+  if (body.length > ENGINE_BODY_MAX_BYTES)
     throw new EngineCommandError(413, "The command body is too large.");
-  return record8;
+  return { path, headers, body };
+}
+function forwardedRequestToRequest(origin, forwarded) {
+  return new Request(origin + forwarded.path, { method: "POST", headers: forwarded.headers, body: forwarded.body });
+}
+async function requestToForwarded(request) {
+  const headers = {};
+  request.headers.forEach((value2, name) => {
+    if (!HOP_HEADERS.has(name.toLowerCase()))
+      headers[name] = value2;
+  });
+  return { path: new URL(request.url).pathname, headers, body: await request.text() };
+}
+async function responseToForwarded(response) {
+  const headers = {};
+  response.headers.forEach((value2, name) => {
+    if (!HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie")
+      headers[name] = value2;
+  });
+  return { status: response.status, headers, body: await response.text() };
 }
 function parseEngineCommandEnvelope(value2) {
   const record8 = asRecord19(value2);
@@ -197785,26 +197813,15 @@ function parseEngineCommandEnvelope(value2) {
       }
       return { id, command: { kind, samples } };
     }
-    case "delete_source_data": {
-      const source = command.source;
-      if (typeof source !== "string" || !SOURCE.test(source))
-        fail("delete_source_data needs a source.");
-      return { id, command: { kind, source, body: body(command.body) } };
-    }
+    case "delete_source_data":
     case "tier_override":
-    case "embed_chunks":
-      return { id, command: { kind, body: body(command.body) } };
-    case "capture": {
-      const operation = command.operation;
-      if (!ENGINE_CAPTURE_OPERATIONS.includes(operation))
-        fail("capture needs a known operation.");
-      return { id, command: { kind, operation, body: body(command.body) } };
-    }
-    case "storage_registry": {
-      const operation = command.operation;
-      if (!ENGINE_STORAGE_REGISTRY_OPERATIONS.includes(operation))
-        fail("storage_registry needs a known operation.");
-      return { id, command: { kind, operation, body: body(command.body) } };
+    case "storage_registry":
+    case "capture":
+    case "embed_chunks": {
+      const frontPid = command.frontPid;
+      if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
+        fail("frontPid is a process id, carried by a delete.");
+      return { id, command: { kind, request: forwardedRequest(kind, command.request), ...frontPid !== undefined ? { frontPid } : {} } };
     }
     case "sync_now":
     case "start_approved": {
@@ -197871,17 +197888,17 @@ class EngineCommandLedger {
   }
   submit(envelope) {
     this.prune();
-    const body2 = JSON.stringify(envelope.command);
+    const body = JSON.stringify(envelope.command);
     const existing = this.entries.get(envelope.id);
     if (existing) {
-      if (existing.body !== body2)
+      if (existing.body !== body)
         throw new EngineCommandError(409, "That command id was used for a different command.");
       return { ...existing.receipt };
     }
     const receipt = { id: envelope.id, state: "received", instance_id: this.options.instanceId };
     const key2 = orderKey(envelope.command);
     const previous = this.chains.get(key2) ?? Promise.resolve();
-    const entry = { body: body2, receipt, settled: Promise.resolve() };
+    const entry = { body, receipt, settled: Promise.resolve() };
     const settled = previous.then(() => this.apply(entry, envelope.command));
     entry.settled = settled;
     this.entries.set(envelope.id, entry);
@@ -197945,8 +197962,8 @@ function createEngineCommandHandler(options) {
     const url2 = new URL(request.url);
     if (url2.pathname === ENGINE_READY_PATH && request.method === "GET") {
       const ready = options.ready();
-      const body2 = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
-      return Response.json(body2, { status: ready ? 200 : 503 });
+      const body = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      return Response.json(body, { status: ready ? 200 : 503 });
     }
     if (url2.pathname === ENGINE_COMMANDS_PATH && request.method === "POST") {
       if (!options.ready())
@@ -197984,14 +198001,19 @@ function createEngineCommandHandler(options) {
     return Response.json({ error: "not_found" }, { status: 404 });
   };
 }
-var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_CAPTURE_OPERATIONS, ENGINE_STORAGE_REGISTRY_OPERATIONS, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE;
+var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, HOP_HEADERS;
 var init_commands = __esm(() => {
   init_engine_split();
   init_http();
   ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction"];
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
-  ENGINE_CAPTURE_OPERATIONS = ["start", "respond", "cancel", "scope"];
-  ENGINE_STORAGE_REGISTRY_OPERATIONS = ["pairing-placement", "pairing-account"];
+  ENGINE_FORWARDED_ROUTES = {
+    delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
+    tier_override: ["/v1/cli/tier"],
+    storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
+    capture: ["/dashboard/messaging/start", "/dashboard/messaging/respond", "/dashboard/messaging/cancel", "/dashboard/messaging/scope"],
+    embed_chunks: ["/v1/source/index/embed"]
+  };
   ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
   EngineCommandError = class EngineCommandError extends Error {
     status;
@@ -198004,6 +198026,7 @@ var init_commands = __esm(() => {
   ID3 = /^[A-Za-z0-9_-]{8,64}$/;
   SOURCE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
   RESOURCE = /^[\x21-\x7e]{1,200}$/;
+  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
 });
 
 // src/workers/engine-split/client.ts
@@ -198070,12 +198093,12 @@ class EngineCommandClient {
         ...init,
         headers: { ...init.headers, Authorization: `Bearer ${this.options.authToken}` }
       });
-      const body2 = await response.json().catch(() => {
+      const body = await response.json().catch(() => {
         return;
       });
-      if (typeof body2?.instance_id === "string")
-        this.options.onInstance?.(body2.instance_id);
-      return { status: response.status, body: body2 };
+      if (typeof body?.instance_id === "string")
+        this.options.onInstance?.(body.instance_id);
+      return { status: response.status, body };
     } catch {
       return;
     }
@@ -198087,18 +198110,37 @@ class OwnerBusyRelay {
   log;
   busyResources = new Set;
   instanceId;
-  constructor(client, log = () => {}) {
+  renewal;
+  renewEveryMs;
+  setTimer;
+  clearTimer;
+  constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
+    this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
+    this.setTimer = options.setInterval ?? ((callback, ms) => {
+      const timer = setInterval(callback, ms);
+      timer.unref?.();
+      return timer;
+    });
+    this.clearTimer = options.clearInterval ?? ((timer) => clearInterval(timer));
   }
   busy(resource) {
     this.busyResources.add(resource);
     this.deliver({ kind: "owner_busy", resource });
+    if (this.renewal === undefined) {
+      this.renewal = this.setTimer(() => {
+        for (const busy of this.busyResources)
+          this.deliver({ kind: "owner_busy", resource: busy });
+      }, this.renewEveryMs);
+    }
   }
   idle(resource) {
     if (!this.busyResources.delete(resource))
       return;
     this.deliver({ kind: "owner_idle", resource });
+    if (this.busyResources.size === 0)
+      this.stopRenewal();
   }
   observeInstance(instanceId) {
     if (instanceId === this.instanceId)
@@ -198109,6 +198151,15 @@ class OwnerBusyRelay {
       return;
     for (const resource of this.busyResources)
       this.deliver({ kind: "owner_busy", resource });
+  }
+  stop() {
+    this.stopRenewal();
+  }
+  stopRenewal() {
+    if (this.renewal === undefined)
+      return;
+    this.clearTimer(this.renewal);
+    this.renewal = undefined;
   }
   isBusy(resource) {
     return this.busyResources.has(resource);
@@ -198186,6 +198237,7 @@ var init_snapshot = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 import { randomUUID as randomUUID35 } from "node:crypto";
 import { lstatSync as lstatSync53 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -198225,6 +198277,9 @@ function startEngineBackgroundServer(input) {
     ledger,
     markReady: () => {
       ready = true;
+    },
+    markStopping: () => {
+      ready = false;
     },
     stop: () => {
       server.stop(true);
@@ -198278,7 +198333,10 @@ function createEngineFront(input) {
     status();
   }, 2000);
   poll.unref?.();
-  return { client, ownerBusy: relay, status, stop: () => clearInterval(poll) };
+  return { client, ownerBusy: relay, status, stop: () => {
+    clearInterval(poll);
+    relay?.stop();
+  } };
 }
 function engineFrontRefusal(request) {
   if (request.method !== "POST")
@@ -198291,6 +198349,128 @@ function engineFrontRefusal(request) {
     message: "This action is not available while Olympus runs its engine split (worker.engineSplit) yet. Turn the switch off to use it."
   }, { status: 503 });
 }
+function restartingResponse() {
+  return Response.json({ error: { code: "worker_restarting", message: "Olympus is restarting; try again in a moment." } }, { status: 503 });
+}
+function createFrontGate() {
+  let open7 = true;
+  let generation = 0;
+  const current2 = new AsyncLocalStorage7;
+  return {
+    isOpen: () => open7,
+    close() {
+      open7 = false;
+      generation += 1;
+      const request = current2.getStore();
+      if (request)
+        request.closedTheGate = true;
+    },
+    reopen() {
+      open7 = true;
+    },
+    wrap(handler) {
+      return async (request, server) => {
+        if (!open7)
+          return restartingResponse();
+        const started = generation;
+        const context3 = { closedTheGate: false };
+        const response = await current2.run(context3, () => handler(request, server));
+        if (!context3.closedTheGate && (started !== generation || !open7)) {
+          await response.body?.cancel().catch(() => {
+            return;
+          });
+          return restartingResponse();
+        }
+        return response;
+      };
+    }
+  };
+}
+function forwardedKindFor(path) {
+  for (const [kind, paths] of Object.entries(ENGINE_FORWARDED_ROUTES)) {
+    if (paths.includes(path))
+      return kind;
+  }
+  return;
+}
+function tierCommandOnlyReads(body) {
+  try {
+    const args = JSON.parse(body).args;
+    if (!Array.isArray(args))
+      return false;
+    const [command, sub] = args;
+    return command === "explain" || command === "rules" && sub === "list" || command === "classifier" && sub === "status" || command === "migrate" && sub === "status";
+  } catch {
+    return false;
+  }
+}
+function createEngineFrontRoutes(input) {
+  const pid = input.pid ?? process.pid;
+  const send2 = async (kind, request) => {
+    const forwarded = await requestToForwarded(request);
+    let receipt;
+    try {
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? 120000 });
+    } catch (error2) {
+      return Response.json({ error: { code: "engine_background_unavailable", message: error2 instanceof Error ? error2.message : "The background engine is not answering." } }, { status: 503 });
+    }
+    if (receipt.state !== "done") {
+      return Response.json({ error: { code: "engine_background_failed", message: receipt.error ?? "The background could not run this." } }, { status: 502 });
+    }
+    const answer = receipt.result;
+    return new Response(answer.body, { status: answer.status, headers: answer.headers });
+  };
+  return (request) => {
+    if (request.method !== "POST")
+      return;
+    const kind = forwardedKindFor(new URL(request.url).pathname);
+    if (!kind)
+      return;
+    return (async () => {
+      if (!input.gate.isOpen())
+        return restartingResponse();
+      if (kind === "tier_override" && tierCommandOnlyReads(await request.clone().text()))
+        return;
+      if (kind !== "delete_source_data")
+        return send2(kind, request);
+      input.gate.close();
+      let response;
+      try {
+        response = await send2(kind, request);
+      } catch (error2) {
+        input.gate.reopen();
+        throw error2;
+      }
+      const restarting2 = response.status === 200 && (await response.clone().json().catch(() => {
+        return;
+      }))?.worker_restarting === true;
+      if (restarting2)
+        input.restartFront();
+      else
+        input.gate.reopen();
+      return response;
+    })();
+  };
+}
+async function waitForProcessExit(pid, options = {}) {
+  const now = options.now ?? (() => Date.now());
+  const sleep5 = options.sleep ?? ((ms) => new Promise((resolve30) => setTimeout(resolve30, ms)));
+  const alive = options.alive ?? ((target) => {
+    try {
+      process.kill(target, 0);
+      return true;
+    } catch (error2) {
+      return error2.code === "EPERM";
+    }
+  });
+  const deadline = now() + (options.timeoutMs ?? 60000);
+  while (alive(pid)) {
+    if (now() >= deadline)
+      return false;
+    await sleep5(options.intervalMs ?? 250);
+  }
+  return true;
+}
 var FRONT_REFUSED_POSTS, FRONT_REFUSED_EXTRACTION, ENGINE_FRONT_REFUSAL_CODE = "not_available_in_split_mode";
 var init_runtime4 = __esm(() => {
   init_engine_split();
@@ -198301,16 +198481,6 @@ var init_runtime4 = __esm(() => {
   init_commands();
   init_snapshot();
   FRONT_REFUSED_POSTS = new Set([
-    "/dashboard/delete-source-data",
-    "/cli/data-delete",
-    "/cli/tier",
-    "/cli/pairing-placement",
-    "/cli/pairing-account",
-    "/source/index/embed",
-    "/dashboard/messaging/start",
-    "/dashboard/messaging/respond",
-    "/dashboard/messaging/cancel",
-    "/dashboard/messaging/scope",
     "/source/watch/create",
     "/source/watch/cancel"
   ]);
@@ -198428,11 +198598,11 @@ function createGatewayRemoteAccessConfigWriter(options) {
         message: "Olympus could not reach OpenClaw to change the setting. Check that OpenClaw is running, then try again."
       };
     }
-    const body2 = await response.json().catch(() => {
+    const body = await response.json().catch(() => {
       return;
     });
-    if (response.ok && (body2?.status === "written" || body2?.status === "unchanged")) {
-      return body2.status === "unchanged" ? { ok: true, unchanged: true } : { ok: true };
+    if (response.ok && (body?.status === "written" || body?.status === "unchanged")) {
+      return body.status === "unchanged" ? { ok: true, unchanged: true } : { ok: true };
     }
     if (response.status === 404) {
       return {
@@ -198442,8 +198612,8 @@ function createGatewayRemoteAccessConfigWriter(options) {
         message: "Restart OpenClaw so it loads this version of Olympus, then try again."
       };
     }
-    const message2 = typeof body2?.message === "string" && body2.message.length <= 400 ? body2.message : "OpenClaw did not accept the change. Try again in a moment.";
-    const code = typeof body2?.error_kind === "string" && /^[a-z0-9_]{1,64}$/.test(body2.error_kind) ? body2.error_kind : "config_write_failed";
+    const message2 = typeof body?.message === "string" && body.message.length <= 400 ? body.message : "OpenClaw did not accept the change. Try again in a moment.";
+    const code = typeof body?.error_kind === "string" && /^[a-z0-9_]{1,64}$/.test(body.error_kind) ? body.error_kind : "config_write_failed";
     return { ok: false, status: response.status === 501 ? 501 : 502, code, message: message2 };
   };
 }
@@ -200513,7 +200683,7 @@ function chatgptPrivateAnswerProgram(config2) {
         const requestEnd = Date.now() + Math.min(config2.requestTimeoutMs, left);
         const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
         let response;
-        let body2 = null;
+        let body = null;
         try {
           response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
             method: "POST",
@@ -200528,11 +200698,11 @@ function chatgptPrivateAnswerProgram(config2) {
           if (mine !== run2)
             return;
           try {
-            body2 = await bounded(response.json(), requestEnd - Date.now(), controller);
+            body = await bounded(response.json(), requestEnd - Date.now(), controller);
           } catch (error2) {
             if (isTimeout(error2))
               throw error2;
-            body2 = null;
+            body = null;
           }
         } catch (error2) {
           if (mine !== run2)
@@ -200547,12 +200717,12 @@ function chatgptPrivateAnswerProgram(config2) {
         }
         if (mine !== run2)
           return;
-        const status = body2 && typeof body2.status === "string" ? body2.status : "";
+        const status = body && typeof body.status === "string" ? body.status : "";
         const code = response.status;
         if (code === 200 && status === "ready") {
           let opened = null;
           try {
-            opened = readAnswer(await bounded(open7(jobId, keys.privateKey, body2), deadline - Date.now(), null));
+            opened = readAnswer(await bounded(open7(jobId, keys.privateKey, body), deadline - Date.now(), null));
           } catch (error2) {
             if (mine !== run2)
               return;
@@ -200686,15 +200856,15 @@ function chatgptPrivateAnswerProgram(config2) {
     svg.setAttribute("viewBox", "0 0 16 16");
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
-    const body2 = doc2.createElementNS(SVG_NS, "rect");
-    body2.setAttribute("x", "3.5");
-    body2.setAttribute("y", "7");
-    body2.setAttribute("width", "9");
-    body2.setAttribute("height", "7");
-    body2.setAttribute("rx", "1.5");
+    const body = doc2.createElementNS(SVG_NS, "rect");
+    body.setAttribute("x", "3.5");
+    body.setAttribute("y", "7");
+    body.setAttribute("width", "9");
+    body.setAttribute("height", "7");
+    body.setAttribute("rx", "1.5");
     const shackle = doc2.createElementNS(SVG_NS, "path");
     shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
-    svg.appendChild(body2);
+    svg.appendChild(body);
     svg.appendChild(shackle);
     return svg;
   }
@@ -200827,20 +200997,20 @@ function chatgptPrivateAnswerProgram(config2) {
     const view3 = card(true);
     view3.line.textContent = T.notSent;
     view3.row.appendChild(button(T.hide, "hide", hide, T.hideLabel));
-    const body2 = el("div", "answer");
-    body2.setAttribute("tabindex", "-1");
-    body2.setAttribute("data-key", "answer");
+    const body = el("div", "answer");
+    body.setAttribute("tabindex", "-1");
+    body.setAttribute("data-key", "answer");
     const markdown = window.olympusMarkdown;
     const text4 = shown.secretInbox?.handle ? shown.text.replace(T.secretOpen + ".", "").trim() : shown.text;
     if (typeof markdown === "function") {
-      body2.className = "answer md";
-      markdown(doc2, body2, text4);
+      body.className = "answer md";
+      markdown(doc2, body, text4);
     } else {
       const paragraphs = text4.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
       for (const part of paragraphs)
-        body2.appendChild(el("p", "", part));
+        body.appendChild(el("p", "", part));
     }
-    view3.card.appendChild(body2);
+    view3.card.appendChild(body);
     if (shown.secretInbox) {
       const notice = shown.secretInbox;
       if (notice.remote) {
@@ -201603,15 +201773,15 @@ function chatgptPrivateQuestionProgram(config2) {
         body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
         ...controller ? { signal: controller.signal } : {}
       }), config2.requestTimeoutMs, controller);
-      let body2 = null;
+      let body = null;
       try {
-        body2 = await response.json();
+        body = await response.json();
       } catch {
-        body2 = null;
+        body = null;
       }
       if (mine !== run2)
         return;
-      const next = response.status === 200 && body2 && body2.status === "opened" ? readMeta(body2.meta) : null;
+      const next = response.status === 200 && body && body.status === "opened" ? readMeta(body.meta) : null;
       if (!next) {
         phase = "gone";
         render();
@@ -201925,7 +202095,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return fail(T.slow, true);
         const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
         let response;
-        let body2 = null;
+        let body = null;
         try {
           response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
             method: "POST",
@@ -201934,9 +202104,9 @@ function chatgptPrivateQuestionProgram(config2) {
             ...controller ? { signal: controller.signal } : {}
           }), Math.min(config2.requestTimeoutMs, left), controller);
           try {
-            body2 = await bounded(response.json(), Math.min(config2.requestTimeoutMs, deadline - Date.now()), controller);
+            body = await bounded(response.json(), Math.min(config2.requestTimeoutMs, deadline - Date.now()), controller);
           } catch {
-            body2 = null;
+            body = null;
           }
         } catch {
           if (mine !== run2)
@@ -201955,8 +202125,8 @@ function chatgptPrivateQuestionProgram(config2) {
           await wait(config2.secondMs * 5);
           continue;
         }
-        if (response.status === 200 && body2 && body2.status === "ready") {
-          const opened = readResult(await open7(jobId, keys.privateKey, body2));
+        if (response.status === 200 && body && body.status === "ready") {
+          const opened = readResult(await open7(jobId, keys.privateKey, body));
           if (mine !== run2)
             return;
           if (!opened)
@@ -201967,7 +202137,7 @@ function chatgptPrivateQuestionProgram(config2) {
           render();
           return;
         }
-        if (response.status === 200 && body2 && body2.status === "failed")
+        if (response.status === 200 && body && body.status === "failed")
           return fail(T.failed, false);
         if (response.status === 409)
           return fail(T.claimed, false);
@@ -201999,15 +202169,15 @@ function chatgptPrivateQuestionProgram(config2) {
     svg.setAttribute("class", "lock");
     svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("aria-hidden", "true");
-    const body2 = doc2.createElementNS(SVG_NS, "rect");
-    body2.setAttribute("x", "5");
-    body2.setAttribute("y", "11");
-    body2.setAttribute("width", "14");
-    body2.setAttribute("height", "9");
-    body2.setAttribute("rx", "2");
+    const body = doc2.createElementNS(SVG_NS, "rect");
+    body.setAttribute("x", "5");
+    body.setAttribute("y", "11");
+    body.setAttribute("width", "14");
+    body.setAttribute("height", "9");
+    body.setAttribute("rx", "2");
     const shackle = doc2.createElementNS(SVG_NS, "path");
     shackle.setAttribute("d", "M8 11V7a4 4 0 0 1 8 0v4");
-    svg.appendChild(body2);
+    svg.appendChild(body);
     svg.appendChild(shackle);
     wrap.appendChild(svg);
     return wrap;
@@ -202121,10 +202291,10 @@ function chatgptPrivateQuestionProgram(config2) {
         onPick();
     });
     wrap.appendChild(input);
-    const body2 = el("span", "q-radio-text");
-    body2.appendChild(el("span", "q-radio-name", text4));
-    body2.appendChild(el("span", "q-radio-hint", hint));
-    wrap.appendChild(body2);
+    const body = el("span", "q-radio-text");
+    body.appendChild(el("span", "q-radio-name", text4));
+    body.appendChild(el("span", "q-radio-hint", hint));
+    wrap.appendChild(body);
     return wrap;
   }
   function workingView(text4) {
@@ -203936,8 +204106,8 @@ function sortedFolderPage(level, secrets, parentKey2, after, ancestorKeys = []) 
   };
 }
 function encodeSortedCursor(parentKey2, last) {
-  const body2 = Buffer.from(JSON.stringify({ p: parentKey2 ?? "", n: last.name, k: last.key }), "utf8").toString("base64url");
-  return `${SORTED_CURSOR_PREFIX}${body2}`;
+  const body = Buffer.from(JSON.stringify({ p: parentKey2 ?? "", n: last.name, k: last.key }), "utf8").toString("base64url");
+  return `${SORTED_CURSOR_PREFIX}${body}`;
 }
 function decodeSortedCursor(value2, parentKey2) {
   if (!value2.startsWith(SORTED_CURSOR_PREFIX))
@@ -214595,8 +214765,8 @@ function refusedAccess(access) {
 function invalidParams(param) {
   return errorResult(remoteErrorOutput(new OperationError("invalid_params", `${param} is invalid.`), { declaredParams: ["question", "limit"] }));
 }
-function errorResult(body2) {
-  return { content: [{ type: "text", text: JSON.stringify(body2, null, 2) }], isError: true };
+function errorResult(body) {
+  return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
 }
 var MAX_QUESTION_CHARS2 = 2000, MAX_LIMIT = 48, REMOTE_SEARCH_TOOL;
 var init_remote_search = __esm(() => {
@@ -214691,13 +214861,13 @@ function createRemoteMcpHandler(options) {
     if (request.method !== "POST") {
       return jsonResponse(405, remoteSurfaceErrorOutput("method_not_allowed"), { Allow: "POST" });
     }
-    const body2 = await readBoundedRequestText(request);
-    if (!body2.ok) {
-      return body2.reason === "too_large" ? jsonResponse(413, remoteSurfaceErrorOutput("payload_too_large")) : jsonResponse(400, remoteSurfaceErrorOutput("invalid_request"));
+    const body = await readBoundedRequestText(request);
+    if (!body.ok) {
+      return body.reason === "too_large" ? jsonResponse(413, remoteSurfaceErrorOutput("payload_too_large")) : jsonResponse(400, remoteSurfaceErrorOutput("invalid_request"));
     }
     let parsedBody;
     try {
-      parsedBody = JSON.parse(body2.text);
+      parsedBody = JSON.parse(body.text);
     } catch {}
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
@@ -214905,8 +215075,8 @@ function unauthorized(error2, urls, protectedResourceMetadataUrl = urls?.protect
   const challenge = `Bearer ${parts.join(", ")}`;
   return jsonResponse(401, { error: error2 ?? "unauthorized" }, { "WWW-Authenticate": challenge });
 }
-function jsonResponse(status, body2, headers = {}) {
-  return new Response(JSON.stringify(body2), {
+function jsonResponse(status, body, headers = {}) {
+  return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
@@ -214969,8 +215139,8 @@ function createRelaySurfacesHandler(options) {
 function withRelaySurfacesRoute(handler, rest) {
   return (request) => new URL(request.url).pathname === RELAY_SURFACES_PATH ? handler(request) : rest(request);
 }
-function reply(status, body2) {
-  return new Response(JSON.stringify(body2), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+function reply(status, body) {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }
 var init_relay_surfaces = __esm(() => {
   init_protocol2();
@@ -215520,16 +215690,16 @@ function createRemoteOAuthHandler(options) {
     const text5 = await readBounded3(request, MAX_REGISTRATION_BYTES);
     if (text5 === undefined)
       return oauthError(400, "invalid_client_metadata", "Registration is too large.");
-    let body2;
+    let body;
     try {
-      body2 = JSON.parse(text5);
+      body = JSON.parse(text5);
     } catch {
       return oauthError(400, "invalid_client_metadata", "Registration is not JSON.");
     }
-    if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return oauthError(400, "invalid_client_metadata", "Registration must be a JSON object.");
     }
-    const metadata = body2;
+    const metadata = body;
     const redirectUris = metadata.redirect_uris;
     if (!Array.isArray(redirectUris) || redirectUris.length === 0 || redirectUris.length > 10 || !redirectUris.every((uri) => typeof uri === "string" && isAcceptableRedirectUri(uri))) {
       return oauthError(400, "invalid_redirect_uri", "redirect_uris must list https or loopback URLs.");
@@ -215716,8 +215886,8 @@ function singleParams(params) {
   return { get: (key2) => out.get(key2) ?? null };
 }
 async function readBounded3(request, maxBytes) {
-  const body2 = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
-  return body2.ok ? body2.text : undefined;
+  const body = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
+  return body.ok ? body.text : undefined;
 }
 async function readForm(request) {
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) {
@@ -215775,8 +215945,8 @@ function tokenResponse(tokens) {
 function oauthError(status, error2, description, headers = {}) {
   return jsonResponse2(status, { error: error2, error_description: description }, headers);
 }
-function metadataResponse(body2) {
-  return new Response(JSON.stringify(body2), {
+function metadataResponse(body) {
+  return new Response(JSON.stringify(body), {
     status: 200,
     headers: {
       "Content-Type": "application/json",
@@ -215799,8 +215969,8 @@ function metadataPreflight() {
 function methodNotAllowed(allow2) {
   return jsonResponse2(405, { error: "method_not_allowed" }, { Allow: allow2 });
 }
-function jsonResponse2(status, body2, headers = {}) {
-  return new Response(JSON.stringify(body2), {
+function jsonResponse2(status, body, headers = {}) {
+  return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
@@ -217103,13 +217273,13 @@ function createPrivateAnswerHandler(options) {
     const text6 = await boundedText(request, privateAnswerMaxRequestBytes(route.action));
     if (text6 === undefined)
       return reply2({ status: 413, body: { status: "invalid" } });
-    let body2;
+    let body;
     try {
-      body2 = JSON.parse(text6);
+      body = JSON.parse(text6);
     } catch {
       return reply2({ status: 400, body: { status: "invalid" } });
     }
-    const record8 = typeof body2 === "object" && body2 !== null && !Array.isArray(body2) ? body2 : undefined;
+    const record8 = typeof body === "object" && body !== null && !Array.isArray(body) ? body : undefined;
     if (!record8 || record8.v !== 1)
       return reply2({ status: 400, body: { status: "invalid" } });
     if (route.action === "ask")
@@ -217264,12 +217434,12 @@ class PrivateQuestionJobs {
   has(jobId) {
     return this.jobs.has(jobId);
   }
-  async ask(jobId, body2) {
+  async ask(jobId, body) {
     this.sweep();
     const job = this.jobs.get(jobId);
     if (!job || privateAnswerInstallId(jobId) !== this.options.installId())
       return gone2();
-    const panel = await importPanelPublicKey(body2.publicKey);
+    const panel = await importPanelPublicKey(body.publicKey);
     if (!panel)
       return invalid4();
     if (this.jobs.get(jobId) !== job)
@@ -217280,7 +217450,7 @@ class PrivateQuestionJobs {
       return this.outcome(job);
     let text6;
     try {
-      text6 = await openPrivateQuestion(jobId, job.enginePrivateKey, panel.key, { iv: body2.iv, ciphertext: body2.ciphertext });
+      text6 = await openPrivateQuestion(jobId, job.enginePrivateKey, panel.key, { iv: body.iv, ciphertext: body.ciphertext });
     } catch {
       return invalid4();
     }
@@ -218041,14 +218211,14 @@ async function callTool(request, name, options) {
   }
 }
 async function readParams(request) {
-  const body2 = await readBoundedRequestText(request);
-  if (!body2.ok) {
+  const body = await readBoundedRequestText(request);
+  if (!body.ok) {
     return {
       ok: false,
-      response: body2.reason === "too_large" ? failure2(413, remoteSurfaceErrorOutput("payload_too_large")) : failure2(400, remoteSurfaceErrorOutput("invalid_request"))
+      response: body.reason === "too_large" ? failure2(413, remoteSurfaceErrorOutput("payload_too_large")) : failure2(400, remoteSurfaceErrorOutput("invalid_request"))
     };
   }
-  const text6 = body2.text;
+  const text6 = body.text;
   if (text6.trim() === "")
     return { ok: true, value: {} };
   let parsed;
@@ -218062,16 +218232,16 @@ async function readParams(request) {
   }
   return { ok: true, value: parsed };
 }
-function failure2(status, body2, headers = {}) {
-  const retryAfter = remoteRetryAfterSeconds(body2);
-  return jsonResponse(status, body2, retryAfter === undefined ? headers : { ...headers, "Retry-After": String(retryAfter) });
+function failure2(status, body, headers = {}) {
+  const retryAfter = remoteRetryAfterSeconds(body);
+  return jsonResponse(status, body, retryAfter === undefined ? headers : { ...headers, "Retry-After": String(retryAfter) });
 }
 async function credentialFailure(refusal4) {
   let code = "unauthorized";
   try {
-    const body2 = await refusal4.json();
-    if (body2.error === "invalid_token" || body2.error === "remote_connections_unavailable")
-      code = body2.error;
+    const body = await refusal4.json();
+    if (body.error === "invalid_token" || body.error === "remote_connections_unavailable")
+      code = body.error;
   } catch {}
   if (refusal4.status === 503)
     code = "remote_connections_unavailable";
@@ -218382,11 +218552,11 @@ function createChatGptSetupBackend(options) {
     const id = privateAnswerMode(current2);
     return { ...settings, revision: settings.revision + "." + policyRevision, privateAnswerMode: { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id], options: PRIVATE_ANSWER_OPTIONS } };
   };
-  const post2 = async (path, body2) => {
+  const post2 = async (path, body) => {
     const response = await options.workerFetch(new Request(`${WORKER_ORIGIN}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body2)
+      body: JSON.stringify(body)
     }));
     const parsed = await response.json().catch(() => {
       return;
@@ -219467,7 +219637,7 @@ async function unpairSource(options, args) {
 function archiveArg(value2) {
   return typeof value2 === "string" && value2.length > 0 && value2.length <= ARCHIVE_ARG_MAX && !value2.includes("\x00");
 }
-async function archiveRoute(options, route, body2, context3) {
+async function archiveRoute(options, route, body, context3) {
   if (context3.localSession !== true) {
     return { ok: false, result: refused3(ARCHIVE_LOCAL_SESSION_REFUSAL, "mac_dashboard_only") };
   }
@@ -219477,7 +219647,7 @@ async function archiveRoute(options, route, body2, context3) {
       "Content-Type": "application/json",
       [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: "local"
     },
-    body: JSON.stringify(body2)
+    body: JSON.stringify(body)
   }));
   const parsed = await response.json().catch(() => {
     return;
@@ -221415,6 +221585,7 @@ async function main() {
     return "ready";
   };
   let requestModelReload = () => false;
+  let restartForDelete = (request) => requestModelReload(request);
   let modelReloadInstalled = false;
   let modelReloadUnavailable = false;
   const modelSetup = new ModelSetupService({
@@ -224007,7 +224178,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             destinations: () => localPrivateAnswers?.destinations() ?? { computer: "not_set_up", venice: "not_set_up" },
             waiting: () => localPrivateAnswers?.waiting(),
             waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
-            handle: (body2, session) => localPrivateAnswers ? localPrivateAnswers.handle(body2, session) : Promise.resolve({ status: 503, body: { ok: false, error: { code: "unavailable", message: "Olympus is still starting. Try again in a moment." } } })
+            handle: (body, session) => localPrivateAnswers ? localPrivateAnswers.handle(body, session) : Promise.resolve({ status: 503, body: { ok: false, error: { code: "unavailable", message: "Olympus is still starting. Try again in a moment." } } })
           }
         } : {},
         consult: {
@@ -224027,7 +224198,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         captureRuntime: dashboardCaptureRuntime,
         workerRestart: {
           canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
-          request: (reload) => requestModelReload(reload)
+          request: (reload) => restartForDelete(reload)
         },
         corpusRegistry: sourceCorpusRegistry2,
         registryPath: handleRegistryPathFromEnv(process.env, true),
@@ -224768,6 +224939,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {}
   };
   const listens = engineRole !== "background";
+  const frontGate = engineFront ? createFrontGate() : undefined;
+  const frontRoutes = engineFront ? createEngineFrontRoutes({
+    client: engineFront.client,
+    gate: frontGate,
+    restartFront: () => {
+      if (!requestModelReload())
+        console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
+    }
+  }) : undefined;
+  const frontWorkerFetch = frontRoutes ? async (request) => await frontRoutes(request) ?? worker.fetch(request) : worker.fetch;
   if (listens && releaseSystemdWorkerSocket())
     console.warn("[olympus:worker] removed the socket left by the previous worker run");
   const socketPath = listens ? prepareWorkerSocket() : undefined;
@@ -224794,11 +224975,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         readOnlyFor: isDemoGrant2,
         ...chatgptSurface
       }
-    })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker2 }), !!socketPath)
+    })), withWorkerBearerAuth(withEngineBriefRoute2(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker2 }), !!socketPath)
   };
   if (engineFront) {
     const serveFront = serverOptions.fetch;
-    serverOptions.fetch = (request, server2) => engineFrontRefusal(request) ?? serveFront(request, server2);
+    const gated = frontGate.wrap(serveFront);
+    serverOptions.fetch = (request, server2) => engineFrontRefusal(request) ?? gated(request, server2);
   }
   await localFilesInitialCleanup;
   const startServer = () => socketPath ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server2) {
@@ -224979,6 +225161,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const refreshSchedulerSources = () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     };
+    const runForwarded = async (request) => responseToForwarded(await worker.fetch(forwardedRequestToRequest("http://olympus-worker.internal", request)));
+    let deleteFromFront;
     const commands = startEngineBackgroundServer({
       socketPath: engineSocketPath,
       authToken,
@@ -225027,6 +225211,18 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             tierSniffer?.wake();
           return { busy: false };
         },
+        delete_source_data: async ({ request, frontPid }) => {
+          deleteFromFront = frontPid;
+          try {
+            return await runForwarded(request);
+          } finally {
+            deleteFromFront = undefined;
+          }
+        },
+        tier_override: ({ request }) => runForwarded(request),
+        storage_registry: ({ request }) => runForwarded(request),
+        capture: ({ request }) => runForwarded(request),
+        embed_chunks: ({ request }) => runForwarded(request),
         judge_boost: () => ({ applied: false, reason: "matched_first_not_in_build" })
       }
     });
@@ -225043,6 +225239,18 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         captures: dashboardCaptureRuntime()
       })
     });
+    restartForDelete = (request) => {
+      const frontPid = deleteFromFront;
+      if (frontPid === undefined)
+        return requestModelReload(request);
+      commands.markStopping();
+      waitForProcessExit(frontPid).then((ended) => {
+        if (!ended)
+          console.warn("[engine-split] the front did not end within a minute of a source-data delete; restarting to delete anyway.");
+        requestModelReload(request);
+      });
+      return true;
+    };
     commands.markReady();
     engineBackground = { stop: () => {
       status.stop();
@@ -225908,6 +226116,7 @@ var init_server5 = __esm(async () => {
   init_engine_split();
   init_store_write_guard();
   init_runtime4();
+  init_commands();
   init_front_history();
   init_agent_connections();
   init_remote_access_control();
@@ -229770,11 +229979,11 @@ async function runTerminalContentRequalify(options) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
   }, authToken));
-  const body2 = await response.text();
+  const body = await response.text();
   if (!response.ok) {
-    throw new OperationError("source_index_error", `Terminal requalify worker request failed with HTTP ${response.status}: ${body2.slice(0, 300)}`);
+    throw new OperationError("source_index_error", `Terminal requalify worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
   }
-  return body2 ? JSON.parse(body2) : {};
+  return body ? JSON.parse(body) : {};
 }
 function parseQueuedContentRetargetArgs(args) {
   const values = new Map;
@@ -229848,11 +230057,11 @@ async function runQueuedContentRetarget(options) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
   }, authToken));
-  const body2 = await response.text();
+  const body = await response.text();
   if (!response.ok) {
-    throw new OperationError("source_index_error", `Queued retarget worker request failed with HTTP ${response.status}: ${body2.slice(0, 300)}`);
+    throw new OperationError("source_index_error", `Queued retarget worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
   }
-  return body2 ? JSON.parse(body2) : {};
+  return body ? JSON.parse(body) : {};
 }
 function parseEvalShardExportArgs(args) {
   const values = new Map;
@@ -229910,11 +230119,11 @@ async function runEvalShardExport(options) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
   }, authToken));
-  const body2 = await response.text();
+  const body = await response.text();
   if (!response.ok) {
-    throw new OperationError("source_index_error", `Eval shard export worker request failed with HTTP ${response.status}: ${body2.slice(0, 300)}`);
+    throw new OperationError("source_index_error", `Eval shard export worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
   }
-  return body2 ? JSON.parse(body2) : {};
+  return body ? JSON.parse(body) : {};
 }
 function parseOwnerTierOverrideArgs(args) {
   const values = new Map;
@@ -229977,11 +230186,11 @@ async function runOwnerTierOverride(options) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options)
   }, authToken));
-  const body2 = await response.text();
+  const body = await response.text();
   if (!response.ok) {
-    throw new OperationError("source_index_error", `Owner tier override worker request failed with HTTP ${response.status}: ${body2.slice(0, 300)}`);
+    throw new OperationError("source_index_error", `Owner tier override worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
   }
-  return body2 ? JSON.parse(body2) : {};
+  return body ? JSON.parse(body) : {};
 }
 function toToolsJson(config2) {
   return exposedOperations(operations, { config: config2, surface: "cli" }).map((operation) => ({

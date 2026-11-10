@@ -38,18 +38,34 @@ export interface EngineItemIdentity {
   providerConversationId?: string;
 }
 
-/** Messaging capture operations the dashboard runs (dashboard-messaging-service.ts). */
-export const ENGINE_CAPTURE_OPERATIONS = ['start', 'respond', 'cancel', 'scope'] as const;
-export type EngineCaptureOperation = typeof ENGINE_CAPTURE_OPERATIONS[number];
-/** Pairing placement and account commands (cli-operations.ts). */
-export const ENGINE_STORAGE_REGISTRY_OPERATIONS = ['pairing-placement', 'pairing-account'] as const;
-export type EngineStorageRegistryOperation = typeof ENGINE_STORAGE_REGISTRY_OPERATIONS[number];
-
 /**
- * Commands that carry a request body run the code that served the route
- * before, in the background, which parses and checks that body exactly as it
- * did; the front has already authenticated the request.
+ * Owner actions that write background-owned data run in the background as
+ * the very route that served them before: the front forwards the request
+ * (path, headers, body) and the background runs it through its own handler,
+ * which repeats every authorization and validation check it makes today, and
+ * answers with the response. Each kind names the routes it may carry.
  */
+export const ENGINE_FORWARDED_ROUTES = {
+  delete_source_data: ['/dashboard/delete-source-data', '/v1/cli/data-delete'],
+  tier_override: ['/v1/cli/tier'],
+  storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
+  capture: ['/dashboard/messaging/start', '/dashboard/messaging/respond', '/dashboard/messaging/cancel', '/dashboard/messaging/scope'],
+  embed_chunks: ['/v1/source/index/embed'],
+} as const;
+export type EngineForwardedKind = keyof typeof ENGINE_FORWARDED_ROUTES;
+
+export interface EngineForwardedRequest {
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export interface EngineForwardedResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
 export const ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
 export const ENGINE_DASHBOARD_SAMPLES_MAX = 500;
 
@@ -57,11 +73,7 @@ export type EngineCommand =
   | { kind: 'reload'; target: EngineReloadKind; corpora?: string[] }
   | { kind: 'archive_changed' }
   | { kind: 'dashboard_samples'; samples: Record<string, unknown>[] }
-  | { kind: 'delete_source_data'; source: string; body: Record<string, unknown> }
-  | { kind: 'tier_override'; body: Record<string, unknown> }
-  | { kind: 'capture'; operation: EngineCaptureOperation; body: Record<string, unknown> }
-  | { kind: 'storage_registry'; operation: EngineStorageRegistryOperation; body: Record<string, unknown> }
-  | { kind: 'embed_chunks'; body: Record<string, unknown> }
+  | { kind: EngineForwardedKind; request: EngineForwardedRequest; frontPid?: number }
   | { kind: 'sync_now'; source: string; manual: boolean }
   | { kind: 'start_approved'; source: string }
   | { kind: 'owner_busy'; resource: string }
@@ -125,11 +137,38 @@ function dashboardSample(value: unknown): boolean {
   return typeof sample.corpus_id === 'string' && typeof sample.source_id === 'string';
 }
 
-function body(value: unknown): Record<string, unknown> {
-  const record = asRecord(value ?? {});
-  if (!record) throw new EngineCommandError(400, 'A command body must be an object.');
-  if (JSON.stringify(record).length > ENGINE_BODY_MAX_BYTES) throw new EngineCommandError(413, 'The command body is too large.');
-  return record;
+function forwardedRequest(kind: EngineForwardedKind, value: unknown): EngineForwardedRequest {
+  const request = asRecord(value);
+  const path = request?.path;
+  if (typeof path !== 'string' || !(ENGINE_FORWARDED_ROUTES[kind] as readonly string[]).includes(path)) {
+    throw new EngineCommandError(400, `${kind} does not carry that route.`);
+  }
+  const headers = asRecord(request!.headers);
+  if (!headers || Object.values(headers).some((entry) => typeof entry !== 'string')) throw new EngineCommandError(400, 'Forwarded headers must be strings.');
+  const body = request!.body;
+  if (typeof body !== 'string') throw new EngineCommandError(400, 'A forwarded body is text.');
+  if (body.length > ENGINE_BODY_MAX_BYTES) throw new EngineCommandError(413, 'The command body is too large.');
+  return { path, headers: headers as Record<string, string>, body };
+}
+
+/** The route a forwarded command carries, as a request the background's own handler serves. */
+export function forwardedRequestToRequest(origin: string, forwarded: EngineForwardedRequest): Request {
+  return new Request(origin + forwarded.path, { method: 'POST', headers: forwarded.headers, body: forwarded.body });
+}
+
+/** Headers that belong to the hop, not to the request. */
+const HOP_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'upgrade']);
+
+export async function requestToForwarded(request: Request): Promise<EngineForwardedRequest> {
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, name) => { if (!HOP_HEADERS.has(name.toLowerCase())) headers[name] = value; });
+  return { path: new URL(request.url).pathname, headers, body: await request.text() };
+}
+
+export async function responseToForwarded(response: Response): Promise<EngineForwardedResponse> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, name) => { if (!HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== 'set-cookie') headers[name] = value; });
+  return { status: response.status, headers, body: await response.text() };
 }
 
 /** Validate one envelope from the wire. Anything unexpected is a 400; nothing is coerced. */
@@ -159,23 +198,15 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       }
       return { id, command: { kind, samples: samples as Record<string, unknown>[] } };
     }
-    case 'delete_source_data': {
-      const source = command!.source;
-      if (typeof source !== 'string' || !SOURCE.test(source)) fail('delete_source_data needs a source.');
-      return { id, command: { kind, source: source as string, body: body(command!.body) } };
-    }
+    case 'delete_source_data':
     case 'tier_override':
+    case 'storage_registry':
+    case 'capture':
     case 'embed_chunks':
-      return { id, command: { kind, body: body(command!.body) } };
-    case 'capture': {
-      const operation = command!.operation;
-      if (!ENGINE_CAPTURE_OPERATIONS.includes(operation as EngineCaptureOperation)) fail('capture needs a known operation.');
-      return { id, command: { kind, operation: operation as EngineCaptureOperation, body: body(command!.body) } };
-    }
-    case 'storage_registry': {
-      const operation = command!.operation;
-      if (!ENGINE_STORAGE_REGISTRY_OPERATIONS.includes(operation as EngineStorageRegistryOperation)) fail('storage_registry needs a known operation.');
-      return { id, command: { kind, operation: operation as EngineStorageRegistryOperation, body: body(command!.body) } };
+    {
+      const frontPid = command!.frontPid;
+      if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');
+      return { id, command: { kind, request: forwardedRequest(kind, command!.request), ...(frontPid !== undefined ? { frontPid: frontPid as number } : {}) } };
     }
     case 'sync_now':
     case 'start_approved': {

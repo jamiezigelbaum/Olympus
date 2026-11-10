@@ -544,7 +544,8 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
-import { createEngineFront, engineBackgroundSocketFromEnv, engineFrontRefusal, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, type EngineFront } from '../engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, engineFrontRefusal, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory } from '../engine-split/front-history.ts';
 
@@ -2751,6 +2752,9 @@ export async function main(): Promise<void> {
     return 'ready';
   };
   let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
+  // The restart a source-data delete asks for. In the split's background, a
+  // delete the front forwarded waits for the front to end first.
+  let restartForDelete: (request?: ModelKeyReloadRequest) => boolean = (request) => requestModelReload(request);
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -6278,7 +6282,7 @@ export async function main(): Promise<void> {
             // check it before deleting anything.
             workerRestart: {
               canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
-              request: (reload) => requestModelReload(reload),
+              request: (reload) => restartForDelete(reload),
             },
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
@@ -7199,6 +7203,20 @@ export async function main(): Promise<void> {
   // stopped (worker-transport.ts).
   // The split's background serves no HTTP: the worker socket and port are the front's.
   const listens = engineRole !== 'background';
+  // The split's front: owner actions that write background-owned data are
+  // forwarded behind the front's own authorization (engine-split/runtime.ts),
+  // and a source-data delete closes the gate on every read first.
+  const frontGate = engineFront ? createFrontGate() : undefined;
+  const frontRoutes = engineFront ? createEngineFrontRoutes({
+    client: engineFront.client,
+    gate: frontGate!,
+    restartFront: () => {
+      if (!requestModelReload()) console.warn('[engine-split] the front could not restart after a source-data delete; it answers "restarting" until it is restarted.');
+    },
+  }) : undefined;
+  const frontWorkerFetch = frontRoutes
+    ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
+    : worker.fetch;
   if (listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
   const socketPath = listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
@@ -7247,15 +7265,17 @@ export async function main(): Promise<void> {
           },
         })),
         // The brief route must pass both bearer and owner-socket authorization.
-        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
+        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
   if (engineFront) {
-    // Owner actions that have no command yet are refused, not written from the front.
+    // Owner actions that have no command yet are refused, not written from the
+    // front; every other request passes the read gate.
     const serveFront = serverOptions.fetch;
+    const gated = frontGate!.wrap(serveFront);
     serverOptions.fetch = ((request: Request, server: Parameters<typeof serveFront>[1]) =>
-      engineFrontRefusal(request) ?? serveFront(request, server)) as typeof serveFront;
+      engineFrontRefusal(request) ?? gated(request, server)) as typeof serveFront;
   }
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
@@ -7433,6 +7453,11 @@ export async function main(): Promise<void> {
         activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
       ).sources);
     };
+    // A forwarded owner action runs as the route that served it before, behind
+    // the front's authorization: the route's handler checks the body itself.
+    const runForwarded = async (request: EngineForwardedRequest) =>
+      responseToForwarded(await worker.fetch(forwardedRequestToRequest('http://olympus-worker.internal', request)));
+    let deleteFromFront: number | undefined;
     const commands = startEngineBackgroundServer({
       socketPath: engineSocketPath!,
       authToken,
@@ -7483,6 +7508,15 @@ export async function main(): Promise<void> {
           if (resource === snifferResource) tierSniffer?.wake();
           return { busy: false };
         },
+        delete_source_data: async ({ request, frontPid }) => {
+          deleteFromFront = frontPid;
+          try { return await runForwarded(request); }
+          finally { deleteFromFront = undefined; }
+        },
+        tier_override: ({ request }) => runForwarded(request),
+        storage_registry: ({ request }) => runForwarded(request),
+        capture: ({ request }) => runForwarded(request),
+        embed_chunks: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         judge_boost: () => ({ applied: false, reason: 'matched_first_not_in_build' }),
       },
@@ -7500,6 +7534,20 @@ export async function main(): Promise<void> {
         captures: dashboardCaptureRuntime(),
       }),
     });
+    // A delete the front forwarded: stop answering ready (so no new front
+    // starts against this background), wait out the front that asked, which
+    // restarts and so closes every connection it held on the account's
+    // files, then restart; the boot deletes the marked account.
+    restartForDelete = (request) => {
+      const frontPid = deleteFromFront;
+      if (frontPid === undefined) return requestModelReload(request);
+      commands.markStopping();
+      void waitForProcessExit(frontPid).then((ended) => {
+        if (!ended) console.warn('[engine-split] the front did not end within a minute of a source-data delete; restarting to delete anyway.');
+        requestModelReload(request);
+      });
+      return true;
+    };
     commands.markReady();
     engineBackground = { stop: () => { status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
