@@ -1803,6 +1803,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const radio = current ? form?.querySelector<HTMLInputElement>(`input[name="choice"][value="${current}"]`) : null;
     if (radio) radio.checked = true;
   };
+  const echoJudgeCap = (form: HTMLFormElement, scope: ParentNode): void => {
+    const value = Number(form.querySelector<HTMLInputElement>('input[name="cap_dollars"]')?.value.trim() || NaN);
+    const text = Number.isFinite(value) && value >= 0 ? value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'not set';
+    scope.querySelectorAll<HTMLElement>('[data-judge-cap-echo]').forEach(echo => { echo.textContent = text; });
+  };
+  const onJudgeCapInput = (event: Event): void => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.name !== 'cap_dollars') return;
+    const form = input.closest<HTMLFormElement>('form[data-judge-choice]');
+    if (form) echoJudgeCap(form, form);
+  };
   const onJudgePick = (event: Event): void => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.name !== 'choice') return;
@@ -1814,6 +1825,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (cap && auto) cap.value = auto;
     if (input.value === form.dataset.judgeCurrent) return;
     const dialog = judgeDialog(form, input.value);
+    // The confirmation states the limit that will be sent: the field's current value.
+    if (dialog) echoJudgeCap(form, dialog);
     if (dialog && typeof dialog.showModal === 'function' && !dialog.open) dialog.showModal();
   };
   const onJudgeDialogClick = (event: Event): void => {
@@ -1919,6 +1932,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
   root.addEventListener('change', onJudgePick);
+  root.addEventListener('input', onJudgeCapInput);
   root.addEventListener('click', onJudgeDialogClick);
   root.addEventListener('cancel', onJudgeDialogCancel, true);
   root.addEventListener('change', onClientFileChange);
@@ -1964,6 +1978,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onJudgePick);
+    root.removeEventListener('input', onJudgeCapInput);
     root.removeEventListener('click', onJudgeDialogClick);
     root.removeEventListener('cancel', onJudgeDialogCancel, true);
     root.removeEventListener('change', onClientFileChange);

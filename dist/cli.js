@@ -120578,12 +120578,12 @@ function judgeArchiveEstimate(count, model, observed = {}) {
       heldFraction,
       observed: observed.heldFraction !== undefined,
       hours: secondRoundItems / VENICE_JUDGE_ESTIMATE.itemsPerMinute / 60,
-      dollars: cloudDollars === null || items === 0 ? null : cloudDollars * secondRoundItems / items
+      dollars: cloudDollars === null ? null : items === 0 ? 0 : cloudDollars * secondRoundItems / items
     }
   };
 }
 function judgeDefaultCapDollars(estimateDollars) {
-  return estimateDollars === null ? null : Math.max(1, Math.ceil(estimateDollars * 1.25));
+  return estimateDollars === null ? JUDGE_DEFAULT_CAP_FLOOR_DOLLARS : Math.max(1, Math.ceil(estimateDollars * 1.25));
 }
 function judgeChoiceUsesVenice(choice) {
   return choice !== "local";
@@ -120771,7 +120771,7 @@ function judgeCapMicros(capDollars) {
     throw new Error("Enter a spending limit in dollars.");
   return cap;
 }
-var JUDGE_PRICE_DATE = "2026-11-06", JUDGE_PRICES, LOCAL_JUDGE_MEASUREMENT, JUDGE_NIGHT_HOURS = 8, JUDGE_RECOMMENDATION_NIGHTS = 14, VENICE_JUDGE_ESTIMATE, SECOND_ROUND_HELD_ASSUMPTION = 0.16, JUDGE_CHOICES;
+var JUDGE_PRICE_DATE = "2026-11-06", JUDGE_PRICES, LOCAL_JUDGE_MEASUREMENT, JUDGE_NIGHT_HOURS = 8, JUDGE_RECOMMENDATION_NIGHTS = 14, VENICE_JUDGE_ESTIMATE, SECOND_ROUND_HELD_ASSUMPTION = 0.16, JUDGE_DEFAULT_CAP_FLOOR_DOLLARS = 5, JUDGE_CHOICES;
 var init_judge_spending = __esm(() => {
   init_file_lease();
   init_atomic_file();
@@ -153114,6 +153114,21 @@ function mountDashboardController(options) {
     if (radio)
       radio.checked = true;
   };
+  const echoJudgeCap = (form, scope) => {
+    const value2 = Number(form.querySelector('input[name="cap_dollars"]')?.value.trim() || NaN);
+    const text3 = Number.isFinite(value2) && value2 >= 0 ? value2.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "not set";
+    scope.querySelectorAll("[data-judge-cap-echo]").forEach((echo) => {
+      echo.textContent = text3;
+    });
+  };
+  const onJudgeCapInput = (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.name !== "cap_dollars")
+      return;
+    const form = input.closest("form[data-judge-choice]");
+    if (form)
+      echoJudgeCap(form, form);
+  };
   const onJudgePick = (event) => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.name !== "choice")
@@ -153128,6 +153143,8 @@ function mountDashboardController(options) {
     if (input.value === form.dataset.judgeCurrent)
       return;
     const dialog = judgeDialog(form, input.value);
+    if (dialog)
+      echoJudgeCap(form, dialog);
     if (dialog && typeof dialog.showModal === "function" && !dialog.open)
       dialog.showModal();
   };
@@ -153272,6 +153289,7 @@ function mountDashboardController(options) {
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
   root.addEventListener("change", onJudgePick);
+  root.addEventListener("input", onJudgeCapInput);
   root.addEventListener("click", onJudgeDialogClick);
   root.addEventListener("cancel", onJudgeDialogCancel, true);
   root.addEventListener("change", onClientFileChange);
@@ -153322,6 +153340,7 @@ function mountDashboardController(options) {
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
     root.removeEventListener("change", onJudgePick);
+    root.removeEventListener("input", onJudgeCapInput);
     root.removeEventListener("click", onJudgeDialogClick);
     root.removeEventListener("cancel", onJudgeDialogCancel, true);
     root.removeEventListener("change", onClientFileChange);
@@ -164885,7 +164904,7 @@ function renderJudgeChoice(view3, options) {
   const dialog = (pick2, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick2}" aria-labelledby="judge-dialog-${pick2}"><h3 id="judge-dialog-${pick2}">${escapeHtml2(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
   const limitLine = (pick2) => {
     const cap = ownCap ?? defaults[pick2];
-    return cap === null || cap === undefined ? "" : `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
+    return `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
   };
   const found = `the ${items.toLocaleString("en-US")} items found so far`;
   const dialogs = (status.choice === "local" ? "" : dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton)) + (status.choice === "local-then-venice" ? "" : dialog("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecond, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? "" : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine("local-then-venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondButton)) + (status.choice === "venice" ? "" : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: ${judgeMoney(estimate.cloudDollars).toLowerCase()} for ${found}`}.</p>${limitLine("venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton));

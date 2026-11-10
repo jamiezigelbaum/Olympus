@@ -169,7 +169,7 @@ test('estimates use the observed held share or the stated assumption, priced lik
   expect(observed.measuredHours).toBeCloseTo(54_600 / 22 / 60);
   expect(judgeDefaultCapDollars(8.736)).toBe(11);
   expect(judgeDefaultCapDollars(0.70)).toBe(1);
-  expect(judgeDefaultCapDollars(null)).toBeNull();
+  expect(judgeDefaultCapDollars(null)).toBe(5);
 });
 
 test('the second round spends under the same cap and stops the same way', async () => {
@@ -245,4 +245,42 @@ test('the screen offers three choices with cents, measured speed, the default li
   expect(own).toContain('name="cap_dollars" min="0" step="0.01" value="3"');
   expect(own).not.toContain('data-cap-auto');
   expect(own).toContain('Spent or reserved: $0.00. Remaining: $3.00.');
+});
+
+test('a fresh install with no items still has a usable limit for the double-check (#1136 review)', () => {
+  const view = buildDashboardPreviewView('ready'); view.sources.forEach(source => { source.coverage.stored_items = 0; source.coverage.indexed_items = 0; });
+  const html = renderJudgeChoice(view, { controlSessionCsrfToken: 'synthetic', judgeSetup: { choice: 'local', capDollars: 0, spentDollars: 0, remainingDollars: 0, stop: null, cloudModel: 'qwen3-6-35b-a3b', cloudAvailable: true } });
+  const value = html.match(/name="cap_dollars" min="0" step="0.01" value="([^"]*)"/)?.[1];
+  expect(Number(value)).toBeGreaterThan(0);
+  expect(html).toMatch(/data-cap-local-then-venice="[1-9]\d*"/);
+  expect(html).toMatch(/data-judge-dialog="local-then-venice"[\s\S]*data-judge-cap-echo/);
+  // A price-less estimate falls back to a small stated floor, never an empty limit.
+  expect(judgeDefaultCapDollars(null)).toBe(5);
+});
+
+test('the confirmation states the limit the owner typed, not the saved one (#1136 review)', async () => {
+  const { Window } = await import('happy-dom');
+  const { mountDashboardController } = await import('../src/control-ui/browser-controller.ts');
+  const browser = new Window({ url: 'http://localhost/dashboard?keys' });
+  const keys = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'HTMLDialogElement'] as const;
+  const previous = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const key of keys) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value: browser[key] });
+  let dispose = () => {};
+  try {
+    const html = renderJudgeChoice(buildDashboardPreviewView('ready'), { controlSessionCsrfToken: 'synthetic', judgeSetup: { choice: 'local-then-venice', capDollars: 3, spentDollars: 0, remainingDollars: 3, stop: null, cloudModel: 'qwen3-6-35b-a3b', cloudAvailable: true } });
+    const root = document.createElement('div'); root.innerHTML = html; document.body.append(root);
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, pollIntervalMs: -1, returnUrl: 'http://localhost/dashboard?keys', navigate() {},
+      refresh: async () => ({ status: 200, title: 'Keys', body: html, controller: 'dashboard', can_write: true, signature: html, poll_interval_ms: -1 }),
+      transport: { control: async () => ({ status: 200, body: { ok: true, status_message: 'Saved' } }) },
+    }); dispose = () => controller.dispose();
+    const cap = root.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!;
+    cap.value = '300'; cap.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector<HTMLInputElement>('input[value="venice"]')!.click();
+    const confirm = root.querySelector<HTMLDialogElement>('dialog[data-judge-dialog="venice"]')!;
+    expect(confirm.open).toBe(true);
+    expect(confirm.querySelector('[data-judge-cap-echo]')!.textContent).toBe('$300.00');
+  } finally {
+    dispose(); browser.close();
+    for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }
+  }
 });

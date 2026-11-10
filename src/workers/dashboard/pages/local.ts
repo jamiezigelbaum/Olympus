@@ -737,8 +737,9 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
     `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>`
     + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(S.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
   const limitLine = (pick: 'local-then-venice' | 'venice') => {
+    // The controller refills the echo from the limit field when this opens, so it states what will be sent.
     const cap = ownCap ?? defaults[pick];
-    return cap === null || cap === undefined ? '' : `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
+    return `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
   };
   const found = `the ${items.toLocaleString('en-US')} items found so far`;
   const dialogs = (status.choice === 'local' ? '' : dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton))

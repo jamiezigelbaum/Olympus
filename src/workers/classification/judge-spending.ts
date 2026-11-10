@@ -46,11 +46,13 @@ export function judgeArchiveEstimate(count: number, model: string, observed: Jud
     cloudDollars,
     secondRound: { items: secondRoundItems, heldFraction, observed: observed.heldFraction !== undefined,
       hours: secondRoundItems / VENICE_JUDGE_ESTIMATE.itemsPerMinute / 60,
-      dollars: cloudDollars === null || items === 0 ? null : cloudDollars * secondRoundItems / items } };
+      dollars: cloudDollars === null ? null : items === 0 ? 0 : cloudDollars * secondRoundItems / items } };
 }
+/** With no estimate to go on, the limit starts small; the owner can raise it. */
+export const JUDGE_DEFAULT_CAP_FLOOR_DOLLARS = 5;
 /** The limit a Venice choice starts with when the owner has not set one: the estimate plus 25%, rounded up to the dollar. */
-export function judgeDefaultCapDollars(estimateDollars: number | null): number | null {
-  return estimateDollars === null ? null : Math.max(1, Math.ceil(estimateDollars * 1.25));
+export function judgeDefaultCapDollars(estimateDollars: number | null): number {
+  return estimateDollars === null ? JUDGE_DEFAULT_CAP_FLOOR_DOLLARS : Math.max(1, Math.ceil(estimateDollars * 1.25));
 }
 /** Whether a choice sends anything to Venice. */
 export function judgeChoiceUsesVenice(choice: JudgeChoice): boolean { return choice !== 'local'; }
