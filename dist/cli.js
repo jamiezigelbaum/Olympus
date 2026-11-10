@@ -31550,15 +31550,19 @@ var init_delphi_scorer = __esm(() => {
 
 // src/workers/classification/sniffer.ts
 import { createHash as createHash19 } from "node:crypto";
+function measuredSnifferDecisionBar(lane) {
+  const id = lane.cacheModelId ?? lane.modelId;
+  const served = lane.servedWeights;
+  const bar = SNIFFER_DECISION_BARS.find(([model, file]) => id === model || id.startsWith(`${model}:`) || served !== undefined && new RegExp(`^${file}${QUANTIZED_GGUF}`, "i").test(served))?.[2];
+  return validDecisionBar(bar) ? bar : undefined;
+}
 function validDecisionBar(bar) {
   return typeof bar === "number" && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
 }
 function snifferDecisionBar(lane) {
   if (validDecisionBar(lane.decisionBar))
     return lane.decisionBar;
-  const id = lane.cacheModelId ?? lane.modelId;
-  const measured = SNIFFER_DECISION_BARS.find(([model]) => id === model || id.startsWith(`${model}:`))?.[1];
-  return validDecisionBar(measured) ? measured : SNIFFER_DECISION_PRIVATE_BAR;
+  return measuredSnifferDecisionBar(lane) ?? SNIFFER_DECISION_PRIVATE_BAR;
 }
 function snifferDecisionPrivateChance(verdict) {
   if (verdict.failSafe || verdict.category !== SNIFFER_DECISION_CATEGORY || !isUnitConfidence(verdict.confidence))
@@ -31862,7 +31866,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, QUANTIZED_GGUF = "(?:-(?:ud-)?(?:i?q\\d\\w*|bf16|f16|f32))?(?:-\\d{5}-of-\\d{5})?\\.gguf$", OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -31892,8 +31896,8 @@ var init_sniffer = __esm(() => {
     }
   };
   SNIFFER_DECISION_BARS = [
-    [QWEN35_4B.modelId, 0.15],
-    [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374]
+    [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
+    [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.374]
   ];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
@@ -152573,6 +152577,13 @@ async function exclusive(state, run2) {
   });
   return result;
 }
+function servedWeightsName(props) {
+  const path = props && typeof props === "object" ? props.model_path : undefined;
+  if (typeof path !== "string" || !path.trim())
+    return;
+  const name = path.trim().split(/[\\/]/).pop();
+  return name ? name.slice(0, 200) : undefined;
+}
 function createDecisionSnifferModel(lane, full, options = {}) {
   lane.snifferMode = initialSnifferMode(lane.profile);
   if (!snifferLaneOffersDecision(lane))
@@ -152602,6 +152613,27 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       throw error2 instanceof NativeRequestError ? error2 : new NativeRequestError(false, timeout.aborted);
     }
   };
+  const readWeights = async () => {
+    try {
+      const response = await fetchModelEndpoint(fetch, `${endpoint}/props`, {
+        method: "GET",
+        headers: options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {},
+        signal: AbortSignal.timeout(1e4)
+      });
+      return response.ok ? servedWeightsName(await response.json()) : undefined;
+    } catch {
+      return;
+    }
+  };
+  const noteBar = () => {
+    lane.servedWeights = sharedState.weights;
+    if (sharedState.barNoted || lane.snifferMode !== "decision")
+      return;
+    sharedState.barNoted = true;
+    if (lane.decisionBar !== undefined || measuredSnifferDecisionBar(lane) !== undefined)
+      return;
+    options.log?.(`Olympus privacy judge: no measured decision bar for ${sharedState.weights ? `weights ${sharedState.weights}` : `model ${lane.modelId}`}; items are held Private at P(Private) ${SNIFFER_DECISION_PRIVATE_BAR}. Measure one with eval/calibration (README, "Measuring a new judge model").`);
+  };
   let shapeKey = "";
   let shape;
   let written;
@@ -152616,8 +152648,13 @@ function createDecisionSnifferModel(lane, full, options = {}) {
   })).prompt;
   const prepare = async () => {
     if (lane.profile.snifferMode === "decision") {
+      if (!sharedState.weightsRead) {
+        sharedState.weights = await readWeights();
+        sharedState.weightsRead = true;
+      }
       lane.snifferMode = "decision";
       lane.rejudgeReady = true;
+      noteBar();
       return;
     }
     if (sharedState.supported === undefined || !sharedState.supported && Date.now() - (sharedState.probedAt ?? 0) >= 60000) {
@@ -152629,6 +152666,10 @@ function createDecisionSnifferModel(lane, full, options = {}) {
         sharedState.supported = replyTokens(reply).length > 0;
         if (sharedState.supported)
           await decisionDivergence(post2);
+        if (sharedState.supported) {
+          sharedState.weights = await readWeights();
+          sharedState.weightsRead = true;
+        }
         sharedState.rejudgeReady = true;
       } catch (error2) {
         sharedState.supported = false;
@@ -152639,6 +152680,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
     }
     lane.snifferMode = sharedState.supported ? "decision" : "full";
     lane.rejudgeReady = sharedState.rejudgeReady !== false;
+    noteBar();
   };
   return {
     async prepareSniffer(nextSignal) {
@@ -234208,7 +234250,7 @@ function createTierSnifferModel(input) {
     return createDecisionSnifferModel(lane, createDelphiAnalystModel(new DelphiClient(config2, undefined, { resolveSecretRef: () => apiKey }), {
       profile: "source_answer",
       preflightTimeoutMs: 5000
-    }), { apiKey });
+    }), { apiKey, log: (line2) => console.warn(line2) });
   }
   if (lane.kind === "venice" && profile.provider === "venice") {
     const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Tier sniffer Venice model profile", bootSecretOptions(input.bootSecretResolver, [lane.profileId], ["classification"], { id: lane.profileId, profile }));
