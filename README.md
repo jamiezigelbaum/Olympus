@@ -510,7 +510,7 @@ Olympus supports one connected account per provider.
 
 The full capability list (scopes, dependencies, provider limits, formats) is
 generated from the public roster in
-[docs/SOURCE_CAPABILITIES.md](https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOURCE_CAPABILITIES.md). Model-lane
+[docs/SOURCE_CAPABILITIES.md](docs/SOURCE_CAPABILITIES.md). Model-lane
 credentials such as Venice are privacy-mode prerequisites, not sources.
 
 Tokens live in an encrypted local secret store by default, or in an explicitly
