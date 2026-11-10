@@ -86,7 +86,10 @@ test('the scan is bounded: past the cap, a buried match is not looked for', asyn
   let pages = 0;
   let rowsRead = 0;
   const spy = (sql: string) => {
-    if (!sql.includes('LIMIT ? OFFSET ?')) return original(sql);
+    // The bounded first try ranks only the best rows and, on these tied
+    // copies, is discarded for the full ranking (#1242): count the pages
+    // whose candidates the scan looked at.
+    if (!sql.includes('LIMIT ? OFFSET ?') || sql.includes('MIN(top.rank)')) return original(sql);
     // An uncached statement, so each page is wrapped once.
     const statement = db.prepare(sql);
     const all = statement.all.bind(statement);
