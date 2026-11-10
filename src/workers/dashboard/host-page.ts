@@ -595,6 +595,7 @@ function hostProgram(input: {
         const valid = typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
         sentence.textContent = valid ? input.updateWords.notice.replace('{version}', version) : '';
         notice.setAttribute('data-update-state', valid ? 'available' : 'none');
+        notice.setAttribute('data-update-version', valid ? version : '');
         const button = notice.querySelector<HTMLElement>('[data-update-now]');
         if (button) button.hidden = !valid;
         notice.hidden = !valid;

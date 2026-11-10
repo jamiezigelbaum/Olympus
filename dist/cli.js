@@ -163237,7 +163237,7 @@ function renderUpdateNotice(input) {
     rootId: `${prefix}-notice`,
     words: WORDS
   };
-  return `<section class="upd" id="${prefix}-notice" data-update-notice data-update-state="${view3?.state ?? "none"}"${view3 ? "" : " hidden"} aria-live="polite">` + `<div class="upd-row"><p class="upd-title" data-update-text><strong data-update-title>${esc2(view3?.title ?? "")}</strong>` + `<span class="upd-detail" data-update-detail${view3?.detail ? "" : " hidden"}>${view3?.detail ? ` · ${esc2(view3.detail)}` : ""}</span></p>` + (input.selfUpdate ? `<button class="btn primary upd-now" type="button" data-update-now${offer ? "" : " hidden"}>${esc2(C2.updateNow)}</button>` : "") + "</div>" + `<div class="upd-bar" data-update-bar role="progressbar" aria-valuemin="0" aria-valuemax="4" aria-valuenow="${view3?.bar ?? 0}"${running ? "" : " hidden"}><span style="width:${(view3?.bar ?? 0) * 25}%"></span></div>` + `<p class="upd-note" data-update-note${view3?.note ? "" : " hidden"}>${esc2(view3?.note ?? "")}</p>` + `<details class="upd-terminal" data-update-terminal${input.selfUpdate ? "" : " open"}${running ? " hidden" : ""}><summary>${esc2(C2.terminal)}</summary>` + `<p>${esc2(C2.terminalHow)}</p><p><code id="${prefix}-command">${esc2(input.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${esc2(C2.copy)}</button> <span class="upd-status" data-update-copy-status aria-live="polite"></span></p></details>` + (input.deferScript ? "" : renderScript(config2)) + "</section>";
+  return `<section class="upd" id="${prefix}-notice" data-update-notice data-update-state="${view3?.state ?? "none"}" data-update-version="${esc2(input.available?.version ?? "")}"${view3 ? "" : " hidden"} aria-live="polite">` + `<div class="upd-row"><p class="upd-title" data-update-text><strong data-update-title>${esc2(view3?.title ?? "")}</strong>` + `<span class="upd-detail" data-update-detail${view3?.detail ? "" : " hidden"}>${view3?.detail ? ` · ${esc2(view3.detail)}` : ""}</span></p>` + (input.selfUpdate ? `<button class="btn primary upd-now" type="button" data-update-now${offer ? "" : " hidden"}>${esc2(C2.updateNow)}</button>` : "") + "</div>" + `<div class="upd-bar" data-update-bar role="progressbar" aria-valuemin="0" aria-valuemax="4" aria-valuenow="${view3?.bar ?? 0}"${running ? "" : " hidden"}><span style="width:${(view3?.bar ?? 0) * 25}%"></span></div>` + `<p class="upd-note" data-update-note${view3?.note ? "" : " hidden"}>${esc2(view3?.note ?? "")}</p>` + `<details class="upd-terminal" data-update-terminal${input.selfUpdate ? "" : " open"}${running ? " hidden" : ""}><summary>${esc2(C2.terminal)}</summary>` + `<p>${esc2(C2.terminalHow)}</p><p><code id="${prefix}-command">${esc2(input.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${esc2(C2.copy)}</button> <span class="upd-status" data-update-copy-status aria-live="polite"></span></p></details>` + (input.deferScript ? "" : renderScript(config2)) + "</section>";
 }
 function renderScript(config2) {
   return `<script>(${updateNoticeProgram.toString()})(${json(config2)});</script>`;
@@ -163257,6 +163257,7 @@ function updateNoticeProgram(config2) {
   const words2 = config2.words;
   const q = (selector) => root.querySelector(selector);
   const fillIn = (template, values) => template.replace(/\{(\w+)\}/g, (_m, key2) => "" + (values[key2] ?? ""));
+  const available = () => root.getAttribute("data-update-version") || config2.available;
   let csrf = config2.csrfToken;
   let local = config2.localSession;
   let polling = false;
@@ -163314,9 +163315,9 @@ function updateNoticeProgram(config2) {
     } else if (status.state === "done" && status.version) {
       show("done", fillIn(words2.done, { version: status.version }), "", "", 0, false);
     } else if (status.state === "rolled_back" && status.to && status.from) {
-      show("rolled_back", fillIn(words2.rolledBack, { to: status.to, from: status.from }), "", "", 0, !!config2.available);
+      show("rolled_back", fillIn(words2.rolledBack, { to: status.to, from: status.from }), "", "", 0, !!available());
     } else if (status.state === "failed") {
-      show("failed", words2.failures[status.reason || ""] || words2.failedFallback, "", "", 0, !!config2.available);
+      show("failed", words2.failures[status.reason || ""] || words2.failedFallback, "", "", 0, !!available());
     }
   }
   async function unlock() {
@@ -163437,11 +163438,11 @@ function updateNoticeProgram(config2) {
           startUpdate(button);
           return;
         }
-        keep(resumeKey, config2.available);
+        keep(resumeKey, "1");
         window.location.reload();
       });
     });
-    if (resume && resume === config2.available && local && csrf && !button.hidden)
+    if (resume && local && csrf && !button.hidden)
       startUpdate(button);
   }
   if (config2.running && config2.selfUpdate) {
@@ -164101,6 +164102,7 @@ function hostProgram(input, bridge, mount) {
         const valid = typeof version2 === "string" && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version2);
         sentence.textContent = valid ? input.updateWords.notice.replace("{version}", version2) : "";
         notice.setAttribute("data-update-state", valid ? "available" : "none");
+        notice.setAttribute("data-update-version", valid ? version2 : "");
         const button = notice.querySelector("[data-update-now]");
         if (button)
           button.hidden = !valid;

@@ -420,11 +420,11 @@ describe('the notice on Home and Settings', () => {
       (before.window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
       await waitFor(() => before.reloads() === 1, { description: 'reload after the new session' });
       expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: null }]);
-      expect(before.window.sessionStorage.getItem('olympus-update-now')).toBe('1.5.1');
+      expect(before.window.sessionStorage.getItem('olympus-update-now')).toBe('1');
     } finally { await before.window.happyDOM.close(); }
     // The reloaded page holds the local session everywhere and carries on.
     calls.length = 0;
-    const after = open(page('local-c', true), '1.5.1');
+    const after = open(page('local-c', true), '1');
     try {
       await waitFor(() => calls.length === 1, { description: 'update started after the reload' });
       expect(calls).toEqual([{ url: DASHBOARD_SELF_UPDATE_PATHS.start, csrf: 'local-c' }]);
@@ -438,6 +438,28 @@ describe('the notice on Home and Settings', () => {
       await new Promise(resolve => setTimeout(resolve, 20));
       expect(calls).toEqual([]);
     } finally { await later.window.happyDOM.close(); }
+  });
+
+  test('Home: an update found after the page was drawn still starts after the session reload', async () => {
+    // The page is drawn before the delayed update check; Home's own health
+    // read then shows Update now. The click must survive the reload.
+    const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+    let reloads = 0;
+    Object.defineProperty(window.location, 'reload', { value: () => { reloads++; } });
+    Object.defineProperty(window, 'setInterval', { value: () => 1 });
+    Object.defineProperty(window, 'fetch', { value: async (url: string) => url === '/v1/health'
+      ? new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }))
+      : new window.Response(JSON.stringify({ csrf_token: 'local-c' })) });
+    try {
+      window.document.write(renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', selfUpdate: true, csrfToken: 'bearer-c', localSession: false }));
+      window.document.close();
+      const button = window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement;
+      await waitFor(() => !button.hidden, { description: 'Update now shown by the health read' });
+      expect(window.document.querySelector('[data-update-notice]')!.getAttribute('data-update-version')).toBe('1.5.1');
+      button.click();
+      await waitFor(() => reloads === 1, { description: 'reload after the new session' });
+      expect(window.sessionStorage.getItem('olympus-update-now')).toBe('1');
+    } finally { await window.happyDOM.close(); }
   });
 
   test('a refused update shows the reason beside the button', async () => {

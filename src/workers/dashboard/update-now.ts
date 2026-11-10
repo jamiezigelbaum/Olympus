@@ -96,7 +96,7 @@ export function renderUpdateNotice(input: UpdateNoticeInput & { deferScript?: bo
     rootId: `${prefix}-notice`,
     words: WORDS,
   };
-  return `<section class="upd" id="${prefix}-notice" data-update-notice data-update-state="${view?.state ?? 'none'}"${view ? '' : ' hidden'} aria-live="polite">`
+  return `<section class="upd" id="${prefix}-notice" data-update-notice data-update-state="${view?.state ?? 'none'}" data-update-version="${esc(input.available?.version ?? '')}"${view ? '' : ' hidden'} aria-live="polite">`
     + `<div class="upd-row"><p class="upd-title" data-update-text><strong data-update-title>${esc(view?.title ?? '')}</strong>`
     + `<span class="upd-detail" data-update-detail${view?.detail ? '' : ' hidden'}>${view?.detail ? ` · ${esc(view.detail)}` : ''}</span></p>`
     + (input.selfUpdate ? `<button class="btn primary upd-now" type="button" data-update-now${offer ? '' : ' hidden'}>${esc(C.updateNow)}</button>` : '')
@@ -157,6 +157,9 @@ function updateNoticeProgram(config: {
   const q = <T extends Element>(selector: string) => root.querySelector<T>(selector);
   const fillIn = (template: string, values: Record<string, string | number>) =>
     template.replace(/\{(\w+)\}/g, (_m: string, key: string) => '' + (values[key] ?? ''));
+  // The version on offer: Home's own update check can find one after the page
+  // was drawn, and writes it to data-update-version (host-page refreshUpdate).
+  const available = () => root!.getAttribute('data-update-version') || config.available;
   let csrf = config.csrfToken;
   let local = config.localSession;
   let polling = false;
@@ -201,9 +204,9 @@ function updateNoticeProgram(config: {
     } else if (status.state === 'done' && status.version) {
       show('done', fillIn(words.done, { version: status.version }), '', '', 0, false);
     } else if (status.state === 'rolled_back' && status.to && status.from) {
-      show('rolled_back', fillIn(words.rolledBack, { to: status.to, from: status.from }), '', '', 0, !!config.available);
+      show('rolled_back', fillIn(words.rolledBack, { to: status.to, from: status.from }), '', '', 0, !!available());
     } else if (status.state === 'failed') {
-      show('failed', words.failures[status.reason || ''] || words.failedFallback, '', '', 0, !!config.available);
+      show('failed', words.failures[status.reason || ''] || words.failedFallback, '', '', 0, !!available());
     }
   }
   // async, not Promise.resolve: a page's VM may not expose the Promise global by name.
@@ -292,12 +295,14 @@ function updateNoticeProgram(config: {
       unlock().then((fresh) => {
         if (!fresh) { startUpdate(button); return; }
         // Without storage the reload still happens; a second click then starts it.
-        keep(resumeKey, config.available);
+        // The mark is the click itself, not a version: Home may have learned
+        // of the update after this page was drawn.
+        keep(resumeKey, '1');
         window.location.reload();
       });
     });
     // After that reload: the update the click asked for, once.
-    if (resume && resume === config.available && local && csrf && !button.hidden) startUpdate(button);
+    if (resume && local && csrf && !button.hidden) startUpdate(button);
   }
   // A page opened, or reloaded, while an update runs keeps following it
   // (reloading once first if that took a new session).
