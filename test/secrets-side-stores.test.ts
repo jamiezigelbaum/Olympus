@@ -28,7 +28,13 @@ import { TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/wo
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
-import { forgetSecretInSideStores, retireSecretRedactions, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
+import type { AppRequestRecord, ReleasedItem } from '../src/core/app-release-capture.ts';
+import { createReleaseCapture, noteReleasedItems, recordAppRequest, runWithReleaseCapture } from '../src/core/app-release-capture.ts';
+import { createAppsReceived } from '../src/workers/apps-received.ts';
+import { appReleaseLogDbPath, openAppReleaseLog } from '../src/core/app-release-log.ts';
+import { resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -998,6 +1004,132 @@ describe('a legacy item (never routed by a set) judged Secret', () => {
   });
 });
 
+describe('the list of what AI apps received keeps no name of an item that becomes Secret', () => {
+  const KEYS: FixtureSpec = { id: 'keys', name: `deploy ${FAKE_AWS_KEY}.txt`, text: 'Weekly notes about the deploy runbook.' };
+  const GARDEN: FixtureSpec = { id: 'garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden.' };
+  const released = (spec: FixtureSpec): ReleasedItem => ({
+    source: 'Files',
+    title: spec.name,
+    tier: 'personal',
+    corpusId: CORPORA.internal,
+    provider: PROVIDER,
+    providerItemId: spec.id,
+    locator: `fixture:/Files/${spec.name}`,
+  });
+  const request = (at: number, specs: FixtureSpec[]): AppRequestRecord => ({
+    at,
+    connection: { name: 'ChatGPT', kind: 'app' },
+    question: 'What is in my deploy notes?',
+    items: specs.map(released),
+    heldBack: 0,
+    answeredPrivately: false,
+    withheld: false,
+  });
+  /** Every stored title and locator, read without the store. */
+  function rawNames(path: string): string {
+    const raw = new Database(path, { readonly: true });
+    try {
+      return JSON.stringify(raw.query('SELECT title, locator FROM app_release_items').all());
+    } finally {
+      raw.close();
+    }
+  }
+
+  test('a title released before the item became Secret is cleared at once; a pending receipt and a restore behave', async () => {
+    const dir = workspace('olympus-secret-side-apps-');
+    const fx = fixture(dir);
+    const clock = createTestClock();
+    const logPath = join(dir, 'apps', 'app-release-log.sqlite');
+    const log = openAppReleaseLog(logPath, { now: () => clock.now() });
+    cleanups.push(() => log.close());
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [KEYS, GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    // Released to an app while it was not a secret.
+    log.record(request(clock.now(), [KEYS, GARDEN]));
+    expect(log.list()[0]!.items.map((item) => item.title)).toEqual([KEYS.name, GARDEN.name]);
+
+    // The owner marks it Secret, through the pass the worker runs.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+    const [first] = log.list();
+    expect(first!.items.map((item) => item.title)).toEqual([undefined, GARDEN.name]);
+    expect(first!.items.map((item) => item.source)).toEqual(['Files', 'Files']);
+    expect(rawNames(logPath)).not.toContain(FAKE_AWS_KEY);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+
+    // A receipt built before the change but written after it keeps no name either.
+    await clock.advance(1_000);
+    log.record(request(clock.now() - 2_000, [KEYS, GARDEN]));
+    expect(log.list().flatMap((entry) => entry.items.map((item) => item.title)).filter(Boolean)).toEqual([GARDEN.name, GARDEN.name]);
+    expect(rawNames(logPath)).not.toContain(FAKE_AWS_KEY);
+
+    // The owner says "not a secret"; the item's next listing decides it again, and a new release is named.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }, GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.itemIsSecret(identityOf('keys'))).toBe(false);
+    await clock.advance(1_000);
+    log.record(request(clock.now(), [KEYS]));
+    expect(log.list()[0]!.items.map((item) => item.title)).toEqual([KEYS.name]);
+  });
+
+  test('on a fresh install, an item made Secret before anything was recorded keeps no name from a receipt written later', async () => {
+    const dir = workspace('olympus-secret-side-apps-fresh-');
+    const fx = fixture(dir);
+    pointJobsDefaultInto(dir);
+    const clock = createTestClock();
+    const logPath = join(dir, 'apps', 'app-release-log.sqlite');
+    // The worker's list, as it starts on a computer that has recorded nothing yet.
+    const apps = createAppsReceived({ dbPath: logPath, setItemPrivate: async () => undefined, now: () => clock.now() });
+    cleanups.push(() => apps.close());
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [KEYS, GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+
+    // The owner marks it Secret before the first receipt is written.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+
+    // A receipt built before the change arrives late, through the worker's recorder.
+    await clock.advance(1_000);
+    const capture = createReleaseCapture();
+    runWithReleaseCapture(capture, () => noteReleasedItems([released(KEYS), released(GARDEN)]));
+    recordAppRequest({ caller: { surface: 'remote', provider: 'openai' }, question: 'What is in my deploy notes?', capture, now: () => clock.now() - 2_000 });
+    const listed = (await apps.handle({ action: 'list' })).body.requests as Array<{ items: Array<{ title?: string }> }>;
+    expect(listed[0]!.items.map((item) => item.title)).toEqual([undefined, GARDEN.name]);
+    expect(rawNames(logPath)).not.toContain(FAKE_AWS_KEY);
+    expect(rawNames(logPath)).not.toContain(`fixture:/Files/${KEYS.name}`);
+  });
+
+  test('a list that cannot be reached is left as a ledger debt and cleared at the next tier tick', async () => {
+    const dir = workspace('olympus-secret-side-apps-debt-');
+    const fx = fixture(dir);
+    pointJobsDefaultInto(dir);
+    const logPath = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env));
+    const clock = createTestClock();
+    const log = openAppReleaseLog(logPath, { now: () => clock.now() });
+    log.record(request(clock.now(), [KEYS]));
+    log.close();
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const kept = await Bun.file(logPath).arrayBuffer();
+    writeFileSync(logPath, 'not a database');
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'keys' })]);
+    writeFileSync(logPath, new Uint8Array(kept));
+    expect(rawNames(logPath)).toContain(FAKE_AWS_KEY);
+
+    expect(retrySecretSideStoreDebts(fx.ledger)).toBe(1);
+    expect(rawNames(logPath)).not.toContain(FAKE_AWS_KEY);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+  });
+});
+
 describe('side stores that do not exist', () => {
   test('are not created by an item becoming Secret', async () => {
     const dir = workspace('olympus-secret-side-none-');
@@ -1008,5 +1140,6 @@ describe('side stores that do not exist', () => {
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
     expect(await Bun.file(jobsPath).exists()).toBe(false);
     expect(await Bun.file(tierSnifferPathForLedger(fx.ledger.dbPath)).exists()).toBe(false);
+    expect(await Bun.file(appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env))).exists()).toBe(false);
   });
 });
