@@ -100,13 +100,35 @@ export function createTierVisibilityGate(
     }
     if (onHeldMatches && held.size > 0) {
       try {
-        onHeldMatches(hits.filter((hit) => held.has(hit)).map((hit) => hit.sourceItem));
+        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
       } catch {
         // Ordering the judge is best effort; the search is not affected.
       }
     }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
   };
+}
+
+/**
+ * Held matches taken in turn from each corpus, each corpus's own rank kept.
+ * The router calls the gate with its hits grouped by corpus, before they are
+ * fused across corpora, so in that order one corpus with many held matches
+ * would fill the judge's per-question allowance and a repeat ask would
+ * never reach the others.
+ */
+function interleaveByCorpus(hits: readonly SourceIndexRoutedSearchHit[]): SourceIndexRoutedSearchHit[] {
+  const byCorpus = new Map<string, SourceIndexRoutedSearchHit[]>();
+  for (const hit of hits) {
+    const lane = byCorpus.get(hit.corpusId);
+    if (lane) lane.push(hit);
+    else byCorpus.set(hit.corpusId, [hit]);
+  }
+  const lanes = [...byCorpus.values()];
+  const ordered: SourceIndexRoutedSearchHit[] = [];
+  for (let rank = 0; ordered.length < hits.length; rank += 1) {
+    for (const lane of lanes) if (rank < lane.length) ordered.push(lane[rank]!);
+  }
+  return ordered;
 }
 
 /**

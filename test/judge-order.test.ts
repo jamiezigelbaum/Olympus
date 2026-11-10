@@ -142,6 +142,28 @@ describe('items a question matched are judged first (#1062)', () => {
     expect(gate(hits)).toEqual(plain(hits));
     expect(heard).toEqual([['held-a', 'held-b']]);
   });
+
+  test('held matches from several corpora share the allowance: each corpus takes turns', () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    cleanups.push(() => ledger.close());
+    const item = (id: string) => ({ provider: 'fixture', accountScope: 'owner', providerItemId: id });
+    const hold = (corpusId: string, id: string) => {
+      ledger.recordRoutedPlacement(item(id), classifyItemTiers({ signals: { title: id }, subject: item(id) }), {
+        copies: [{ corpusId, trustDomain: 'secure_local', layers: 'both' }], embedHold: true });
+      return { corpusId, sourceItem: { family: 'files', ...item(id) } } as unknown as SourceIndexRoutedSearchHit;
+    };
+    // The router's order: every hit of the first corpus, then the second's.
+    const hits = [
+      ...Array.from({ length: 25 }, (_, n) => hold('mail', `mail-${n}`)),
+      ...Array.from({ length: 3 }, (_, n) => hold('files', `doc-${n}`)),
+    ];
+    const boosts = new JudgeBoosts();
+    const gate = createTierVisibilityGate(() => [{ ledger, corpusIds: new Set(['mail', 'files']) }], (identities) => boosts.raise(identities));
+    gate(hits);
+    for (let n = 0; n < 3; n += 1) expect(boosts.has(item(`doc-${n}`))).toBe(true);
+    expect(boosts.has(item('mail-0'))).toBe(true);
+    expect(boosts.size).toBe(JUDGE_BOOST_PER_QUESTION);
+  });
 });
 
 describe('every source takes turns, whatever its priority (#866)', () => {
