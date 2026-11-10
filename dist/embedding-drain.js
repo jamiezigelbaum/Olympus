@@ -70157,7 +70157,7 @@ var SETTINGS_PROPOSAL_SCHEMA = {
       fields: {
         choice: { type: "string", allowed: ["local", "venice"] },
         spending_limit_dollars: { type: "number", note: "Zero or more. Required for both choices." },
-        note: { type: "note", note: "Propose a model change for the same provider (models.venice with choice venice, models.local with choice local) separately, first. With choice venice, propose a private_answer_mode change separately, first, too." }
+        note: { type: "note", note: "Propose privacy_judge on its own. Propose any models, private_answer_mode or computer_use change first, separately." }
       }
     },
     models: {
@@ -70170,7 +70170,6 @@ var SETTINGS_PROPOSAL_SCHEMA = {
   },
   example: {
     private_answer_mode: "local-first",
-    privacy_judge: { choice: "venice", spending_limit_dollars: 5 },
     models: { venice: "strongest" }
   }
 };

@@ -78,18 +78,12 @@ export function createSettingsProposalHolder(targets: SettingsProposalTargets, n
       }
       rows.push({ key: 'computer_use', label: 'How this computer runs', current: 'Not chosen yet', proposed: input.computer_use === 'server' ? 'Always-on server' : 'Everyday computer' });
     }
-    if (input.privacy_judge && input.models?.[input.privacy_judge.choice] !== undefined) {
-      // The judge's approval names the exact model the running Olympus uses; a
-      // model changed in the same batch only takes effect after the restart, so
-      // the judge would be approved for the old one and then refuse to judge.
-      const provider = input.privacy_judge.choice === 'venice' ? 'Venice' : 'local';
-      throw new SettingsProposalError(`Change the ${provider} model and the privacy judge in two proposals: propose models.${input.privacy_judge.choice} first, and once it is applied, propose privacy_judge.`);
-    }
-    if (input.privacy_judge?.choice === 'venice' && input.private_answer_mode) {
-      // Whether Venice can judge depends on the Private-answer mode the running
-      // Olympus uses; a mode changed in the same batch takes effect only after
-      // the restart, so a mode without Venice would leave the judge off.
-      throw new SettingsProposalError('Change the Private-answer mode and Venice judging in two proposals: propose private_answer_mode first, and once it is applied, propose privacy_judge.');
+    if (input.privacy_judge && (input.models || input.private_answer_mode || input.computer_use)) {
+      // The judge is approved for the exact model and lane the running Olympus
+      // uses. Models, the Private-answer mode and how the computer runs change
+      // only after the restart, so a judge saved in the same batch would be
+      // approved for the old setup and then stay off.
+      throw new SettingsProposalError('The privacy judge goes in two proposals: propose the other changes first, and once they are applied, propose privacy_judge on its own.');
     }
     if (input.privacy_judge) {
       const judge = targets.judge?.();

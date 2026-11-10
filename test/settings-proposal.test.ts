@@ -63,13 +63,13 @@ describe('the proposal holder', () => {
     const { calls, targets: t } = targets();
     const holder = createSettingsProposalHolder(t);
     const first = await holder.propose({ models: { venice: 'strongest' } });
-    const second = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { venice: 'strongest' } });
+    const second = await holder.propose({ private_answer_mode: 'local-first', models: { venice: 'strongest' } });
     // The owner was looking at the first; the agent replaced it since.
     expect(await holder.apply(first.id)).toBeUndefined();
     expect(calls).toEqual([]);
     const result = await holder.apply(second.id);
     expect(result?.ok).toBe(true);
-    expect(calls).toEqual(['model:venice:strongest', 'judge:local:0', 'mode:local-first']);
+    expect(calls).toEqual(['model:venice:strongest', 'mode:local-first']);
     expect(holder.current()).toBeUndefined();
     expect(holder.lastApplied()?.rows.every((row) => row.applied)).toBe(true);
     // A second click applies nothing again.
@@ -80,24 +80,23 @@ describe('the proposal holder', () => {
     const order: string[] = [];
     const { targets: t } = targets({
       saveModel: async () => { order.push('model'); return { ok: true }; },
-      saveJudge: async () => { order.push('judge'); return { ok: true }; },
       saveAnswerMode: () => { order.push('mode'); return { ok: true }; },
       deferReloads: async (writes) => { order.push('hold'); try { return await writes(); } finally { order.push('release'); } },
     });
     const holder = createSettingsProposalHolder(t);
-    const proposal = await holder.propose({ private_answer_mode: 'local-first', privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { venice: 'strongest' } });
+    const proposal = await holder.propose({ private_answer_mode: 'local-first', models: { venice: 'strongest' } });
     await holder.apply(proposal.id);
-    expect(order).toEqual(['hold', 'model', 'judge', 'mode', 'release']);
+    expect(order).toEqual(['hold', 'model', 'mode', 'release']);
   });
 
   test('one failing write is reported and the rest still apply', async () => {
-    const { calls, targets: t } = targets({ saveJudge: async () => { throw new Error('Set up an allowed Venice model in Private answers first.'); } });
+    const { calls, targets: t } = targets({ saveModel: async () => { throw new Error('That model is gone.'); } });
     const holder = createSettingsProposalHolder(t);
-    const proposal = await holder.propose({ privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { venice: 'strongest' } });
+    const proposal = await holder.propose({ private_answer_mode: 'local-first', models: { venice: 'strongest' } });
     const result = await holder.apply(proposal.id);
     expect(result?.ok).toBe(false);
-    expect(result?.rows.find((row) => row.key === 'privacy_judge')).toMatchObject({ applied: false, message: 'Set up an allowed Venice model in Private answers first.' });
-    expect(calls).toEqual(['model:venice:strongest']);
+    expect(result?.rows.find((row) => row.key === 'models.venice')).toMatchObject({ applied: false, message: 'That model is gone.' });
+    expect(calls).toEqual(['mode:local-first']);
   });
 
   test('Discard drops it without writing', async () => {
@@ -110,12 +109,14 @@ describe('the proposal holder', () => {
     expect(calls).toEqual([]);
   });
 
-  test('a model or the answer mode and the judge that depends on it go in two proposals', async () => {
+  test('the privacy judge goes in a proposal of its own', async () => {
     const { targets: t } = targets();
     const holder = createSettingsProposalHolder(t);
     await expect(holder.propose({ privacy_judge: { choice: 'venice', spending_limit_dollars: 5 }, models: { venice: 'strongest' } })).rejects.toThrow('two proposals');
     await expect(holder.propose({ privacy_judge: { choice: 'local', spending_limit_dollars: 0 }, models: { local: 'builtin:4b' } })).rejects.toThrow('two proposals');
     await expect(holder.propose({ private_answer_mode: 'local-only', privacy_judge: { choice: 'venice', spending_limit_dollars: 5 } })).rejects.toThrow('two proposals');
+    await expect(holder.propose({ private_answer_mode: 'local-only', privacy_judge: { choice: 'local', spending_limit_dollars: 0 } })).rejects.toThrow('two proposals');
+    await expect(holder.propose({ models: { zkapi: 'strongest' }, privacy_judge: { choice: 'local', spending_limit_dollars: 0 } })).rejects.toThrow('two proposals');
   });
 
   test('values this computer does not offer are refused when proposed', async () => {
