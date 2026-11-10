@@ -166730,6 +166730,7 @@ function judgeCheckClientScript(input) {
   const config2 = {
     csrfToken: input.csrfToken,
     path: DASHBOARD_JUDGE_CHECK_PATH,
+    changedEvent: JUDGE_CHECK_ITEMS_CHANGED_EVENT,
     itemsHref: input.itemsHref,
     logos: sourceLogoTilesByProvider(),
     copy: DASHBOARD_JUDGE_CHECK_COPY
@@ -166762,7 +166763,16 @@ function judgeCheckClientScript(input) {
     } catch (error) { message = J.unreachable; render(); return; }
     var result = {};
     try { result = (await response.json()) || {}; } catch (error) { result = {}; }
-    if (response.ok && result.ok === true && result.round) { round = result.round; message = ''; }
+    if (response.ok && result.ok === true && result.round) {
+      var setBefore = round ? round.changed : 0;
+      round = result.round; message = '';
+      // An answer set an item: the list below shows it as changed by the owner.
+      if (round.changed > setBefore) {
+        var changedEvent = document.createEvent('Event');
+        changedEvent.initEvent(config.changedEvent, true, false);
+        mount.dispatchEvent(changedEvent);
+      }
+    }
     else message = (result.error && result.error.message) || J.failed;
     render();
   }
@@ -166850,7 +166860,7 @@ function judgeCheckClientScript(input) {
   send({ action: 'status' });
 })();`;
 }
-var DASHBOARD_JUDGE_CHECK_PATH = "/dashboard/privacy/judge-check", JUDGE_CHECK_MOUNT = '<div class="jc" data-judge-check aria-live="polite"></div>', JUDGE_CHECK_CSS = `
+var DASHBOARD_JUDGE_CHECK_PATH = "/dashboard/privacy/judge-check", JUDGE_CHECK_ITEMS_CHANGED_EVENT = "olympus-judge-check-items-changed", JUDGE_CHECK_MOUNT = '<div class="jc" data-judge-check aria-live="polite"></div>', JUDGE_CHECK_CSS = `
 .jc:empty { display: none; }
 .jc { margin: 0 0 14px; }
 .jc .jccard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
@@ -167262,6 +167272,8 @@ function privacyItemsClientScript(input) {
     var media = window.matchMedia('(max-width: 719px)');
     if (media && media.addEventListener) media.addEventListener('change', render);
   }
+  // The label check above set an item: reload so its label, mark and Undo match.
+  root.addEventListener(${JSON.stringify(JUDGE_CHECK_ITEMS_CHANGED_EVENT)}, function () { load(); });
   load();
 })();`;
 }

@@ -13,6 +13,9 @@ import { DASHBOARD_JUDGE_CHECK_COPY as J } from '../vocabulary.ts';
 
 export const DASHBOARD_JUDGE_CHECK_PATH = '/dashboard/privacy/judge-check';
 
+/** Fired (bubbling) from the card when an answer set an item, so the Your items list below reloads. */
+export const JUDGE_CHECK_ITEMS_CHANGED_EVENT = 'olympus-judge-check-items-changed';
+
 /** Where the card goes: the top of Your items. Empty until the script reads the round. */
 export const JUDGE_CHECK_MOUNT = '<div class="jc" data-judge-check aria-live="polite"></div>';
 
@@ -72,6 +75,7 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
   const config = {
     csrfToken: input.csrfToken,
     path: DASHBOARD_JUDGE_CHECK_PATH,
+    changedEvent: JUDGE_CHECK_ITEMS_CHANGED_EVENT,
     itemsHref: input.itemsHref,
     logos: sourceLogoTilesByProvider(),
     copy: J,
@@ -104,7 +108,16 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
     } catch (error) { message = J.unreachable; render(); return; }
     var result = {};
     try { result = (await response.json()) || {}; } catch (error) { result = {}; }
-    if (response.ok && result.ok === true && result.round) { round = result.round; message = ''; }
+    if (response.ok && result.ok === true && result.round) {
+      var setBefore = round ? round.changed : 0;
+      round = result.round; message = '';
+      // An answer set an item: the list below shows it as changed by the owner.
+      if (round.changed > setBefore) {
+        var changedEvent = document.createEvent('Event');
+        changedEvent.initEvent(config.changedEvent, true, false);
+        mount.dispatchEvent(changedEvent);
+      }
+    }
     else message = (result.error && result.error.message) || J.failed;
     render();
   }

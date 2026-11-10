@@ -20,7 +20,7 @@ import {
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
   JUDGE_REASON_PHRASES,
 } from '../vocabulary.ts';
-import { JUDGE_CHECK_CSS, JUDGE_CHECK_MOUNT, judgeCheckClientScript } from './judge-check.ts';
+import { JUDGE_CHECK_CSS, JUDGE_CHECK_ITEMS_CHANGED_EVENT, JUDGE_CHECK_MOUNT, judgeCheckClientScript } from './judge-check.ts';
 import type { DashboardPageOptions } from './local.ts';
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 
@@ -510,6 +510,8 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     var media = window.matchMedia('(max-width: 719px)');
     if (media && media.addEventListener) media.addEventListener('change', render);
   }
+  // The label check above set an item: reload so its label, mark and Undo match.
+  root.addEventListener(${JSON.stringify(JUDGE_CHECK_ITEMS_CHANGED_EVENT)}, function () { load(); });
   load();
 })();`;
 }

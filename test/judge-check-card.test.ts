@@ -12,7 +12,7 @@ import { Window } from 'happy-dom';
 import { DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { createJudgeCheck, wilsonInterval } from '../src/workers/classification/judge-check.ts';
 import type { OwnerTierItem } from '../src/workers/classification/tier-owner-items.ts';
-import { DASHBOARD_JUDGE_CHECK_PATH } from '../src/workers/dashboard/pages/judge-check.ts';
+import { DASHBOARD_JUDGE_CHECK_PATH, JUDGE_CHECK_ITEMS_CHANGED_EVENT } from '../src/workers/dashboard/pages/judge-check.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { PRIVACY_ITEMS_LIST_ID, renderDashboardPrivacyItemsPage } from '../src/workers/dashboard/pages/privacy-items.ts';
 import { DASHBOARD_JUDGE_CHECK_COPY as J } from '../src/workers/dashboard/vocabulary.ts';
@@ -99,6 +99,18 @@ describe('Check how Olympus labelled your items', () => {
     expect(c.text('[data-jc-offer]')).toContain('You answered 2 of 10.');
     await c.click('[data-jc-act="resume"]');
     expect(c.text('[data-jc-position]')).toBe('Item 3 of 10');
+  });
+
+  test('an answer that sets an item tells Your items below to reload; agreeing does not', async () => {
+    const c = await card();
+    let reloads = 0;
+    c.$('[data-privacy-items]')!.addEventListener(JUDGE_CHECK_ITEMS_CHANGED_EVENT, () => { reloads += 1; });
+    await c.click('[data-jc-act="start"]');
+    const tierOf = (id: string) => items.find((candidate) => candidate.item_id === id)!.tier!;
+    await c.click(`[data-jc-answer="${tierOf(c.current())}"]`);
+    expect(reloads).toBe(0);
+    await c.click(`[data-jc-answer="${tierOf(c.current()) === 'Personal' ? 'Private' : 'Personal'}"]`);
+    expect(reloads).toBe(1);
   });
 
   test('a finished round shows the count, the likely range as a band, and Check 10 more', async () => {
