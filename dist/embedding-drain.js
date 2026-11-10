@@ -21743,11 +21743,10 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
   });
 }
 async function withOffThreadSnapshot(dbPath, work) {
-  const reader = readerThread();
-  if (!reader)
+  if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
+  const reader = await snapshotThread();
   const snapshot = nextId++;
-  reader.snapshots += 1;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
@@ -21760,6 +21759,43 @@ async function withOffThreadSnapshot(dbPath, work) {
   } finally {
     reader.snapshots -= 1;
     dispatch();
+  }
+}
+function snapshotThreadNow() {
+  const best = live().filter((reader) => !reader.job).reduce((least, reader) => !least || busy(reader) < busy(least) ? reader : least, undefined);
+  if (best && busy(best) === 0)
+    return best;
+  return startThread() ?? best;
+}
+function snapshotThread() {
+  const reader = snapshotThreadNow();
+  if (reader) {
+    reader.snapshots += 1;
+    return Promise.resolve(reader);
+  }
+  return new Promise((resolve7, reject) => {
+    const waiter = {
+      resolve: resolve7,
+      reject,
+      timer: setTimeout(() => {
+        const at = snapshotWaiters.indexOf(waiter);
+        if (at >= 0)
+          snapshotWaiters.splice(at, 1);
+        reject(new Error("off-thread reads are busy"));
+      }, OFF_THREAD_READ_TIMEOUT_MS)
+    };
+    snapshotWaiters.push(waiter);
+  });
+}
+function serveSnapshotWaiters() {
+  while (snapshotWaiters.length > 0) {
+    const reader = snapshotThreadNow();
+    if (!reader)
+      return;
+    const waiter = snapshotWaiters.shift();
+    clearTimeout(waiter.timer);
+    reader.snapshots += 1;
+    waiter.resolve(reader);
   }
 }
 function readOnPool(dbPath, read, options = {}) {
@@ -21780,6 +21816,15 @@ function readOnPool(dbPath, read, options = {}) {
   });
 }
 function releaseOffThreadReads(dbPath) {
+  const waiting = queues.get(dbPath);
+  if (waiting) {
+    queues.delete(dbPath);
+    const turn = turns.indexOf(dbPath);
+    if (turn >= 0)
+      turns.splice(turn, 1);
+    for (const job of waiting)
+      settle(job, { error: new OffThreadReadBusyError });
+  }
   for (const reader of live()) {
     try {
       reader.worker.postMessage({ op: "release", path: dbPath });
@@ -21831,6 +21876,7 @@ function nextJob() {
   return;
 }
 function dispatch() {
+  serveSnapshotWaiters();
   while (turns.length > 0) {
     const reader = freeThread();
     if (!reader)
@@ -21900,7 +21946,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 };
-`, threads, nextId = 1, queues, turns;
+`, threads, nextId = 1, queues, turns, snapshotWaiters;
 var init_off_thread_reads = __esm(() => {
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -21918,6 +21964,7 @@ var init_off_thread_reads = __esm(() => {
   threads = [];
   queues = new Map;
   turns = [];
+  snapshotWaiters = [];
 });
 
 // src/core/store-identity.ts
@@ -26638,6 +26685,7 @@ var init_local_index = __esm(() => {
     db;
     readOnly;
     now;
+    controlPath;
     trustReconciliationReadyCursors;
     exclusions;
     reactionsColumnPresent = false;
@@ -26666,6 +26714,7 @@ var init_local_index = __esm(() => {
       this.family = options.family;
       this.trustDomain = options.trustDomain;
       this.now = options.now ?? (() => new Date);
+      this.controlPath = options.controlPath ?? controlPathHeadroom;
       this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
       if (options.tierLedger === null || options.readOnly === true) {
         this.tierLedgerDisabled = true;
@@ -26730,6 +26779,7 @@ var init_local_index = __esm(() => {
         this.boundLedgerHandle = undefined;
       } finally {
         this.tierLedgerHandle = undefined;
+        this.closedForPoolReads = true;
         if (offThreadReadsSupported(this.dbPath))
           releaseOffThreadReads(this.dbPath);
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
@@ -30466,7 +30516,7 @@ var init_local_index = __esm(() => {
               break;
             }
             itemsSeen += 1;
-            await ingestionTurn();
+            await this.controlPath.ingestionTurn();
             const exclusion = this.exclusions.evaluateMetadata(item.metadata);
             if (exclusion.excluded) {
               tallyExclusion(exclusionTally, exclusion);
@@ -32349,6 +32399,8 @@ var init_local_index = __esm(() => {
       const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
       let step = steps.next();
       while (!step.done) {
+        if (this.closedForPoolReads)
+          throw new OffThreadReadBusyError;
         step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
       }
       return step.value;
@@ -32361,6 +32413,7 @@ var init_local_index = __esm(() => {
         ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
       }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
+    closedForPoolReads = false;
     readHere(steps) {
       let step = steps.next();
       while (!step.done) {
@@ -32422,11 +32475,14 @@ var init_local_index = __esm(() => {
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
         const placeholders = pks.map(() => "?").join(", ");
-        const itemAt = new Map(rows.map((row) => [row.item_pk, row.local_item_id]));
-        const sameItem = (hit) => itemAt.get(hit.item_pk) === hit.local_item_id;
+        const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
+        const sameItem = (hit) => {
+          const row = itemAt.get(hit.item_pk);
+          return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
+        };
         for (const [groupIndex, group] of groups.entries()) {
           const hits = (yield { mode: "all", sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
           FROM connector_store_fts
           JOIN items i ON i.item_pk = connector_store_fts.item_pk
           WHERE connector_store_fts MATCH ?
@@ -32443,7 +32499,7 @@ var init_local_index = __esm(() => {
         const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
         const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
         const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
-        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
+        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
         FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
         WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
           ${selectedFtsScope.sql}
@@ -77182,6 +77238,12 @@ class TierSnifferService {
   timers() {
     return this.options.timers ?? GLOBAL_TIMERS;
   }
+  monotonicNow() {
+    return this.options.monotonicNow?.() ?? performance.now();
+  }
+  ingestionTurn() {
+    return (this.options.ingestionTurn ?? ingestionTurn)();
+  }
   start() {
     if (this.timer)
       return;
@@ -77402,7 +77464,7 @@ class TierSnifferService {
             break;
           this.addPendingSlice(counts, opened, [lo, hi]);
           lo = hi;
-          await ingestionTurn();
+          await this.ingestionTurn();
           if (this.stopped)
             return;
         }
@@ -77416,7 +77478,7 @@ class TierSnifferService {
               break;
             this.addQuestionSlice(counts, opened.db, [lo, hi]);
             lo = hi;
-            await ingestionTurn();
+            await this.ingestionTurn();
             if (this.stopped)
               return;
           }
@@ -77518,7 +77580,7 @@ class TierSnifferService {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {
       leave();
-      this.lastTickEndedAt = performance.now();
+      this.lastTickEndedAt = this.monotonicNow();
       if (this.fairTurn) {
         this.fairTurn = false;
         this.yieldingSinceMs = undefined;
@@ -77878,12 +77940,12 @@ class TierSnifferService {
     this.pauseTraining();
     await this.trainingJob;
     const { lane } = this.options;
-    const phaseStarted = performance.now();
+    const phaseStarted = this.monotonicNow();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
     let phaseAt = phaseStarted;
     const phaseMs = {};
     const phase = (name) => {
-      const now = performance.now();
+      const now = this.monotonicNow();
       phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
       phaseAt = now;
     };
@@ -77966,19 +78028,19 @@ class TierSnifferService {
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
   async recoverMissingQuestions(signal, allowReask = false) {
-    const deadline = performance.now() + MISSING_QUESTION_RECOVERY_PHASE_MS;
+    const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     const cursorKey = allowReask ? "sniffer_missing_question_reask_cursor_v1" : "sniffer_missing_question_cursor_v1";
     const paths = this.ledgerPaths();
     const offset = (this.recoveryLedgerOffsets.get(cursorKey) ?? 0) % (paths.length || 1);
     for (let n = 0;n < paths.length; n++) {
-      if (signal.aborted || this.stopped || n > 0 && performance.now() >= deadline)
+      if (signal.aborted || this.stopped || n > 0 && this.monotonicNow() >= deadline)
         break;
       const index = (offset + n) % paths.length;
       const ledgerPath = paths[index];
@@ -78003,8 +78065,8 @@ class TierSnifferService {
         let lastProcessed;
         let processed = 0;
         for (const row of rows) {
-          await ingestionTurn();
-          if (signal.aborted || this.stopped || processed > 0 && performance.now() >= deadline)
+          await this.ingestionTurn();
+          if (signal.aborted || this.stopped || processed > 0 && this.monotonicNow() >= deadline)
             break;
           const identity = recordIdentity(row);
           lastProcessed = identity;
@@ -78153,7 +78215,7 @@ class TierSnifferService {
   async settleStoredItems() {
     this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
-      await ingestionTurn();
+      await this.ingestionTurn();
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
@@ -78212,7 +78274,7 @@ class TierSnifferService {
       return total;
     const maxOpen = Math.max(0, this.options.rejudgeMaxOpenQuestions ?? 2 * perPass);
     for (const ledgerPath of this.ledgerPaths()) {
-      await ingestionTurn();
+      await this.ingestionTurn();
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
@@ -78223,7 +78285,7 @@ class TierSnifferService {
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = await rejudgeRoutedItemsInTurns({
           set: set2,
-          turn: ingestionTurn,
+          turn: () => this.ingestionTurn(),
           limit: perPass,
           ...after ? { after } : {},
           autoMoves: this.autoMovesFor(set2)
@@ -78256,7 +78318,7 @@ class TierSnifferService {
   }
   async runAutoMoves(options, signal, direction) {
     const timings = emptyTierMoveTimings();
-    const started = performance.now();
+    const started = this.monotonicNow();
     const paths = this.ledgerPaths();
     const backlog = direction === "lower" ? paths.reduce((n, path) => {
       try {
@@ -78272,7 +78334,7 @@ class TierSnifferService {
     const requestedMs = options.lowerSliceMs ?? adaptiveMs;
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
-    const shouldStop = () => signal.aborted || direction === "lower" && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow());
+    const shouldStop = () => signal.aborted || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date))().getTime();
@@ -78333,7 +78395,7 @@ class TierSnifferService {
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset2 = 0;offset2 < queued.length && budget > 0 && !shouldStop(); ) {
         const pending = [];
-        const batchDeadline = Math.min(deadline, performance.now() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
+        const batchDeadline = Math.min(deadline, this.monotonicNow() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
         for (let n = 0;n < (direction === "raise" ? 1 : batchSize) && offset2 < queued.length && !shouldStop(); n++) {
           const record3 = queued[offset2++];
           budget--;
@@ -78362,7 +78424,7 @@ class TierSnifferService {
           try {
             let copied = 0;
             const results = moveTieredItemsLowering(pending.map((entry) => entry.move), {
-              shouldStop: () => shouldStop() || copied++ > 0 && performance.now() >= batchDeadline
+              shouldStop: () => shouldStop() || copied++ > 0 && this.monotonicNow() >= batchDeadline
             });
             results.forEach((result, index) => {
               if ("error" in result)
@@ -78378,11 +78440,11 @@ class TierSnifferService {
           }
         }
         await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
-        await ingestionTurn();
+        await this.ingestionTurn();
       }
       await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
     }
-    report.elapsedMs = performance.now() - started;
+    report.elapsedMs = this.monotonicNow() - started;
     if (direction === "lower" || report.moved > 0 || report.failed > 0) {
       this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }

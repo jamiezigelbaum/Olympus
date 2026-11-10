@@ -5,7 +5,7 @@ import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
-import { ingestionTurn } from '../control-path-headroom.ts';
+import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsAvailable, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
@@ -657,6 +657,11 @@ export interface LocalConnectorStoreOptions {
   stillImagesRead?: StillImagesRead;
   /** Clock for owner observations compared with provider snapshot cutoffs. */
   now?: () => Date;
+  /**
+   * The event-loop turn a connector sync takes between items. Omitted: the
+   * worker's shared control-path headroom. Tests inject one with a fake clock.
+   */
+  controlPath?: Pick<ControlPathHeadroom, 'ingestionTurn'>;
   /**
    * The user's folder-exclusion gate for this store.
    *
@@ -2741,6 +2746,7 @@ export class LocalConnectorStore {
   private db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
+  private readonly controlPath: Pick<ControlPathHeadroom, 'ingestionTurn'>;
   /**
    * Completion latch for trust reconciliation lineages, keyed by connector id
    * holding the final cursor. A completed sweep is immutable — nothing ever
@@ -2809,6 +2815,7 @@ export class LocalConnectorStore {
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
+    this.controlPath = options.controlPath ?? controlPathHeadroom;
     this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
     if (options.tierLedger === null || options.readOnly === true) {
       this.tierLedgerDisabled = true;
@@ -8548,7 +8555,7 @@ export class LocalConnectorStore {
           // a count of items bounded nothing when each item was slow). Put the
           // turn before item handling so every disposition — excluded,
           // deleted, rejected, or indexed — shares the same fairness bound.
-          await ingestionTurn();
+          await this.controlPath.ingestionTurn();
 
           // FIRST, before content is fetched, before classification, before
           // any scope or allowlist is consulted. Enforcing here is what makes

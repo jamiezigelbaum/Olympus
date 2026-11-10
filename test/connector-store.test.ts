@@ -44,6 +44,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { TIER_MOVE_CONNECTOR_ID } from '../src/workers/connector-store/tier-move.ts';
 import { setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { ControlPathHeadroom } from '../src/workers/control-path-headroom.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 import type {
   SourceEmbeddingInput,
@@ -471,6 +472,12 @@ describe('LocalConnectorStore sync', () => {
   });
 
   test('keeps the HTTP event loop schedulable during large metadata pages', async () => {
+    // Each item costs 1 ms of synchronous work on a fake clock, so the 20 ms
+    // control-path slice runs out partway through the page whatever the
+    // runner's speed. The turn it then takes is a real macrotask: a timer set
+    // while item 1 is handled must run before item 33 is handled.
+    let clock = 0;
+    const headroom = new ControlPathHeadroom({ now: () => clock, log: () => {} });
     const specs = Array.from({ length: 33 }, (_, index): FakeItemSpec => ({
       id: `id:yield-${index + 1}`,
       inlineText: `bounded item ${index + 1}`,
@@ -481,6 +488,7 @@ describe('LocalConnectorStore sync', () => {
     const connector: SourceConnector = {
       ...base,
       classificationSignals(item) {
+        clock += 1;
         if (item.identity.providerItemId === 'id:yield-1') {
           setTimeout(() => { timerFired = true; }, 0);
         }
@@ -490,11 +498,18 @@ describe('LocalConnectorStore sync', () => {
         return base.classificationSignals(item);
       },
     };
-    const store = newStore();
-    const summary = await store.syncFromConnector(connector);
-    expect(summary.itemsSeen).toBe(33);
-    expect(timerObservedByItem33).toBe(true);
-    store.close();
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local', controlPath: headroom,
+    });
+    try {
+      const summary = await store.syncFromConnector(connector);
+      expect(summary.itemsSeen).toBe(33);
+      expect(headroom.snapshot().turns).toBeGreaterThan(0);
+      expect(timerObservedByItem33).toBe(true);
+    } finally {
+      headroom.stop();
+      store.close();
+    }
   });
 
   test('maintains and uses the normalized locator identity index on live writes', async () => {
