@@ -15,9 +15,12 @@ import {
   snifferId,
   snifferTierKey,
   snifferVerdictTier,
+  QWEN36_35B_A3B_SNIFFER_MODEL,
   type SnifferLaneIdentity,
 } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { resolveSnifferLane } from '../src/workers/classification/sniffer-lane.ts';
+import { createSovereigntyEngine, loadSovereigntyPreset, validateSovereigntyConfig } from '../src/core/sovereignty.ts';
 import { BUILT_IN_REASONING_MODELS, QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
@@ -46,6 +49,32 @@ test('the decision bar is per lane: the built-in 4B at 0.15, every other judge a
   for (const decisionBar of [0.7, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
     expect(snifferDecisionBar({ ...builtIn4B, decisionBar })).toBe(0.15);
     expect(snifferDecisionBar({ ...otherJudge, decisionBar })).toBe(0.5);
+  }
+});
+
+test('the 35B-A3B has its measured bar, by its model name or by its profile behind a router alias', () => {
+  expect(snifferDecisionBar({ kind: 'local', modelId: QWEN36_35B_A3B_SNIFFER_MODEL, snifferMode: 'decision' })).toBe(0.374);
+  // A router alias names no weights: the profile carries the measured bar.
+  expect(snifferDecisionBar({ kind: 'local', modelId: 'delphi/source-answer', snifferMode: 'decision' })).toBe(0.5);
+  expect(snifferDecisionBar({ kind: 'local', modelId: 'delphi/source-answer', snifferMode: 'decision', decisionBar: 0.374 })).toBe(0.374);
+
+  const config = structuredClone(loadSovereigntyPreset('local-first'));
+  config.modelProfiles['local-source-answer']!.snifferDecisionBar = 0.374;
+  const lane = resolveSnifferLane(createSovereigntyEngine(validateSovereigntyConfig(config)));
+  expect(snifferDecisionBar(lane)).toBe(0.374);
+});
+
+test('a profile\'s decision bar can only lean Private, and only on a local profile', () => {
+  for (const bar of [0, -0.1, 0.51, 1, Number.NaN]) {
+    const config = structuredClone(loadSovereigntyPreset('local-first'));
+    config.modelProfiles['local-source-answer']!.snifferDecisionBar = bar;
+    expect(() => validateSovereigntyConfig(config)).toThrow(/snifferDecisionBar/);
+  }
+  const config = structuredClone(loadSovereigntyPreset('local-first'));
+  const cloud = Object.entries(config.modelProfiles).find(([, profile]) => profile.trust !== 'local');
+  if (cloud) {
+    cloud[1].snifferDecisionBar = 0.3;
+    expect(() => validateSovereigntyConfig(config)).toThrow(/snifferDecisionBar/);
   }
 });
 

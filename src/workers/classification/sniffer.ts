@@ -111,10 +111,18 @@ export interface SnifferLaneIdentity {
 /**
  * Measured decision bars, by the pinned weights a lane names (#1184, #890).
  * Qwen3.5 4B: on the owner's labels (5 Nov 2026) 0.15 missed 0 of 49
- * important Private items at 79% agreement; 0.5 missed 2. A judge with no
+ * important Private items at 79% agreement; 0.5 missed 2.
+ * Qwen3.6 35B-A3B (llama.cpp): on the fresh whole-item sample (#883, 10 Nov
+ * 2026) 0.374, chosen on the dev half, missed 0 of 21 important Private items
+ * at 90.5% agreement; 0.5 missed 2. A lane that names it through a router
+ * alias sets the profile's `snifferDecisionBar` instead. A judge with no
  * measured bar keeps SNIFFER_DECISION_PRIVATE_BAR.
  */
-const SNIFFER_DECISION_BARS: ReadonlyArray<readonly [modelId: string, bar: number]> = [[QWEN35_4B.modelId, 0.15]];
+export const QWEN36_35B_A3B_SNIFFER_MODEL = 'qwen36-35b-a3b-text';
+const SNIFFER_DECISION_BARS: ReadonlyArray<readonly [modelId: string, bar: number]> = [
+  [QWEN35_4B.modelId, 0.15],
+  [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374],
+];
 
 function validDecisionBar(bar: number | undefined): bar is number {
   return typeof bar === 'number' && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
