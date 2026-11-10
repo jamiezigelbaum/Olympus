@@ -8,6 +8,13 @@ const READ_ONLY_TOOLS = {
   'scripts/source-eval-pack-inspect.ts': 'openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {',
 } as const;
 
+// How each tool builds its retrieval: the eval searches through the same answer
+// lanes live answers use (#707); the inspector builds its own adapter.
+const RETRIEVAL = {
+  'eval/run-real.ts': ['createSourceAnswerLanes({'],
+  'scripts/source-eval-pack-inspect.ts': ['createConnectorStoreCorpusAdapter({', 'createConnectorStoreContentProvider({'],
+} as const;
+
 describe('private eval store access', () => {
   for (const [relativePath, opener] of Object.entries(READ_ONLY_TOOLS)) {
     test(`${relativePath} opens only the canonical connector store query-only`, () => {
@@ -15,8 +22,7 @@ describe('private eval store access', () => {
 
       expect(source).toContain(opener);
       expect(source).toContain('readOnly: true');
-      expect(source).toContain('createConnectorStoreCorpusAdapter({');
-      expect(source).toContain('createConnectorStoreContentProvider({');
+      for (const builder of RETRIEVAL[relativePath as keyof typeof RETRIEVAL]) expect(source).toContain(builder);
       // The store Olympus places for the Dropbox account, or the copy OLYMPUS_EVAL_DROPBOX_STORE names; never a retired override.
       expect(source).toContain("resolvedStorePath('dropbox.files', 'secure_local')");
       expect(source).toContain('OLYMPUS_EVAL_DROPBOX_STORE');
