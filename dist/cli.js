@@ -56582,7 +56582,8 @@ var init_vocabulary = __esm(() => {
     veniceTag: "In Venice’s cloud",
     zkapiOff: "Turned off. zkAPI is turned off.",
     zkapiPaused: "Paused. Accept the updated statements to continue.",
-    turnOnInModels: "Turn on below",
+    turnOnInModels: "Turn on in Settings",
+    fixInSettings: "Fix in Settings",
     afterAsk: "Sent. The answer will appear in your inbox.",
     computerName: "Local model",
     veniceName: "Venice model",
@@ -56598,7 +56599,7 @@ var init_vocabulary = __esm(() => {
     levelStrictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
     levelStandard: "Standard",
     levelStandardHint: "Your words, prepared the way you chose in {models}.",
-    levelModelsLink: "zkAPI settings",
+    levelModelsLink: "Privacy rules",
     askComputer: "Ask the local model",
     askVenice: "Ask a Venice model",
     askZkapi: "Ask a model through zkAPI",
@@ -56628,10 +56629,11 @@ var init_vocabulary = __esm(() => {
     inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
     inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
     anonymousFailed: "Olympus could not answer this question.",
-    goToModels: "Review below",
+    goToModels: "Review in Settings",
     privatePath: "Local model",
     anonymousPath: "zkAPI model",
-    sent: "What was sent to zkAPI",
+    sentAsWritten: "Sent to zkAPI as you wrote it.",
+    sentRewritten: "Sent to zkAPI (rewritten)",
     askLabel: "Your question",
     askPlaceholder: "Ask anything, including about your Private items…",
     ask: "Ask",
@@ -56878,6 +56880,11 @@ var init_vocabulary = __esm(() => {
     abandonHint: "Stops waiting without finishing it; the unfinished payment may later link two sessions.",
     abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
     languagesTitle: "Languages",
+    privacyChoicesLink: "What zkAPI may send, and how the question is written, is on Privacy rules.",
+    accountLink: "Balance, limits and setup",
+    saveLanguages: "Save languages",
+    settingsTitle: "zkAPI",
+    settingsIntro: "Your anonymous account for outside answers: money, connection and limits.",
     languagesIntro: "The outside question may use these languages. Only languages with a word pack installed on this computer can be chosen.",
     packMissing: "pack not installed",
     domainsOn: "Besides everyday words in these languages, a question may use: {list}.",
@@ -146502,10 +146509,19 @@ function linuxModelReadiness(env = process.env, options = {}) {
     {
       name: "Transcription",
       state: transcriptionEnabled ? transcription.state : "unavailable",
-      detail: env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? "An external transcription command is configured." : transcriptionEnabled ? `Qwen3-ASR 0.6B: ${transcription.state}. Downloads when audio is chosen.` : "Built-in transcription is off or its audio decoder is unavailable. Install ffmpeg, or check OLYMPUS_BUILT_IN_TRANSCRIPTION, then restart Olympus.",
+      detail: env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? "An external transcription command is configured." : transcriptionEnabled ? `Qwen3-ASR 0.6B: ${transcription.state}. Downloads when audio is chosen.` : transcriptionOffReason(env, options.decoderPresent ?? (() => audioDecoderPresent(`linux-${process.arch}`, env))),
       downloadBytes: QWEN3_ASR_06B.files.reduce((sum2, file) => sum2 + file.bytes, 0)
     }
   ];
+}
+function transcriptionOffReason(env, decoderPresent) {
+  const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no") {
+    return `Built-in transcription is turned off by ${BUILT_IN_TRANSCRIPTION_ENV}=${raw}. Remove that setting to turn it on, then restart Olympus.`;
+  }
+  if (decoderPresent())
+    return "Built-in transcription is not available for this kind of computer.";
+  return "Built-in transcription needs ffmpeg, which is not installed. Install ffmpeg, then restart Olympus.";
 }
 var init_linux_model_readiness = __esm(() => {
   init_analyst_built_in();
@@ -154021,6 +154037,8 @@ function shortTime(iso2) {
   return `${shortDate(iso2.slice(0, 10))} ${iso2.slice(11, 16)}`.trim();
 }
 function renderOutsideHelpCard(status, input) {
+  if (input.part === "privacy")
+    return renderOutsideHelpPrivacyPart(status, input);
   const summary = summaryOf(status);
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
@@ -154035,8 +154053,9 @@ function renderOutsideHelpCard(status, input) {
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
   const missingRoute = !unavailable4 && route.state === "not_configured";
+  const writerHref = input.part === "account" && input.otherPartHref ? `${input.otherPartHref.split("#")[0]}#outside-writer` : undefined;
   if (missingRoute)
-    parts.push(renderProblems(status, access));
+    parts.push(renderProblems(status, access, writerHref));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
@@ -154048,18 +154067,24 @@ function renderOutsideHelpCard(status, input) {
     return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
   }
   if (!missingRoute)
-    parts.push(renderProblems(status, access));
+    parts.push(renderProblems(status, access, writerHref));
   if (route.state === "configured" && !route.acknowledgements.complete)
     parts.push(renderStatementsToAccept(access));
   const more = [];
   if (!on)
     more.push(renderBeforeTurningOn());
-  more.push(renderLevel(status, canEdit));
-  if (status.standard)
-    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
-  if (status.writer)
-    more.push(renderWriter(status.writer, canEdit));
-  more.push(renderLanguages(status, canEdit));
+  if (input.part === "account") {
+    parts.push(savedLanguagesForSwitch(status));
+    if (input.otherPartHref)
+      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
+  } else {
+    more.push(renderLevel(status, canEdit));
+    if (status.standard)
+      more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
+    if (status.writer)
+      more.push(renderWriter(status.writer, canEdit));
+    more.push(renderLanguages(status, canEdit));
+  }
   if (route.state === "configured")
     more.push(renderLimits(route, canEdit));
   if (route.state === "configured" && route.acknowledgements.complete)
@@ -154070,6 +154095,36 @@ function renderOutsideHelpCard(status, input) {
   const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
+}
+function savedLanguagesForSwitch(status) {
+  const chosen = new Set(status.settings.languages);
+  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
+}
+function renderOutsideHelpPrivacyPart(status, input) {
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
+  const summary = summaryOf(status);
+  const on = status.settings.state === "on";
+  const parts = [];
+  if (canUnlock) {
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
+  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
+  if (status.writer?.modelProblem) {
+    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
+  }
+  const more = [renderLevel(status, canEdit)];
+  if (status.standard)
+    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
+  if (status.writer)
+    more.push(renderWriter(status.writer, canEdit));
+  const invalid4 = status.settings.state === "invalid";
+  const save = canEdit && !invalid4 ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
+  parts.push(`<div class="ohmore">${more.join("")}</div>`);
+  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}`;
 }
 function outsideHelpScriptConfig(csrfToken) {
   return {
@@ -154124,7 +154179,7 @@ function problemLine(words2, fix, access, input = {}) {
   }
   return `<li${input.attrs ?? ""}><span>${escapeHtml2(words2)}</span>${action}</li>`;
 }
-function renderProblems(status, access) {
+function renderProblems(status, access, writerHref) {
   const canEdit = access === "edit";
   const route = status.route;
   const items = [];
@@ -154180,8 +154235,10 @@ function renderProblems(status, access) {
       items.push(problemLine(words2, fix, access, { attrs }));
     }
   }
-  if (status.writer?.modelProblem) {
+  if (status.writer?.modelProblem && writerHref === undefined) {
     items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
+  } else if (status.writer?.modelProblem && writerHref !== undefined) {
+    items.push(`<li data-outside-model-problem><span>${escapeHtml2(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml2(writerHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
   }
   if (items.length === 0)
     return "";
@@ -154442,6 +154499,7 @@ function outsideHelpClientScript(config2) {
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
       var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
+      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
       return body;
     }
     if (kind === 'route') {
@@ -163064,8 +163122,7 @@ function renderPrivateAnswersBody(options) {
     script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date) : "";
-  const zkapiSetup = `<section class="pasection" id="${ANONYMOUS_SETUP_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiSetupTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : csrfToken === undefined ? `<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)}</p>` : `<p class="pnote" data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`;
-  return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}${zkapiSetup}</div>${script2}`;
+  return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}</div>${script2}`;
 }
 function renderAsk(options, enabled, inbox) {
   const models = dashboardLocalPageHref("keys", readToken(options?.basePath));
@@ -163073,11 +163130,13 @@ function renderAsk(options, enabled, inbox) {
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
   const zkModel = zk?.route.state === "configured" ? zk.route.model : undefined;
-  const zkSetup = `#${ANONYMOUS_SETUP_ID}`;
+  const zkSetup = `${dashboardLocalPageHref("settings", readToken(options?.basePath))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
+  const zkModelHref = `${models}#zkapi-model`;
+  const zkPaused = zkState === "needs_acceptance" || zkState === "blocked" || zkState === "fence_held";
   const destinations = [
     { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerCard, model: states.computerModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLine, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
     { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceCard, model: states.veniceModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLine, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" },
-    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiCard, model: zkModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLine, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: zkSetup, action: "ask_anonymous" }
+    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiCard, model: zkModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLine, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.fixInSettings : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: zkSetup, action: "ask_anonymous" }
   ];
   const label = (d) => d.model ? `${d.name} · ${d.model}` : d.name;
   const first = enabled ? destinations.find((d) => d.state === "ready") : undefined;
@@ -163090,11 +163149,11 @@ function renderAsk(options, enabled, inbox) {
     };
     const state = d.state;
     const action = enabled ? actions[state] : "";
-    const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
+    const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
     const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot3]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot3}" aria-hidden="true"></span>${escapeHtml2(text4)}</span>`).join("");
     const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
-    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.id === "anonymous" && d.model && enabled ? ` <a class="pamodelchange" href="${escapeHtml2(zkSetup)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", zkSetup) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml2(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("");
   const answeredBy = first ? DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy.replace("{name}", label(first)) : DASHBOARD_PRIVATE_ANSWERS_COPY.noneReady;
   const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
@@ -163110,7 +163169,8 @@ function renderFailureNotice(reason) {
   return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml2(failure2.message)} ${failure2.href ? `<a href="${escapeHtml2(failure2.href)}">${escapeHtml2(failure2.action)}</a>` : escapeHtml2(failure2.action)}</p>`;
 }
 function renderWaiting(waiting, now) {
-  const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
+  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
@@ -163126,7 +163186,6 @@ function renderWaiting(waiting, now) {
     return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
-  parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button></div>`);
   parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
@@ -163146,7 +163205,8 @@ function privateAnswersClientScript(input) {
       venicePath: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName,
       destinationBusy: DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy,
       emptyQuestion: DASHBOARD_PRIVATE_ANSWERS_COPY.emptyQuestion,
-      sent: DASHBOARD_PRIVATE_ANSWERS_COPY.sent,
+      sentAsWritten: DASHBOARD_PRIVATE_ANSWERS_COPY.sentAsWritten,
+      sentRewritten: DASHBOARD_PRIVATE_ANSWERS_COPY.sentRewritten,
       privatePath: DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath,
       anonymousPath: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath,
       open: DASHBOARD_PRIVATE_ANSWERS_COPY.open,
@@ -163224,9 +163284,12 @@ function privateAnswersClientScript(input) {
   function panel(out, question) {
     out.textContent = '';
     var card = el('div', 'pacard');
-    var heading = el('p', 'paquestion');
-    heading.appendChild(el('strong', '', question));
-    card.appendChild(heading);
+    // An inbox row already shows its question as the row title (#1045); only the Ask result repeats it.
+    if (question && !out.closest('[data-pa-question]')) {
+      var heading = el('p', 'paquestion');
+      heading.appendChild(el('strong', '', question));
+      card.appendChild(heading);
+    }
     out.appendChild(card);
     return card;
   }
@@ -163281,8 +163344,12 @@ function privateAnswersClientScript(input) {
         box.textContent = String(result.answer || '');
       }
       card.appendChild(box);
-      if (typeof result.sent === 'string') { card.appendChild(el('p', 'palabel', config.copy.sent)); card.appendChild(el('p', 'paquestion pasent', result.sent)); }
       var meta = el('div', 'pameta');
+      // What left for zkAPI, in the muted meta area (#1045): one line when it is the question as written, the text only when it was rewritten.
+      if (typeof result.sent === 'string') {
+        if (result.sent.trim() === String(question || '').trim()) meta.appendChild(el('p', 'palabel', config.copy.sentAsWritten));
+        else { meta.appendChild(el('div', 'palabel', config.copy.sentRewritten)); meta.appendChild(el('p', 'pasent', result.sent)); }
+      }
       renderSent(meta, result);
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
@@ -163543,15 +163610,19 @@ function privateAnswersClientScript(input) {
   schedule();
 })();`;
 }
-var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", DASHBOARD_SETTINGS_ZKAPI_ID = "zkapi", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
 .pa { width: 100%; min-width: 0; max-width: min(920px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
 .pa .pasection + .pasection { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--line); }
-.pa .pasection > .sect { margin: 0 0 12px; }
+.pa .pasection > .sect, .pa .pawaithead > .sect { margin: 0 0 12px; }
+.pa .pawaithead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pa .palink { padding: 0; border: 0; background: none; color: var(--t2); font: inherit; font-size: var(--fs-body); text-decoration: underline; cursor: pointer; }
+.pa .palink:hover, .pa .palink:focus-visible { color: var(--link); }
+.pa .palink[hidden] { display: none; }
 .pa .paquestion { margin: 0 0 12px; color: var(--t1); font-size: var(--fs-row); }
 .pa .paanswer { color: var(--t1); line-height: 1.55; overflow-wrap: anywhere; }
-.pa .pasent { white-space: pre-wrap; }
+.pa .pameta .pasent { margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--t2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer:not(.md) { white-space: pre-wrap; }
 .pa .paanswer pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .paanswer table { table-layout: fixed; display: table; }
@@ -163655,14 +163726,13 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH 
 .judgecap { display: block; margin: 8px 0 4px; }
 .judgehow { margin: 10px 0 0; color: var(--t2); }
 @media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
-`, ANONYMOUS_SETUP_ID;
+`;
 var init_private_answers = __esm(() => {
   init_components();
   init_host_page();
   init_top_nav();
   init_outside_help();
   init_vocabulary();
-  ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
 });
 
 // src/workers/dashboard/source-logos.ts
@@ -163749,7 +163819,7 @@ function renderAnswerModelPickers(choices, unlocked) {
 function renderZkapiModelPicker(choices, unlocked) {
   if (!choices?.zkapi)
     return "";
-  return `<section id="zkapi-model"><h3 class="sect">On Private questions</h3><div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div></section>`;
+  return `<div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div>`;
 }
 var TITLES, LOCAL_MODEL_AGENT_REQUEST = `Help me add a local model to Olympus. Pick a model that fits this computer's memory, download it with Ollama or LM Studio, start it, and tell me when it is running so I can press "Look on this computer" in Olympus Privacy rules. Do not change Olympus settings yourself.`, MODEL_PICKER_CSS = `
 .pickrows { display: grid; gap: 12px; margin: 12px 0; }
@@ -163993,7 +164063,7 @@ function renderDashboardKeysPage(view3, options) {
     dashboardPrivacyTabs("settings", token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
     `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view3.model_setup) + `<div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
-    renderZkapiModelPicker(options?.modelChoices, unlocked(options)),
+    renderZkapiPrivacy(options, token),
     view3.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view3, options)
   ].filter((block) => block !== "").join(`
@@ -164003,9 +164073,17 @@ function renderDashboardKeysPage(view3, options) {
     tab: "privacy",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
-    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
     options
   });
+}
+function renderZkapiPrivacy(options, token) {
+  const picker2 = renderZkapiModelPicker(options?.modelChoices, unlocked(options));
+  const csrfToken = options?.controlSessionCsrfToken;
+  const card = options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "privacy", otherPartHref: `${dashboardLocalPageHref("settings", token)}#${DASHBOARD_SETTINGS_ZKAPI_ID}` }) : "";
+  if (!picker2 && !card)
+    return "";
+  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker2}${card}</section>`;
 }
 function sourceDomId(sourceId) {
   return sourceId.replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -164259,13 +164337,15 @@ function renderDashboardSettingsPage(options) {
   const token = readToken2(options?.basePath);
   const settings = options?.settings;
   const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
-  const agents = `<section id="settings-agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>') : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
-  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>' + (settings?.models?.length ? `<div class="srows">${settings.models.map((model) => `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(model.name)}</b> <span class="pnote">· ${escapeHtml2(model.state)}</span><p class="pnote">${escapeHtml2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p></div></div>`).join("")}</div>` : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>') + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml2(dashboardLocalPageHref("keys", token)) + '">Privacy rules</a>.</p></section>';
+  const agents = `<section class="setpane" id="agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>') : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section class="setpane" id="models"><h3 class="sect">Models on this computer</h3>' + (settings?.models?.length ? `<div class="srows">${settings.models.map((model) => `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(model.name)}</b> <span class="pnote">· ${escapeHtml2(model.state)}</span><p class="pnote">${escapeHtml2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p></div></div>`).join("")}</div>` : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>') + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml2(dashboardLocalPageHref("keys", token)) + '">Privacy rules</a>.</p></section>';
+  const csrfToken = options?.controlSessionCsrfToken;
+  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml2(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
   const update = settings?.update;
-  const updates = '<section><h3 class="sect" id="updates">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
-  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
-  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
-  return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
+  const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${updates}${help}</div></div>`;
+  return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS], options });
 }
 function renderDashboardHelpPage(options) {
   const report = options?.systemReport;
@@ -164344,16 +164424,7 @@ var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a c
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
-`, SETTINGS_SECTIONS, SETTINGS_CSS = `
-.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
-.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
-.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
-.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
-.setmain section + section { margin-top: 24px; }
-.setmain > section:first-child .sect { margin-top: 0; }
-.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
-`;
+`, SETTINGS_SECTIONS, SETTINGS_CSS;
 var init_local = __esm(() => {
   init_judge_spending();
   init_source_failure();
@@ -164370,6 +164441,7 @@ var init_local = __esm(() => {
   init_vocabulary();
   init_model_pickers();
   init_model_setup2();
+  init_outside_help();
   init_vocabulary();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
   CONNECTOR_PROMPT = [
@@ -164405,9 +164477,24 @@ var init_local = __esm(() => {
   SETTINGS_SECTIONS = [
     { id: "agents", label: "Agents and access" },
     { id: "models", label: "Models on this computer" },
+    { id: DASHBOARD_SETTINGS_ZKAPI_ID, label: "zkAPI" },
     { id: "updates", label: "Updates" },
     { id: "help", label: "Help" }
   ];
+  SETTINGS_CSS = `
+.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
+.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
+.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
+.setmain > .setpane { display: none; scroll-margin-top: 12px; }
+.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }
+.setmain > .setpane > .sect:first-child { margin-top: 0; }
+${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .setside a[href="#${section.id}"]`).join(`,
+`)},
+.setlayout:not(:has(.setpane:target)) .setside a:first-child { border-color: var(--link); background: var(--panel, transparent); font-weight: 600; }
+.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
+`;
 });
 
 // src/workers/dashboard/index.ts
@@ -164443,7 +164530,7 @@ function dashboardLegacyRedirect(url2) {
   return dashboardHomeHref(dashboardReadToken(url2));
 }
 function dashboardOutsideHelpRedirect(url2) {
-  return `${dashboardLocalPageHref("privateAnswers", dashboardReadToken(url2))}#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`;
+  return `${dashboardLocalPageHref("settings", dashboardReadToken(url2))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
 }
 function renderDashboardLocalPage(page2, input) {
   const options = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -170351,10 +170438,15 @@ function createEmailSourceWorker(options = {}) {
           if (page2 === "settings") {
             const installer = installerForPlatform(options.platform ?? process.platform);
             const update = installer ? options.updateAvailable?.() : undefined;
+            const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
+              return;
+            }) : undefined;
             return html2(renderDashboardLocalPage("settings", {
               url: url2,
               options: {
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                ...outsideHelp ? { outsideHelp } : {},
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 ...agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {},
                 ...options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {},
                 settings: {
@@ -217775,7 +217867,8 @@ function createDashboardConsultAdapter(options) {
       const current2 = readConsultSettings(location);
       const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen = [...base.languages];
-      if (enabled && update.languages !== undefined) {
+      const savingLanguages = update.languages !== undefined && (enabled || update.save_languages === true);
+      if (savingLanguages) {
         if (!Array.isArray(update.languages) || update.languages.length === 0)
           return invalid5(MESSAGES3.languagesEmpty, "languages_empty");
         if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
@@ -217800,7 +217893,7 @@ function createDashboardConsultAdapter(options) {
         if (!acknowledgementsComplete())
           return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES3.acknowledgementsIncomplete };
       }
-      if (enabled && (turningOn || update.languages !== undefined)) {
+      if (turningOn || savingLanguages) {
         const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed2.has(language)))
           return invalid5(MESSAGES3.languageMissing, "language_pack_missing");
@@ -217817,7 +217910,7 @@ function createDashboardConsultAdapter(options) {
       }, location);
       if (result.ok) {
         const paused = enabled && Boolean(zkapiProfile()) && !acknowledgementsComplete();
-        const message2 = update.level !== undefined ? paused ? MESSAGES3.levelSavedPaused : MESSAGES3.levelSaved : enabled ? MESSAGES3.turnedOn : MESSAGES3.turnedOff;
+        const message2 = update.level !== undefined ? paused ? MESSAGES3.levelSavedPaused : MESSAGES3.levelSaved : update.save_languages === true ? MESSAGES3.languagesSaved : enabled ? MESSAGES3.turnedOn : MESSAGES3.turnedOff;
         return { ok: true, status_message: message2, revision: result.settings.revision };
       }
       return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
@@ -217969,7 +218062,7 @@ var init_dashboard_consult = __esm(() => {
     acknowledgementsIncomplete: "Accept the statements on this page before turning anonymous answers on.",
     levelUnknown: "Choose what zkAPI may send: Standard or Strict.",
     levelSaved: "Saved.",
-    levelSavedPaused: "Saved. Anonymous answers stay paused until you accept the statements on this page.",
+    levelSavedPaused: "Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.",
     languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
     languagesEmpty: "Choose at least one language.",
     noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
@@ -217988,6 +218081,7 @@ var init_dashboard_consult = __esm(() => {
     confirm: "This action needs your confirmation.",
     turnedOn: "Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.",
     turnedOff: "Anonymous answers are off. No question is sent.",
+    languagesSaved: "Languages saved.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
     routeAdded: "The zkAPI route is added. Finish the steps below.",

@@ -247,7 +247,8 @@ const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon
  * statements in full only until they are accepted; everything else one line
  * each, collapsed, showing its current value. Nothing is asked from this page.
  */
-export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string; untitled?: boolean }): string {
+export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string; untitled?: boolean; part?: OutsideHelpPart; otherPartHref?: string }): string {
+  if (input.part === 'privacy') return renderOutsideHelpPrivacyPart(status, input);
   const summary = summaryOf(status);
   // Controls only for a local-grade session: a bearer-grade session (the
   // launch flow, or a bearer mint) reads the card and is offered the local
@@ -272,7 +273,8 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const access: Access = canEdit ? 'edit' : canUnlock ? 'unlock' : 'read';
   // Adding the missing route is the prerequisite for turning answers on.
   const missingRoute = !unavailable && route.state === 'not_configured';
-  if (missingRoute) parts.push(renderProblems(status, access));
+  const writerHref = input.part === 'account' && input.otherPartHref ? `${input.otherPartHref.split('#')[0]}#outside-writer` : undefined;
+  if (missingRoute) parts.push(renderProblems(status, access, writerHref));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (unavailable) {
@@ -283,7 +285,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   }
 
   // 2. Problems: one line each, one button each.
-  if (!missingRoute) parts.push(renderProblems(status, access));
+  if (!missingRoute) parts.push(renderProblems(status, access, writerHref));
 
   // 3. The statements, in full only until accepted.
   if (route.state === 'configured' && !route.acknowledgements.complete) parts.push(renderStatementsToAccept(access));
@@ -291,10 +293,16 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   // 4. Everything else: one line each with its current value, collapsed.
   const more: string[] = [];
   if (!on) more.push(renderBeforeTurningOn());
-  more.push(renderLevel(status, canEdit));
-  if (status.standard) more.push(renderStandard(status.standard, status.settings.level, status.settings.state === 'invalid' ? false : canEdit));
-  if (status.writer) more.push(renderWriter(status.writer, canEdit));
-  more.push(renderLanguages(status, canEdit));
+  if (input.part === 'account') {
+    // Settings › zkAPI (#1047): the privacy choices live on Privacy rules; the switch still posts the saved languages.
+    parts.push(savedLanguagesForSwitch(status));
+    if (input.otherPartHref) more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml(input.otherPartHref)}">${escapeHtml(W.privacyChoicesLink)}</a></p>`);
+  } else {
+    more.push(renderLevel(status, canEdit));
+    if (status.standard) more.push(renderStandard(status.standard, status.settings.level, status.settings.state === 'invalid' ? false : canEdit));
+    if (status.writer) more.push(renderWriter(status.writer, canEdit));
+    more.push(renderLanguages(status, canEdit));
+  }
   if (route.state === 'configured') more.push(renderLimits(route, canEdit));
   if (route.state === 'configured' && route.acknowledgements.complete) more.push(renderAccepted());
   more.push(renderSetupSteps(
@@ -308,6 +316,52 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
+}
+
+/** Which half of the card a page shows (#1047): Settings › zkAPI has the account, Privacy rules the privacy choices. */
+export type OutsideHelpPart = 'account' | 'privacy';
+
+/** The saved languages as checked boxes the switch reads, so Turn on or off keeps them as they are. */
+function savedLanguagesForSwitch(status: DashboardOutsideHelpStatus): string {
+  const chosen = new Set(status.settings.languages);
+  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language))
+    .map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join('')}</div>`;
+}
+
+/**
+ * Privacy rules › zkAPI (#1047): what may be sent, how the question is
+ * prepared, who writes it and its languages. Languages save with their own
+ * button, which posts the switch as it stands.
+ */
+function renderOutsideHelpPrivacyPart(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; otherPartHref?: string }): string {
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
+  const summary = summaryOf(status);
+  const on = status.settings.state === 'on';
+  const parts: string[] = [];
+  if (canUnlock) {
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>`
+      + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
+      + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  const tone = summary.state === 'on' ? 'on' : summary.state === 'off' || summary.state === 'unavailable' ? 'off' : 'attn';
+  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml(W.row[summary.state])}.</span>`
+    + (input.otherPartHref ? ` <a href="${escapeHtml(input.otherPartHref)}">${escapeHtml(W.accountLink)}</a>` : '') + '</p>');
+  if (status.writer?.modelProblem) {
+    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(W.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: 'open', section: 'writer', label: W.chooseModel, focus: 'chatgpt_frontier_model' }, canEdit ? 'edit' : canUnlock ? 'unlock' : 'read', { attrs: ' data-outside-model-problem' })}</ul>`);
+  }
+  const more: string[] = [renderLevel(status, canEdit)];
+  if (status.standard) more.push(renderStandard(status.standard, status.settings.level, status.settings.state === 'invalid' ? false : canEdit));
+  if (status.writer) more.push(renderWriter(status.writer, canEdit));
+  // The languages post the switch as it is, with this form's own button.
+  const invalid = status.settings.state === 'invalid';
+  const save = canEdit && !invalid
+    ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? 'true' : 'false'}">${escapeHtml(W.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>`
+    : '';
+  more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
+  parts.push(`<div class="ohmore">${more.join('')}</div>`);
+  const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
+  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
 }
 
 function outsideHelpScriptConfig(csrfToken: string | undefined) {
@@ -418,7 +472,7 @@ function problemLine(words: string, fix: ProblemFix | undefined, access: Access,
 /** What the reader may do: change things, unlock first, or only read. */
 type Access = 'edit' | 'unlock' | 'read';
 
-function renderProblems(status: DashboardOutsideHelpStatus, access: Access): string {
+function renderProblems(status: DashboardOutsideHelpStatus, access: Access, writerHref?: string): string {
   const canEdit = access === 'edit';
   const route = status.route;
   const items: string[] = [];
@@ -486,8 +540,10 @@ function renderProblems(status: DashboardOutsideHelpStatus, access: Access): str
       items.push(problemLine(words, fix, access, { attrs }));
     }
   }
-  if (status.writer?.modelProblem) {
+  if (status.writer?.modelProblem && writerHref === undefined) {
     items.push(problemLine(status.writer.modelProblem.message, { kind: 'open', section: 'writer', label: W.chooseModel, focus: 'chatgpt_frontier_model' }, access, { attrs: ' data-outside-model-problem' }));
+  } else if (status.writer?.modelProblem && writerHref !== undefined) {
+    items.push(`<li data-outside-model-problem><span>${escapeHtml(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml(writerHref)}">${escapeHtml(W.chooseModel)}</a></li>`);
   }
   if (items.length === 0) return '';
   return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(W.problemsTitle)}">${items.join('')}</ul>`;
@@ -909,6 +965,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
       var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
+      if (form.hasAttribute('data-outside-save-languages')) body.save_languages = true;
       return body;
     }
     if (kind === 'route') {

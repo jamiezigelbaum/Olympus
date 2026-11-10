@@ -70859,6 +70859,7 @@ var CODEX_SNIPPET = [
 init_vocabulary();
 // src/workers/dashboard/pages/private-answers.ts
 init_vocabulary();
+var DASHBOARD_SETTINGS_ZKAPI_ID = "zkapi";
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
@@ -70880,6 +70881,27 @@ var CONNECTOR_PROMPT = [
 var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 var CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
 var MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
+var SETTINGS_SECTIONS = [
+  { id: "agents", label: "Agents and access" },
+  { id: "models", label: "Models on this computer" },
+  { id: DASHBOARD_SETTINGS_ZKAPI_ID, label: "zkAPI" },
+  { id: "updates", label: "Updates" },
+  { id: "help", label: "Help" }
+];
+var SETTINGS_CSS = `
+.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
+.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
+.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
+.setmain > .setpane { display: none; scroll-margin-top: 12px; }
+.setmain > .setpane:target, .setmain:not(:has(> .setpane:target)) > .setpane:first-child { display: block; }
+.setmain > .setpane > .sect:first-child { margin-top: 0; }
+${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .setside a[href="#${section.id}"]`).join(`,
+`)},
+.setlayout:not(:has(.setpane:target)) .setside a:first-child { border-color: var(--link); background: var(--panel, transparent); font-weight: 600; }
+.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
+`;
 
 // src/workers/dashboard/index.ts
 init_vocabulary();

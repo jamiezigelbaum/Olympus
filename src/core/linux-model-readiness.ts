@@ -2,7 +2,7 @@
 import { builtInAnalystEnabled, builtInPrivateModelStatus } from './analyst-built-in.ts';
 import { BUILT_IN_EMBEDDING_MODEL } from '../workers/source-index/built-in-embedding/manifest.ts';
 import { readBuiltInEmbeddingStatus } from '../workers/source-index/built-in-embedding/assets.ts';
-import { builtInTranscriptionEnabled, readBuiltInTranscriptionStatusFile, builtInTranscriptionDashboardState } from '../workers/source-index/built-in-reasoning/transcription-model.ts';
+import { BUILT_IN_TRANSCRIPTION_ENV, audioDecoderPresent, builtInTranscriptionEnabled, readBuiltInTranscriptionStatusFile, builtInTranscriptionDashboardState } from '../workers/source-index/built-in-reasoning/transcription-model.ts';
 import { QWEN3_ASR_06B } from '../workers/source-index/built-in-reasoning/manifest.ts';
 
 export interface LocalModelReadiness { name: string; state: string; detail: string; downloadBytes: number; }
@@ -23,7 +23,17 @@ export function linuxModelReadiness(env: Record<string, string | undefined> = pr
     { name: 'Transcription', state: transcriptionEnabled ? transcription.state : 'unavailable', detail: env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
       ? 'An external transcription command is configured.'
       : transcriptionEnabled ? `Qwen3-ASR 0.6B: ${transcription.state}. Downloads when audio is chosen.`
-      : 'Built-in transcription is off or its audio decoder is unavailable. Install ffmpeg, or check OLYMPUS_BUILT_IN_TRANSCRIPTION, then restart Olympus.',
+      : transcriptionOffReason(env, options.decoderPresent ?? (() => audioDecoderPresent(`linux-${process.arch}`, env))),
       downloadBytes: QWEN3_ASR_06B.files.reduce((sum, file) => sum + file.bytes, 0) },
   ];
+}
+
+/** Names the one cause that applies (#1046): turned off by setting, or no audio decoder. */
+function transcriptionOffReason(env: Record<string, string | undefined>, decoderPresent: () => boolean): string {
+  const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
+  if (raw === 'off' || raw === 'false' || raw === '0' || raw === 'no') {
+    return `Built-in transcription is turned off by ${BUILT_IN_TRANSCRIPTION_ENV}=${raw}. Remove that setting to turn it on, then restart Olympus.`;
+  }
+  if (decoderPresent()) return 'Built-in transcription is not available for this kind of computer.';
+  return 'Built-in transcription needs ffmpeg, which is not installed. Install ffmpeg, then restart Olympus.';
 }
