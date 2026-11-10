@@ -549,7 +549,30 @@ export interface EvalAnswerStageAudit {
     inAnalystPrompt?: boolean;
     inAnalystAnswer: boolean;
     inReleasedAnswer: boolean;
+    /**
+     * When the value is in the pack only inside a longer token: that token's
+     * shape (digits to 9, letters to a, punctuation kept), never its text.
+     */
+    packTokenShape?: string;
+    /** The same for the Analyst's answer, when it holds the value only inside a longer token. */
+    answerTokenShape?: string;
   }>;
+}
+
+/** The shape of the first token holding a form of the value as a substring (digits to 9, letters to a). */
+function valueTokenShape(value: string, text: string): string | undefined {
+  const lower = text.toLowerCase();
+  for (const form of acceptableForms(value)) {
+    const at = lower.indexOf(form);
+    if (at < 0) continue;
+    let start = at;
+    let end = at + form.length;
+    while (start > 0 && !/\s/.test(lower[start - 1]!)) start -= 1;
+    while (end < lower.length && !/\s/.test(lower[end]!)) end += 1;
+    const token = lower.slice(start, end).replace(/[.,;:!?)\]]+$/u, '').replace(/^[(\[]+/u, '');
+    return token.replace(/\p{N}/gu, '9').replace(/\p{L}/gu, 'a');
+  }
+  return undefined;
 }
 
 export function evalAnswerStageAudit(
@@ -575,7 +598,17 @@ export function evalAnswerStageAudit(
       ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
       inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
       inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
-    })),
+    })).map((entry, index) => {
+      const value = question.expectedAnswerContains![index]!;
+      const analystAnswer = (analystResult ?? releasedResult).answer;
+      const packShape = !entry.inPack && entry.inPackAsSubstring ? valueTokenShape(value, packText) : undefined;
+      const answerShape = !entry.inAnalystAnswer ? valueTokenShape(value, analystAnswer) : undefined;
+      return {
+        ...entry,
+        ...(packShape !== undefined ? { packTokenShape: packShape } : {}),
+        ...(answerShape !== undefined ? { answerTokenShape: answerShape } : {}),
+      };
+    }),
   };
 }
 
