@@ -224100,6 +224100,8 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
   return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
 }
 function createConnectorStoreMountDiscovery(raw, options) {
+  const retryBaseMs = 5000;
+  const retryMaxMs = 600000;
   const reported = new Map;
   const reportFailure = (message2) => {
     const label = message2.split(" skipped:")[0];
@@ -224153,7 +224155,7 @@ function createConnectorStoreMountDiscovery(raw, options) {
         continue;
       }
       const attempts = (failed.get(declaration)?.attempts ?? 0) + 1;
-      const delay2 = Math.min(CONNECTOR_STORE_MOUNT_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 30), CONNECTOR_STORE_MOUNT_RETRY_MAX_MS);
+      const delay2 = Math.min(retryBaseMs * 2 ** Math.min(attempts - 1, 30), retryMaxMs);
       failed.set(declaration, { attempts, retryAt: time3 + delay2 });
     }
     return mounts;
@@ -224319,7 +224321,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock, CONNECTOR_STORE_MOUNT_RETRY_BASE_MS = 5000, CONNECTOR_STORE_MOUNT_RETRY_MAX_MS = 600000;
+var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_judge_setup();
   init_judge_spending();

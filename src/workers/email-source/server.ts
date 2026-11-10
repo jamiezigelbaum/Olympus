@@ -8267,9 +8267,6 @@ export function parseConnectorStoreMountsFromEnv(
   return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
 }
 
-const CONNECTOR_STORE_MOUNT_RETRY_BASE_MS = 5_000;
-const CONNECTOR_STORE_MOUNT_RETRY_MAX_MS = 10 * 60_000;
-
 /**
  * Compile fixed configuration once; only pending absent files need probes on
  * reads. A store whose file exists but fails to mount (an account mid-deletion,
@@ -8284,6 +8281,10 @@ export function createConnectorStoreMountDiscovery(raw: string | undefined, opti
   reportFailure?(message: string): void;
   now?(): number;
 }): () => ConnectorStoreMount[] {
+  // Local, not module-level: startup runs this factory while the module is
+  // paused at the entrypoint's top-level await, before later bindings exist.
+  const retryBaseMs = 5_000;
+  const retryMaxMs = 10 * 60_000;
   const reported = new Map<string, string>();
   const reportFailure = (message: string): void => {
     const label = message.split(' skipped:')[0]!;
@@ -8329,7 +8330,7 @@ export function createConnectorStoreMountDiscovery(raw: string | undefined, opti
         continue;
       }
       const attempts = (failed.get(declaration)?.attempts ?? 0) + 1;
-      const delay = Math.min(CONNECTOR_STORE_MOUNT_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 30), CONNECTOR_STORE_MOUNT_RETRY_MAX_MS);
+      const delay = Math.min(retryBaseMs * 2 ** Math.min(attempts - 1, 30), retryMaxMs);
       failed.set(declaration, { attempts, retryAt: time + delay });
     }
     return mounts;
