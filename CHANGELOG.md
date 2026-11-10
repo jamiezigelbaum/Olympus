@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.3 - 2026-11-10
+
+- **Ask answers while Olympus is busy judging.** On a large install that was judging privacy, an Ask could freeze the dashboard for over a minute and then say every source was left out. Search no longer rebuilds each store's hidden copies on every question, a source isn't dropped just because the engine was busy when its time ran out, and the dashboard status no longer rebuilds them on each refresh either (#1079, #1091, #1056).
+- When sources were too busy to search in time, the answer names them and says to ask again; when no source could be searched, it says so instead of saying the answer isn't there. Sources that were never set up are no longer listed as left out (#1091).
+
 ## 1.4.2 - 2026-11-08
 
 - **`olympus settings show`**: your agent can read every dashboard setting as JSON, so it no longer has to ask you what's on screen (#1051).
