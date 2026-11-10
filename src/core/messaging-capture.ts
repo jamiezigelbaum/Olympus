@@ -138,7 +138,11 @@ export function readMessagingCaptureGrantFacts(
       const scopes = raw.split(',').map((item) => item.trim()).filter(Boolean);
       if (scopes.length > 0) {
         if (scopes.length === 1 && scopes[0] === '*') facts.scope = { kind: 'whole_account' };
-        else if (scopes.every((scope) => !scope.includes('*'))) facts.scope = { kind: 'chats', count: new Set(scopes).size };
+        else if (scopes.every((scope) => !scope.includes('*'))) {
+          // A kind (`kind:dm`, #1075) is not a number of chats: only exact chats are counted.
+          const exact = scopes.filter((scope) => !scope.startsWith('kind:'));
+          if (exact.length > 0) facts.scope = { kind: 'chats', count: new Set(exact).size };
+        }
       }
     }
     return facts;
