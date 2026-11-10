@@ -79,6 +79,8 @@ export const SHARED_DATA_FILES = {
   // socket folder off Linux, and the status snapshot it publishes.
   'engine-run': 'engine-run',
   'engine-status': 'engine-background-status.json',
+  // One person across sources (#1076): Private, on this computer only.
+  'people-index': 'people-index.sqlite',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
   'built-in-reasoning': 'models/built-in-reasoning',
