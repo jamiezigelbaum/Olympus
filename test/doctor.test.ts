@@ -242,6 +242,18 @@ describe('runDoctor', () => {
     expect(host.hint).toContain('olympus worker uninstall');
   });
 
+  test('inside OpenClaw, a newer installed plugin than the running one names the pending activation first (#896)', async () => {
+    const pending = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      hostProbe: () => ({ engine: { installed: true, state: 'running', workerProblem: WORKER_DATA_OWNER_CONFLICT_MESSAGE }, legacyWorkerUnit: false, insideOpenClaw: true, plugin: { running: '1.3.1', installed: '1.3.3' } }) }));
+    const host = checkByName(pending.checks, 'host');
+    expect(host.ok).toBe(false);
+    expect(host.detail).toContain('still running Olympus 1.3.1, but 1.3.3 is installed');
+    expect(host.hint).toContain('openclaw plugins reload olympus --wait');
+    const current = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      hostProbe: () => ({ engine: { installed: false, state: 'not_loaded' }, legacyWorkerUnit: false, insideOpenClaw: true, plugin: { running: '1.3.3', installed: '1.3.3' } }) }));
+    expect(checkByName(current.checks, 'host').detail).not.toContain('activation is pending');
+  });
+
   test('a worker unit from olympus worker install beside the engine fails host with its removal step', async () => {
     const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), platform: 'linux',
       hostProbe: () => ({ engine: { installed: true, state: 'running', healthy: false, detail: 'Olympus worker failed to become ready.', linger: true }, legacyWorkerUnit: true }) }));

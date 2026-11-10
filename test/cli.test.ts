@@ -15,6 +15,7 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   formatCliFatalError,
   runDashboardCommand,
+  dashboardPortArg,
   type DashboardCommandDependencies,
   isV04PublicCliInvocation,
   lifecycleRecoverySignalsFromWorkerHttpState,
@@ -2060,5 +2061,18 @@ test('Linux desktop dashboard asks the socket to open a private file, and refuse
       } });
     expect(sent).toBe('http://127.0.0.1:8010/desktop-owner/open'); expect(result.opened).toBe(true); expect(result.url).not.toContain('#');
     await expect(runDashboardCommand({ platform: 'linux', fetchImpl: async () => Response.json({ state: 'port_in_use', remedy: 'Free the port or use SSH socket forward.' }, { status: 503 }) })).rejects.toThrow('Free the port');
+  } finally { env.restore(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('dashboard --port: parsed strictly, and refused where the worker is not reached over an SSH socket (#776)', async () => {
+  expect(dashboardPortArg(['dashboard', '--no-open', '--port', '8011'])).toBe(8011);
+  expect(dashboardPortArg(['dashboard'])).toBeUndefined();
+  for (const bad of ['80', '70000', '80x', '']) expect(() => dashboardPortArg(['dashboard', '--port', bad])).toThrow('--port takes a port number');
+  const home = mkdtempSync(join(tmpdir(), 'dashboard-port-'));
+  const env = withTemporaryEnv({ HOME: home, OLYMPUS_CONFIG: join(home, 'missing.json'), OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1', OLYMPUS_WORKER_AUTH_TOKEN: 'fixture-worker-token' });
+  try {
+    const error = await runDashboardCommand({ platform: 'darwin', noOpen: true, port: 8011, fetchImpl: async () => { throw new Error('must not mint'); } }).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(OperationError);
+    expect((error as Error).message).toContain('not reached through an SSH socket');
   } finally { env.restore(); rmSync(home, { recursive: true, force: true }); }
 });

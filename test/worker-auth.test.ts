@@ -1,3 +1,4 @@
+import { dashboardSessionMarker } from '../src/workers/dashboard/session-marker.ts';
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -157,8 +158,10 @@ describe('worker HTTP bind and auth', () => {
     // again on this browser (owner ruling, 2026-09-02).
     expect(mint.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=2592000');
     const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
-    const payload = await mint.json() as { csrf_token: string; policy: Record<string, boolean> };
+    const payload = await mint.json() as { csrf_token: string; session_marker: string; policy: Record<string, boolean> };
     expect(payload.csrf_token).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    // The page adopts this marker after an unlock instead of hashing (#728).
+    expect(payload.session_marker).toBe(dashboardSessionMarker(payload.csrf_token));
     expect(payload.policy).toMatchObject({
       bearer_token_persisted_in_browser_storage: false,
       http_only_cookie: true,

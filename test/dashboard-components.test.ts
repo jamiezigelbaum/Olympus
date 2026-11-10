@@ -1,3 +1,4 @@
+import { dashboardSessionMarker } from '../src/workers/dashboard/session-marker.ts';
 import { describe, expect, test } from 'bun:test';
 import {
   actionButton,
@@ -366,6 +367,13 @@ describe('dashboardPageSignature', () => {
     expect(markerOf(mintA)).toBe(markerOf(mintA2));
     expect(mintA).not.toContain('data-session="csrf-A"');
     expect(pageShell({ title: 'Olympus', meta: '', body: '<div>one</div>' })).not.toContain('dashboard-poll-signature');
+  });
+
+  test('the local unlock adopts the server marker; the page never recomputes it (#728)', () => {
+    const html = pageShell({ title: 'Olympus', meta: '', body: '<div>one</div>', poll: { unlocked: true, controlSessionCsrfToken: 'csrf-A' } });
+    expect(/data-session="([0-9a-f]*)"/.exec(html)?.[1]).toBe(dashboardSessionMarker('csrf-A'));
+    expect(html).toContain('body.session_marker');
+    expect(html).not.toContain('olympus-dashboard-session-marker');
   });
 
 });
