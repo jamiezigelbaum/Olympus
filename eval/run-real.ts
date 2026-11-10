@@ -12,8 +12,14 @@
 //   OLYMPUS_SOURCE_INDEX_ACCOUNT=personal \
 //   bun run eval:real [path/to/held-out.real.json]
 //
-// The store is the Dropbox account's Private store where this install keeps it;
-// OLYMPUS_EVAL_DROPBOX_STORE names another file (a copy, say).
+// It searches the way Ask does: every Dropbox tier store this install has
+// (Private and Personal, and Public when it exists) through the shared answer
+// lanes, judged by the source's tier ledger, with the built-in embedding model
+// when it is installed and keyword search otherwise (said in the run output).
+// The Private store is where this install keeps it unless
+// OLYMPUS_EVAL_DROPBOX_STORE names another file (a copy, say);
+// OLYMPUS_EVAL_DROPBOX_PERSONAL_STORE, OLYMPUS_EVAL_DROPBOX_PUBLIC_STORE and
+// OLYMPUS_EVAL_DROPBOX_LEDGER do the same for the other stores and the ledger.
 //
 // Set OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY only when every instantiated
 // expected evidence item is inside that approved Dropbox scope.
@@ -21,6 +27,7 @@
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
 import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
+import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,21 +50,38 @@ import {
   buildEvidencePackDetailed,
   type EvidencePackBuildDetail,
 } from '../src/core/evidence-pack.ts';
-import { createAnalystQueryPlanner } from '../src/core/query-planner.ts';
+import { createAnalystQueryPlanner, type AnalystQueryPlanner } from '../src/core/query-planner.ts';
 import {
   buildSourceIndexCorpusRegistry,
   defineSourceIndexCorpus,
 } from '../src/core/source-index/corpus.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { DROPBOX_APPROVED_SCOPE_FILTER_CODEC } from '../src/workers/dropbox-files/index.ts';
 import {
-  LocalConnectorStore,
-  createConnectorStoreContentProvider,
-  createConnectorStoreCorpusAdapter,
-} from '../src/workers/connector-store/index.ts';
+  releaseAnalystAnswer,
+  type AnalystAnswerLanes,
+  type AnalystReleaseOutcome,
+} from '../src/workers/source-index/analyst-answer.ts';
+import type { AnalystResult } from '../src/core/contracts.ts';
+import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
+import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
+import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
+import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
 import {
-  DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
-  DROPBOX_FILES_CORPUS_ID,
-} from '../src/workers/dropbox-files/index.ts';
-import { releaseAnalystAnswer } from '../src/workers/source-index/analyst-answer.ts';
+  BuiltInSourceEmbeddingProvider,
+  loadedBuiltInEmbedding,
+} from '../src/workers/source-index/built-in-embedding/provider.ts';
+import {
+  builtInEmbeddingPaths,
+  installedBuiltInEmbedding,
+} from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
+import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
 import type { EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
@@ -69,6 +93,7 @@ const DEFAULT_REPORT_PATH = 'eval/private/report.latest.json';
 const DEFAULT_QUESTION_TIMEOUT_MS = 240_000;
 const DEFAULT_MAX_RESULTS = 5;
 const DEFAULT_MAX_CHARS_PER_CANDIDATE = 1_500;
+const DEFAULT_EMBEDDING_WARM_TIMEOUT_MS = 180_000;
 const INTERNAL_QUESTION_INDEX_ENV = 'OLYMPUS_EVAL_INTERNAL_QUESTION_INDEX';
 type EvalAnalystProvider = 'local' | 'venice';
 
@@ -86,9 +111,9 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
-  const dbPath = process.env.OLYMPUS_EVAL_DROPBOX_STORE?.trim() || resolvedStorePath('dropbox.files', 'secure_local');
-  if (!existsSync(dbPath)) {
-    console.error(`No Dropbox connector store at ${dbPath}. Set OLYMPUS_EVAL_DROPBOX_STORE to the store to evaluate.`);
+  const storePaths = evalDropboxStorePaths(process.env);
+  if (!existsSync(storePaths.secure)) {
+    console.error(`No Dropbox connector store at ${storePaths.secure}. Set OLYMPUS_EVAL_DROPBOX_STORE to the store to evaluate.`);
     process.exit(2);
   }
 
@@ -131,33 +156,30 @@ async function main(): Promise<void> {
   };
   const config = loadConfig();
 
-  const store = new LocalConnectorStore({
-    dbPath,
-    corpusId: DROPBOX_FILES_CORPUS_ID,
-    family: 'file',
-    trustDomain: 'secure_local',
-    readOnly: true,
-  });
+  const opened = openEvalDropboxStores(storePaths);
   const scope = resolveEvalDropboxScope(account, approvedScopeKey);
-  const registry = buildSourceIndexCorpusRegistry([
-    defineSourceIndexCorpus({
-      corpusId: DROPBOX_FILES_CORPUS_ID,
-      family: 'file',
-      trustDomain: 'secure_local',
-    }),
-  ]);
-  const adapters = {
-    [DROPBOX_FILES_CORPUS_ID]: createConnectorStoreCorpusAdapter({
-      store,
-      ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
-      ...(scope.locatorPathScope
-        ? { filters: { provider: 'dropbox', locatorPathScope: scope.locatorPathScope } }
-        : {}),
-    }),
+  const embedding = await prepareEvalEmbedding({
+    configured: await configuredEvalEmbedding(config, process.env),
+    warmTimeoutMs: parsePositiveIntegerEnv(
+      process.env.OLYMPUS_EVAL_EMBEDDING_WARM_TIMEOUT_SECONDS,
+      DEFAULT_EMBEDDING_WARM_TIMEOUT_MS / 1000,
+      'OLYMPUS_EVAL_EMBEDDING_WARM_TIMEOUT_SECONDS',
+    ) * 1000,
+  });
+  const retrieval = {
+    ...embedding.retrieval,
+    corpora: opened.stores.map((store) => store.corpusId),
+    tierLedger: opened.ledger ? 'bound' as const : 'absent' as const,
   };
-  const contentProviders = {
-    [DROPBOX_FILES_CORPUS_ID]: createConnectorStoreContentProvider({ store }),
-  };
+  console.error(
+    `eval retrieval: ${retrieval.note}; stores ${retrieval.corpora.join(', ')}; tier ledger ${retrieval.tierLedger}`,
+  );
+  const lanes = createEvalDropboxLanes({
+    stores: opened.stores,
+    ...(opened.ledger ? { ledger: opened.ledger } : {}),
+    scope,
+    embeddingFor: embedding.embeddingFor,
+  });
   const model = createEvalAnalystModel({
     provider: analystProvider,
     config,
@@ -179,20 +201,15 @@ async function main(): Promise<void> {
     continueOnQuestionError: true,
     stopOnQuestionTimeout: true,
     async buildPack(question) {
-      const detail = await buildEvidencePackDetailed({
+      const detail = await buildEvalPack({
         question: question.question,
+        lanes,
         ...(queryPlanner ? { queryPlanner } : {}),
         ...(reranker ? { reranker } : {}),
         maxResults,
         // Keep local-model prompts bounded for an eval gate. Truncation is
         // reported as a coverage gap; raise this only for targeted diagnosis.
         maxCharsPerCandidate,
-        searchContext: {
-          allowedTrustDomains: ['public_safe', 'internal', 'secure_local'],
-        },
-        registry,
-        adapters,
-        contentProviders,
       });
       detailsByPack.set(detail.pack, detail);
       return detail.pack;
@@ -200,22 +217,7 @@ async function main(): Promise<void> {
     analyst,
     releaseFor(pack, result) {
       const detail = detailsByPack.get(pack);
-      if (!detail) return undefined;
-      const release = releaseAnalystAnswer({
-        detail,
-        result,
-        releaseSecureContent: true, // the eval asks explicitly, like an owner ask
-      });
-      const released = release.decision.decision === 'allow' || release.decision.decision === 'redact';
-      return {
-        result: {
-          ...result,
-          answer: release.answer,
-          citations: released ? result.citations : [],
-          unanswered: releasedVisibleUnanswered(release.answer, released),
-        },
-        audit: release.opsec,
-      };
+      return detail ? releaseEvalAnswer(detail, result) : undefined;
     },
     gradeContextFor(pack) {
       const detail = detailsByPack.get(pack);
@@ -251,18 +253,16 @@ async function main(): Promise<void> {
     },
     onPartialReport(partial) {
       writeEvalReport(reportPath, datasetPath, partial, traces, {
-        analystProvider,
-        questionTimeoutMs,
-        queryPlannerEnabled,
-        maxResults,
-        maxCharsPerCandidate,
+        ...reportConfig,
+        retrieval,
         reranker: reranker?.id ?? 'off',
       }, { partial: true });
     },
   });
-  store.close();
+  opened.close();
   writeEvalReport(reportPath, datasetPath, report, traces, {
     ...reportConfig,
+    retrieval,
     reranker: reranker?.id ?? 'off',
   }, { partial: false });
 
@@ -303,6 +303,263 @@ export function resolveEvalDropboxScope(
   };
 }
 
+/** Where the eval finds each Dropbox tier store and the source's tier ledger. */
+export interface EvalDropboxStorePaths {
+  secure: string;
+  personal?: string;
+  public?: string;
+  /** The set ledger; default beside the Private store, where the lane keeps it. */
+  ledger?: string;
+}
+
+export function evalDropboxStorePaths(env: Record<string, string | undefined>): EvalDropboxStorePaths {
+  const secure = env.OLYMPUS_EVAL_DROPBOX_STORE?.trim() || resolvedStorePath('dropbox.files', 'secure_local');
+  return {
+    secure,
+    personal: env.OLYMPUS_EVAL_DROPBOX_PERSONAL_STORE?.trim() || resolvedStorePath('dropbox.files', 'internal', env),
+    public: env.OLYMPUS_EVAL_DROPBOX_PUBLIC_STORE?.trim() || resolvedStorePath('dropbox.files', 'public_safe', env),
+    ledger: env.OLYMPUS_EVAL_DROPBOX_LEDGER?.trim() || tieredStoreSetLedgerPath(secure),
+  };
+}
+
+export interface EvalDropboxStores {
+  /** Every tier store that exists, opened query-only. */
+  stores: LocalConnectorStore[];
+  /** The set ledger, read-only, when it exists. */
+  ledger?: TierLedger;
+  close(): void;
+}
+
+/**
+ * Opens every Dropbox tier store that exists, query-only. A store bound to
+ * the set ledger judges what it serves by that ledger itself; the ledger
+ * opened here feeds the same visibility gate live Ask applies over the hits.
+ */
+export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropboxStores {
+  const files: Array<[SourceTrustDomain, string | undefined]> = [
+    ['secure_local', paths.secure],
+    ['internal', paths.personal],
+    ['public_safe', paths.public],
+  ];
+  const stores: LocalConnectorStore[] = [];
+  for (const [trustDomain, dbPath] of files) {
+    const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
+    if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
+    stores.push(new LocalConnectorStore({
+      dbPath,
+      corpusId,
+      family: 'file',
+      trustDomain,
+      readOnly: true,
+    }));
+  }
+  const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
+  const ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
+  return {
+    stores,
+    ...(ledger ? { ledger } : {}),
+    close() {
+      for (const store of stores) store.close();
+      ledger?.close();
+    },
+  };
+}
+
+/**
+ * The answer lanes over the eval's stores, built by the same factory live
+ * answers use (email-source/source-answer-lanes.ts) in its on-this-computer
+ * mode: a store's vector lane runs only with the built-in model this process
+ * holds loaded, and otherwise searches by keyword.
+ */
+export function createEvalDropboxLanes(input: {
+  stores: readonly LocalConnectorStore[];
+  ledger?: TierLedger;
+  scope: { accountScope?: string; locatorPathScope?: string };
+  embeddingFor?: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined;
+  localEmbedding?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider | undefined;
+}): (question: string) => AnalystAnswerLanes {
+  const stores = () => input.stores;
+  const scopes = () => (input.ledger
+    ? [{ ledger: input.ledger, corpusIds: new Set(input.stores.map((store) => store.corpusId)), stores }]
+    : []);
+  const filters = input.scope.locatorPathScope
+    ? { provider: 'dropbox', locatorPathScope: input.scope.locatorPathScope }
+    : undefined;
+  const lanes = createSourceAnswerLanes({
+    stores,
+    registry: () => buildSourceIndexCorpusRegistry(input.stores.map((store) => defineSourceIndexCorpus({
+      corpusId: store.corpusId,
+      family: store.family,
+      trustDomain: store.trustDomain,
+    }))),
+    embeddingProvider: (store) => input.embeddingFor?.(store.trustDomain),
+    localEmbedding: input.localEmbedding ?? loadedBuiltInEmbedding,
+    readScope: () => ({
+      allowed: true,
+      contentAllowed: true,
+      ...(input.scope.accountScope ? { accountScope: input.scope.accountScope } : {}),
+      ...(filters ? { filters, contentFilters: filters } : {}),
+    }),
+    answerScope: () => ({ kind: 'search' }),
+    accountScope: () => input.scope.accountScope,
+    visibilityGate: createTierVisibilityGate(scopes),
+    parentLabels: createParentLabelResolver({ stores, scopes }),
+  });
+  return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+}
+
+/** One question's evidence pack, over the eval's lanes, as live Ask builds it. */
+export function buildEvalPack(input: {
+  question: string;
+  lanes: (question: string) => AnalystAnswerLanes;
+  queryPlanner?: AnalystQueryPlanner;
+  reranker?: EvidenceReranker;
+  maxResults: number;
+  maxCharsPerCandidate: number;
+}): Promise<EvidencePackBuildDetail> {
+  const lanes = input.lanes(input.question);
+  return buildEvidencePackDetailed({
+    question: input.question,
+    ...(input.queryPlanner ? { queryPlanner: input.queryPlanner } : {}),
+    ...(input.reranker ? { reranker: input.reranker } : {}),
+    maxResults: input.maxResults,
+    maxCharsPerCandidate: input.maxCharsPerCandidate,
+    searchContext: {
+      allowedTrustDomains: ['public_safe', 'internal', 'secure_local'],
+    },
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+    ...(lanes.secretLocations ? { secretLocations: lanes.secretLocations } : {}),
+    ...(lanes.classificationCoverage ? { classificationCoverage: lanes.classificationCoverage } : {}),
+    ...(lanes.parentLabels ? { parentLabels: lanes.parentLabels } : {}),
+  });
+}
+
+export interface EvalRetrievalMode {
+  mode: 'hybrid' | 'keyword';
+  /** The built-in model that ran, when hybrid. */
+  modelId?: string;
+  /** One line for the run output and report. */
+  note: string;
+}
+
+/**
+ * The built-in embedding model, loaded, when the install has it; keyword
+ * search otherwise, with the reason. Never downloads a model: a model that
+ * was never installed leaves the eval on keyword search.
+ */
+export async function prepareEvalEmbedding(input: {
+  configured: Partial<Record<SourceTrustDomain, SourceEmbeddingProvider>>;
+  /** Thrown or unset configuration, said in the note. */
+  configurationError?: string;
+  warmTimeoutMs?: number;
+  /** Where the built-in model's files are looked for. Default: this process's environment. */
+  env?: Record<string, string | undefined>;
+}): Promise<{ retrieval: EvalRetrievalMode; embeddingFor: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined }> {
+  const keyword = (reason: string) => ({
+    retrieval: { mode: 'keyword' as const, note: `keyword search only (${reason})` },
+    embeddingFor: () => undefined,
+  });
+  if (input.configurationError) return keyword(`embedding configuration unreadable: ${input.configurationError}`);
+  const configured = Object.values(input.configured).filter((provider): provider is SourceEmbeddingProvider => provider !== undefined);
+  if (configured.length === 0) return keyword('no embedding model is configured');
+  const builtIn = [...new Set(configured.filter((provider) => provider instanceof BuiltInSourceEmbeddingProvider))] as BuiltInSourceEmbeddingProvider[];
+  if (builtIn.length === 0) return keyword('the configured embedding model is not the built-in one');
+  for (const provider of builtIn) {
+    const status = provider.status();
+    if (status.state !== 'ready' && status.previouslyReady !== true) {
+      return keyword(`built-in embedding model ${provider.modelId} is not installed (${status.state})`);
+    }
+    // Loading runs the installer, which downloads whatever is missing: a
+    // status file that outlived its files must not start a download.
+    if (!builtInEmbeddingFilesPresent(provider.modelId, input.env ?? process.env)) {
+      return keyword(`built-in embedding model ${provider.modelId} files are missing`);
+    }
+    try {
+      await withTimeout(provider.warm(), input.warmTimeoutMs ?? DEFAULT_EMBEDDING_WARM_TIMEOUT_MS, 'model load');
+    } catch (error) {
+      return keyword(`built-in embedding model ${provider.modelId} did not load: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const modelIds = [...new Set(builtIn.map((provider) => provider.modelId))].join(', ');
+  return {
+    retrieval: { mode: 'hybrid', modelId: modelIds, note: `hybrid search with the built-in embedding model ${modelIds}` },
+    embeddingFor: (trustDomain) => input.configured[trustDomain],
+  };
+}
+
+/** Whether every file the built-in model loads from is on disk (never downloads). */
+export function builtInEmbeddingFilesPresent(modelId: string, env: Record<string, string | undefined>): boolean {
+  const model = builtInEmbeddingModel(modelId);
+  if (!model) return false;
+  try {
+    const paths = builtInEmbeddingPaths(env, model);
+    const installed = installedBuiltInEmbedding(paths, model);
+    return [installed.modelPath, installed.vocabularyPath, installed.libraryPath ?? installed.runtimeDir]
+      .every((path) => path === undefined || existsSync(path));
+  } catch {
+    return false;
+  }
+}
+
+/** Each tier's embedding model as this install configures it (the worker's own resolution). */
+async function configuredEvalEmbedding(
+  config: OlympusConfig,
+  env: Record<string, string | undefined>,
+): Promise<Parameters<typeof prepareEvalEmbedding>[0]['configured']> {
+  try {
+    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/email-source/server.ts');
+    const engine = loadSourceWorkerSovereignty(config, env);
+    const configured: Partial<Record<SourceTrustDomain, SourceEmbeddingProvider>> = {};
+    for (const domain of ['public_safe', 'internal', 'secure_local'] as const) {
+      const provider = createSourceIndexEmbeddingProviderFromSovereignty(engine, domain, env);
+      if (provider) configured[domain] = provider;
+    }
+    return configured;
+  } catch (error) {
+    console.error(`eval retrieval: embedding configuration unreadable (${error instanceof Error ? error.message : String(error)})`);
+    return {};
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** The answer as the live release step lets it out, with the gaps it carries. */
+export function releaseEvalAnswer(
+  detail: EvidencePackBuildDetail,
+  result: AnalystResult,
+): { result: AnalystResult; audit: OpsecReleaseAudit } {
+  const release = releaseAnalystAnswer({
+    detail,
+    result,
+    releaseSecureContent: true, // the eval asks explicitly, like an owner ask
+  });
+  return { result: releasedEvalResult(result, release), audit: release.opsec };
+}
+
+/**
+ * What the grader sees: the released answer, its citations when released,
+ * and the release's own notes as `unanswered`, read from the structured
+ * outcome rather than parsed out of the answer text.
+ */
+export function releasedEvalResult(result: AnalystResult, release: AnalystReleaseOutcome): AnalystResult {
+  const released = release.decision.decision === 'allow' || release.decision.decision === 'redact';
+  return {
+    ...result,
+    answer: release.answer,
+    citations: released ? result.citations : [],
+    unanswered: released ? [...release.unanswered] : [],
+  };
+}
+
 interface IsolatedEvalInput {
   args: ReturnType<typeof parseEvalRealArgs>;
   dataset: EvalDataset;
@@ -318,13 +575,21 @@ interface IsolatedEvalInput {
 
 interface RealEvalReportEnvelope {
   report: EvalReport;
+  retrieval?: EvalReportRetrieval;
   precision?: { traces?: PrecisionTrace[] };
+}
+
+/** How each question's retrieval ran, as the run output says it. */
+export interface EvalReportRetrieval extends EvalRetrievalMode {
+  corpora: string[];
+  tierLedger: 'bound' | 'absent';
 }
 
 async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
   const grades: EvalGrade[] = [];
   const timings: EvalQuestionTiming[] = [];
   const traces: PrecisionTrace[] = [];
+  let retrieval: EvalReportRetrieval | undefined;
   const scriptPath = fileURLToPath(import.meta.url);
   let timedOut = false;
 
@@ -367,6 +632,7 @@ async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
         grades.push(grade);
         timings.push(timing);
         traces.push(...(envelope.precision?.traces ?? []));
+        retrieval ??= envelope.retrieval;
       } else {
         grades.push(isolatedFailureGrade(question, 'child_report_incomplete'));
         timings.push(isolatedFailureTiming(question, result.durationMs, 'error'));
@@ -382,7 +648,7 @@ async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
       input.args.datasetPath,
       partial,
       traces,
-      input.config,
+      { ...input.config, ...(retrieval ? { retrieval } : {}) },
       { partial: true },
     );
     if (timedOut) break;
@@ -394,11 +660,12 @@ async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
     input.args.datasetPath,
     report,
     traces,
-    input.config,
+    { ...input.config, ...(retrieval ? { retrieval } : {}) },
     { partial: report.remaining > 0 },
   );
   console.log(JSON.stringify(report, null, 2));
   console.error(`held-out eval: ${report.passed}/${report.total} passed`);
+  if (retrieval) console.error(`retrieval: ${retrieval.note}; stores ${retrieval.corpora.join(', ')}`);
   console.error('\nprecision trace (where the needle was lost):');
   for (const trace of traces) {
     console.error(
@@ -521,15 +788,6 @@ export function resolveEvalAnalystProvider(value: string | undefined): EvalAnaly
   if (!normalized) return 'local';
   if (normalized === 'local' || normalized === 'venice') return normalized;
   throw new Error('OLYMPUS_EVAL_ANALYST_PROVIDER/--analyst-provider must be local or venice.');
-}
-
-export function releasedVisibleUnanswered(answer: string, released: boolean): string[] {
-  if (!released) return [];
-  const marker = '\n\nCoverage notes:\n';
-  const markerIndex = answer.indexOf(marker);
-  if (markerIndex === -1) return [];
-  const notes = answer.slice(markerIndex + marker.length).trim();
-  return notes ? [notes] : [];
 }
 
 export function createEvalAnalystModel(input: {
@@ -672,6 +930,7 @@ function writeEvalReport(
     queryPlannerEnabled: boolean;
     maxResults: number;
     maxCharsPerCandidate: number;
+    retrieval?: EvalReportRetrieval;
     reranker?: string;
   },
   options: { partial: boolean },
@@ -688,6 +947,7 @@ function writeEvalReport(
       queryPlannerEnabled: config.queryPlannerEnabled,
       maxResults: config.maxResults,
       maxCharsPerCandidate: config.maxCharsPerCandidate,
+      ...(config.retrieval ? { retrieval: config.retrieval } : {}),
       ...(config.reranker ? { reranker: config.reranker } : {}),
       report,
       precision: {
