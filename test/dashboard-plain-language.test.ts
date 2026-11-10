@@ -53,9 +53,9 @@ describe('owner-facing dashboard pages carry no implementation jargon outside De
   // Unified dashboard phase 4: the panel is the dashboard (its own words are
   // checked in the ChatGPT tests); the computer's own pages are checked here.
   for (const state of SETUP_STATES) {
-    test(`Keys, Agents and Build a connector speak plainly (${state})`, () => {
+    test(`Keys, Agents and Sources (with Build a connector) speak plainly (${state})`, () => {
       const url = new URL('http://worker.test/dashboard?keys');
-      for (const page of ['keys', 'agents', 'connector'] as const) {
+      for (const page of ['keys', 'agents', 'connect'] as const) {
         const html = renderDashboardLocalPage(page, { url, view: buildDashboardPreviewView(state), options: { now: DASHBOARD_PREVIEW_NOW } });
         expect(jargonIn(html)).toEqual([]);
         expect(legacyIn(html)).toEqual([]);

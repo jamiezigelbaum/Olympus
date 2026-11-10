@@ -58,6 +58,7 @@ import {
   COMPUTER_HOST_PAGE_CSP,
   dashboardHtmlRoutePage,
   renderComputerHostPage,
+  dashboardConnectorRedirect,
   dashboardOutsideHelpRedirect,
   renderDashboardLocalPage,
 } from '../src/workers/dashboard/index.ts';
@@ -2195,6 +2196,7 @@ if (import.meta.main) {
       const page = dashboardHtmlRoutePage(url);
       if (page === 'legacy') return new Response(null, { status: 302, headers: { location: '/dashboard' } });
       if (page === 'outside_help_moved') return new Response(null, { status: 302, headers: { location: dashboardOutsideHelpRedirect(url) } });
+      if (page === 'connector') return new Response(null, { status: 302, headers: { location: dashboardConnectorRedirect(url) } });
       if (page === 'panel_read') return Response.json(previewDashboardToolResult(pageState, false));
       if (page === 'host') {
         return withCookies(html(renderComputerHostPage({

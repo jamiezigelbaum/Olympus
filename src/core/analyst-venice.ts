@@ -25,6 +25,8 @@ export interface VeniceAnalystModelOptions {
   timeoutMs?: number;
   fetchImpl?: OpenAIAnalystFetch;
   catalog?: VeniceModelCatalogOptions;
+  /** Venice `prompt_cache_key`: a routing hint so requests sharing a prefix reach a warm cache. */
+  promptCacheKey?: string;
 }
 
 export const DEFAULT_VENICE_ANALYST_MODEL = 'kimi-k3';
@@ -55,6 +57,7 @@ export function createVeniceAnalystModel(options: VeniceAnalystModelOptions): An
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     extraBody: {
+      ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
       venice_parameters: {
         enable_web_search: 'off',
         enable_web_scraping: false,
