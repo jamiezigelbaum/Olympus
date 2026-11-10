@@ -657,6 +657,10 @@ export function snifferMaterialForModel(material: string): string {
 
 // --- Synchronous, cache-backed sniffer ------------------------------------------------
 
+function verdictKey(request: TierSnifferRequest, material: string, lane: SnifferLaneIdentity, promptVersion: string, mapRevision: string) {
+  return { materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material), modelId: snifferCacheModelId(lane), promptVersion, mapRevision };
+}
+
 /**
  * The TierSniffer the classifier consults during a sync. It never calls a
  * model: it answers from the verdict cache, and queues a miss for the
@@ -701,9 +705,14 @@ export class CachedTierSniffer implements TierSniffer {
         mapRevision,
       });
       if (cached && request.contentHash && !contentVerdictReusable(cached, request.contentHash, request.subject)) cached = undefined;
+      if (cached && request.recheckHeld && !cached.failSafe && snifferVerdictTier(cached, this.lane, request.flags).tier === 'secure') {
+        // A second round re-asks what this judge held: its Private answer must not settle the question again.
+        this.store.deleteVerdict(verdictKey(request, material, this.lane, this.promptVersion, mapRevision));
+        cached = undefined;
+      }
       let duplicate = cached !== undefined && request.contentHash !== undefined
         && (!request.subject || cached.modelSubject !== snifferSubjectKey(request.subject));
-      if (!cached && request.pass === 'content' && request.contentHash && this.lane.snifferMode !== 'pending') {
+      if (!cached && !request.recheckHeld && request.pass === 'content' && request.contentHash && this.lane.snifferMode !== 'pending') {
         cached = this.store.getFinalModelContentVerdict({
           materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
           contentHash: request.contentHash, modelId: snifferCacheModelId(this.lane),

@@ -1,5 +1,5 @@
 import { dashboardPeopleRow } from './people.ts';
-import { judgeArchiveEstimate, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
+import { judgeArchiveEstimate, judgeChoiceUsesVenice, judgeDefaultCapDollars, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeChoice, type JudgeObserved, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
 import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
  * The computer's own pages (unified dashboard phase 4, 2026-10-09): what
@@ -70,7 +70,7 @@ import {
   dashboardSetupLead,
 } from '../vocabulary.ts';
 
-export interface DashboardJudgeSetup extends JudgeSpendingStatus { cloudModel: string | null; cloudAvailable: boolean }
+export interface DashboardJudgeSetup extends JudgeSpendingStatus { cloudModel: string | null; cloudAvailable: boolean; observed?: JudgeObserved }
 export interface DashboardPageOptions {
   judgeSetup?: DashboardJudgeSetup;
   /** The model pickers on Privacy rules (model-choices-backend.ts). */
@@ -781,57 +781,110 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   const status = options?.judgeSetup;
   if (!status) return '';
   const items = view.sources.reduce((sum, source) => sum + (source.coverage.stored_items ?? source.coverage.indexed_items), 0);
-  const estimate = judgeArchiveEstimate(items, status.cloudModel ?? '');
-  const money = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
-  const hours = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 1 });
+  const estimate = judgeArchiveEstimate(items, status.cloudModel ?? '', status.observed ?? {});
   const cloud = status.stop !== 'storage' && status.cloudAvailable && estimate.cloudDollars !== null;
   const stopped = status.stop === 'storage'
     ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>'
     : status.stop === 'payment'
     ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>'
     : status.stop === 'cap' ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : '';
-  const nights = `${hours(estimate.shortHours / 8)} to ${hours(estimate.longHours / 8)} nights`;
-  const venicePrice = estimate.cloudDollars === null ? 'Cost unavailable' : `About ${money(estimate.cloudDollars)}`;
   const row = (term: string, value: string) => `<span class="judgeterm">${escapeHtml(term)}</span><span>${value}</span>`;
-  // Each way to sort is one card; clicking the other card opens a
-  // confirmation under the cards (pure CSS on the checked radio), and
-  // Cancel resets the form to the choice in use.
-  const option = (id: 'local' | 'venice', title: string, lead: string, rows: string, fit: string, enabled: boolean) =>
+  const note = (text: string) => `<br><small class="judgenote">${escapeHtml(text)}</small>`;
+  const measured = estimate.measuredHours !== undefined;
+  const localRange = `About ${judgeHours(estimate.shortHours / 8)} to ${judgeHours(estimate.longHours / 8)} nights`;
+  const localTime = measured
+    ? `${judgeDuration(estimate.measuredHours!)}${note(S.judgeMeasuredHere.replace('{n}', judgeCount(estimate.measuredPerMinute!)))}`
+    : `${localRange} (${judgeHours(estimate.shortHours)} to ${judgeHours(estimate.longHours)} hours)`
+      + note(S.judgeMeasuredElsewhere.replace('{computer}', LOCAL_JUDGE_MEASUREMENT.computer).replace('{date}', LOCAL_JUDGE_MEASUREMENT.date));
+  const localThen = measured ? judgeDuration(estimate.measuredHours!).replace(/ \(.*\)$/, '') : localRange;
+  const second = estimate.secondRound;
+  // Each way to sort is one card; clicking another card opens its
+  // confirmation, and Cancel resets the form to the choice in use.
+  const option = (id: JudgeChoice, title: string, lead: string, rows: string, fit: string, enabled: boolean) =>
     `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? ' checked' : ''}${enabled ? '' : ' disabled'}> <b>${escapeHtml(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml(S.judgeNow)}</span>` : ''}</span>`
-    + `<span class="judgelead">${lead}</span><span class="judgerows">${rows}</span><span class="judgefit">${fit}</span></label>`;
-  const local = option('local', S.judgeLocal, escapeHtml(S.judgeLocalLead),
-    row(S.judgeCost, 'Free')
-    + row(S.judgeTime, `About ${nights} of 8 hours (${hours(estimate.shortHours)} to ${hours(estimate.longHours)} hours)`)
-    + row(S.judgeWhen, escapeHtml(S.judgeLocalWhen)),
-    escapeHtml(S.judgeLocalFit), true);
-  const venice = option('venice', S.judgeVenice, 'Venice reads every item to sort it, including items it marks Private.',
-    row(S.judgeCost, `${venicePrice}, on your own Venice account`)
-    + row(S.judgeTime, `About ${hours(estimate.cloudHours)} hours`)
-    + row(S.judgeWhen, escapeHtml(S.judgeVeniceWhen))
-    + (status.cloudModel ? row(S.judgeModel, escapeHtml(status.cloudModel)) : ''),
-    escapeHtml(S.judgeVeniceFit), cloud);
+    + `<span class="judgelead">${escapeHtml(lead)}</span><span class="judgerows">${rows}</span><span class="judgefit">${escapeHtml(fit)}</span></label>`;
+  const local = option('local', S.judgeLocal, S.judgeLocalLead,
+    row(S.judgeCost, 'Free') + row(S.judgeTime, localTime) + row(S.judgeWhen, escapeHtml(S.judgeLocalWhen)),
+    S.judgeLocalFit, true);
+  const doubleCheck = option('local-then-venice', S.judgeSecond, S.judgeSecondLead,
+    row(S.judgeCost, `${judgeMoney(second.dollars)}, on your own Venice account`)
+    + row(S.judgeTime, `${localThen}, then ${judgeDuration(second.hours).toLowerCase()}`)
+    + row(S.judgeWhen, escapeHtml(S.judgeSecondWhen.replace('{n}', judgeCount(second.items))) + note(S.judgeSecondWhenNote)),
+    S.judgeSecondFit, cloud);
+  const venice = option('venice', S.judgeVenice, S.judgeVeniceLead,
+    row(S.judgeCost, `${judgeMoney(estimate.cloudDollars)}, on your own Venice account`)
+    + row(S.judgeTime, judgeDuration(estimate.cloudHours))
+    + row(S.judgeWhen, escapeHtml(S.judgeVeniceWhen)),
+    S.judgeVeniceFit, cloud);
+  // The limit shows whenever a choice that uses Venice is selected (CSS). Until the
+  // owner sets one, it starts at the selected choice's estimate plus 25% (#884).
+  const defaults = { 'local-then-venice': judgeDefaultCapDollars(second.dollars), venice: judgeDefaultCapDollars(estimate.cloudDollars) };
+  const ownCap = judgeChoiceUsesVenice(status.choice) && !status.uncapped && status.stop !== 'storage' ? status.capDollars : undefined;
+  const capValue = ownCap ?? (status.uncapped ? undefined : defaults[status.choice === 'venice' ? 'venice' : 'local-then-venice'] ?? undefined);
   const spent = status.uncapped
     ? 'No spending limit is set, so Olympus isn\'t tracking cloud spending yet. Your Venice account shows what you\'ve spent.'
-    : `${status.stop === 'storage' ? 'Spending amounts are unavailable.' : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} Olympus stops before going past this limit. Items not yet sorted then stay Private and wait for this computer.`;
-  const cap = `<label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? '' : status.capDollars}"></label><p class="pnote">${spent}</p>`;
+    : ownCap !== undefined
+      ? `Spent or reserved: ${judgeMoney(status.spentDollars, true)}. Remaining: ${judgeMoney(status.remainingDollars, true)}. ${S.judgeCapStops}`
+      : status.stop === 'storage' ? `Spending amounts are unavailable. ${S.judgeCapStops}` : S.judgeCapDefault;
+  const capAttrs = ownCap === undefined && !status.uncapped
+    ? ` data-cap-auto="true" data-cap-local-then-venice="${defaults['local-then-venice'] ?? ''}" data-cap-venice="${defaults.venice ?? ''}"` : '';
+  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ''}"${capAttrs}></label>`
+    + `<p class="pnote">${escapeHtml(spent)}</p>${judgeChoiceUsesVenice(status.choice) ? `<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button>` : ''}</div>`;
+  // Box 3 of the approved mock (#922, "Go easy on this computer"): the idle-mode
+  // checkbox goes here, between the choices and the spending limit.
+  const idleModeSlot = '';
   const reply = '<span data-action-message role="status"></span>';
-  const dialog = (pick: 'local' | 'venice', title: string, body: string, button: string) =>
+  const dialog = (pick: JudgeChoice, title: string, body: string, button: string) =>
     `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>`
     + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(S.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
-  const confirm = status.choice === 'venice'
-    ? dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton)
-      + `<div class="judgekeep">${cap}<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button></div>`
-    : dialog('venice', S.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? '' : `: about ${money(estimate.cloudDollars)} for the ${items.toLocaleString('en-US')} items found so far`}.</p>${cap}`, S.judgeToVeniceButton);
+  const limitLine = (pick: 'local-then-venice' | 'venice') => {
+    // The controller refills the echo from the limit field when this opens, so it states what will be sent.
+    const cap = ownCap ?? defaults[pick];
+    return `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
+  };
+  const found = `the ${items.toLocaleString('en-US')} items found so far`;
+  const dialogs = (status.choice === 'local' ? '' : dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton))
+    + (status.choice === 'local-then-venice' ? '' : dialog('local-then-venice', S.judgeToSecond,
+      `<p>${escapeHtml(S.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? '' : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine('local-then-venice')}`, S.judgeToSecondButton))
+    + (status.choice === 'venice' ? '' : dialog('venice', S.judgeToVenice,
+      `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? '' : `: ${judgeMoney(estimate.cloudDollars).toLowerCase()} for ${found}`}.</p>${limitLine('venice')}`, S.judgeToVeniceButton));
+  const recommended = !cloud ? 'the free judge on this computer'
+    : estimate.recommended === 'venice' ? 'Venice for this archive size, if you choose to send it to the cloud' : 'this computer, with Venice double-checking what it keeps Private';
+  const held = second.observed
+    ? `On this computer the free judge has kept ${Math.round(second.heldFraction * 100)}% of items Private so far, so about that share goes to Venice.`
+    : `About ${Math.round(second.heldFraction * 100)}% of items go to Venice: the share the free judge kept Private in a test on labelled items (5 Nov 2026). Your archive may differ.`;
   return `<section id="privacy-judge"><h3 class="sect">${escapeHtml(S.judgeTitle)}</h3><p class="pnote">${escapeHtml(S.judgeIntro)}</p>
     <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? '' : ' disabled'}><legend class="judgelegend">${escapeHtml(S.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ''}${stopped}
-    <div class="judgeopts">${local}${venice}</div>
+    <div class="judgeopts">${local}${doubleCheck}${venice}</div>
     ${options?.goEasy === undefined ? '' : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? ' checked' : ''}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`}
     ${cloud || status.stop === 'storage' ? '' : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
-    ${confirm}${reply}
-    <p class="pnote">Estimates for the ${items.toLocaleString('en-US')} items found so far. Recommended: ${estimate.recommended === 'venice' ? 'Venice for this archive size, if you choose to send it to the cloud' : 'the free judge on this computer'}. Cloud stays off until you choose and approve it.</p>
+    ${idleModeSlot}${capBox}
+    <p class="pnote judgeorder">${escapeHtml(S.judgeOrder)}</p>
+    ${dialogs}${reply}
+    <p class="pnote">Estimates for ${found}. Recommended: ${recommended}. Cloud stays off until you choose and approve it.</p>
     <details class="judgehow"><summary>How these estimates are made</summary>
-    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: measured on an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ. Venice: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
+    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute!)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml(status.cloudModel)})` : ''}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
+}
+
+/** Whole cents; an amount under a cent says so instead of showing $0.00. */
+export function judgeMoney(dollars: number | null | undefined, bare = false): string {
+  if (dollars === null || dollars === undefined) return 'Cost unavailable';
+  const text = dollars > 0 && dollars < 0.005 ? 'less than $0.01' : dollars.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return bare ? text : `About ${text}`;
+}
+function judgeHours(n: number): string { return n.toLocaleString('en-US', { maximumFractionDigits: 1 }); }
+function judgeCount(n: number): string {
+  const rounded = n >= 1_000 ? Math.round(n / 100) * 100 : n >= 100 ? Math.round(n / 10) * 10 : Math.round(n);
+  return rounded.toLocaleString('en-US');
+}
+/** "About 25 minutes", "About 5 hours", or nights of 8 hours for local sorting. */
+function judgeDuration(hours: number): string {
+  const minutes = Math.max(1, Math.round(hours * 60));
+  if (minutes < 60) return `About ${minutes} minute${minutes === 1 ? '' : 's'}`;
+  if (hours < 8) return `About ${judgeHours(hours)} hour${judgeHours(hours) === '1' ? '' : 's'}`;
+  const nights = Math.round(hours / 8);
+  return `About ${nights} night${nights === 1 ? '' : 's'} (${Math.round(hours)} hours)`;
 }

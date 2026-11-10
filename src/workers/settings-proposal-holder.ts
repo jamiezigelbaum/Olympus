@@ -10,6 +10,7 @@
  * Kept in memory: a proposal is a moment's handoff between the agent and the
  * owner, and a restarted Olympus simply asks the agent to propose again.
  */
+import type { JudgeChoice } from './classification/judge-spending.ts';
 import { randomUUID } from 'node:crypto';
 import type { DashboardModelChoices } from '../core/model-choices.ts';
 import { PRIVACY_PRESET_LABELS } from '../core/privacy-language.ts';
@@ -51,9 +52,11 @@ function modeLabel(id: string): string {
   return (PRIVACY_PRESET_LABELS as Record<string, string>)[id] ?? id;
 }
 
-function judgeLabel(choice: 'local' | 'venice', cap: number | null): string {
+function judgeLabel(choice: JudgeChoice, cap: number | null): string {
   if (choice === 'local') return 'Local (free)';
-  return cap === null ? 'Venice, no spending limit' : `Venice, up to $${cap}`;
+  const limit = cap === null ? 'no spending limit' : `up to $${cap}`;
+  if (choice === 'local-then-venice') return `This computer, then Venice double-checks, ${limit}`;
+  return `Venice, ${limit}`;
 }
 
 export function createSettingsProposalHolder(targets: SettingsProposalTargets, now: () => Date = () => new Date()) {

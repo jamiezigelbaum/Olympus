@@ -532,9 +532,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
     if (form.hasAttribute('data-judge-choice')) {
       // A spending limit only governs Venice: Local saves without one (#950).
-      const choice = body.choice === 'venice' ? 'venice' : 'local';
+      const choice = body.choice === 'venice' || body.choice === 'local-then-venice' ? body.choice : 'local';
       const cap = (body.cap_dollars ?? '').trim();
-      if (choice === 'venice' && cap === '') { say(form, 'Enter a total cloud spending limit in dollars to use Venice.'); return undefined; }
+      if (choice !== 'local' && cap === '') { say(form, 'Enter a total cloud spending limit in dollars to use Venice.'); return undefined; }
       return { action: 'save_judge', choice, cap_dollars: cap === '' ? 0 : Number(cap) };
     }
     if (form.hasAttribute('data-model-choice')) {
@@ -2072,12 +2072,30 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (line) line.textContent = ok ? (typeof result.body.status_message === 'string' ? result.body.status_message : 'Saved.') : errorMessage(result);
       });
   };
+  const echoJudgeCap = (form: HTMLFormElement, scope: ParentNode): void => {
+    const value = Number(form.querySelector<HTMLInputElement>('input[name="cap_dollars"]')?.value.trim() || NaN);
+    const text = Number.isFinite(value) && value >= 0 ? value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'not set';
+    scope.querySelectorAll<HTMLElement>('[data-judge-cap-echo]').forEach(echo => { echo.textContent = text; });
+  };
+  const onJudgeCapInput = (event: Event): void => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.name !== 'cap_dollars') return;
+    const form = input.closest<HTMLFormElement>('form[data-judge-choice]');
+    if (form) echoJudgeCap(form, form);
+  };
   const onJudgePick = (event: Event): void => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.name !== 'choice') return;
     const form = input.closest<HTMLFormElement>('form[data-judge-choice]');
-    if (!form || !input.checked || input.value === form.dataset.judgeCurrent) return;
+    if (!form || !input.checked) return;
+    // An unset limit follows the picked choice: its own estimate plus 25% (#884).
+    const cap = form.querySelector<HTMLInputElement>('input[name="cap_dollars"][data-cap-auto="true"]');
+    const auto = input.value === 'venice' ? cap?.dataset.capVenice : input.value === 'local-then-venice' ? cap?.dataset.capLocalThenVenice : undefined;
+    if (cap && auto) cap.value = auto;
+    if (input.value === form.dataset.judgeCurrent) return;
     const dialog = judgeDialog(form, input.value);
+    // The confirmation states the limit that will be sent: the field's current value.
+    if (dialog) echoJudgeCap(form, dialog);
     if (dialog && typeof dialog.showModal === 'function' && !dialog.open) dialog.showModal();
   };
   const onJudgeDialogClick = (event: Event): void => {
@@ -2184,6 +2202,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.addEventListener('click', onClick);
   root.addEventListener('change', onJudgePick);
   root.addEventListener('change', onGoEasyChange);
+  root.addEventListener('input', onJudgeCapInput);
   root.addEventListener('click', onJudgeDialogClick);
   root.addEventListener('cancel', onJudgeDialogCancel, true);
   root.addEventListener('change', onClientFileChange);
@@ -2231,6 +2250,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onJudgePick);
     root.removeEventListener('change', onGoEasyChange);
+    root.removeEventListener('input', onJudgeCapInput);
     root.removeEventListener('click', onJudgeDialogClick);
     root.removeEventListener('cancel', onJudgeDialogCancel, true);
     root.removeEventListener('change', onClientFileChange);
