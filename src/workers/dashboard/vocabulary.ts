@@ -17,7 +17,7 @@ import type {
 } from '../source-dashboard.ts';
 import type { DashboardLivePassErrorKind, DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
-import { ARCHIVE_FORMATS } from '../../core/archive-formats.ts';
+import { ARCHIVE_FORMATS, archiveExportGuides } from '../../core/archive-formats.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { displayText } from './display-text.ts';
@@ -2272,6 +2272,29 @@ export const DASHBOARD_ARCHIVE_COPY = {
     failed: 'The upload stopped before it finished. Nothing was imported. Try again.',
     several: '{n} items',
     chooseAnother: 'Start over',
+    /**
+     * The two paths (#660, owner 2026-10-31): the drop zone first for an
+     * archive already on this computer, then one step-by-step guide per app,
+     * from each format's registry entry, for asking that app for its export.
+     */
+    have: 'I already have my archive',
+    get: {
+      title: 'Get my archive',
+      line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+      step: 'Step {n} of {of}',
+      open: 'Open this page in {provider}',
+      next: "I've done this, next",
+      back: 'Back',
+      ready: "Come back when it's ready",
+      wait: 'Exports can take a few minutes, hours or days. When yours arrives, come back to this page.',
+    },
+    // The words only: each step's page reaches the picker in the computer
+    // meta (archiveSources guideLinks), so this page names no outside origin.
+    guides: archiveExportGuides().map((entry) => ({
+      id: entry.formatId,
+      ...entry.guide,
+      steps: entry.guide.steps.map(({ link, ...step }) => (link ? { ...step, link: { label: link.label } } : step)),
+    })),
   },
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },

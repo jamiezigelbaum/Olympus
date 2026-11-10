@@ -2731,6 +2731,70 @@ export class TierLedger {
   }
 
   /**
+   * The most recently decided items, newest first (the dashboard's "recently
+   * sorted" list, tier-owner-items.ts). Content-free: ledger rows only.
+   */
+  recentDecisions(limit = 25): TierLedgerRecord[] {
+    const rows = this.db.query(`
+      SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 200))) as TierItemRow[];
+    return rows.map(recordFromRow);
+  }
+
+  /**
+   * Routed items still resting on an owner override that has since been
+   * cleared (the owner's "undo"): settled at the override's tiers, decided by
+   * `override`, with no override row left. The set's override pass puts each
+   * back to the decision the override took it over from
+   * (`settledDecisionBeforeOverride`).
+   */
+  listClearedOverrideRows(limit = 100, after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>): TierLedgerRecord[] {
+    // `after` pages past rows a pass could not restore, so they never block the rest.
+    const rows = this.db.query(`
+      SELECT i.* FROM tier_items i
+      WHERE i.routed = 1 AND i.state = 'current' AND i.decided_by = 'override'
+        AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
+        AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o
+          WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+            AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+        )
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      LIMIT ?
+    `).all(
+      after ? 1 : null,
+      after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null,
+      Math.max(1, Math.min(limit, 1_000)),
+    ) as TierItemRow[];
+    return rows.map(recordFromRow);
+  }
+
+  /**
+   * The newest settled decision in the item's history that no owner override
+   * made: what the judge (or the item's other automatic steps) decided before
+   * the owner changed it. Undefined when the owner set the item before any
+   * such decision was recorded.
+   */
+  settledDecisionBeforeOverride(identity: TierLedgerIdentity): { metadataTier: TierKey; contentTier: TierKey; decidedBy: string; reasons: string[] } | undefined {
+    const row = this.db.query(`
+      SELECT metadata_tier, content_tier, decided_by, reasons_json FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND state = 'current' AND decided_by != 'override' AND instr(reasons_json, '"override:') = 0
+      ORDER BY history_pk DESC
+      LIMIT 1
+    `).get(...idParams(identity)) as { metadata_tier: TierKey; content_tier: TierKey; decided_by: string; reasons_json: string } | null;
+    if (!row || !TIER_KEYS.includes(row.metadata_tier) || !TIER_KEYS.includes(row.content_tier)) return undefined;
+    let reasons: string[];
+    try {
+      const parsed = JSON.parse(row.reasons_json) as unknown;
+      reasons = Array.isArray(parsed) ? parsed.filter((reason): reason is string => typeof reason === 'string') : [];
+    } catch {
+      reasons = [];
+    }
+    return { metadataTier: row.metadata_tier, contentTier: row.content_tier, decidedBy: row.decided_by, reasons };
+  }
+
+  /**
    * The queued-move write: the item goes `moving` with the decision's tiers
    * as its target and the decision's flags; with `hide`, every current copy
    * is superseded first (a raise hides before anything moves). The copy
