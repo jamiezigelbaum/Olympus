@@ -156,12 +156,70 @@ describe('the local mint on a computer with no owner socket (macOS)', () => {
   });
 });
 
-describe('the local mint on Linux', () => {
-  test('a request over the owner socket mints with no session, as before; TCP without the socket is refused', async () => {
-    const inner = withWorkerBearerAuth(async () => Response.json({ ok: true }), { authToken: TOKEN, requireOwnerSocket: true });
-    const owner = withRequestPeer(inner, true);
-    const viaSocket = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    expect((await owner(viaSocket, { requestIP: () => null })).status).toBe(200);
-    expect((await inner(localMint())).status).toBe(403);
+describe('the local mint on Linux: the owner socket is necessary, not sufficient (#1188)', () => {
+  // `olympus remote open` forwards the owner socket to a loopback TCP port on
+  // the client computer, one socket connection per TCP connection, so a
+  // request through that forward arrives exactly as a local socket client's
+  // does. Any account on the client can reach that port; the socket alone
+  // cannot say the browser is the owner's.
+  function linuxEngine() {
+    const seen: Request[] = [];
+    const inner = withWorkerBearerAuth(async (request) => {
+      seen.push(request);
+      return Response.json({ ok: true });
+    }, { authToken: TOKEN, requireOwnerSocket: true, sessionSecret: newDashboardSessionSecret(), launchTickets: new DashboardLaunchTickets() });
+    const viaSocket = withRequestPeer(inner, true);
+    return { fetch: (request: Request) => Promise.resolve(viaSocket(request, { requestIP: () => null })), tcp: inner, seen };
+  }
+  const socketMint = (headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN, ...headers } });
+
+  test('through the socket forward with no bearer and no session: refused, no cookie, nothing reaches the worker', async () => {
+    const linux = linuxEngine();
+    const refused = await linux.fetch(socketMint());
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get('Set-Cookie')).toBeNull();
+    expect(await refused.text()).not.toContain('csrf_token');
+    // A cookie this engine did not sign is no proof either.
+    expect((await linux.fetch(socketMint({ Cookie: 'olympus_dashboard_control=forged.1.x.b.y' }))).status).toBe(401);
+    expect(linux.seen).toEqual([]);
+  });
+
+  test('TCP without the socket is still refused, session or not', async () => {
+    const linux = linuxEngine();
+    const page = await launchedPage(linux.fetch, 'remote');
+    expect((await linux.tcp(localMint())).status).toBe(403);
+    expect((await linux.tcp(localMint({ Cookie: page.cookie }))).status).toBe(403);
+  });
+
+  test('the owner\'s remote opening link, through the forward, still unlocks and reaches the local-only routes', async () => {
+    const linux = linuxEngine();
+    const page = await launchedPage(linux.fetch, 'remote');
+    const unlocked = await linux.fetch(socketMint({ Cookie: page.cookie, 'X-Olympus-CSRF': page.csrf }));
+    expect(unlocked.status).toBe(200);
+    const local = { cookie: cookieOf(unlocked), csrf: (await unlocked.json() as { csrf_token: string }).csrf_token };
+    const request = new Request(`${ORIGIN}${DASHBOARD_CONSULT_CONTROL_PATHS[0]}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: ORIGIN, Cookie: local.cookie, 'X-Olympus-CSRF': local.csrf }, body: '{}',
+    });
+    expect((await linux.fetch(request)).status).toBe(200);
+    expect(linux.seen.at(-1)!.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('local');
+  });
+
+  test('the desktop bridge\'s page (a bearer session it opened for the owner) unlocks as before', async () => {
+    const linux = linuxEngine();
+    const opened = await linux.fetch(new Request(`${ORIGIN}/dashboard/control/session`, {
+      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN },
+    }));
+    expect(opened.status).toBe(200);
+    const { csrf_token: csrf } = await opened.json() as { csrf_token: string };
+    expect((await linux.fetch(socketMint({ Cookie: cookieOf(opened), 'X-Olympus-CSRF': csrf }))).status).toBe(200);
+  });
+
+  test('the CLI over the socket keeps its bearer routes', async () => {
+    const linux = linuxEngine();
+    expect((await linux.fetch(new Request(`${ORIGIN}/v1/sources`))).status).toBe(401);
+    const cli = await linux.fetch(new Request(`${ORIGIN}/v1/sources`, { headers: { Authorization: `Bearer ${TOKEN}` } }));
+    expect(cli.status).toBe(200);
+    expect(linux.seen.map(r => new URL(r.url).pathname)).toEqual(['/v1/sources']);
   });
 });

@@ -15,7 +15,8 @@
 // - The model answers Personal or Private, never Public. Anything else is no
 //   verdict.
 // - Full-mode Personal is accepted only at confidence >= 0.9; decision mode
-//   uses the normalized tier-token mass at 0.5. Topic alone never
+//   holds Private at the lane's P(Private) bar (snifferDecisionBar), applied
+//   when a verdict is read. Topic alone never
 //   decides sensitivity; the owner policy and own-record status do.
 // - The judgment is ONE generic question (prompt p3, owner ruling
 //   2026-10-01): is the item a person's OWN private information (records,
@@ -27,7 +28,8 @@
 
 import { createHash } from 'node:crypto';
 import { canonicalizeScreeningText } from '../../core/secret-patterns.ts';
-import { BUILT_IN_REASONING_MODELS } from '../source-index/built-in-reasoning/manifest.ts';
+import { BUILT_IN_REASONING_MODELS, QWEN35_4B } from '../source-index/built-in-reasoning/manifest.ts';
+import { SNIFFER_DECISION_PRIVATE_BAR } from './sniffer-decision-mass.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 import { isUnitConfidence, parseStrictJsonObject } from './delphi-scorer.ts';
 import {
@@ -98,17 +100,69 @@ export interface SnifferLaneIdentity {
   modelId: string;
   /** Actual weights/revision identity; never used to look up owner consent. */
   cacheModelId?: string;
+  /**
+   * This lane's decision-mode P(Private) bar, when set for it (a per-owner
+   * raise their labels support, a newly measured judge). Absent: the measured
+   * bar of the lane's pinned model, else SNIFFER_DECISION_PRIVATE_BAR.
+   */
+  decisionBar?: number;
+}
+
+/**
+ * Measured decision bars, by the pinned weights a lane names (#1184, #890).
+ * Qwen3.5 4B: on the owner's labels (5 Nov 2026) 0.15 missed 0 of 49
+ * important Private items at 79% agreement; 0.5 missed 2. A judge with no
+ * measured bar keeps SNIFFER_DECISION_PRIVATE_BAR.
+ */
+const SNIFFER_DECISION_BARS: ReadonlyArray<readonly [modelId: string, bar: number]> = [[QWEN35_4B.modelId, 0.15]];
+
+function validDecisionBar(bar: number | undefined): bar is number {
+  return typeof bar === 'number' && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
+}
+
+/**
+ * The P(Private) at or above which a decision verdict holds the item Private
+ * on this lane. Never above an even chance: when a judge is uncertain the item
+ * is held Private (owner, 2026-11-10). Applied when a verdict is READ, so a new
+ * bar re-tiers stored verdicts with no new judge call.
+ */
+export function snifferDecisionBar(lane: SnifferLaneIdentity): number {
+  if (validDecisionBar(lane.decisionBar)) return lane.decisionBar;
+  const id = lane.cacheModelId ?? lane.modelId;
+  const measured = SNIFFER_DECISION_BARS.find(([model]) => id === model || id.startsWith(`${model}:`))?.[1];
+  return validDecisionBar(measured) ? measured : SNIFFER_DECISION_PRIVATE_BAR;
+}
+
+/**
+ * P(Private) recovered from a stored decision verdict: its confidence is the
+ * chosen tier's normalized mass, so a Private verdict stores P(Private) and a
+ * Personal one 1 - P(Private). Undefined for any other or unreadable verdict.
+ */
+export function snifferDecisionPrivateChance(
+  verdict: Pick<StoredSnifferVerdict, 'tier' | 'category' | 'confidence'> & Partial<Pick<StoredSnifferVerdict, 'failSafe'>>,
+): number | undefined {
+  if (verdict.failSafe || verdict.category !== SNIFFER_DECISION_CATEGORY || !isUnitConfidence(verdict.confidence)) return undefined;
+  if (verdict.tier === 'private') return verdict.confidence;
+  return verdict.tier === 'personal' ? 1 - verdict.confidence : undefined;
 }
 
 /** The parser folds record sensitivity into tier BEFORE the existing cache stores it.
  * Stored verdicts therefore need no schema migration; the new prompt invalidates old entries.
- * A Private verdict is never lowered by its topic. */
+ * A Private verdict is never lowered by its topic. A decision verdict is re-read
+ * against `decisionBar` (its lane's, snifferDecisionBar), not its stored tier;
+ * an unreadable one holds Private. */
 export function snifferTierKey(
   verdict: Pick<StoredSnifferVerdict, 'tier' | 'category' | 'confidence'> & Partial<Pick<StoredSnifferVerdict, 'failSafe'>>
     & Partial<Pick<SnifferVerdict, 'ownRecord' | 'privateKind'>>,
+  decisionBar = SNIFFER_DECISION_PRIVATE_BAR,
 ): 'private' | 'secure' {
-  if (verdict.failSafe || verdict.tier === 'private' || recordRequiresPrivate(verdict)) return 'secure';
-  if (verdict.category === SNIFFER_DECISION_CATEGORY) return 'private';
+  if (verdict.failSafe || recordRequiresPrivate(verdict)) return 'secure';
+  if (verdict.category === SNIFFER_DECISION_CATEGORY) {
+    const chance = snifferDecisionPrivateChance(verdict);
+    const bar = validDecisionBar(decisionBar) ? decisionBar : SNIFFER_DECISION_PRIVATE_BAR;
+    return chance === undefined || chance >= bar ? 'secure' : 'private';
+  }
+  if (verdict.tier === 'private') return 'secure';
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? 'private' : 'secure';
 }
 
@@ -128,7 +182,7 @@ export function snifferVerdictTier(
   lane: SnifferLaneIdentity,
   flags: readonly string[],
 ): { tier: 'private' | 'secure'; code: string } {
-  const tier = snifferTierKey(verdict);
+  const tier = snifferTierKey(verdict, snifferDecisionBar(lane));
   const code = snifferReasonCode(verdict);
   if (tier === 'private' && snifferLaneIsSmall(lane) && flags.some((flag) => flag.startsWith(OWN_RECORD_FLAG_PREFIX))) {
     return { tier: 'secure', code: `${SNIFFER_RECORD_HELD_CODE_PREFIX}${code}` };
@@ -167,8 +221,10 @@ export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category'
 export const SNIFFER_INJECTION_CATEGORY = 'injection';
 /** Reserved for the native adapter, never accepted from full-mode JSON. */
 export const SNIFFER_DECISION_CATEGORY = 'decision';
-/** Single semantic identity of native mode, its bar, coverage floor and decoder.
- * Bump for any change to those semantics; cache and re-judge ids derive from it. */
+/** Single semantic identity of native mode, its coverage floor and decoder.
+ * Bump for any change to those semantics; cache and re-judge ids derive from it.
+ * A bar is not part of it: verdicts store P(Private), and `snifferId` names a
+ * non-default bar, so a bar change re-applies cached verdicts without asking. */
 export const SNIFFER_DECISION_VERSION = 'decision-v2';
 
 /**
@@ -313,7 +369,13 @@ export function snifferCacheModelId(lane: SnifferLaneIdentity): string {
 }
 
 export function snifferId(lane: SnifferLaneIdentity, promptVersion = SNIFFER_PROMPT_VERSION): string {
-  const model = createHash('sha256').update(snifferCacheModelId(lane)).digest('hex').slice(0, 16);
+  // A decision lane's bar is part of the judge identity, never of the verdict
+  // cache key: a bar change makes recorded decisions re-judge candidates
+  // (tier-rejudge.ts), which re-read the cached verdicts under the new bar
+  // with no model call. The default bar adds nothing, so existing ids stand.
+  const bar = lane.snifferMode === 'decision' ? snifferDecisionBar(lane) : SNIFFER_DECISION_PRIVATE_BAR;
+  const judge = bar === SNIFFER_DECISION_PRIVATE_BAR ? snifferCacheModelId(lane) : `${snifferCacheModelId(lane)}:bar-${bar}`;
+  const model = createHash('sha256').update(judge).digest('hex').slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 

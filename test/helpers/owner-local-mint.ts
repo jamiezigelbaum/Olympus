@@ -2,10 +2,10 @@ import { recordRequestPeer } from '../../src/core/request-peer.ts';
 import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../../src/workers/http.ts';
 
 /**
- * The local mint as the owner's browser makes it on a computer with no owner
- * socket (macOS): the browser already holds the control session the owner's
- * launch link or token opened and its CSRF token (#1187), and asks from a loopback peer, same origin, no
- * bearer (#1153). `headers` add to or replace the browser's own.
+ * The local mint as the owner's browser makes it on any platform: the browser
+ * already holds the control session the owner's launch link or token opened
+ * and its CSRF token (#1187), and asks from a loopback peer, same origin, no
+ * bearer (#1153, #1188). `headers` add to or replace the browser's own.
  */
 export async function ownerLocalMint(
   fetcher: (request: Request) => Promise<Response> | Response,

@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { dashboardSessionMarker } from './dashboard/session-marker.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
@@ -207,18 +208,22 @@ export function withWorkerBearerAuth(
       // The socket peer, as the server recorded it (core/request-peer.ts):
       // loopback, or no mint. A request with no recorded peer is remote.
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request)))) return dashboardControlForbiddenResponse('origin_mismatch');
-      // Without the owner socket (macOS), a loopback peer is any account on
-      // this computer, not the owner. The owner proof there is a live control
-      // session in this same browser, proven the way every control POST is:
-      // the cookie the owner's launch link or token opened, plus that
-      // session's CSRF token from the owner's page (#1153). The cookie alone
-      // is not enough: browsers do not separate cookies by port, so a server
-      // on another loopback port can be handed it (#1187).
-      if (!requestFromOwnerSocket(request)) {
-        const owner = authorizeDashboardControlSession(request, sessionSecret, now(), true);
-        if (owner.status === 'origin_mismatch' || owner.status === 'csrf_mismatch') return dashboardControlForbiddenResponse(owner.status);
-        if (owner.status !== 'allowed') return unauthorizedWorkerResponse();
-      }
+      // A peer, socket or loopback, is not the owner's browser. Without the
+      // owner socket (macOS) a loopback peer is any account on this computer
+      // (#1153). With it (Linux), `olympus remote open` forwards the socket to
+      // a loopback port on the client computer, one socket connection per TCP
+      // connection, so a request any account there sends through that forward
+      // arrives exactly as the owner's own would (#1188). The owner proof on
+      // every platform is a live control session in this same browser, proven
+      // the way every control POST is: the cookie the owner's launch link,
+      // remote opening link, desktop bridge or token opened (each needs the
+      // worker token only the owner can read, worker.env 0600), plus that
+      // session's CSRF token from the owner's page. The cookie alone is not
+      // enough: browsers do not separate cookies by port, so a server on
+      // another loopback port can be handed it (#1187).
+      const owner = authorizeDashboardControlSession(request, sessionSecret, now(), true);
+      if (owner.status === 'origin_mismatch' || owner.status === 'csrf_mismatch') return dashboardControlForbiddenResponse(owner.status);
+      if (owner.status !== 'allowed') return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
@@ -902,6 +907,7 @@ function dashboardControlSessionResponse(
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: csrfToken,
+    session_marker: dashboardSessionMarker(csrfToken),
     expires_at: new Date(expiresAtMs).toISOString(),
     policy: {
       bearer_token_persisted_in_browser_storage: false,
