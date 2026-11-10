@@ -162,6 +162,21 @@ describe('a round', () => {
     expect(view.range).toEqual({ ...wilsonInterval(24 + JUDGE_CHECK_RANDOM_PICKS, from), from, agreed: 24 + JUDGE_CHECK_RANDOM_PICKS });
   });
 
+  test('an answer that cannot be applied (the item became Secret) is kept but never shown as a change', () => {
+    const items = pool();
+    const engine: OwnerTierItems = {
+      find: () => ({ items }),
+      set: () => ({ ok: false, code: 'secret_item', message: 'Secret items are not changed here.' }),
+    };
+    const check = createJudgeCheck({ items: engine, get: (id) => items.find((candidate) => candidate.item_id === id), path: join(root, 'jc.json'), random: () => 0.5 });
+    const view = check.start();
+    const id = view.current!.item_id;
+    const judge = items.find((candidate) => candidate.item_id === id)!.tier as 'Personal' | 'Private';
+    const after = check.answer(id, judge === 'Personal' ? 'Private' : 'Personal');
+    expect(after.answered[0]).toMatchObject({ item_id: id, changed: false, not_applied: true });
+    expect(after.changed).toBe(0);
+  });
+
   test('an answer is applied against the item\'s label now, if the owner changed it since the round began', () => {
     const items = pool();
     const { check, sets } = fixture(items);

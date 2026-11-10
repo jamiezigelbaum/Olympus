@@ -33,10 +33,10 @@ const items: OwnerTierItem[] = Array.from({ length: 10 }, (_, index) => ({
   judge_reason: `ordinary:0.${index}0`, decided_at: '2026-11-03T10:00:00.000Z', preview: `Text ${index}`,
 }));
 
-async function card(earlier?: { compared: number; agreed: number }) {
+async function card(earlier?: { compared: number; agreed: number }, failSet = false) {
   if (earlier) writeFileSync(join(root, 'judge-check.json'), JSON.stringify({ v: 1, random_tally: earlier }));
   const check = createJudgeCheck({
-    items: { find: () => ({ items }), set: () => ({ ok: true, item: items[0]!, changed: 'set', applies: 'now', results: [] }) },
+    items: { find: () => ({ items }), set: () => (failSet ? { ok: false as const, code: 'secret_item' as const, message: 'Secret' } : { ok: true as const, item: items[0]!, changed: 'set' as const, applies: 'now' as const, results: [] }) },
     get: (id) => items.find((item) => item.item_id === id),
     path: join(root, 'judge-check.json'),
     random: () => 0.5,
@@ -139,6 +139,14 @@ describe('Check how Olympus labelled your items', () => {
     expect(c.$('[data-jc-act="start"]')!.textContent).toBe(J.more);
     // "See them in Your items" goes to the list below the card, on the same tab.
     expect(c.$('[data-jc-fixed] a')!.getAttribute('href')).toBe(`#${PRIVACY_ITEMS_LIST_ID}`);
+  });
+
+  test('an answer that could not be applied says so, and never reads as changed', async () => {
+    const c = await card(undefined, true);
+    await finishRound(c);
+    const row = c.text('[data-jc-fixed] [data-jc-answered]');
+    expect(row).toContain('not changed, it can no longer be changed here');
+    expect(c.text('[data-jc-fixed]')).toContain('0 changed to your answer');
   });
 
   test('once 30 random answers are in, the finished round shows the likely range as a band', async () => {

@@ -125,7 +125,7 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
   function answeredRow(item) {
     var you = item.answer === 'not_sure' ? '' : '<span>' + esc(J.you) + ' ' + pill(item.answer) + '</span>';
     var verdict = item.answer === 'not_sure' ? fill(J.notSureRow, { judge: item.judge })
-      : item.answer === item.judge ? J.agreed : fill(J.changed, { judge: item.judge });
+      : item.answer === item.judge ? J.agreed : fill(item.not_applied ? J.notApplied : J.changed, { judge: item.judge });
     return '<div class="jcdone" data-jc-answered="' + esc(item.item_id) + '">' + logo(item, true) + '<span class="grow">' + esc(title(item)) + '</span>' + you + '<span class="jcverdict">' + esc(verdict) + '</span></div>';
   }
 
@@ -183,11 +183,12 @@ export function judgeCheckClientScript(input: { csrfToken: string; itemsHref: st
         + '<div class="jcticks"><span>0%</span><span>50%</span><span>100%</span></div></div>';
     }
     var changed = round.answered.filter(function (answered) { return answered.changed; });
+    var shownRows = round.answered.filter(function (answered) { return answered.changed || answered.not_applied; });
     var confirmed = round.answered.filter(function (answered) { return answered.answer === answered.judge; }).length;
     html = '<div class="jccard" data-jc-result>' + head(J.roundDone)
       + '<p class="jcresult" data-jc-count>' + result + '</p>' + range
       + '<p class="jchonest">' + (round.range ? mix + esc(J.honest) : esc(J.fixesOnly)) + '</p>'
-      + '<div style="margin-top:12px" data-jc-fixed>' + changed.map(answeredRow).join('')
+      + '<div style="margin-top:12px" data-jc-fixed>' + shownRows.map(answeredRow).join('')
       + '<div class="jcdone jcsum"><span class="grow">' + esc(fill(J.summary, { changed: changed.length, confirmed: confirmed, notSure: round.not_sure })) + '</span><a href="' + esc(config.itemsHref) + '">' + esc(J.seeThem) + '</a></div></div>'
       + '<div class="jcnext"><button type="button" class="btn" data-jc-act="put_away">' + esc(J.done) + '</button><button type="button" class="btn primary" data-jc-act="start">' + esc(J.more) + '</button></div>' + msg + '</div>';
     mount.innerHTML = html;

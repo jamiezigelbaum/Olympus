@@ -57292,6 +57292,7 @@ var init_vocabulary = __esm(() => {
     you: "You:",
     agreed: "Judge agreed",
     changed: "Judge said {judge} · changed",
+    notApplied: "Judge said {judge} · not changed, it can no longer be changed here",
     notSureRow: "Not sure · judge said {judge}",
     soFar: "So far the judge agreed with you on {agreed} of {compared}.",
     tooFew: "That's too few to say how accurate it is.",
@@ -146128,7 +146129,8 @@ function createJudgeCheck(options) {
       ...shown(item.item_id),
       answer: item.answer,
       judge: item.judge,
-      changed: item.changed === true
+      changed: item.changed === true,
+      not_applied: item.not_applied === true
     }));
     const compared = answered.filter((item) => item.answer !== "not_sure");
     const agreed = compared.filter((item) => item.answer === item.judge).length;
@@ -146230,6 +146232,8 @@ function createJudgeCheck(options) {
         const choice = answer === "Personal" ? "personal" : "private";
         const result = options.items.set({ itemId, choice, allowLower: true });
         current2.changed = result.ok;
+        if (!result.ok)
+          current2.not_applied = true;
       }
       write(state);
       return viewOf(state);
@@ -166787,7 +166791,7 @@ function judgeCheckClientScript(input) {
   function answeredRow(item) {
     var you = item.answer === 'not_sure' ? '' : '<span>' + esc(J.you) + ' ' + pill(item.answer) + '</span>';
     var verdict = item.answer === 'not_sure' ? fill(J.notSureRow, { judge: item.judge })
-      : item.answer === item.judge ? J.agreed : fill(J.changed, { judge: item.judge });
+      : item.answer === item.judge ? J.agreed : fill(item.not_applied ? J.notApplied : J.changed, { judge: item.judge });
     return '<div class="jcdone" data-jc-answered="' + esc(item.item_id) + '">' + logo(item, true) + '<span class="grow">' + esc(title(item)) + '</span>' + you + '<span class="jcverdict">' + esc(verdict) + '</span></div>';
   }
 
@@ -166845,11 +166849,12 @@ function judgeCheckClientScript(input) {
         + '<div class="jcticks"><span>0%</span><span>50%</span><span>100%</span></div></div>';
     }
     var changed = round.answered.filter(function (answered) { return answered.changed; });
+    var shownRows = round.answered.filter(function (answered) { return answered.changed || answered.not_applied; });
     var confirmed = round.answered.filter(function (answered) { return answered.answer === answered.judge; }).length;
     html = '<div class="jccard" data-jc-result>' + head(J.roundDone)
       + '<p class="jcresult" data-jc-count>' + result + '</p>' + range
       + '<p class="jchonest">' + (round.range ? mix + esc(J.honest) : esc(J.fixesOnly)) + '</p>'
-      + '<div style="margin-top:12px" data-jc-fixed>' + changed.map(answeredRow).join('')
+      + '<div style="margin-top:12px" data-jc-fixed>' + shownRows.map(answeredRow).join('')
       + '<div class="jcdone jcsum"><span class="grow">' + esc(fill(J.summary, { changed: changed.length, confirmed: confirmed, notSure: round.not_sure })) + '</span><a href="' + esc(config.itemsHref) + '">' + esc(J.seeThem) + '</a></div></div>'
       + '<div class="jcnext"><button type="button" class="btn" data-jc-act="put_away">' + esc(J.done) + '</button><button type="button" class="btn primary" data-jc-act="start">' + esc(J.more) + '</button></div>' + msg + '</div>';
     mount.innerHTML = html;

@@ -3845,6 +3845,7 @@ export const DASHBOARD_JUDGE_CHECK_COPY = {
   you: 'You:',
   agreed: 'Judge agreed',
   changed: 'Judge said {judge} · changed',
+  notApplied: 'Judge said {judge} · not changed, it can no longer be changed here',
   notSureRow: 'Not sure · judge said {judge}',
   soFar: 'So far the judge agreed with you on {agreed} of {compared}.',
   tooFew: "That's too few to say how accurate it is.",

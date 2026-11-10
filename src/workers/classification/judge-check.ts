@@ -41,6 +41,8 @@ interface StoredRoundItem {
   answer?: JudgeCheckAnswer;
   /** The owner's answer differed and the item was set to it. */
   changed?: boolean;
+  /** The owner's answer differed but the item could not be set (it became Secret or was removed). */
+  not_applied?: boolean;
   /** Picked at random, not for the judge's doubt: only these answers estimate how often the judge agrees overall. */
   random?: boolean;
 }
@@ -73,6 +75,8 @@ export interface JudgeCheckAnswered extends JudgeCheckItem {
   answer: JudgeCheckAnswer;
   judge: JudgeLabel;
   changed: boolean;
+  /** The answer differed but could not be applied: the item became Secret or was removed. */
+  not_applied: boolean;
 }
 
 export interface JudgeCheckView {
@@ -223,7 +227,7 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     const round = state.round;
     if (!round) return { state: 'none', put_away: state.put_away === true, total: 0, answered: [], compared: 0, agreed: 0, not_sure: 0, changed: 0 };
     const answered = round.items.filter((item) => item.answer !== undefined).map((item) => ({
-      ...shown(item.item_id), answer: item.answer!, judge: item.judge, changed: item.changed === true,
+      ...shown(item.item_id), answer: item.answer!, judge: item.judge, changed: item.changed === true, not_applied: item.not_applied === true,
     }));
     const compared = answered.filter((item) => item.answer !== 'not_sure');
     const agreed = compared.filter((item) => item.answer === item.judge).length;
@@ -330,6 +334,8 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
         // The owner's answer settles this one item, on this computer.
         const result = options.items.set({ itemId, choice, allowLower: true });
         current.changed = result.ok;
+        // Never claim a change that did not happen: the card says it was not applied.
+        if (!result.ok) current.not_applied = true;
       }
       write(state);
       return viewOf(state);
