@@ -20,6 +20,13 @@ import { SNIFFER_SYSTEM_PROMPT } from './sniffer.ts';
  * to reach a server whose cache holds the shared instructions. Derived from
  * the fixed instructions only, so it names no owner, item or account.
  */
+/**
+ * The privacy judge reads at temperature 0 with a fixed seed, so a second read
+ * of the same item gives the same verdict (the local judges already do; #883
+ * found two Venice runs that differed on 37 of 200 items at Venice's default).
+ */
+export const JUDGE_SAMPLING = Object.freeze({ temperature: 0, seed: 883 });
+
 export const JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash('sha256').update(SNIFFER_SYSTEM_PROMPT).digest('hex').slice(0, 16)}`;
 
 /** Calls in flight for a Venice judge when the owner sets nothing (local lanes stay at 1). */
