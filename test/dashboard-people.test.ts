@@ -47,6 +47,23 @@ describe('People page (#1076)', () => {
     }
   });
 
+  test('merge choices are rendered once, not once per person', () => {
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    try {
+      index.rebuild(Array.from({ length: 40 }, (_, n) => ({ provider: 'gmail', senderId: `p${n}@example.com`, senderLabel: `Person ${n} <p${n}@example.com>`, isOwner: false, itemCount: 1 })));
+      const html = renderDashboardLocalPage('people', {
+        url: new URL('http://127.0.0.1/dashboard?people'),
+        options: { controlSessionCsrfToken: 'csrf' },
+        people: dashboardPeopleView(index),
+        peopleLocalSession: true,
+      });
+      expect(html.match(/<option /g)?.length).toBe(40);
+      expect(html.match(/data-pp-merge-options/g)?.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      index.close();
+    }
+  });
+
   test('without a local control session the page shows no one', () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     try {

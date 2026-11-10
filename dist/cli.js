@@ -164167,21 +164167,22 @@ function peopleBody(view3) {
   }
   parts.push(`<input class="ppfind" type="search" data-pp-find placeholder="${escapeHtml(C2.find)}" aria-label="${escapeHtml(C2.find)}">`);
   const mergeOptions = others.map((person) => `<option value="${escapeHtml(person.identities[0]?.identityKey ?? "")}">${escapeHtml(`${person.displayName} · ${[...new Set(person.identities.map((chip) => chip.source))].join(", ")}`)}</option>`).join("");
+  parts.push(`<template data-pp-merge-options>${mergeOptions}</template>`);
   for (const person of others)
-    parts.push(personRow(person, mergeOptions));
+    parts.push(personRow(person));
   parts.push(`<p class="ppempty" data-pp-nomatch hidden>${escapeHtml(C2.noMatch)}</p>`);
   return parts.join("");
 }
 function chips(person) {
   return `<div class="ppchips">${person.identities.map((chip) => `<span class="ppchip" title="${escapeHtml(`${chip.source} ${chip.detail}`)}"><i class="ppdot" style="background:${SOURCE_DOTS[chip.provider] ?? "var(--t3)"}"></i><span>${escapeHtml(chip.source === chip.detail ? chip.source : `${chip.source} ${chip.detail}`)}</span></span>`).join("")}</div>`;
 }
-function personRow(person, mergeOptions) {
+function personRow(person) {
   const first = person.identities[0]?.identityKey ?? "";
   const linked = linkedSentence(person.linkedBy);
   const why = person.named ? [linked || C2.onlyOneSource, C2.messages(person.messages)].join(" · ") : [C2.noName, ...linked ? [linked] : [], C2.messages(person.messages)].join(" · ");
   const search = [person.displayName, ...person.identities.map((chip) => `${chip.source} ${chip.detail}`)].join(" ").toLowerCase();
   const splits = person.identities.length > 1 ? person.identities.map((chip) => `<button class="btn" type="button" data-pp-op="split" data-identity="${escapeHtml(chip.identityKey)}">${escapeHtml(C2.split(`${chip.source} ${chip.detail}`))}</button>`).join("") : "";
-  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml(C2.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml(person.personId)}">${escapeHtml(C2.renamePrompt)}</label>` + `<input id="rn-${escapeHtml(person.personId)}" name="name" maxlength="160" value="${escapeHtml(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C2.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml(person.personId)}">${escapeHtml(C2.mergeWith)}</label>` + `<select id="mg-${escapeHtml(person.personId)}" name="identity_b">${mergeOptions.replace(`value="${escapeHtml(first)}"`, `value="${escapeHtml(first)}" disabled`)}</select>` + `<input type="hidden" name="identity_a" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C2.merge)}</button></form>` + splits + "</div></details>";
+  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml(C2.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml(person.personId)}">${escapeHtml(C2.renamePrompt)}</label>` + `<input id="rn-${escapeHtml(person.personId)}" name="name" maxlength="160" value="${escapeHtml(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C2.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml(person.personId)}">${escapeHtml(C2.mergeWith)}</label>` + `<select id="mg-${escapeHtml(person.personId)}" name="identity_b" required></select>` + `<input type="hidden" name="identity_a" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C2.merge)}</button></form>` + splits + "</div></details>";
   return `<div class="ppcard pprow" data-pp-person="${escapeHtml(person.personId)}" data-pp-search="${escapeHtml(search)}">` + `<div><p class="ppname">${escapeHtml(person.displayName)}</p>${chips(person)}<p class="ppwhy">${escapeHtml(why)}</p></div>${menu}</div>`;
 }
 function linkedSentence(reasons) {
@@ -164225,6 +164226,16 @@ function peopleClientScript(csrfToken) {
     if (form.matches('[data-pp-rename]')) send({ op: 'rename', identity: data.get('identity'), name: data.get('name') });
     else if (form.matches('[data-pp-merge]')) send({ op: 'merge', identity_a: data.get('identity_a'), identity_b: data.get('identity_b') });
   });
+  var mergeOptions = root.querySelector('template[data-pp-merge-options]');
+  root.addEventListener('toggle', function (event) {
+    var menu = event.target;
+    if (!menu || !menu.open || !mergeOptions) return;
+    var picker = menu.querySelector('[data-pp-merge] select');
+    if (!picker || picker.options.length > 0) return;
+    var own = menu.querySelector('[data-pp-merge] input[name="identity_a"]');
+    picker.appendChild(mergeOptions.content.cloneNode(true));
+    Array.prototype.forEach.call(picker.options, function (option) { if (own && option.value === own.value) option.disabled = true; });
+  }, true);
   var find = root.querySelector('[data-pp-find]');
   if (find) find.addEventListener('input', function () {
     var wanted = String(find.value || '').trim().toLowerCase();
