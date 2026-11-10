@@ -217,6 +217,8 @@ export interface TierSnifferServiceOptions {
    */
   rejudgePerPass?: number;
   rejudgeMaxOpenQuestions?: number;
+  /** The second round's sweep (judge-second-round.ts, #891): re-opens items the local judge held, after the re-judge. */
+  secondRound?: (ledgerPaths: readonly string[], autoMovesFor: (set: TieredStoreSet) => boolean) => Promise<unknown>;
   /**
    * Automatic tier moves (owner approval 2026-10-01): queued moves (a held
    * item the sniffer judged Personal after all queues one) are carried out
@@ -1415,6 +1417,9 @@ export class TierSnifferService {
     phase('recover');
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     phase('rejudge');
+    if (!preparationStopped && this.options.secondRound) {
+      try { await this.options.secondRound(this.ledgerPaths(), set => this.autoMovesFor(set)); } catch { /* Tried again next tick. */ }
+    }
     const report = await runSnifferPass({
       targets,
       lane,
