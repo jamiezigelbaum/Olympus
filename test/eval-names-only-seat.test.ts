@@ -213,16 +213,21 @@ test('a title-only Personal match ranked first by keyword search keeps a seat wh
   expect(plain[0]!.chunk).toBeUndefined();
   // The Personal store's adapter, asked for the pack's 5, as the router asks it.
   const laneSet = createEvalDropboxLanes({ stores: opened.stores, ...(opened.ledger ? { ledger: opened.ledger } : {}), scope: { accountScope: ACCOUNT } })(QUESTION);
-  const adapterHits = await laneSet.adapters[PERSONAL_CORPUS]!({
-    query: QUESTION, maxResults: 5, corpus: { corpusId: PERSONAL_CORPUS, family: 'file', trustDomain: 'internal' },
+  const ask = async (maxResults: number) => (await laneSet.adapters[PERSONAL_CORPUS]!({
+    query: QUESTION, maxResults, corpus: { corpusId: PERSONAL_CORPUS, family: 'file', trustDomain: 'internal' },
     context: { allowedTrustDomains: ['public_safe', 'internal', 'secure_local'] },
-  } as never);
-  const adapterIds = adapterHits.hits.map((hit) => hit.sourceItem.providerItemId);
-  expect(adapterIds).toContain(TITLE_ONLY.id);
+  } as never)).hits.map((hit) => hit.sourceItem.providerItemId);
+  // The rule: the best name match keeps a seat whenever the store's lane has
+  // room for more than one, and never takes the first seat from a readable
+  // match. It used to drop here: every readable partial match came before
+  // every title-only one, cut at what the router asks for.
+  expect(await ask(5)).toContain(TITLE_ONLY.id);
+  const two = await ask(2);
+  expect(two[1]).toBe(TITLE_ONLY.id);
+  const one = await ask(1);
+  expect(one).toHaveLength(1);
+  expect(one[0]).not.toBe(TITLE_ONLY.id);
 
-  // Today it drops here: the keyword lane puts every readable partial match
-  // ahead of every title-only partial match, whatever their bm25 rank, and
-  // cuts at the 5 the router asks for (connectorStoreKeywordLaneRows).
   const audit = await evalSeat(opened);
   expect(audit.packCandidateSources.some((seat) => seat.expectedItem === 1)).toBe(true);
 });

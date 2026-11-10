@@ -15163,10 +15163,12 @@ async function connectorStoreKeywordLaneRows(
   // demoted the plain search's bm25 leader behind every readable row that
   // shares part of the question, so a file named for the question, unread or
   // with Private content, never left its store (2026-11-10 eval gap-1: first
-  // of 377 by bm25, absent from the pack). It takes the third partial seat
-  // (LANE_LEADER_SEATS), so the two best readable rows still lead and a
-  // one-result search still gets content. One row, never more: the titles
-  // after it still follow the readable rows.
+  // of 377 by bm25, absent from the pack). The rule: when the plain search's
+  // best match is a name that outscores every readable partial match, it
+  // keeps a seat whenever the lane has room for more than one, and never
+  // takes the first seat from a readable match, so a one-result search still
+  // gets content. One row, never more: the titles after it still follow the
+  // readable rows.
   const leader = rows[0];
   const nameLeader = leader && !connectorStoreRowHasContent(leader) && !complete.has(leader.sourceItem.localItemId)
     ? leader.sourceItem.localItemId
@@ -15174,7 +15176,8 @@ async function connectorStoreKeywordLaneRows(
   if (leader && nameLeader !== undefined) {
     const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
     const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    const seat = firstPartial + LANE_LEADER_SEATS - 1;
+    // Right after the best readable partial match, when one leads it.
+    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]!) ? 1 : 0);
     if (firstPartial >= 0 && at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
   }
   // The expansion-free baseline is the same search when expansion changes

@@ -35594,7 +35594,7 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
   if (leader && nameLeader !== undefined) {
     const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
     const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    const seat = firstPartial + LANE_LEADER_SEATS - 1;
+    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]) ? 1 : 0);
     if (firstPartial >= 0 && at > seat)
       ordered.splice(seat, 0, ...ordered.splice(at, 1));
   }
