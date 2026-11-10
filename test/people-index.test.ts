@@ -9,6 +9,7 @@ import {
   OWNER_PERSON_ID,
   peopleIndexPath,
   linkPeople,
+  displayNameFromLabel,
   normalizePhone,
   strongKeysFromText,
   type PeopleCorrection,
@@ -46,6 +47,17 @@ describe('people index: strong keys', () => {
     expect(strongKeysFromText('14155550123@s.example.net')).toEqual(['email:14155550123@s.example.net', 'phone:+14155550123']);
     expect(strongKeysFromText('777')).toEqual([]);
     expect(strongKeysFromText('123456@lid')).toEqual([]);
+  });
+
+  test('an address keeps its whole local part, apostrophes and all', () => {
+    expect(strongKeysFromText("Pat O'Brien <O'Brien@example.com>")).toEqual(["email:o'brien@example.com"]);
+    expect(strongKeysFromText('first.last+tag!x#y@example.com')).toEqual(['email:first.last+tag!x#y@example.com']);
+    expect(displayNameFromLabel("o'brien@example.com")).toBeUndefined();
+    const people = linkPeople({ observations: [
+      obs('mail', "o'brien@example.com", undefined),
+      obs('mail-2', 'brien@example.com', undefined),
+    ] });
+    expect(personOf(people, "sender:mail:o'brien@example.com").identities).toHaveLength(1);
   });
 
   test('a mailbox whose name is all digits still links by its email address', () => {

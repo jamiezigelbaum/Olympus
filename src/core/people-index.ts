@@ -33,6 +33,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { addressSpansIn } from './sender-rules.ts';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
 
@@ -206,7 +207,9 @@ export function normalizePhone(value: string): string | undefined {
   return digits.length >= 8 && digits.length <= 15 && !digits.startsWith('0') ? `+${digits}` : undefined;
 }
 
-const ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
+/** Labels and ids longer than this are read only this far for addresses. */
+const MAX_ADDRESS_TEXT_CHARS = 4_096;
+const addressesIn = (value: string) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS));
 
 /**
  * The strong keys an id or a label carries, read as address formats only:
@@ -217,13 +220,12 @@ const ADDRESS = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
 export function strongKeysFromText(value: string | undefined): string[] {
   if (!value) return [];
   const keys = new Set<string>();
-  for (const match of value.matchAll(ADDRESS)) {
-    const local = match[1]!;
+  for (const { address, local } of addressesIn(value)) {
     // An address is always an email key, even with an all-digit mailbox
     // (123456789@qq.com). A digit-only local part also reads as a phone
     // number (a chat id such as 14155550123@s.whatsapp.net); a phone key
     // shared by two such addresses on different domains is a known limit.
-    keys.add(`email:${match[0]!.toLowerCase()}`);
+    keys.add(`email:${address}`);
     if (/^\d{8,15}$/.test(local) && !local.startsWith('0')) keys.add(`phone:+${local}`);
   }
   if (keys.size === 0) {
@@ -236,7 +238,9 @@ export function strongKeysFromText(value: string | undefined): string[] {
 /** A label as a person's name, or undefined when it is an address, number or id. */
 export function displayNameFromLabel(label: string | undefined): string | undefined {
   if (!label) return undefined;
-  const withoutAddress = label.replace(/<[^>]*>/g, ' ').replace(ADDRESS, ' ').replace(/["']/g, ' ');
+  let withoutAddress = label;
+  for (const span of addressesIn(label).reverse()) withoutAddress = `${withoutAddress.slice(0, span.start)} ${withoutAddress.slice(span.end)}`;
+  withoutAddress = withoutAddress.replace(/<[^>]*>/g, ' ').replace(/["']/g, ' ');
   const name = withoutAddress.replace(/\s+/g, ' ').trim();
   if (!name || normalizePhone(name)) return undefined;
   if (!/\p{L}/u.test(name)) return undefined;
