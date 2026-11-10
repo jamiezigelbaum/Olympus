@@ -107752,7 +107752,7 @@ function snapshotAtOneLedgerGeneration(input) {
       input.discard(result);
     } finally {
       for (const watch of watches)
-        closeSqliteStore(watch.db);
+        closeSqliteStore(watch.db, { checkpoint: false });
     }
   }
   throw new OperationError("source_index_error", `Olympus kept changing privacy decisions while this source was exported, ${attempts} times over, so its stores and ledgers never matched; nothing was published for it.`, "Export again in a few minutes, or once the privacy judge has caught up.");
@@ -107806,7 +107806,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
       return false;
     throw new OperationError("source_index_error", `Failed to snapshot Olympus SQLite store for export: ${sqlitePath}`, "Retry the export once the store is readable; no partial snapshot was published.");
   } finally {
-    closeSqliteStore(db);
+    closeSqliteStore(db, { checkpoint: false });
   }
   return true;
 }

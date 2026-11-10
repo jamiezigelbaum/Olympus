@@ -1872,7 +1872,7 @@ export function snapshotAtOneLedgerGeneration<T>(input: {
       if (watches.every((watch) => ledgerDataVersion(watch.db) === watch.start)) return result;
       input.discard(result);
     } finally {
-      for (const watch of watches) closeSqliteStore(watch.db);
+      for (const watch of watches) closeSqliteStore(watch.db, { checkpoint: false });
     }
   }
   throw new OperationError(
@@ -1969,7 +1969,9 @@ function snapshotSqliteStore(sqlitePath: string, staging: string): boolean {
       'Retry the export once the store is readable; no partial snapshot was published.',
     );
   } finally {
-    closeSqliteStore(db);
+    // Read-only: no checkpoint into the live file. A TRUNCATE checkpoint resets
+    // its WAL, which reads as a change to the ledger watch (#1224).
+    closeSqliteStore(db, { checkpoint: false });
   }
   return true;
 }
