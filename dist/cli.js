@@ -167090,7 +167090,10 @@ function backupClientScript(csrfToken, folder) {
   });
   document.addEventListener('submit', async function (event) {
     var form = event.target instanceof HTMLFormElement ? event.target : null;
-    if (!form || !form.matches('[data-backup-passphrase]')) return;
+    if (!form) return;
+    // Enter in the restore passphrase must start the restore, never a native GET that puts the passphrase in the URL.
+    if (form.matches('[data-backup-restore]')) { event.preventDefault(); var use = $('#backup-browser [data-browser-use]'); if (use && !use.disabled) use.click(); return; }
+    if (!form.matches('[data-backup-passphrase]')) return;
     event.preventDefault();
     var pass = form.elements.passphrase.value, again = form.elements.again.value;
     if (pass !== again) { say('#backup-passphrase [data-backup-dialog-msg]', 'The two passphrases are different.', true); return; }

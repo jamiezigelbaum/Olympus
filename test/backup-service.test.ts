@@ -355,3 +355,30 @@ describe('backup routes', () => {
     expect(readdirSync(sharedDataPath('backup-staging', env))).toEqual([]);
   });
 });
+
+describe('restore passphrase form', () => {
+  test('Enter in the restore passphrase starts the restore, never a native submit that would put it in the URL', async () => {
+    const { Window } = await import('happy-dom');
+    const status = { folder: '/Volumes/T7/Backup/Olympus', schedule: 'nightly' as const, passphraseSet: true, running: false, backups: [], restoreAvailable: true };
+    const html = renderDashboardSettingsPage({ backup: status, outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' });
+    const section = html.slice(html.indexOf('<section class="setpane" id="backup"'));
+    const start = section.indexOf('<script>') + '<script>'.length;
+    const script = section.slice(start, section.indexOf('</script>', start));
+    const win = new Window({ url: 'http://127.0.0.1:4100/dashboard?settings' });
+    try {
+      win.document.body.innerHTML = section.slice(0, start - '<script>'.length) + '</section>';
+      new Function('window', 'document', 'HTMLInputElement', 'HTMLFormElement', 'HTMLElement', 'Element', script)(win, win.document, win.HTMLInputElement, win.HTMLFormElement, win.HTMLElement, win.Element);
+      const form = win.document.querySelector('[data-backup-restore]') as unknown as HTMLFormElement;
+      form.hidden = false;
+      (form.querySelector('input[name="passphrase"]') as unknown as HTMLInputElement).value = 'correct horse battery';
+      let used = 0;
+      win.document.querySelector('[data-browser-use]')!.addEventListener('click', () => { used += 1; });
+      const submit = new win.Event('submit', { bubbles: true, cancelable: true });
+      form.dispatchEvent(submit as never);
+      expect(submit.defaultPrevented).toBe(true);
+      expect(used).toBe(1);
+    } finally {
+      await win.happyDOM.close();
+    }
+  });
+});
