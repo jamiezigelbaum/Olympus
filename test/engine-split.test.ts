@@ -12,7 +12,7 @@ import { ENGINE_BACKGROUND_ORIGIN, ENGINE_ROLE_ENV, engineRoleFromEnv } from '..
 import { FrontStoreWriteError, forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
-import { createReleaseTierCheck, registerGovernedStore } from '../src/workers/connector-store/tier-visibility.ts';
+import { createPendingGovernance, createReleaseTierCheck, registerGovernedStore } from '../src/workers/connector-store/tier-visibility.ts';
 import { SecretLocationsIndex as SecretLocations } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
@@ -639,6 +639,31 @@ describe('configured mounts are governed by their ledgers', () => {
     const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
     expect(server).toMatch(/for \(const store of configuredConnectorStores\) registerConfiguredTierStore\(store\);/);
     expect(server).toMatch(/adoptConfiguredPrincipal\(mount\);\s*registerConfiguredTierStore\(mount\.store\);/);
+  });
+});
+
+describe('a configured store whose ledger appears later is governed then', () => {
+  test('the waiting registration is retried on every scope read, not only when discovery reports a new mount', () => {
+    const root = tempRoot();
+    const path = join(root, 'reflect.sqlite');
+    const identity = { provider: 'reflect', accountScope: 'reflect:me', providerItemId: 'note-1' };
+    const store = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.reflect.notes', family: 'note', trustDomain: 'internal' });
+    const lanes: Array<{ ledger: TierLedger; corpusIds: Set<string> }> = [];
+    const pending = createPendingGovernance(lanes, (mounted, ledger) => ({ ledger, corpusIds: new Set([mounted.corpusId]) }));
+    // Mounted before any sync: no ledger yet, so it waits.
+    pending.add(store);
+    expect(pending.waiting()).toEqual(['internal.reflect.notes']);
+    const check = createReleaseTierCheck(() => (pending.retry(), lanes), () => 'approval');
+    const input = { corpusId: 'internal.reflect.notes', ...identity, privateAtAnswer: false };
+    expect(check.inputs([input])[0]!.tier).toBe('legacy');
+    // Its first sync creates the ledger; discovery reports nothing new.
+    store.tierLedger()!.recordDecision(identity, classifyItemTiers({ signals: { title: 'note-1' }, text: 'A plain note.', subject: identity }));
+    expect(check.inputs([input])[0]!.tier).toBe('public_or_personal');
+    expect(pending.waiting()).toEqual([]);
+    store.close();
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/const tierScopes = \(\): TierVisibilityScope\[\] => \(pendingGovernance\.retry\(\), tierLanes\)/);
+    expect(server).toMatch(/const registerConfiguredTierStore = \(store: LocalConnectorStore\): void => pendingGovernance\.add\(store\);/);
   });
 });
 

@@ -347,7 +347,7 @@ import {
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
-import { createReleaseTierCheck, createTierVisibilityGate, registerGovernedStore, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { createPendingGovernance, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
@@ -3142,7 +3142,15 @@ export async function main(): Promise<void> {
   // Each lane's ledger, its corpora and its stores that exist now: the stores
   // let a child item be judged by its parent where the gate and the release
   // check read (tier-visibility.ts).
-  const tierScopes = (): TierVisibilityScope[] => tierLanes.map((lane) => ({
+  // Configured stores waiting for their ledger (#1224): retried on every
+  // scope read, so a ledger that appears later governs at once, whatever
+  // mount discovery reports.
+  const pendingGovernance = createPendingGovernance(
+    tierLanes,
+    (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }),
+    (line) => console.warn(line),
+  );
+  const tierScopes = (): TierVisibilityScope[] => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
@@ -3916,9 +3924,9 @@ export async function main(): Promise<void> {
   // A configured mount (Reflect, Roam, ...) whose store is ledger-backed is
   // governed by that ledger: register it, so the visibility gate and every
   // release check read its items' tiers instead of treating them as legacy.
-  const registerConfiguredTierStore = (store: LocalConnectorStore): void => {
-    registerGovernedStore(tierLanes, store, (ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line) => console.warn(line));
-  };
+  // One whose ledger does not exist yet, or cannot be opened now, waits in
+  // pendingGovernance, which every scope read retries (tierScopes).
+  const registerConfiguredTierStore = (store: LocalConnectorStore): void => pendingGovernance.add(store);
   for (const store of configuredConnectorStores) registerConfiguredTierStore(store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
