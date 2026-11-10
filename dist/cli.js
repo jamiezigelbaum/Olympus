@@ -66410,7 +66410,7 @@ function createLocalModelActivity() {
     const kind = localInferencePriority?.getStore() ?? "owner";
     pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try {
-        resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
+        resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key2, work)) : lease(key2, work)));
       } catch (error) {
         reject(error);
       }
@@ -66418,6 +66418,19 @@ function createLocalModelActivity() {
     queueMicrotask(pump);
   });
   const taggedRunning = new Map;
+  const ownerRunning = new Map;
+  const lease = async (key2, work) => {
+    const store = localInferencePriority?.getStore();
+    const owner = store !== "background" && store !== "maintenance";
+    if (owner)
+      ownerRunning.set(key2, (ownerRunning.get(key2) ?? 0) + 1);
+    try {
+      return await get(key2).run(work);
+    } finally {
+      if (owner)
+        ownerRunning.set(key2, (ownerRunning.get(key2) ?? 1) - 1);
+    }
+  };
   const resources = new Map;
   const busyListeners = new Map;
   const get = (key2) => {
@@ -66436,7 +66449,8 @@ function createLocalModelActivity() {
   return {
     busy: (key2) => get(key2).busy,
     busyExcept: (key2, tag) => get(key2).inFlight > (taggedRunning.get(`${key2}\x00${tag}`) ?? 0),
-    run: (key2, work) => get(key2).run(work),
+    ownerInFlight: (key2) => (ownerRunning.get(key2) ?? 0) > 0,
+    run: (key2, work) => lease(key2, work),
     onBusy(key2, listener) {
       const listeners = busyListeners.get(key2) ?? new Set;
       busyListeners.set(key2, listeners);
@@ -66449,7 +66463,7 @@ function createLocalModelActivity() {
     track(key2, model, options = {}) {
       const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work2) => get(key2).run(work2) : (work2) => dispatch(key2, work2, limit);
+        const run = options.serialize === false ? (work2) => lease(key2, work2) : (work2) => dispatch(key2, work2, limit);
         return run(async () => {
           const tagKey = options.tag === undefined ? undefined : `${key2}\x00${options.tag}`;
           if (tagKey !== undefined)
@@ -196316,6 +196330,11 @@ class TierSnifferService {
         this.yieldingSinceMs = undefined;
       return false;
     }
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
+    }
     if (this.fairTurn)
       return false;
     const now = this.clockMs();
@@ -196780,6 +196799,13 @@ class TierSnifferService {
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
       return;
+    }
+  }
+  ownerAnswering() {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
   answering() {
@@ -223664,6 +223690,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
+    ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),

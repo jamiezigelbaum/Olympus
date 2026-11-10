@@ -199,12 +199,25 @@ export function createLocalModelActivity() {
     };
     const kind = localInferencePriority?.getStore() ?? 'owner';
     pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
-      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key).run(work)) : get(key).run(work))); } catch (error) { reject(error); }
+      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key, work)) : lease(key, work))); } catch (error) { reject(error); }
     } });
     // Gather simultaneous dispatches before choosing owner-first.
     queueMicrotask(pump);
   });
   const taggedRunning = new Map<string, number>();
+  // The owner's own calls in flight per resource (every call not run as
+  // background or maintenance), so a fair turn never outlasts one (#1031).
+  const ownerRunning = new Map<string, number>();
+  const lease = async <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const store = localInferencePriority?.getStore();
+    const owner = store !== 'background' && store !== 'maintenance';
+    if (owner) ownerRunning.set(key, (ownerRunning.get(key) ?? 0) + 1);
+    try {
+      return await get(key).run(work);
+    } finally {
+      if (owner) ownerRunning.set(key, (ownerRunning.get(key) ?? 1) - 1);
+    }
+  };
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
   const get = (key: string) => {
@@ -223,7 +236,9 @@ export function createLocalModelActivity() {
     busy: (key: string) => get(key).busy,
     // Busy with calls other than the ones tracked under `tag`.
     busyExcept: (key: string, tag: string) => get(key).inFlight > (taggedRunning.get(`${key}\u0000${tag}`) ?? 0),
-    run: <T>(key: string, work: () => Promise<T>) => get(key).run(work),
+    // True while one of the owner's own calls runs on this resource.
+    ownerInFlight: (key: string) => (ownerRunning.get(key) ?? 0) > 0,
+    run: <T>(key: string, work: () => Promise<T>) => lease(key, work),
     onBusy(key: string, listener: () => void) {
       const listeners = busyListeners.get(key) ?? new Set<() => void>();
       busyListeners.set(key, listeners);
@@ -238,7 +253,7 @@ export function createLocalModelActivity() {
     track<T extends import('../core/analyst.ts').AnalystModel & { prepareSniffer?(signal?: AbortSignal): Promise<void> }>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
       const coordinate = <R>(work: () => Promise<R>, signal?: AbortSignal, limit = options.concurrency ?? 1): Promise<R> => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? <V>(work: () => Promise<V>) => get(key).run(work) : <V>(work: () => Promise<V>) => dispatch(key, work, limit);
+        const run = options.serialize === false ? <V>(work: () => Promise<V>) => lease(key, work) :<V>(work: () => Promise<V>) => dispatch(key, work, limit);
         return run(async () => {
           const tagKey = options.tag === undefined ? undefined : `${key}\u0000${options.tag}`;
           if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);

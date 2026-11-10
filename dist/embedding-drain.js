@@ -77000,6 +77000,11 @@ class TierSnifferService {
         this.yieldingSinceMs = undefined;
       return false;
     }
+    if (this.ownerAnswering()) {
+      this.fairTurn = false;
+      this.yieldingSinceMs = undefined;
+      return true;
+    }
     if (this.fairTurn)
       return false;
     const now = this.clockMs();
@@ -77464,6 +77469,13 @@ class TierSnifferService {
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
       return;
+    }
+  }
+  ownerAnswering() {
+    try {
+      return this.options.ownerInFlight?.() ?? false;
+    } catch {
+      return false;
     }
   }
   answering() {
