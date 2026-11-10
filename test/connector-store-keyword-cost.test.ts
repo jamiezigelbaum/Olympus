@@ -14,7 +14,7 @@ import {
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
-import { traceKeywordSearch } from '../eval/store-probe.ts';
+import { keywordStatementKind, traceKeywordSearch } from '../eval/store-probe.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -119,5 +119,34 @@ test('ties at the bound fall back to ranking every match, with the same page', a
     expect(run.statements.ranked_match_page_bounded?.calls).toBe(1);
     expect(run.statements.ranked_match_page?.calls).toBe(1);
     expect(run.rows).toBe(50);
+  }
+});
+
+// Which concepts each candidate holds is asked of the candidates' own FTS
+// rows. Matching a concept across the whole store and keeping the candidates
+// read every match of a common word: about 1 s a call on Sparta's Private
+// store (rerun 13), and 22 s cold for "invoice" on a 120k-item fixture,
+// against 4 ms from the candidates' rows.
+test('concept hits read only the candidates\' FTS rows, never every match in the store', async () => {
+  const store = await openStore();
+  const db = (store as unknown as { db: { query: (sql: string) => { all: (...params: unknown[]) => unknown[] } } }).db;
+  const query = db.query;
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  db.query = function (sql: string) {
+    const statement = query.call(db, sql);
+    if (keywordStatementKind(sql) !== 'concept_hits_for_candidates') return statement;
+    return { ...statement, all: (...params: unknown[]) => { statements.push({ sql, params }); return statement.all(...params); } } as typeof statement;
+  };
+  let rows;
+  try {
+    rows = store.searchItemsDetailed(QUESTION, 5, undefined, undefined, { prefix: false }).rows;
+  } finally {
+    db.query = query;
+  }
+  expect(rows[0]?.sourceItem.providerItemId).toBe('answer');
+  expect(statements.length).toBeGreaterThan(0);
+  for (const { sql, params } of statements) {
+    const plan = (db.query(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>).map((row) => row.detail);
+    expect(plan[0]).toMatch(/^SEARCH \w+ USING COVERING INDEX idx_connector_store_fts_rows_item \(item_pk=\?\)$/);
   }
 });
