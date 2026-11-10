@@ -138,7 +138,7 @@ import type { Operation, OperationContext } from './core/operations.ts';
 import { VERSION } from './version.ts';
 import type { WorkerServicePlatform, WorkerServiceState } from './core/worker-service.ts';
 import { writeManagedWorkerEnvSecret } from './core/worker-service.ts';
-import { isValidSshTarget, parseServerModeSetting, resolveServerMode, remoteOpenInstructions } from './core/remote-open.ts';
+import { isValidPort, isValidSshTarget, parseServerModeSetting, resolveServerMode, remoteOpenInstructions } from './core/remote-open.ts';
 import {
   runWorkerLifecycle,
   type LifecycleRecoverySignal,
@@ -182,6 +182,7 @@ import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewr
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
 import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
 import { backupOlympusData, restoreOlympusBackup, deriveBackupKey } from './data-backup.ts';
+import { parseProposalFrom, parseSettingsProposalInput, SETTINGS_PROPOSAL_SCHEMA, SettingsProposalError } from './core/settings-proposal.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
 import {
   runSetupWizard,
@@ -392,6 +393,29 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'setup' && args[1] === 'status') {
+    // The setup checklist (#1077): JSON for an agent, --text for a person.
+    try {
+      const { parseSetupStatusArgs, readSetupStatus } = await import('./core/setup-status.ts');
+      const { text } = parseSetupStatusArgs(args.slice(2));
+      const checklist = await readSetupStatus();
+      if (text) {
+        const { renderSetupChecklistText } = await import('./core/setup-checklist.ts');
+        console.log(renderSetupChecklistText(checklist));
+      } else {
+        console.log(JSON.stringify(checklist, null, 2));
+      }
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
   if (args[0] === 'setup') {
     if (args.length === 2 && args[1] === '--privacy-options') {
       const { state } = resolveInstallationPrivacyState();
@@ -584,9 +608,10 @@ async function main(): Promise<void> {
       // list (core/open-targets.ts). The remote-mode instructions name it so
       // a link opened through an SSH tunnel lands on the right screen.
       const target = dashboardTargetArg(args);
+      const port = dashboardPortArg(args);
       const result = args.includes('--read-only')
         ? runDashboardReadOnlyCommand({ noOpen })
-        : await runDashboardCommand({ noOpen, ...(target ? { target } : {}) });
+        : await runDashboardCommand({ noOpen, ...(target ? { target } : {}), ...(port !== undefined ? { port } : {}) });
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -1491,18 +1516,20 @@ function printHelp(): void {
   console.log('  olympus source index search <query> --corpus-id <corpus>');
   console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join('|')} --yes [--cloud-lane subscription|api-key]`);
+  console.log('  olympus setup status [--text]');
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path ~/.olympus/sovereignty.json]`);
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
   console.log(`  ${ENGINE_CLI_USAGE['engine install-helper']}`);
   console.log('  olympus engine uninstall|status [--brief]|start|stop|restart|rollback|logs');
-  console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>]');
+  console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>] [--port <n>]');
   console.log('  olympus dashboard token');
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
   console.log('  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
-  console.log('  olympus settings show');
+  console.log('  olympus settings show|schema');
+  console.log('  olympus settings propose <file.json|-> [--from <name>]');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1561,12 +1588,14 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
-  dashboard: 'olympus dashboard [--read-only] [--no-open] [--target <place>]',
+  dashboard: 'olympus dashboard [--read-only] [--no-open] [--target <place>] [--port <n>]',
   open: 'olympus open olympus://open/<target>',
   'open-handler install': 'olympus open-handler install',
   'open-handler uninstall': 'olympus open-handler uninstall',
   'open-handler status': 'olympus open-handler status',
   'settings show': 'olympus settings show',
+  'settings schema': 'olympus settings schema',
+  'settings propose': 'olympus settings propose <file.json|-> [--from <name>]',
   'server-mode status': 'olympus server-mode status',
   'server-mode on': 'olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]',
   'server-mode off': 'olympus server-mode off',
@@ -1706,7 +1735,10 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   settings: [
     'Usage: olympus settings <command>',
     'Commands:',
-    '  olympus settings show   Every dashboard setting, as JSON, read from the running Olympus (changes nothing)',
+    '  olympus settings show      Every dashboard setting, as JSON, read from the running Olympus (changes nothing)',
+    '  olympus settings schema    What a settings proposal can set',
+    '  olympus settings propose <file.json|-> [--from <name>]',
+    '                             Propose settings; the owner applies them with one click on the dashboard Settings page',
   ],
   'server-mode': [
     'Usage: olympus server-mode <command>',
@@ -3263,17 +3295,63 @@ function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
 export async function runSettingsCommand(
   args: readonly string[],
   env: Record<string, string | undefined> = process.env,
-  options: { fetchImpl?: typeof fetch } = {},
+  options: { fetchImpl?: typeof fetch; readStdin?: () => string } = {},
 ): Promise<Record<string, unknown>> {
-  if (args.length !== 1 || args[0] !== 'show') throw new OperationError('invalid_params', 'Usage: olympus settings show');
+  if (args[0] === 'schema' && args.length === 1) return { kind: 'olympus_settings_schema', ...SETTINGS_PROPOSAL_SCHEMA };
+  if (args[0] === 'propose') return runSettingsPropose(args.slice(1), env, options);
+  if (args.length !== 1 || args[0] !== 'show') throw new OperationError('invalid_params', SETTINGS_USAGE);
   let settings: Record<string, unknown>;
   try {
     settings = await callWorkerCli<Record<string, unknown>>('settings', {}, { env, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
   } catch (error) {
     if (!(error instanceof WorkerUnreachableError)) throw error;
-    throw new OperationError('config_error', 'Olympus is not running, so its settings cannot be read.', 'Start Olympus (olympus engine start), then run olympus settings show again.');
+    throw new OperationError('config_error', 'Olympus is not running, so its settings cannot be read.', 'Start Olympus (olympus engine start), then run olympus settings show again as the account Olympus runs under.');
   }
   return { ...settings, remote_access: runConnectionsStatus(env) };
+}
+
+const SETTINGS_USAGE = 'Usage: olympus settings show | schema | propose <file.json|-> [--from <name>]';
+
+/**
+ * `olympus settings propose <file>`: hand the running Olympus a set of
+ * settings for the owner to review. Nothing changes until the owner clicks
+ * Apply all on the dashboard's Settings page (#1050).
+ */
+async function runSettingsPropose(
+  args: readonly string[],
+  env: Record<string, string | undefined>,
+  options: { fetchImpl?: typeof fetch; readStdin?: () => string },
+): Promise<Record<string, unknown>> {
+  let file: string | undefined;
+  let from: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--from') { from = args[index + 1]; index += 1; continue; }
+    if (file !== undefined || (arg.startsWith('-') && arg !== '-')) throw new OperationError('invalid_params', SETTINGS_USAGE);
+    file = arg;
+  }
+  if (!file) throw new OperationError('invalid_params', SETTINGS_USAGE);
+  let text: string;
+  try {
+    text = file === '-' ? (options.readStdin ?? (() => readFileSync(0, 'utf8')))() : readFileSync(file, 'utf8');
+  } catch (error) {
+    throw new OperationError('invalid_params', `Could not read ${file === '-' ? 'the proposal from standard input' : file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { throw new OperationError('invalid_params', 'The proposal is not valid JSON.', 'Run olympus settings schema for its shape.'); }
+  try {
+    parseSettingsProposalInput(parsed);
+    parseProposalFrom(from);
+  } catch (error) {
+    if (error instanceof SettingsProposalError) throw new OperationError('invalid_params', error.message, 'Run olympus settings schema for what can be set.');
+    throw error;
+  }
+  try {
+    return await callWorkerCli<Record<string, unknown>>('settings-propose', { proposal: parsed, ...(from ? { from } : {}) }, { env, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
+  } catch (error) {
+    if (!(error instanceof WorkerUnreachableError)) throw error;
+    throw new OperationError('config_error', 'Olympus is not running, so it cannot take a settings proposal.', 'Start Olympus (olympus engine start). Run this as the account Olympus runs under.');
+  }
 }
 
 function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
@@ -3325,6 +3403,11 @@ export interface DashboardCommandDependencies {
   noOpen?: boolean;
   /** Where the opened dashboard lands (an `olympus://` link's target); the plain dashboard when absent. */
   target?: OpenTarget;
+  /**
+   * The port the owner's end of the SSH tunnel listens on, when the engine's
+   * own port is busy on their computer (#776). The link is bound to it.
+   */
+  port?: number;
 }
 
 /**
@@ -3350,10 +3433,17 @@ export async function runDashboardCommand(
   dependencies: DashboardCommandDependencies = {},
 ): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = cliWorkerRoot(config);
+  const engineBase = cliWorkerRoot(config);
   const token = resolveWorkerAuthToken(process.env, config);
+  // --port: the link is minted for the tunnel's own port. Only a worker
+  // reached through its owner socket can take that, since the socket answers
+  // whatever loopback port the request names (#776).
+  if (dependencies.port !== undefined && !validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {})) {
+    throw new OperationError('invalid_params', '--port is for opening a server\'s dashboard over SSH, and this engine is not reached through an SSH socket.', 'Run the command without --port.');
+  }
+  const base = dependencies.port === undefined ? engineBase : `http://127.0.0.1:${dependencies.port}`;
   let desktopUnavailable = false;
-  if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen) {
+  if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen && dependencies.port === undefined) {
     if (!token) throw new OperationError('config_error', 'No worker auth token is configured. Run olympus setup first.');
     let response: Response;
     try { response = await (dependencies.fetchImpl ?? workerFetch)(`${base}${DESKTOP_OWNER_OPEN_PATH}${dependencies.target ? '?target=' + openTargetPath(dependencies.target) : ''}`, {
@@ -3366,8 +3456,18 @@ export async function runDashboardCommand(
     if (result.state !== 'headless') throw new OperationError('email_unreachable', 'Worker did not provide an owner-proven desktop route.');
     desktopUnavailable = true;
   }
-  const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
-  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  // A socket that fails its checks still lets the mint run first, so the
+  // error names the worker that refused, as before; the socket error follows.
+  let socketPath: string | undefined;
+  let socketError: unknown;
+  try { socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {}); } catch (error) { socketError = error; }
+  // Behind the owner socket the link is opened through an SSH forward that
+  // listens on 127.0.0.1 only, so it names that literal origin: a configured
+  // name such as localhost may resolve to another listener on the owner's
+  // computer (#1211). The socket carries the request whatever host it names.
+  const mintBase = socketPath ? new URL(`http://127.0.0.1:${new URL(base).port || '80'}`).origin : base;
+  const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint() });
+  if (socketError !== undefined) throw socketError;
   const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {
@@ -3382,7 +3482,8 @@ export async function runDashboardCommand(
   return {
     url: openUrl,
     opened,
-    hint: handoff ? `${desktopUnavailable ? 'No desktop session is available. ' : ''}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
+    hint: handoff ? `${desktopUnavailable ? 'No desktop session is available. ' : ''}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.`
+      + ` If ssh says "Address already in use", port ${new URL(base).port || '80'} is already taken on your computer: run ${olympusCommandHint()} dashboard --no-open --port <another port> on this server instead, and use the command it prints.` : dependencies.noOpen
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
@@ -3520,6 +3621,17 @@ export function runServerModeCommand(
 }
 
 /** `--target <path>` for `olympus dashboard`: one of the closed list, or a refusal naming them. */
+/** `--port <n>` for `olympus dashboard` (#776). */
+export function dashboardPortArg(args: readonly string[]): number | undefined {
+  const index = args.indexOf('--port');
+  if (index < 0) return undefined;
+  const value = Number(args[index + 1]);
+  if (!isValidPort(value) || value < 1024 || !/^\d+$/.test(args[index + 1] ?? '')) {
+    throw new OperationError('invalid_params', '--port takes a port number from 1024 to 65535.', 'For example: --port 8011.');
+  }
+  return value;
+}
+
 export function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
   const index = args.indexOf('--target');
   if (index < 0) return undefined;

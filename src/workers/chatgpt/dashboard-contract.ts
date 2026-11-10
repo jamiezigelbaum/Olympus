@@ -242,6 +242,19 @@ export function unreadableNames(input: unknown): string[] {
   });
 }
 
+/**
+ * A source waiting on a daily API budget or a rate limit (#1044). `reason` is
+ * a closed word; `api` names whose budget it is ("X"); `resumesAt` is an ISO
+ * time when known (a daily budget resets at 00:00 UTC).
+ */
+export interface DashboardSourceWait {
+  sourceId: string;
+  label: string;
+  reason: 'daily_budget' | 'rate_limit';
+  api: string;
+  resumesAt?: string;
+}
+
 /** A Sync now press's state on the row: `checking` while its sync runs, then what it found. */
 export type ManualSyncOutcome = 'checking' | 'checked' | 'failed' | 'busy';
 
@@ -266,6 +279,12 @@ export interface DashboardViewModelV1 {
   blocker?: DashboardItem;
   /** Includes an unreachable local model; models never block on their own. */
   needsYou: DashboardItem[];
+  /**
+   * Sources Olympus parked on its own budget or a provider's rate limit
+   * (#1044): nothing for the owner to do and no Sync now, only the reason and
+   * when it resumes. Absent when none waits.
+   */
+  waits?: DashboardSourceWait[];
   /**
    * Server-ordered, one list: sources that need the owner first, then
    * connected sources, then sources not connected yet (2026-10-09). `group`
@@ -528,6 +547,12 @@ export interface ComputerDashboardMeta {
    */
   indexedItems?: number;
   /**
+   * The setup checklist (#1077, core/setup-checklist.ts): the same steps,
+   * states and ways forward `olympus setup status` gives the owner's agent.
+   * Names and states only; computer only.
+   */
+  setup?: import('../../core/setup-checklist.ts').SetupChecklist;
+  /**
    * Imported archives and the imports waiting on the person, for the
    * Archives row (archive-import/dashboard.ts). The list, with the folders
    * the person's files are in, is only ever in this meta; what needs the
@@ -551,6 +576,11 @@ export interface ComputerDashboardMeta {
    */
   archiveSources?: ComputerArchiveSourceMeta[];
   /**
+   * Every export guide's step pages, by format id (Get my archive, #660), for
+   * Import another archive: present with `archives`, whatever sources run.
+   */
+  archiveGuideLinks?: Record<string, Array<string | null>>;
+  /**
    * Each import-only source's card (Reflect, Roam: a format no live connector
    * reads names its card in the format registry): the imports of its formats,
    * listed as the Archives row lists its own, with Remove. `sourceId` is the card.
@@ -566,6 +596,13 @@ export interface ComputerArchiveSourceMeta {
   label: string;
   /** The picker's opening sentence: the exports this source reads, and how to choose one. */
   intro: string;
+  /**
+   * The export guides (Get my archive, #660) this source's picker offers, by
+   * format id: each step's https page, or null for a step without one; absent:
+   * none. The pages travel here, not in the page's own words, so the page
+   * source names no outside origin.
+   */
+  guideLinks?: Record<string, Array<string | null>>;
 }
 
 /** The imports that joined one source, and the history that source's inputs cover. */
@@ -1121,7 +1158,9 @@ export const PRIVACY_CHECK_TOOL_NAME = 'olympus_privacy_check';
 /** The `_meta` key carrying the privacy rules to the widget only. */
 export const PRIVACY_META_KEY = 'olympus/privacy';
 
-export type PrivacyRuleKind = 'folder' | 'label' | 'sender';
+export type PrivacyRuleKind = 'folder' | 'label' | 'sender' | 'chat';
+/** Chat sources an always-Private chat rule may name (privacy-profile.ts RULE_SOURCES.chat). */
+export type PrivacyChatSourceId = 'telegram.messages' | 'whatsapp.personal.messages';
 
 /** A folder that is always Private: the picker's opaque node key. */
 export interface PrivacyFolderRule {
@@ -1148,12 +1187,23 @@ export interface PrivacySenderRule {
 }
 
 /**
+ * A chat that is always Private: the owner's own whole-chat rule. `key` is the
+ * conversation id the chat's messages carry; `display` its name, only in `_meta`.
+ */
+export interface PrivacyChatRule {
+  kind: 'chat';
+  source_id: PrivacyChatSourceId;
+  key: string;
+  display?: string;
+}
+
+/**
  * One always-Private rule, as `olympus_privacy_set` takes it and
  * `olympus_privacy_get` returns it (only in `_meta[PRIVACY_META_KEY]`).
  * Caps: 100 rules; key 1024 characters; label name and display 200; sender
  * an address or `@domain` of at most 240.
  */
-export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySenderRule;
+export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySenderRule | PrivacyChatRule;
 
 /** `olympus_privacy_get {}` → `_meta[PRIVACY_META_KEY]`; also `olympus_privacy_set`'s. */
 export interface PrivacySettings {

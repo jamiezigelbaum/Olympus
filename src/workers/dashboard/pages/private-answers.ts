@@ -11,15 +11,12 @@ import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts'
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
-  DASHBOARD_PRIVACY_ITEMS_COPY,
   dashboardRelativeFromMs,
   PRIVATE_ANSWER_FAILURES,
   privateAnswerFailure,
 } from '../vocabulary.ts';
 import type { AskDestinationStates } from '../../email-source/venice-inbox-answer.ts';
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
-import { JUDGE_CHECK_CSS, JUDGE_CHECK_MOUNT, judgeCheckClientScript } from './judge-check.ts';
-import { SOURCE_LOGO_CSS } from '../source-logos.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
 export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous-setup';
@@ -131,34 +128,35 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     nav: dashboardTopNav({ active: 'privacy', unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...(readToken(basePath) ? { token: readToken(basePath)! } : {}) }),
     meta: '',
     body: dashboardPrivacyTabs('questions', readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS, SOURCE_LOGO_CSS, JUDGE_CHECK_CSS],
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS],
     // The local inbox carries its own small controller and visible-page poll.
   });
 }
 
-/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), then Your items (?privacy-items). */
-export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'items', token?: string): string {
-  const tab = (id: 'questions' | 'settings' | 'items', href: string, label: string) => id === active
+/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), What AI apps received (?apps-received). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'apps', token?: string): string {
+  const tab = (id: 'questions' | 'settings' | 'apps', href: string, label: string) => id === active
     ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
     : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
     + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
     + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
-    + tab('items', dashboardLocalPageHref('privacyItems', token), DASHBOARD_PRIVACY_ITEMS_COPY.tab)
+    + tab('apps', dashboardLocalPageHref('appsReceived', token), W.tabApps)
     + '</nav>';
 }
 
 export const PRIVACY_TABS_CSS = `
-.ptabs { display: flex; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs { display: flex; flex-wrap: wrap; gap: 0 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs .ptab { white-space: nowrap; }
 .ptabs .ptab { padding: 8px 14px; color: var(--t2); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .ptabs .ptab.on { color: var(--t1); border-bottom-color: var(--link); font-weight: 600; }
 .ptabs .ptab:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.judgeopts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+.judgeopts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 10px 0; }
 .judgeopt { display: block; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; }
 .judgeopt:has(input:checked) { border-color: var(--link); }
 .judgeopt:has(input:disabled) { cursor: default; opacity: .6; }
 .judgehead { display: flex; align-items: center; gap: 6px; }
-.judgenow { font-size: var(--fs-caption); padding: 0 8px; border-radius: 10px; border: 1px solid var(--link); color: var(--link); }
+.judgenow { white-space: nowrap; flex-shrink: 0; font-size: var(--fs-caption); padding: 0 8px; border-radius: 10px; border: 1px solid var(--link); color: var(--link); }
 .judgelead { display: block; margin: 4px 0 0; color: var(--t2); }
 .judgerows { display: grid; grid-template-columns: 64px 1fr; gap: 4px 10px; margin: 10px 0 0; }
 .judgeterm { color: var(--t2); }
@@ -170,8 +168,16 @@ export const PRIVACY_TABS_CSS = `
 .judgedialog p { margin: 0 0 12px; }
 .judgedialogbar { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .judgecap { display: block; margin: 8px 0 4px; }
+.judgenote { color: var(--t2); font-size: var(--fs-caption); }
+.judgecapbox { display: none; margin: 12px 0; }
+.judgecapbox .pnote { margin: 0 0 8px; }
+form[data-judge-choice]:has(input[name="choice"][value="venice"]:checked) .judgecapbox,
+form[data-judge-choice]:has(input[name="choice"][value="local-then-venice"]:checked) .judgecapbox { display: block; }
+.judgecapbox input[type="number"] { width: 110px; }
+.judgeorder { margin: 12px 0; }
 .judgehow { margin: 10px 0 0; color: var(--t2); }
 @media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .ptabs .ptab { padding: 8px 10px; } }
 `;
 
 /** The read-only token a dash_ reader's basePath carries, for the link to the gate. */
@@ -197,14 +203,12 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     notes.push(`<form class="paunlock" data-pa-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
-    script = `<script>${privateAnswersClientScript({ csrfToken: '', unlockOnly: true })}</script>`;
+    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
     ready = true;
-    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`
-      // "Check the judge" at the top of the Inbox (judge-check.ts): local session only, like the Inbox.
-      + `<script>${judgeCheckClientScript({ csrfToken, ...(readToken(options?.basePath) ? { token: readToken(options?.basePath)! } : {}) })}</script>`;
+    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date()) : '';
   // zkAPI's own settings live on Settings › zkAPI and Privacy rules (#1047); this tab keeps only its card.
@@ -284,7 +288,7 @@ function renderFailureNotice(reason: unknown): string {
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
   // Delete all sits top right of the heading, as signed off (final-1, #1047).
   const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button>` : '';
-  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>${deleteAll}</div>${waiting ? JUDGE_CHECK_MOUNT : ''}`];
+  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(W.unavailable)}</p>`);
     return parts.join('') + '</section>';
@@ -335,6 +339,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       anonymousPath: W.anonymousPath,
       open: W.open,
       leftOut: W.leftOut,
+      busy: W.busy,
+      notSearched: W.notSearched,
       unanswered: W.unanswered,
       notFound: W.notFound,
       noModel: W.noModel,
@@ -371,7 +377,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       event.preventDefault();
       var button = unlock.querySelector('button');
       if (button) button.disabled = true;
-      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
         if (response.ok) { window.location.reload(); return; }
         var msg = unlock.querySelector('[data-pa-msg]');
         if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }
@@ -457,6 +463,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var card = panel(out, question);
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
+    var busy = Array.isArray(result.busy) ? result.busy : [];
     if (status === 'withdrawn') { renderSent(card, result); card.appendChild(el('p', 'pamsg', result.reason)); return; }
     if (status === 'answered') {
       var box = el('div', 'paanswer answer');
@@ -497,6 +504,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         meta.appendChild(el('p', 'pamsg', config.copy.unanswered.replace('{parts}', result.unanswered.join('; '))));
       }
       if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+      if (busy.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.busy.replace('{sources}', busy.join(', '))));
       if (meta.childNodes.length > 0) card.appendChild(meta);
       return;
     } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
@@ -505,6 +513,10 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       card.appendChild(failureNotice(result.failureReason));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
+    } else if (status === 'not_searched') {
+      var unsearched = el('p', 'pamsg', config.copy.notSearched);
+      unsearched.setAttribute('data-state', 'error');
+      card.appendChild(unsearched);
     } else {
       var words = status === 'no_model' ? config.copy.noModel
         : status === 'model_downloading' ? config.copy.downloading
@@ -514,6 +526,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       card = out.firstChild;
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+    if (busy.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.busy.replace('{sources}', busy.join(', '))));
   }
   // The picked model card sets where the one Ask button sends; a card that
   // stops being ready gives up the pick to the next ready one.

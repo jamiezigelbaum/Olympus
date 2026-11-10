@@ -1,11 +1,19 @@
+import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
+import type { DashboardPeopleBackend } from './dashboard-people.ts';
+import { DASHBOARD_PEOPLE_PATH, type DashboardPeopleView } from '../dashboard/pages/people.ts';
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
+import { dashboardModelsOnComputer } from '../dashboard/models-on-computer.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
 import { privateAnswerMode } from '../../core/first-run-privacy.ts';
+import { parseProposalFrom, parseSettingsProposalInput, SettingsProposalError } from '../../core/settings-proposal.ts';
+import { createSettingsProposalHolder, type SettingsProposalHolder } from '../settings-proposal-holder.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
+import { agentAnswerReceipt, recordAgentAnswerReceipt, type AgentAnswerReceipt } from '../../core/app-release-agent.ts';
+import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 import type { SelfUpdateStart, SelfUpdateStatus } from '../../core/self-update.ts';
@@ -22,7 +30,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { WHATSAPP_SESSION_FILE } from '../../core/olympus-layout.ts';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { isRetiredGooglePilotClientId, packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
@@ -39,7 +48,7 @@ import {
   type OAuthRelayStateKeys,
 } from '../../core/oauth-relay.ts';
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type ExternalPendingOAuthConnection, type OAuthFetch } from '../../core/connect.ts';
+import { connectPublicApiKeySource, DROPBOX_MISSING_SCOPE_MESSAGE, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type ExternalPendingOAuthConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
   callerClaimsRemoteConnection,
@@ -58,7 +67,6 @@ import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
 import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
 import type { OwnerItemChoice, OwnerTierItems } from '../classification/tier-owner-items.ts';
-import { JudgeCheckError, type JudgeCheck } from '../classification/judge-check.ts';
 import { ArchiveUploadError } from '../archive-import/staging.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
@@ -212,6 +220,7 @@ import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  DASHBOARD_APPS_RECEIVED_ROUTE,
   DASHBOARD_PRIVATE_ANSWERS_PATH,
   DASHBOARD_SELF_UPDATE_LOCAL_ONLY,
   DASHBOARD_SELF_UPDATE_PATHS,
@@ -453,10 +462,17 @@ export interface EmailSourceWorkerOptions {
   selfUpdate?: { start(): SelfUpdateStart; status(): SelfUpdateStatus };
   platform?: string;
   /** Local Linux notices, outside the frozen ChatGPT panel bundle. */
-  localModelReadiness?: () => readonly { name: string; state: string; detail: string; downloadBytes: number }[];
+  localModelReadiness?: () => readonly import('../../core/linux-model-readiness.ts').LocalModelReadiness[];
   connector?: EmailSourceConnector;
   sourceAnswer?: SourceIndexAnswerHandler;
   sourceAnswerReleaseCheck?: ReleaseCheck;
+  /**
+   * How many items wait for their privacy judgment (the tier sniffer's
+   * pending count), read per request. A local caller's source answer and
+   * search carry the local note (core/privacy-backlog-coverage.ts); a remote
+   * caller's output gets the remote note at its own boundary instead.
+   */
+  pendingPrivacyItems?: () => number | undefined;
   /**
    * "Ask anonymously" (core/consult-ask.ts), bound by the composition root:
    * one typed question prepared at the chosen level and sent through zkAPI.
@@ -477,12 +493,6 @@ export interface EmailSourceWorkerOptions {
    * (`/dashboard/privacy/items/*`). Absent: those routes answer 501.
    */
   ownerTierItems?: OwnerTierItems;
-  /**
-   * "Check the judge" on Private questions (classification/judge-check.ts):
-   * a round of items the owner labels before seeing the judge's label. Local
-   * dashboard session only (`/dashboard/privacy/judge-check`). Absent: 501.
-   */
-  judgeCheck?: JudgeCheck;
   // Optional content-free latency ledger. When present, one JSON line per
   // answered source_answer request is appended (phase timings, corpus ids, skip
   // reasons, analyst backend/fallback, release decision — never query/content).
@@ -596,13 +606,21 @@ export interface EmailSourceWorkerOptions {
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
     systemReport?: () => SystemSupportFacts;
+    /**
+     * The setup checklist (#1077, core/setup-checklist.ts), built from the
+     * dashboard view and the facts beside it. For `olympus setup status` and
+     * the agent tool, through the `setup-status` CLI route. Names and states only.
+     */
+    setupStatus?: () => Promise<import('../../core/setup-checklist.ts').SetupChecklist>;
     judgeSetup?: {
       status: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
-      save: (choice: 'local' | 'venice', capDollars: number) => Promise<{ ok: true; status_message: string }>;
+      save: (choice: JudgeChoice, capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
     /** The model pickers on Privacy rules (model-choices-backend.ts). */
     modelChoices?: import('./model-choices-backend.ts').ModelChoicesBackend;
+    /** Go easy on this computer (#922, local-pacing.ts): shown under the judge choice. */
+    goEasy?: { on: () => boolean; save: (on: boolean) => { ok: true; status_message: string } };
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
@@ -611,6 +629,10 @@ export interface EmailSourceWorkerOptions {
     computerSetup?: () => Pick<ModelSetupView, 'computer_use_pending' | 'engine_server_mode'>;
     saveComputerUseChoice?: (choice: 'everyday' | 'server') => { ok: true; status_message: string };
     saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
+    /** Change the Private-answer mode after the first run (an applied settings proposal, #1050). */
+    savePrivateAnswerMode?: (choice: SovereigntyPresetName) => { ok: true; message?: string } | { ok: false; message: string };
+    /** Hold the reloads the writers request until a whole settings proposal is saved. */
+    deferReloads?: <T>(writes: () => Promise<T>) => Promise<T>;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
      * Outside help (consults): the Mac dashboard card's backend
@@ -636,7 +658,27 @@ export interface EmailSourceWorkerOptions {
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
     /** Settings › Back up and restore (backup-service.ts); its routes take the local grade only. */
     backup?: BackupService;
+    /**
+     * What AI apps received (workers/apps-received.ts): served only through
+     * DASHBOARD_APPS_RECEIVED_ROUTE to a locally minted control session.
+     */
+    appsReceived?: Pick<import('../apps-received.ts').AppsReceived, 'handle'>;
+    /**
+     * People (#1076; dashboard-people.ts): the people index as the People page
+     * shows it, and the owner's corrections. The list is Private: the page
+     * shows it and the route answers only inside a local control session
+     * (workers/http.ts). Absent: the page says it is not ready and the route
+     * answers 501.
+     */
+    people?: DashboardPeopleBackend;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
+    /**
+     * Logs this computer's WhatsApp linked device out (the bridge's `--unlink`
+     * against that state folder), which removes it from the phone's Linked
+     * devices (#761). Unpair runs it after capture has stopped and before the
+     * session is deleted. Absent: the phone keeps its entry.
+     */
+    unlinkWhatsAppDevice?: (stateDir: string) => Promise<'removed' | 'offline' | 'failed'>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
      * last report and what the grant approved (counts only). Absent for a
@@ -889,6 +931,38 @@ function dashboardConnectSourceLabel(source: string): string {
     ?? source;
 }
 
+/** Where the Settings page's Apply all and Discard post (local control session only, workers/http.ts). */
+export const DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = '/dashboard/settings/proposal/apply';
+export const DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = '/dashboard/settings/proposal/discard';
+
+/** Agent-proposed settings (#1050), bound to the same writers the dashboard's own controls use. */
+function settingsProposalHolderFor(dashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>): SettingsProposalHolder {
+  const judge = dashboard.judgeSetup;
+  const models = dashboard.modelChoices;
+  const saveComputerUse = dashboard.saveComputerUseChoice;
+  return createSettingsProposalHolder({
+    answerMode: () => {
+      const id = privateAnswerMode(dashboard.sovereigntyEngine.config);
+      return { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id] };
+    },
+    ...(dashboard.savePrivateAnswerMode ? { saveAnswerMode: dashboard.savePrivateAnswerMode } : {}),
+    ...(dashboard.deferReloads ? { deferReloads: dashboard.deferReloads } : {}),
+    ...(dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {}),
+    ...(saveComputerUse ? { saveComputerUse: (choice: 'everyday' | 'server') => ({ ok: true as const, message: saveComputerUse(choice).status_message }) } : {}),
+    ...(judge ? {
+      judge: judge.status,
+      saveJudge: async (choice: 'local' | 'venice', cap: number) => ({ ok: true as const, message: (await judge.save(choice, cap)).status_message }),
+    } : {}),
+    ...(models ? {
+      modelChoices: () => models.status(),
+      saveModel: async (provider: 'local' | 'venice' | 'zkapi', value: string) => {
+        const saved = await models.save(provider, value);
+        return saved.ok ? { ok: true as const, message: saved.status_message } : { ok: false as const, message: saved.message };
+      },
+    } : {}),
+  });
+}
+
 export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}): {
   fetch(request: Request): Promise<Response>;
   /**
@@ -903,14 +977,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceAnswer = options.sourceAnswer;
   // Content-free manifests for stdio's delayed collection. Tickets never
   // appear on an assistant surface; missing/expired tickets fail closed.
-  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[] }>();
+  const releaseTickets = new Map<string, { expires: number; manifests: readonly ReleaseManifest[]; receipt?: AgentAnswerReceipt }>();
   const pruneReleaseTickets = () => {
     for (const [ticket, entry] of releaseTickets) if (entry.expires <= Date.now()) releaseTickets.delete(ticket);
   };
   const consultAsk = options.consultAsk;
   const archiveImportAgent = options.archiveImportAgent;
   const ownerTierItems = options.ownerTierItems;
-  const judgeCheck = options.judgeCheck;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync
@@ -949,6 +1022,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
   const serviceInstanceId = options.serviceInstanceId?.trim() || undefined;
@@ -1169,6 +1243,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }
 
+        // An agent on this computer received this answer (its tool result,
+        // core/app-release-agent.ts): record what the worker kept with the
+        // ticket on the owner's list of what each AI app received, once. The
+        // caller names only the ticket and whether it was withheld; the
+        // question, app and items are the worker's own.
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/received`) {
+          const body = await parseObjectBody(request);
+          const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
+          if (entry?.receipt && entry.expires > Date.now()) {
+            const { receipt } = entry;
+            delete entry.receipt;
+            recordAgentAnswerReceipt(receipt, body.withheld !== false);
+          }
+          return json({ ok: true });
+        }
+
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json() as { ticket?: unknown };
           const entry = typeof body.ticket === 'string' ? releaseTickets.get(body.ticket) : undefined;
@@ -1211,14 +1301,26 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // Forward the manifest to an in-process remote call's sink too.
               for (const manifest of manifests.manifests) recordReleaseManifest(manifest);
               assertNoRawEmailFields(result);
+              // Not recorded on the owner's list of what each AI app received yet: a local agent's
+              // answer is recorded when its tool result says it was received (/source/answer/received,
+              // core/app-release-agent.ts), after collection and the release-ticket check. A remote call
+              // is recorded where its own output leaves.
+              const receipt = agentAnswerReceipt(sourceAnswerRequest.question, caller, result);
               let releaseTicket: string | undefined;
               if (caller?.surface !== 'remote') {
                 pruneReleaseTickets();
                 releaseTicket = randomBytes(32).toString('base64url');
-                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests });
+                releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests, ...(receipt ? { receipt } : {}) });
                 while (releaseTickets.size > 256) releaseTickets.delete(releaseTickets.keys().next().value!);
               }
-              const response = json({ ...result, ...(releaseTicket ? { _release_ticket: releaseTicket } : {}) });
+              // A remote caller's output adds its own note (core/remote-result.ts, chatgpt/response-builder.ts).
+              const localNote = caller?.surface !== 'remote'
+                ? privacyBacklogCoverageNote(readPendingPrivacyItems(options), 'local')
+                : undefined;
+              const answered = localNote && typeof result.answer === 'string'
+                ? { ...result, answer: withCoverageNote(result.answer, localNote) }
+                : result;
+              const response = json({ ...answered, ...(releaseTicket ? { _release_ticket: releaseTicket } : {}) });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,
@@ -1260,6 +1362,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'tier': return json(await tierForCli(body));
               case 'pairing-placement': return json(pairingPlacementForCli(body));
               case 'pairing-account': return json(pairingAccountForCli(body));
+              case 'setup-status': {
+                if (!sourceDashboard?.setupStatus) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no setup checklist to show.');
+                return json(await sourceDashboard.setupStatus());
+              }
+              case 'settings-propose': {
+                if (!settingsProposal) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to change.');
+                try {
+                  const proposal = await settingsProposal.propose(parseSettingsProposalInput(body.proposal), parseProposalFrom(body.from));
+                  return json({
+                    kind: 'olympus_settings_proposal',
+                    id: proposal.id,
+                    changes: proposal.rows,
+                    next: 'Nothing has changed yet. Ask the owner to open the dashboard on this computer, go to Settings, check the proposed changes and click Apply all.',
+                  });
+                } catch (error) {
+                  if (error instanceof SettingsProposalError) throw new EmailSourceWorkerError(400, 'invalid_params', error.message, 'Run olympus settings schema and olympus settings show for what can be set.');
+                  throw error;
+                }
+              }
               case 'settings': {
                 if (!sourceDashboard) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to show.');
                 const dashboard = sourceDashboard;
@@ -1531,7 +1652,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               updateAvailable: options.updateAvailable?.(),
               ...(options.selfUpdate ? { selfUpdate: true, updateStatus: options.selfUpdate.status() } : {}),
               platform: options.platform ?? process.platform,
-              ...(options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {}),
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
               ...(controlSessionCsrfToken && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local' ? { localSession: true } : {}),
@@ -1585,11 +1705,28 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // The folder and the backups in it only for the unlocked session minted on this computer.
                 ...(sourceDashboard?.backup && controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local'
                   ? { backup: sourceDashboard.backup.status() } : {}),
+                ...(settingsProposal ? { settingsProposal: { current: settingsProposal.current(), lastApplied: settingsProposal.lastApplied() } } : {}),
                 settings: {
-                  ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
+                  models: dashboardModelsOnComputer({
+                    config: sourceDashboard?.sovereigntyEngine.config,
+                    // The built-in model answers for the route's local member exactly when the local picker lists built-in sizes.
+                    builtInAnswers: (await sourceDashboard?.modelChoices?.status().catch(() => undefined))?.local?.current.startsWith('builtin:') === true,
+                    ...(options.localModelReadiness ? { readiness: options.localModelReadiness() } : {}),
+                  }),
                   ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
                   ...(installer ? { updater: { command: installer.command, selfUpdate: options.selfUpdate !== undefined, ...(options.selfUpdate ? { status: options.selfUpdate.status() } : {}) } } : {}),
                 },
+              },
+            }));
+          }
+          if (page === 'apps_received') {
+            // The page carries no request: its script reads the list through the local-only route.
+            return html(renderDashboardLocalPage('apps_received', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                appsReceivedAvailable: sourceDashboard?.appsReceived !== undefined,
               },
             }));
           }
@@ -1617,16 +1754,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
-          if (page === 'privacy_items') {
-            // Privacy › Your items: the page reads its items through the
-            // dashboard's local routes, so it carries no item here; it only
-            // needs to know whether the session was minted on this computer.
-            return html(renderDashboardLocalPage('privacy_items', {
+          if (page === 'people') {
+            // The people list only for a locally minted control session.
+            const localSession = controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
+            let people: DashboardPeopleView | undefined;
+            if (localSession && sourceDashboard?.people) {
+              try {
+                people = sourceDashboard.people.view();
+              } catch {
+                people = undefined;
+              }
+            }
+            return html(renderDashboardLocalPage('people', {
               url,
-              options: {
-                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
-                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
-              },
+              options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) },
+              ...(people ? { people } : {}),
+              peopleLocalSession: localSession,
             }));
           }
           if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
@@ -1772,6 +1915,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {}),
                 ...(sourceDashboard.modelChoices ? { modelChoices: await sourceDashboard.modelChoices.status().catch(() => undefined) } : {}),
+                ...(sourceDashboard.goEasy ? { goEasy: sourceDashboard.goEasy.on() } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
@@ -2294,18 +2438,52 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const outcome = await handleDashboardBackupRoute(url.pathname, await parseObjectBody(request), { backup: sourceDashboard.backup });
           return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
         }
+        if (request.method === 'POST' && (url.pathname === DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH || url.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Apply proposed settings in an unlocked dashboard on this computer.' } }, 403);
+          }
+          if (!settingsProposal) throw new EmailSourceWorkerError(501, 'not_available', 'Proposed settings are unavailable.');
+          const input = await parseObjectBody(request);
+          if (typeof input.id !== 'string' || input.id === '') throw new EmailSourceWorkerError(400, 'invalid_request', 'Refresh the page to see the current proposal.');
+          if (url.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH) {
+            return settingsProposal.discard(input.id)
+              ? json({ ok: true, status_message: 'Discarded. Nothing was changed.' })
+              : json({ ok: false, error: { code: 'proposal_changed', message: 'This proposal was replaced or already handled. Refresh the page.' } }, 409);
+          }
+          const applied = await settingsProposal.apply(input.id);
+          if (!applied) return json({ ok: false, error: { code: 'proposal_changed', message: 'This proposal was replaced or already handled. Refresh the page.' } }, 409);
+          const failed = applied.rows.filter((row) => !row.applied);
+          return json({
+            ok: true,
+            rows: applied.rows,
+            status_message: failed.length === 0
+              ? `Applied ${applied.rows.length} ${applied.rows.length === 1 ? 'change' : 'changes'}.`
+              : `Applied ${applied.rows.length - failed.length} of ${applied.rows.length}. Not applied: ${failed.map((row) => `${row.label} (${row.message ?? 'not saved'})`).join('; ')}.`,
+          }, failed.length === 0 ? 200 : 409);
+        }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/judge') {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
             return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
           }
           const input = await parseObjectBody(request);
-          if ((input.choice !== 'local' && input.choice !== 'venice') || typeof input.cap_dollars !== 'number' || !Number.isFinite(input.cap_dollars) || input.cap_dollars < 0) {
+          if (!JUDGE_CHOICES.includes(input.choice as JudgeChoice) || typeof input.cap_dollars !== 'number' || !Number.isFinite(input.cap_dollars) || input.cap_dollars < 0) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a judge and enter a spending limit in dollars.');
           }
           if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
-          try { return json(await sourceDashboard.judgeSetup.save(input.choice, input.cap_dollars)); }
+          try { return json(await sourceDashboard.judgeSetup.save(input.choice as JudgeChoice, input.cap_dollars)); }
           catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/engine/go-easy') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (typeof input.on !== 'boolean') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose whether to go easy on this computer.');
+          if (!sourceDashboard?.goEasy) throw new EmailSourceWorkerError(501, 'not_available', 'This setting is unavailable.');
+          try { return json(sourceDashboard.goEasy.save(input.on)); }
+          catch { return json({ ok: false, error: { code: 'go_easy_failed', message: 'The setting could not be saved. Try again.' } }, 409); }
         }
 
         if (request.method === 'POST' && (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start || url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status)) {
@@ -2397,6 +2575,36 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           } catch {
             return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
           }
+        }
+
+        // What AI apps received: the questions apps asked and the titles they got. Like Private
+        // answers, only with the context header of a locally minted control session.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_APPS_RECEIVED_ROUTE) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.appsReceived) {
+            throw new EmailSourceWorkerError(501, 'apps_received_not_supported', 'What AI apps received is not available in this worker.');
+          }
+          const outcome = await sourceDashboard.appsReceived.handle(await parseObjectBody(request));
+          return new Response(JSON.stringify(outcome.body), {
+            status: outcome.status,
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+          });
+        }
+
+        // People (#1076): Same person, Not the same, Merge, Split, Rename.
+        // Local control session only, like Private answers below.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_PEOPLE_PATH) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'People opens only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.people) {
+            throw new EmailSourceWorkerError(501, 'people_not_supported', 'People is not available in this worker yet.');
+          }
+          const record = await parseObjectBody(request);
+          const outcome = sourceDashboard.people.handle(record);
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
         }
 
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
@@ -3044,6 +3252,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 }
               }
 
+              // WhatsApp only: sign this linked device out at WhatsApp while the
+              // session still exists, so the phone's Linked devices loses the
+              // entry instead of keeping one of its four slots (#761). Telegram's
+              // session is a login the owner ends in Telegram's Active sessions.
+              let phoneUnlinked: 'removed' | 'offline' | 'failed' | undefined;
+              const whatsappSessionDb = sourceId === 'telegram.messages'
+                ? undefined
+                : session.paths.find((path) => basename(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== 'gone');
+              if (whatsappSessionDb && sourceDashboard.unlinkWhatsAppDevice) {
+                phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname(whatsappSessionDb)).catch(() => 'failed' as const);
+              }
+              const phoneNote = phoneUnlinked === 'offline' || phoneUnlinked === 'failed'
+                ? ' Olympus could not reach WhatsApp to remove itself from your phone: remove Olympus in WhatsApp → Settings → Linked devices.'
+                : '';
+
               const removedSessionPaths: string[] = [];
               const unremovedSessionPaths: string[] = [];
               for (const target of removalPlan.plan.targets) {
@@ -3172,8 +3395,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // rendered as the ordinary "Done" was a completion claim over
                 // a session file still sitting on disk.
                 ...(outstandingSteps.length > 0 ? { failed_steps: outstandingSteps } : {}),
+                ...(phoneUnlinked ? { phone_unlinked: phoneUnlinked } : {}),
                 status_message: complete
-                  ? 'Unpaired. Waiting for the next refresh.'
+                  ? (phoneUnlinked === 'removed' ? 'Unpaired, and removed from your phone\'s linked devices. Waiting for the next refresh.' : 'Unpaired. Waiting for the next refresh.') + phoneNote
                   : outstandingPaths.length > 0
                     ? `Unpair incomplete — remove by hand: ${outstandingPaths.join(', ')}`
                     : failedSteps.includes('connected_handle')
@@ -3190,7 +3414,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   connected_handle_removed: !outstandingSteps.includes('connected_handle'),
                   indexed_data_deleted: false,
                   captured_messages_deleted: false,
-                  provider_device_still_linked: true,
+                  provider_device_still_linked: phoneUnlinked !== 'removed',
                   capture_service_stopped: false,
                   restart_required: false,
                   raw_runtime_secrets_exposed: false,
@@ -3325,37 +3549,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
-        // "Check the judge" (judge-check.ts): the owner's answers stay on this
-        // computer, and only a session minted here reaches them.
-        if (request.method === 'POST' && url.pathname === '/dashboard/privacy/judge-check') {
-          if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
-            throw new EmailSourceWorkerError(403, 'mac_dashboard_only', 'Checking the judge happens only in the dashboard on this computer, in an unlocked browser.');
-          }
-          if (!judgeCheck) {
-            throw new EmailSourceWorkerError(501, 'judge_check_not_supported', 'Checking the judge is not set up in this engine.');
-          }
-          const record = await parseObjectBody(request);
-          const action = asOptionalString(record.action);
-          try {
-            if (action === 'status') return json({ ok: true, round: judgeCheck.status() });
-            if (action === 'start') return json({ ok: true, round: judgeCheck.start() });
-            if (action === 'put_away') return json({ ok: true, round: judgeCheck.putAway() });
-            if (action === 'resume') return json({ ok: true, round: judgeCheck.resume() });
-            if (action === 'answer') {
-              const itemId = asOptionalString(record.item_id);
-              const answer = asOptionalString(record.answer);
-              if (!itemId || (answer !== 'Personal' && answer !== 'Private' && answer !== 'not_sure')) {
-                throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id and an answer (Personal, Private or not_sure) are required.');
-              }
-              return json({ ok: true, round: judgeCheck.answer(itemId, answer) });
-            }
-          } catch (error) {
-            if (error instanceof JudgeCheckError) throw new EmailSourceWorkerError(409, error.code, error.message);
-            throw error;
-          }
-          throw new EmailSourceWorkerError(400, 'invalid_request', 'action must be status, start, answer, put_away or resume.');
-        }
-
         // The owner's one-item privacy change on the dashboard's Privacy tab
         // (tier-owner-items.ts): find any item, and set it Personal or
         // Private, or back to the judge's label. Control routes held to a
@@ -3377,18 +3570,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const query = asOptionalString(record.query);
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, 'limit');
-            const filter = asOptionalString(record.filter);
-            if (filter !== undefined && filter !== 'personal' && filter !== 'private' && filter !== 'changed') {
-              throw new EmailSourceWorkerError(400, 'invalid_request', 'filter must be "personal", "private" or "changed".');
-            }
             return json({ ok: true, ...ownerTierItems.find({
               ...(query !== undefined ? { query } : {}),
               ...(recent !== undefined ? { recent } : {}),
               ...(limit !== undefined ? { limit } : {}),
-              ...(filter !== undefined ? { filter } : {}),
-              // The owner reads what the item says before deciding, on this computer only.
-              withPreview: true,
-            }), ...(ownerTierItems.counts ? { counts: ownerTierItems.counts() } : {}) });
+            }) });
           }
           if (url.pathname === '/dashboard/privacy/items/set') {
             const itemId = asOptionalString(record.item_id);
@@ -3827,7 +4013,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // title noise. Without embeddings it stays keyword, with no
               // skipped-lane marker for a lane nobody asked for.
               const retrievalMode = searchRequest.retrievalMode
-                ?? (searchEmbeddingProvider && store.hasEmbeddings(searchEmbeddingProvider.modelId)
+                ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId)
                   ? 'hybrid'
                   : 'keyword');
               const combinedFilters = searchRequest.filters || mandatoryScope?.filters
@@ -3951,6 +4137,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const locatorsExposed = hits.some((hit) => (
               Object.prototype.hasOwnProperty.call(hit, 'locator')
             ));
+            const pendingPrivacy = readPendingPrivacyItems(options);
             const safeResult = {
               kind: 'source_index_search',
               corpus_id: connectorStore.corpusId,
@@ -3986,6 +4173,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 source_text_returned: false,
                 ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),
                 ...(privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}),
+                // A count only (local callers alone reach this route): the
+                // plugin turns it into the local privacy-backlog note.
+                ...(pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}),
               },
               policy: {
                 raw_source_exposed: false,
@@ -7761,7 +7951,8 @@ function safeVeniceCheckFailure(error: unknown): string {
 
 function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource, clientIdSource?: 'publisher' | 'byo'): string {
   const message = error instanceof Error ? error.message : '';
-  if (source === 'dropbox' && clientIdSource === 'byo' && message === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
+  // The check's own sentence is worded for the CLI; on the dashboard it names the walkthrough's step.
+  if (source === 'dropbox' && clientIdSource === 'byo' && message === DROPBOX_MISSING_SCOPE_MESSAGE) return 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.';
   // Only fixed setup-check sentences may cross the callback HTML boundary.
   const setupMessages = source === 'x' ? [
     'X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.',
@@ -8192,6 +8383,15 @@ function isSourceIndexStatusResult(value: unknown): value is SourceIndexStatusRe
 
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+/** The privacy-backlog count, or undefined when it cannot be read: a status read never fails a search or an answer. */
+function readPendingPrivacyItems(options: Pick<EmailSourceWorkerOptions, 'pendingPrivacyItems'>): number | undefined {
+  try {
+    return options.pendingPrivacyItems?.();
+  } catch {
+    return undefined;
+  }
 }
 
 function json(value: unknown, status = 200): Response {

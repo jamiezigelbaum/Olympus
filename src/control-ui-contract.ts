@@ -124,7 +124,7 @@ export type OlympusDashboardControlParams =
   | { action: 'test_local_models'; base_url: string; answer_model: string }
   | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
   | { action: 'save_first_run_privacy'; choice: string }
-  | { action: 'save_judge'; choice: 'local' | 'venice'; cap_dollars: number }
+  | { action: 'save_judge'; choice: 'local' | 'local-then-venice' | 'venice'; cap_dollars: number }
   | { action: 'save_model_choice'; provider: 'local' | 'venice' | 'zkapi'; model: string }
   | { action: 'list_addable_models'; provider: 'venice' }
   /** Sources (?connect): check a connected source now, by the sync route's own name for it. */
@@ -133,6 +133,11 @@ export type OlympusDashboardControlParams =
   | { action: 'disconnect_source'; source_id: string; acknowledge: true }
   | { action: 'delete_source_data'; source_id: string; acknowledge: true }
   | { action: 'set_computer_use'; choice: 'everyday' | 'server' }
+  /** Go easy on this computer (#922): local sorting trickles while the owner works. */
+  | { action: 'set_go_easy'; on: boolean }
+  /** Settings (#1050): apply or discard the settings an agent proposed, by the proposal's id. */
+  | { action: 'apply_settings_proposal'; id: string }
+  | { action: 'discard_settings_proposal'; id: string }
   | {
       action: 'start_oauth';
       source: OlympusDashboardOAuthSource;

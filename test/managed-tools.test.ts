@@ -9,12 +9,12 @@
  * shell script, written by the test.
  */
 import { createHash } from 'node:crypto';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { resolveZkapiExecutable, ZKAPI_SUPPORTED_DAEMON_VERSIONS } from '../src/core/consult-transport-zkapi.ts';
 import {
   createManagedToolsJob,
@@ -50,7 +50,7 @@ import {
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { createDashboardConsultAdapter, dashboardInstallView } from '../src/workers/email-source/dashboard-consult.ts';
 import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
-import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONSULT_CONTROL_PATHS, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 
 const cleanups: Array<() => void> = [];
@@ -120,7 +120,7 @@ const LONG_PATH = `share/zkapi-clientd/third-party/${'x'.repeat(90)}/LICENSE`;
 
 function zkapiEntries(): FixtureEntry[] {
   return [
-    { name: 'zkapi-clientd', data: '#!/bin/sh\necho "zkapi-clientd 0.1.6-olympus4"\n', mode: 0o755 },
+    { name: 'zkapi-clientd', data: '#!/bin/sh\necho "zkapi-clientd 0.1.6-olympus5"\n', mode: 0o755 },
     { name: 'zkapi-walletd', data: 'walletd', mode: 0o755 },
     { name: 'share/', type: '5' },
     { name: 'share/zkapi-clientd/', type: '5' },
@@ -167,7 +167,7 @@ const sha256 = (data: Buffer): string => createHash('sha256').update(data).diges
 // name its hash.
 const CONFINE = 'bin/zkapi-confine';
 const BUILD_RECORD = 'share/zkapi-clientd/olympus-build.json';
-const LAUNCHER_BYTES = Buffer.from('#!/bin/sh\necho "zkapi-confine 0.1.6-olympus4"\n');
+const LAUNCHER_BYTES = Buffer.from('#!/bin/sh\necho "zkapi-confine 0.1.6-olympus5"\n');
 const LAUNCHER_HASH = sha256(LAUNCHER_BYTES);
 /** The fixture pin's launcher fingerprint: fixed, as the real pin's is. */
 const CONFINE_PIN: ManagedToolPinnedFile = { path: CONFINE, sha256: LAUNCHER_HASH, record: BUILD_RECORD };
@@ -210,7 +210,7 @@ function servingFetch(files: Record<string, Buffer>, log: string[] = []): typeof
 
 const okVersion: ManagedToolVersionCheck = async (executable) => ({
   ok: true,
-  stdout: executable.endsWith('zkapi-clientd') ? 'zkapi-clientd 0.1.6-olympus4 (darwin/arm64)\n' : 'Tor version 0.4.9.13.\n',
+  stdout: executable.endsWith('zkapi-clientd') ? 'zkapi-clientd 0.1.6-olympus5 (darwin/arm64)\n' : 'Tor version 0.4.9.13.\n',
 });
 
 function setup(input: { tor?: Buffer; zkapi?: Buffer; platform?: NodeJS.Platform; served?: Partial<Record<'tor' | 'zkapi', Buffer>> } = {}) {
@@ -250,23 +250,23 @@ describe('the pins', () => {
   test('every pinned download is https from the upstream release, with a 64-hex SHA-256 and a size', () => {
     for (const pin of Object.values(MANAGED_TOOL_PINS)) {
       for (const asset of Object.values(pin.assets)) {
-        expect(asset!.url.startsWith('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/') || asset!.url.startsWith('https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/')).toBe(true);
+        expect(asset!.url.startsWith('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/') || asset!.url.startsWith('https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/')).toBe(true);
         expect(asset!.sha256).toMatch(/^[0-9a-f]{64}$/);
         expect(asset!.bytes).toBeGreaterThan(1_000_000);
       }
     }
-    expect(MANAGED_TOOL_PINS['zkapi-clientd'].version).toBe('0.1.6-olympus4');
+    expect(MANAGED_TOOL_PINS['zkapi-clientd'].version).toBe('0.1.6-olympus5');
     expect(Object.keys(MANAGED_TOOL_PINS['zkapi-clientd'].assets).sort()).toEqual(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64']);
     expect(Object.keys(MANAGED_TOOL_PINS.tor.assets).sort()).toEqual(['darwin-arm64', 'darwin-x64', 'linux-ia32', 'linux-x64']);
   });
 
-  test('the pinned bytes and fingerprints are the reproducibly built olympus4 release artifacts, one per platform', () => {
+  test('the pinned bytes and fingerprints are the reproducibly built olympus5 release artifacts, one per platform', () => {
     const assets = MANAGED_TOOL_PINS['zkapi-clientd'].assets;
     const published: Record<string, [number, string]> = {
-      'darwin-arm64': [23_233_898, 'c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87'],
-      'darwin-x64': [23_924_531, 'afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9'],
-      'linux-x64': [25_885_185, '069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a'],
-      'linux-arm64': [23_923_385, 'cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489'],
+      'darwin-arm64': [23_234_981, 'a93c602386425bc88d853189fba3018d8e074b9a7878898d176dd39e4de7934e'],
+      'darwin-x64': [23_925_134, '329cb09ce4666fd8168a999e3977110df27690d9aa6ed01fdfafc3e4f3b4a19e'],
+      'linux-x64': [25_886_188, '77c89ec391bd3e70909d436f56984d9ad49e3c753bc7284f7ff3a8d36bf4268a'],
+      'linux-arm64': [23_924_679, '60f629eff3df44d32cc2899e6fa7449d971349ce27d39bb500d2ef20fd069106'],
     };
     for (const [platform, [bytes, sha256]] of Object.entries(published)) {
       const asset = assets[platform as keyof typeof assets]!;
@@ -277,7 +277,7 @@ describe('the pins', () => {
 
   test('Linux x64 carries the confinement launcher pinned by its own hash and by the bundle\'s build record; the Macs and deferred arm64 do not require it', () => {
     const assets = MANAGED_TOOL_PINS['zkapi-clientd'].assets;
-    expect(ZKAPI_CONFINE_SHA256).toBe('bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3');
+    expect(ZKAPI_CONFINE_SHA256).toBe('875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215');
     expect(assets['linux-x64']!.required).toContain('bin/zkapi-confine');
     expect(assets['linux-x64']!.pinnedFiles).toEqual([
       { path: 'bin/zkapi-confine', sha256: ZKAPI_CONFINE_SHA256, record: 'share/zkapi-clientd/olympus-build.json' },
@@ -294,7 +294,13 @@ describe('the pins', () => {
 
   test('the previous Olympus fork release is replaced, platform hash for platform hash', () => {
     const replaces = MANAGED_TOOL_PINS['zkapi-clientd'].replaces!;
-    expect(Object.keys(replaces).sort()).toEqual(['0.1.6', '0.1.6-olympus2', '0.1.6-olympus3']);
+    expect(Object.keys(replaces).sort()).toEqual(['0.1.6', '0.1.6-olympus2', '0.1.6-olympus3', '0.1.6-olympus4']);
+    expect(replaces['0.1.6-olympus4']).toEqual({
+      'darwin-arm64': 'c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87',
+      'darwin-x64': 'afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9',
+      'linux-x64': '069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a',
+      'linux-arm64': 'cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489',
+    });
     expect(replaces['0.1.6-olympus3']).toEqual({
       'darwin-arm64': 'e4d911dd43839fd25b23a96781fcf2628538c0f0f0ed7e791161843583284b14',
       'darwin-x64': '2cfecfba8176141eaf8106f23f15d251e9f677287a5401412156bb288bba1851',
@@ -314,12 +320,13 @@ describe('the pins', () => {
     expect(ZKAPI_SUPPORTED_DAEMON_VERSIONS as readonly string[]).toContain(pin.version);
     for (const [platform, asset] of Object.entries(pin.assets)) {
       const arch = platform.replace('-x64', '_amd64').replace('-', '_');
-      expect(asset!.url).toBe(`https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_${arch}.tar.gz`);
+      expect(asset!.url).toBe(`https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus5/zkapi-clientd_0.1.6-olympus5_${arch}.tar.gz`);
       expect(asset!.executable).toBe('bin/zkapi-clientd');
       // The companion and the proof files the daemon reads stay required.
       expect(asset!.required).toEqual(expect.arrayContaining(['bin/zkapi-walletd', 'share/zkapi-clientd/proof-setup/request.pk', 'share/zkapi-clientd/proof-setup/withdrawal.vk']));
     }
-    expect(pin.versionLine.test('zkapi-clientd 0.1.6-olympus4')).toBe(true);
+    expect(pin.versionLine.test('zkapi-clientd 0.1.6-olympus5')).toBe(true);
+    expect(pin.versionLine.test('zkapi-clientd 0.1.6-olympus4')).toBe(false);
     expect(pin.versionLine.test('zkapi-clientd 0.1.6-olympus2')).toBe(false);
     expect(pin.versionLine.test('zkapi-clientd 0.1.6')).toBe(false);
     expect(pin.versionLine.test('zkapi-clientd 0.1.6-olympus1')).toBe(false);
@@ -762,7 +769,7 @@ describe('updating an earlier build', () => {
     stdout: executable.endsWith('zkapi-clientd') ? 'zkapi-clientd 0.1.6-olympus2 (darwin/arm64)\n' : 'Tor version 0.4.9.13.\n',
   });
 
-  test('an installed olympus2 build reads as outdated, and the update replaces it with the olympus4 pin', async () => {
+  test('an installed olympus2 build reads as outdated, and the update replaces it with the olympus5 pin', async () => {
     const f = setup();
     const old = await installManagedTools({ ...f.options, pins: olympus2Pins(f.pins), versionCheck: olympus2Version, tools: ['zkapi-clientd'] });
     expect(old.tools[0]).toMatchObject({ outcome: 'installed', version: '0.1.6-olympus2' });
@@ -905,12 +912,12 @@ describe('discovery refuses what it did not verify', () => {
     if (!platformKey || !asset) return; // a host Olympus has no download for
     const env = { HOME: home, PATH: join(home, 'bin') };
     mkdirSync(join(home, 'bin'), { recursive: true });
-    writeFileSync(join(home, 'bin', 'zkapi-clientd'), '#!/bin/sh\necho "zkapi-clientd 0.1.6-olympus4"\n', { mode: 0o755 });
+    writeFileSync(join(home, 'bin', 'zkapi-clientd'), '#!/bin/sh\necho "zkapi-clientd 0.1.6-olympus5"\n', { mode: 0o755 });
     expect(resolveZkapiExecutable('zkapi-clientd', undefined, env)).toBe(join(home, 'bin', 'zkapi-clientd'));
     const versionDir = join(managedToolsRoot({ env })!, 'zkapi-clientd', ZK);
     mkdirSync(join(versionDir, 'bin'), { recursive: true, mode: 0o700 });
     for (let dir = versionDir; dir !== join(home); dir = join(dir, '..')) chmodSync(dir, 0o700);
-    writeFileSync(join(versionDir, 'bin', 'zkapi-clientd'), '#!/bin/sh\necho "zkapi-clientd 0.1.6-olympus4"\n', { mode: 0o700 });
+    writeFileSync(join(versionDir, 'bin', 'zkapi-clientd'), '#!/bin/sh\necho "zkapi-clientd 0.1.6-olympus5"\n', { mode: 0o700 });
     // Discovery now checks every file the daemon needs, not only the one it starts.
     for (const required of asset.required) {
       if (required === 'bin/zkapi-clientd') continue;
@@ -967,9 +974,7 @@ describe('the install route', () => {
     const bearerGrade = await fetcher(post({ Cookie: cookieOf(bearerMint), Origin: ORIGIN, 'X-Olympus-CSRF': bearerCsrf }));
     expect(bearerGrade.status).toBe(403);
     expect(((await bearerGrade.json()) as { error: { code: string } }).error.code).toBe('mac_dashboard_only');
-    const localRequest = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(localRequest, '127.0.0.1');
-    const localMint = await fetcher(localRequest);
+    const localMint = await ownerLocalMint(fetcher, ORIGIN, TOKEN);
     expect(localMint.status).toBe(200);
     const cookie = cookieOf(localMint);
     const csrf = ((await localMint.json()) as { csrf_token: string }).csrf_token;

@@ -14,6 +14,7 @@
  * `test/store-open-guard.test.ts` ties the two lists to the code: a module that
  * opens a shared SQLite file must own a step or a kept entry.
  */
+import { appReleaseLogDbPath, forgetAppReleaseItems } from './app-release-log.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 import { resolveRemoteConnectionsDbPath } from './remote-connections.ts';
@@ -21,6 +22,7 @@ import {
   forgetWaitingPrivateQuestions,
   waitingPrivateQuestionsDbPath,
 } from './waiting-private-questions.ts';
+import { forgetPeopleIndexRows, peopleIndexPath } from './people-index.ts';
 import { forgetSourceWatches, defaultSourceWatchDbPath } from './source-watch.ts';
 import { defaultIngestionHealthStatePath, forgetIngestionHealthState } from './ingestion-health-state.ts';
 import { defaultFileSourceScopeStatePath, forgetFileSourceScopeApproval } from './source-scope-approval.ts';
@@ -37,7 +39,8 @@ import {
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
-import { accountExtractionSpoolRoot, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
+import { accountExtractionSpoolRoot, accountFolder, SHARED_DATA_FILES, type SharedDataFile } from './olympus-layout.ts';
+import { forgetSecondRoundCursors, judgeSecondRoundStatePath } from '../workers/classification/judge-second-round.ts';
 import { placedAccount } from './source-placement.ts';
 import { xBookmarksApiUsageDbPath } from './olympus-layout.ts';
 import { forgetXBookmarksSyncState } from '../workers/x-bookmarks/live-control.ts';
@@ -75,6 +78,8 @@ export interface ForgetContext {
    * source gets new ids, so the old claims could never be retired again.
    */
   tierLedgerIds?: readonly string[] | undefined;
+  /** The paths of the source's tier ledgers: positions kept by ledger path (the Venice double-check's) go with them. */
+  tierLedgerPaths?: readonly string[] | undefined;
   /**
    * Tier ledgers that exist but whose id could not be read. Their claims stay
    * (nothing is guessed) and the extraction step says so in its report.
@@ -219,6 +224,23 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     },
   },
   {
+    // What each AI app received: the titles a deleted source released go with it.
+    id: 'app-release-log',
+    file: 'app-release-log',
+    modules: ['src/core/app-release-log.ts'],
+    // An answer written from the deleted stores' open handles can still be recorded before the restart.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
+      return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids }, { dryRun }));
+    },
+    // One imported archive removed: only its items' rows, the family's other archives' stay.
+    forgetAccountScopes(account, accountScopes, context, { dryRun }) {
+      const path = appReleaseLogDbPath(resolveRemoteConnectionsDbPath(context.env));
+      return line(path, 'titles shared with apps', forgetAppReleaseItems(path, { corpusIds: account.corpus_ids, accountScopes }, { dryRun }));
+    },
+  },
+  {
     id: 'source-dashboard',
     file: 'source-dashboard',
     // The ingestion ledger shares the file; forgetSourceDashboardRows covers both writers' tables.
@@ -283,6 +305,21 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     },
   },
   {
+    // People (#1076): the deleted source's identities, the owner's corrections
+    // and contact-card entries that name them, and the derived people, which
+    // the next refresh rebuilds from the stores that remain.
+    id: 'people-index',
+    file: 'people-index',
+    modules: ['src/core/people-index.ts'],
+    // The worker's refresh can link the deleting source's senders again
+    // from stores still open while it winds down.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = peopleIndexPath(context.env);
+      return line(path, 'people', forgetPeopleIndexRows(path, { corpusIds: account.corpus_ids }, { dryRun }));
+    },
+  },
+  {
     id: 'source-watches',
     file: 'source-watches',
     modules: ['src/core/source-watch.ts'],
@@ -324,6 +361,20 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const path = tierMigrationStatePath(context.env);
       return line(path, 'migration batch selectors', forgetTierMigrationSelectors(path, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The Venice double-check's sweep positions name items (account scope, conversation, item id).
+    id: 'judge-second-round-cursors',
+    file: 'judge-second-round.json',
+    modules: [],
+    // A sweep between awaits can write its old positions back after the first forget.
+    repeatBeforeRestart: true,
+    forget(account, context, { dryRun }) {
+      const path = judgeSecondRoundStatePath(context.env);
+      const placed = placedAccount(account.source_id, context.env, account.slot);
+      const folder = placed.layout === 'folder' ? accountFolder(placed, context.env) : undefined;
+      return line(path, 'sweep positions', forgetSecondRoundCursors(path, { ledgerPaths: context.tierLedgerPaths ?? [], accountFolder: folder }, { dryRun }));
     },
   },
   {
@@ -416,6 +467,11 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
     file: 'judge-spending.json',
     modules: [],
     reason: 'The global cloud-judge choice, dollar cap, spend/reservations and terminal stop, with no source or item data. It must survive source deletion and reconnects so they cannot reset the spending limit.',
+  },
+  {
+    file: 'judge-second-round.sqlite',
+    modules: ['src/workers/classification/judge-second-round.ts'],
+    reason: 'One-way SHA-256 digests of the questions Venice already kept Private, so a resumed double-check never pays for them twice. No source, account, item id or text; a digest only stops a repeat Venice call, and the item stays Private.',
   },
   {
     file: 'tier-sniffer-budget.json',

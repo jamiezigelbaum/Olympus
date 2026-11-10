@@ -112,7 +112,7 @@ describe('forget registry: one test file per step', () => {
         const stranger = { source_id: 'made.up', slot: '1', corpus_ids: ['internal.made.up'] };
 
         // A source nobody connected has no tier ledger either.
-        expect(stepOf(file).forget(stranger, { ...context, tierLedgerIds: [] }, { dryRun: false })).toEqual([]);
+        expect(stepOf(file).forget(stranger, { ...context, tierLedgerIds: [], tierLedgerPaths: [] }, { dryRun: false })).toEqual([]);
         expect(treeDigest(root)).toEqual(seeded);
         expect(file.left(layout, file.mine)).toBeGreaterThan(0);
       });
@@ -255,10 +255,12 @@ const seededFile = (stepId: string): SeededFile => SEEDED_FILES.find((file) => f
 
 describe('steps the worker repeats before its restart', () => {
   test('only the steps its own background writers can write back are marked', () => {
-    // The private answers (asked of the deleted stores' open handles), the
-    // dashboard history poll and the watch pass; no owner-choice step.
+    // The private answers (asked of the deleted stores' open handles), what
+    // AI apps received from those handles, the dashboard history poll, the
+    // people refresh, the watch pass and the Venice double-check's sweep
+    // (which can write a cursor back after the first forget); no owner-choice step.
     expect(FORGET_STEPS.filter((step) => step.repeatBeforeRestart).map((step) => step.id))
-      .toEqual(['waiting-private-questions', 'source-dashboard', 'source-watches']);
+      .toEqual(['waiting-private-questions', 'app-release-log', 'source-dashboard', 'people-index', 'source-watches', 'judge-second-round-cursors']);
   });
 
   test('a repeat-only run forgets the marked steps\' rows and no others', () => {

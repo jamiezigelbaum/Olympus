@@ -8,6 +8,7 @@ import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
  * rather than stubbed so the three pages cannot each grow their own copy.
  */
 import { createHash } from 'node:crypto';
+import { dashboardSessionMarker } from './session-marker.ts';
 import { olympusOpenUrl } from '../../core/open-targets.ts';
 import { mountDashboardController } from '../../control-ui/browser-controller.ts';
 import { DASHBOARD_SAVED_SECRET_FIELD_VALUE, isGoogleOAuthSource } from '../source-dashboard.ts';
@@ -179,7 +180,7 @@ export function pageShell(input: DashboardPageShellInput): string {
   // page and its signature can never disagree about the clock or the facts.
   const sessionMarker = input.poll?.controlSessionCsrfToken === undefined
     ? ''
-    : createHash('sha256').update('olympus-dashboard-session-marker\0').update(input.poll.controlSessionCsrfToken).digest('hex').slice(0, 24);
+    : dashboardSessionMarker(input.poll.controlSessionCsrfToken);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController
     ? []
@@ -955,6 +956,9 @@ export function standaloneDashboardControllerScript(
         if (action === 'disconnect_source') return ['/dashboard/disconnect', withoutAction(params)];
         if (action === 'delete_source_data') return ['/dashboard/delete-source-data', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
+        if (action === 'set_go_easy') return ['/dashboard/engine/go-easy', withoutAction(params)];
+        if (action === 'apply_settings_proposal') return ['/dashboard/settings/proposal/apply', withoutAction(params)];
+        if (action === 'discard_settings_proposal') return ['/dashboard/settings/proposal/discard', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'connect_this_computer') return ['/dashboard/connect/this-computer', withoutAction(params)];
@@ -976,18 +980,17 @@ export function standaloneDashboardControllerScript(
         root: root,
         transport: {
           async openLocalControls() {
+            // The live session's CSRF token is the owner proof with the cookie (#1187).
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken },
             });
             // The local session is a new one: later requests carry its CSRF token, not the launch session's,
-            // and the poll expects its marker (the server's hash of that token), so it does not reload the page.
+            // and the poll expects the server's marker for it, so it does not reload the page.
             var body = await json(response);
             if (response.ok && typeof body.csrf_token === 'string') {
               csrfToken = body.csrf_token;
-              try {
-                var digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('olympus-dashboard-session-marker\\u0000' + csrfToken));
-                sessionMarker = Array.from(new Uint8Array(digest)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').slice(0, 24);
-              } catch (error) {}
+              if (typeof body.session_marker === 'string') sessionMarker = body.session_marker;
             }
             return response.ok;
           },

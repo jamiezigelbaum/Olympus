@@ -94,6 +94,8 @@ import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type Visu
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
 import { BESIDE_LIVE_FORMATS, EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import { checkZkapiConfinement } from './zkapi-confinement.ts';
+import { checkMacOwnerProof } from './mac-owner-proof.ts';
+import { checkForwardedSocketOwnerProof } from './forwarded-socket-owner-proof.ts';
 import {
   ARCHIVE_BOUNDS, BULK_SIZES, besideLiveChecks, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, seedLiveChecks,
   type BesideLiveObservation, type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation, type SeedLiveObservation,
@@ -1396,6 +1398,10 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 // the Models and Ask pages show; every check and screen before it sees the install as a user first has it.
 async function runConfinementCheck(run: Run): Promise<void> {
   run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
+  // Mac only (a skip on Linux): a second account's local unlock is refused, the owner's still works (#1153).
+  run.add(await run.phase('mac-owner-proof', () => checkMacOwnerProof(run.machine!)));
+  // Linux only (a skip on a Mac): the owner socket, which `olympus remote open` forwards, is not an owner proof by itself (#1188).
+  run.add(await run.phase('forwarded-socket-owner-proof', () => checkForwardedSocketOwnerProof(run.machine!)));
 }
 
 export async function runReleaseCheck(options: RunOptions): Promise<ReleaseReport> {

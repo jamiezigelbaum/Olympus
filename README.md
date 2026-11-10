@@ -796,10 +796,10 @@ handler.
 
 There are no operator agent tools. Index maintenance — sync, extraction,
 embedding, retries — is the worker's own scheduler, and what a person drives by
-hand goes through the `olympus` CLI. The whole agent tool surface is fifteen tools —
+hand goes through the `olympus` CLI. The whole agent tool surface is sixteen tools —
 `argus_ping`, `argus_list_models`, `argus_complete`, `source_answer`,
 `source_answer_result` (MCP and remote only), `source_index_status`, `source_index_search`, `source_watch_create`,
-`source_watches`, `source_watch_cancel`, `olympus_doctor`, `ask_anonymously`, `archive_import`,
+`source_watches`, `source_watch_cancel`, `olympus_doctor`, `olympus_setup_status`, `ask_anonymously`, `archive_import`,
 `privacy_item_find`, `privacy_item_set` — declared in
 [`src/core/public-surface.ts`](src/core/public-surface.ts); Hermes over MCP sees
 the subset above, and worker bearer auth is enforced throughout.

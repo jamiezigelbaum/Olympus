@@ -2,7 +2,7 @@
 // restores onto a fresh install; a wrong passphrase or a changed byte
 // restores nothing; a backup folder keeps the newest seven.
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -19,6 +19,7 @@ import {
   readBackupHeader,
   restoreOlympusBackup,
   writeBackupFile,
+  USTAR_MAX_SIZE,
 } from '../src/data-backup.ts';
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
@@ -141,6 +142,48 @@ describe('data backup', () => {
     );
     expect(existsSync(join(folder, 'olympus-backup-2020-01-01-0000.olympusbackup'))).toBe(true);
     expect(existsSync(join(folder, 'holiday.jpg'))).toBe(true);
+  }));
+
+  test('a renamed or duplicated backup is offered for restore, but retention keeps to its own names', withHomes(async (dir, _homeA, _homeB, folder) => {
+    const exportDir = join(dir, 'export');
+    mkdirSync(exportDir, { recursive: true });
+    writeFileSync(join(exportDir, 'manifest.json'), '{}');
+    const original = await writeBackupFile({ exportDir, folder, now: new Date(2026, 10, 10, 3, 10) });
+    const bytes = readFileSync(original.path);
+    // A second download of the same file, and a copy the owner renamed.
+    writeFileSync(join(folder, 'olympus-backup-2026-11-10-0310 (1).olympusbackup'), bytes);
+    writeFileSync(join(folder, 'before the move.olympusbackup'), bytes);
+    // Not a backup, whatever its name says.
+    writeFileSync(join(folder, 'notes.olympusbackup'), 'hello');
+    expect(listBackups(folder, { anyName: true }).map((backup) => backup.name).sort()).toEqual([
+      'before the move.olympusbackup',
+      'olympus-backup-2026-11-10-0310 (1).olympusbackup',
+      original.name,
+    ].sort());
+    expect(listBackups(folder).map((backup) => backup.name)).toEqual([original.name]);
+    expect(pruneBackups(folder, 0)).toEqual([original.name]);
+    expect(existsSync(join(folder, 'before the move.olympusbackup'))).toBe(true);
+    expect(existsSync(join(folder, 'olympus-backup-2026-11-10-0310 (1).olympusbackup'))).toBe(true);
+  }));
+
+  test('a backup is never written with a key setting no restore could open', withHomes(async (dir, _homeA, _homeB, folder) => {
+    const exportDir = join(dir, 'export');
+    mkdirSync(exportDir, { recursive: true });
+    writeFileSync(join(exportDir, 'manifest.json'), '{}');
+    const key = fastKey('correct horse battery');
+    await expect(writeBackupFile({ exportDir, folder, key: { ...key, kdf: { ...key.kdf, N: 0 } } })).rejects.toThrow('key setting');
+    expect(existsSync(folder) ? readdirSync(folder) : []).toEqual([]);
+  }));
+
+  test('a file too large for the archive format is refused before any backup is written', withHomes(async (dir, _homeA, _homeB, folder) => {
+    const exportDir = join(dir, 'export');
+    mkdirSync(join(exportDir, 'stores'), { recursive: true });
+    writeFileSync(join(exportDir, 'manifest.json'), '{}');
+    // A sparse file: its size is 64 GiB, but no disk space is used.
+    writeFileSync(join(exportDir, 'stores', 'big.sqlite'), '');
+    truncateSync(join(exportDir, 'stores', 'big.sqlite'), USTAR_MAX_SIZE + 1);
+    await expect(writeBackupFile({ exportDir, folder })).rejects.toThrow('too large to back up');
+    expect(existsSync(folder) ? readdirSync(folder) : []).toEqual([]);
   }));
 
   test('a second backup in the same minute gets its own name', withHomes(async (dir, _homeA, _homeB, folder) => {

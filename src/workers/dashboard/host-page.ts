@@ -24,6 +24,7 @@ import { renderUpdateNotice, renderUpdateNoticeScript, UPDATE_NOTICE_CSS } from 
 import {
   ARCHIVE_UPLOAD_START_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
+  COMPUTER_META_KEY,
   COMPUTER_LOCAL_SESSION_TOOL_NAMES,
   DASHBOARD_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
@@ -41,11 +42,12 @@ import { dashboardTopNav, TOP_NAV_CSS } from './top-nav.ts';
 import { ARCHIVE_UPLOAD_CHUNK_BYTES } from '../archive-import/staging.ts';
 import {
   DASHBOARD_HOST_GATE_COPY,
+  DASHBOARD_SETUP_AGENT_COPY,
   DASHBOARD_UPDATE_COPY,
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
 import {
-  DASHBOARD_IMPORT_LANDING_PREFIX,
+  DASHBOARD_IMPORT_LANDING_PREFIX, DASHBOARD_SOURCE_LANDING_PREFIX, DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_ALL_SOURCES_ID,
   DASHBOARD_OPEN_FRAGMENT_KEY,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
@@ -72,11 +74,11 @@ export const DASHBOARD_LOCAL_PAGES = {
   connect: 'connect',
   agents: 'agents',
   privateAnswers: 'private-answers',
-  /** Privacy › Your items: one item's label (pages/privacy-items.ts). */
-  privacyItems: 'privacy-items',
+  appsReceived: 'apps-received',
   connector: 'connector',
   help: 'help',
   settings: 'settings',
+  people: 'people',
 } as const;
 
 export type DashboardLocalPage = keyof typeof DASHBOARD_LOCAL_PAGES;
@@ -124,7 +126,6 @@ export interface ComputerHostPageInput {
   updateStatus?: SelfUpdateStatus | undefined;
   /** The running worker platform; unsupported installers never render or poll. */
   platform?: string;
-  modelReadiness?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   /** The panel HTML, exactly as ChatGPT loads it (dashboard-resource.ts dashboardResourceHtml). */
   panelHtml: string;
   /** This browser's request origin, e.g. http://127.0.0.1:8787. */
@@ -195,6 +196,15 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 .pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
 .pairing::backdrop{background:rgba(0,0,0,0.45)}
 .pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
+.setup-agent{width:min(46rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:1.25rem 1.5rem;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,0.12)}
+.setup-agent::backdrop{background:rgba(0,0,0,0.35)}
+.setup-agent .head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem}
+.setup-agent h2{margin:0;font-size:1.0625rem;font-weight:600}
+.setup-agent .x{border:0;background:transparent;color:var(--muted);font:inherit;font-size:1.25rem;line-height:1;min-width:2.25rem;min-height:2.25rem;cursor:pointer;border-radius:999px}
+.setup-agent .x:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.setup-agent .intro{margin:0.375rem 0 0.75rem;color:var(--muted);font-size:0.9375rem}
+.setup-agent pre{margin:0 0 0.75rem;padding:0.875rem 1rem;background:var(--surface);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all}
+.setup-agent .actions{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 `;
 
 /**
@@ -238,6 +248,10 @@ function hostProgram(input: {
   landings: Record<string, string>;
   /** `import.`: a Keys link's landing on one card's Import an archive; the panel checks the card. */
   importLanding: string;
+  /** `source.`: the Sources tab's Details on one row; the panel shows that source's row on Home. */
+  sourceLanding: string;
+  /** `sources`: the Sources tab's Archives and details; the panel shows every source's row. */
+  allSourcesLanding: { token: string; id: string };
   hasReadToken: boolean;
   toolsCallPath: string;
   /** Where one file of an archive upload goes, and the local tool whose unlock opens the session it needs. */
@@ -248,6 +262,12 @@ function hostProgram(input: {
   words: typeof DASHBOARD_HOST_GATE_COPY;
   updateWords: { notice: string };
   updateSupported: boolean;
+  /**
+   * "Set up with my agent" (#1077): the dashboard read's computer-meta key
+   * the checklist rides under, and the fragment that opens the brief. The
+   * brief opens only once a read carried the checklist.
+   */
+  setupAgent: { metaKey: string; fragment: string; copied: string; copyFailed: string };
   /**
    * Pairing WhatsApp or Telegram in place: Connect on the card opens these
    * controls over the dashboard instead of the Keys page. `urls` are the
@@ -267,7 +287,47 @@ function hostProgram(input: {
   let handle: { lock(): void } | undefined;
   function remember(name: string, result: unknown): unknown {
     if (name === input.bridge.readTool) lastRead = result;
+    return noteSetup(name, result);
+  }
+  // "Set up with my agent": ready once a dashboard read carried the setup
+  // checklist in the computer meta; the fragment or an opener shows it.
+  let setupReady = false;
+  const setupDialog = document.querySelector<HTMLDialogElement>('[data-setup-agent-dialog]');
+  function openSetupAgent(): void {
+    if (!setupReady || !setupDialog || setupDialog.open) return;
+    if (typeof setupDialog.showModal === 'function') setupDialog.showModal();
+    else setupDialog.setAttribute('open', '');
+  }
+  function noteSetup(name: string, result: unknown): unknown {
+    if (name !== input.bridge.readTool || !result || typeof result !== 'object') return result;
+    const meta = (result as { _meta?: Record<string, unknown> })._meta;
+    const computer = meta && typeof meta === 'object' ? meta[input.setupAgent.metaKey] as { setup?: { kind?: unknown } } | undefined : undefined;
+    const ready = !!(computer && computer.setup && computer.setup.kind === 'olympus_setup_status');
+    if (ready && !setupReady) {
+      setupReady = true;
+      document.querySelectorAll<HTMLElement>('[data-setup-agent-open]').forEach((opener) => { opener.hidden = false; });
+      if (window.location.hash === input.setupAgent.fragment) openSetupAgent();
+    }
     return result;
+  }
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('hashchange', () => { if (window.location.hash === input.setupAgent.fragment) openSetupAgent(); });
+  }
+  if (typeof document.addEventListener === 'function') document.addEventListener('click', (event) => {
+    const target = event.target as Element | null;
+    if (target && target.closest && target.closest('[data-setup-agent-open]')) openSetupAgent();
+    if (target && target.closest && target.closest('[data-setup-agent-close]') && setupDialog) setupDialog.close();
+  });
+  const setupCopy = document.querySelector<HTMLButtonElement>('[data-setup-agent-copy]');
+  const setupBrief = document.getElementById('setup-agent-brief');
+  const setupStatus = document.querySelector<HTMLElement>('[data-setup-agent-copy-status]');
+  if (setupCopy && setupBrief) {
+    setupCopy.addEventListener('click', () => {
+      const done = (words: string) => { if (setupStatus) setupStatus.textContent = words; };
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(setupBrief.textContent || '').then(() => done(input.setupAgent.copied), () => done(input.setupAgent.copyFailed));
+      } else done(input.setupAgent.copyFailed);
+    });
   }
   /** The session expired or was locked elsewhere: lock this page, never a raw 401. */
   function lockPage(): void {
@@ -289,11 +349,12 @@ function hostProgram(input: {
    * A tool only this computer's own session may use (approving an import):
    * open that session first, the way the local pages' Unlock does. The
    * worker grants it to a loopback browser presenting no bearer, so an
-   * agent's bearer never reaches it; refused, the tool says so itself.
+   * agent's bearer never reaches it, and with this page's CSRF token, so the
+   * session cookie alone never does (#1187); refused, the tool says so itself.
    */
   function localUnlock(name: string): Promise<void> {
     if (localSession || input.localTools.indexOf(name) < 0) return Promise.resolve();
-    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'X-Olympus-CSRF': csrfToken } })
       .then((response) => (response.ok ? response.json() : undefined))
       .then((body: { csrf_token?: unknown } | undefined) => {
         if (body && typeof body.csrf_token === 'string' && body.csrf_token) {
@@ -306,7 +367,8 @@ function hostProgram(input: {
     if (expired) return lastRead !== undefined && name === input.bridge.readTool ? Promise.resolve(lastRead) : Promise.reject(new Error('locked'));
     if (!csrfToken) {
       return fetch(input.readUrl, { cache: 'no-store', credentials: 'same-origin' })
-        .then((response) => (response.ok ? response.json() : failed()));
+        .then((response) => (response.ok ? response.json() : failed()))
+        .then((result) => noteSetup(name, result));
     }
     return localUnlock(name).then(() => fetch(input.toolsCallPath, {
       method: 'POST',
@@ -418,10 +480,13 @@ function hostProgram(input: {
     if (Object.prototype.hasOwnProperty.call(input.landings, wanted)) landing = { sourceId: input.landings[wanted]! };
     const card = wanted.indexOf(input.importLanding) === 0 ? wanted.slice(input.importLanding.length) : '';
     if (/^[a-z0-9_.]{1,64}$/.test(card)) landing = { sourceId: card, import: true };
+    const row = wanted.indexOf(input.sourceLanding) === 0 ? wanted.slice(input.sourceLanding.length) : '';
+    if (/^[a-z0-9_.]{1,64}$/.test(row)) landing = { sourceId: row };
+    if (wanted === input.allSourcesLanding.token) landing = { sourceId: input.allSourcesLanding.id };
   }
   /** Opens a local-grade session (the messaging routes need one); true once it is. */
   function openLocalSession(): Promise<boolean> {
-    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'X-Olympus-CSRF': csrfToken } })
       .then((response) => (response.ok ? response.json() : undefined))
       .then((body: { csrf_token?: unknown } | undefined) => {
         if (body && typeof body.csrf_token === 'string' && body.csrf_token) {
@@ -593,10 +658,21 @@ function hostProgram(input: {
         const sentence = document.querySelector<HTMLElement>('[data-update-title]');
         if (!notice || !sentence) return;
         const state = notice.getAttribute('data-update-state');
-        if (state !== 'none' && state !== 'available') return;
         const valid = typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
+        if (state === 'failed' || state === 'rolled_back') {
+          // Keep the outcome's words; a version found since (a worker just
+          // restarted has an empty update cache) brings the retry back.
+          if (valid) {
+            notice.setAttribute('data-update-version', version);
+            const retry = notice.querySelector<HTMLElement>('[data-update-now]');
+            if (retry) retry.hidden = false;
+          }
+          return;
+        }
+        if (state !== 'none' && state !== 'available') return;
         sentence.textContent = valid ? input.updateWords.notice.replace('{version}', version) : '';
         notice.setAttribute('data-update-state', valid ? 'available' : 'none');
+        notice.setAttribute('data-update-version', valid ? version : '');
         const button = notice.querySelector<HTMLElement>('[data-update-now]');
         if (button) button.hidden = !valid;
         notice.hidden = !valid;
@@ -699,6 +775,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
     landings: panelOpenTargetSources(),
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
+    sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
+    allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
@@ -708,6 +786,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     updateSupported: installer !== undefined,
     updateWords: { notice: DASHBOARD_UPDATE_COPY.notice('{version}') },
     pairing: computerPairing(bridge.openTargets),
+    setupAgent: { metaKey: COMPUTER_META_KEY, fragment: `#${DASHBOARD_SETUP_AGENT_ID}`, copied: DASHBOARD_SETUP_AGENT_COPY.copied, copyFailed: DASHBOARD_SETUP_AGENT_COPY.copyFailed },
   })}, ${dashboardHostBridge.toString()}, ${mountDashboardController.toString()});`.replaceAll('</script', '<\\/script');
   return [
     '<!doctype html>',
@@ -729,11 +808,12 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     lockedGate(!locked),
     `<section class="gate" data-open-offer role="alert" hidden><p>${text(DASHBOARD_HOST_GATE_COPY.openBlocked)} `
     + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
-    ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
+    // Built-in models are status, not something to act on: Settings › Models on this computer (#1085).
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,
     '</main>',
+    setupAgentDialog(),
     `<dialog class="pairing" data-pairing-dialog aria-label="${attribute(DASHBOARD_PAIRING_DIALOG_LABEL)}"><div class="bar"><button class="btn" type="button" data-pairing-close>Close</button></div><div data-pairing-root></div></dialog>`,
     `<script>${program}</script>`,
     // The notice's own program, after the page's (update-now.ts).
@@ -742,6 +822,28 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     '</html>',
     '',
   ].join('\n');
+}
+
+/** The fragment that opens "Set up with my agent" on Home: `/dashboard#setup-with-agent`. */
+export const DASHBOARD_SETUP_AGENT_ID = 'setup-with-agent';
+
+/**
+ * "Set up with my agent" (#1077, approved mockup 2-agent-brief): the brief
+ * for the owner's agent and its Copy button, in the host page because the
+ * framed panel's sandbox has no clipboard. Closed until a dashboard read
+ * carries the setup checklist; Home's setup card opens it with
+ * `[data-setup-agent-open]` or the fragment.
+ */
+export function setupAgentDialog(): string {
+  const C = DASHBOARD_SETUP_AGENT_COPY;
+  return `<dialog class="setup-agent" id="${DASHBOARD_SETUP_AGENT_ID}" data-setup-agent-dialog aria-labelledby="setup-agent-title">`
+    + `<div class="head"><h2 id="setup-agent-title">${text(C.title)}</h2><button class="x" type="button" data-setup-agent-close aria-label="${attribute(C.close)}">✕</button></div>`
+    + `<p class="intro">${text(C.intro)}</p>`
+    + `<pre id="setup-agent-brief">${text(C.brief)}</pre>`
+    + `<div class="actions"><button class="btn primary" type="button" data-setup-agent-copy>${text(C.copy)}</button>`
+    + `<button class="btn" type="button" data-setup-agent-close>${text(C.close)}</button>`
+    + '<span class="status" data-setup-agent-copy-status aria-live="polite"></span></div>'
+    + '</dialog>';
 }
 
 /**

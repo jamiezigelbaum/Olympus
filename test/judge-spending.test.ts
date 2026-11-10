@@ -1,4 +1,5 @@
 import { runTierClassifier } from '../src/workers/classification/tier-cli.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { approveClassifier, readClassificationLedger, isClassifierApproved, revokeClassifier } from '../src/workers/classification-ledger.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
@@ -7,7 +8,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createOpenAICompatibleAnalystModel } from '../src/core/analyst-openai.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth, DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../src/workers/http.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -140,9 +141,7 @@ test('judge approval POST requires local controls and CSRF; a bearer cannot opt 
   }));
   expect((await post({})).status).toBe(401);
   expect((await post({ Authorization: 'Bearer synthetic-bearer' })).status).toBe(403);
-  const mintRequest = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
-  recordRequestPeer(mintRequest, '127.0.0.1');
-  const mint = await fetcher(mintRequest); expect(mint.status).toBe(200);
+  const mint = await ownerLocalMint(fetcher, origin, 'synthetic-bearer'); expect(mint.status).toBe(200);
   const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
   const csrf = (await mint.json() as { csrf_token: string }).csrf_token;
   expect((await post({ Cookie: cookie, 'X-Olympus-CSRF': 'wrong' })).status).toBe(403);
@@ -291,7 +290,9 @@ test('saving the choice already shown still says it saved, and Local needs no sp
     expect(confirm.open).toBe(true);
     expect(confirm.querySelector('[data-action-message]')!.textContent).toBe('Enter a total cloud spending limit in dollars to use Venice.');
     // With a limit the choice is accepted, and only then does the confirmation close.
-    confirm.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!.value = '15';
+    // The one limit field sits under the choices (box 4 of the approved mock), not inside the confirmation.
+    expect(confirm.querySelector('input[name="cap_dollars"]')).toBeNull();
+    root.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!.value = '15';
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await browser.happyDOM.waitUntilComplete();
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -325,7 +326,8 @@ test('the choice form defaults to local even for a large archive and submits onl
     root.querySelector<HTMLInputElement>('input[value="venice"]')!.click();
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await browser.happyDOM.waitUntilComplete();
-    expect(calls).toEqual([{ action: 'save_judge', choice: 'venice', cap_dollars: 20 }]);
+    // A limit left over on a Local record is not the owner's Venice limit: the field starts at the estimate plus 25%.
+    expect(calls).toEqual([{ action: 'save_judge', choice: 'venice', cap_dollars: 7032 }]);
   } finally {
     dispose(); browser.close();
     for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }
@@ -478,9 +480,7 @@ test('the Keys page renders through the real setup object and shows the upgrade 
   cleanup.push(() => worker.close());
   const fetcher = withWorkerBearerAuth(worker.fetch, { authToken: 'synthetic-bearer' });
   const origin = 'http://127.0.0.1:17777';
-  const mintRequest = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
-  recordRequestPeer(mintRequest, '127.0.0.1');
-  const cookie = (await fetcher(mintRequest)).headers.get('Set-Cookie')!.split(';')[0]!;
+  const cookie = (await ownerLocalMint(fetcher, origin, 'synthetic-bearer')).headers.get('Set-Cookie')!.split(';')[0]!;
   const keys = async () => {
     const page = new Request(origin + '/dashboard?keys', { headers: { Cookie: cookie } });
     recordRequestPeer(page, '127.0.0.1');

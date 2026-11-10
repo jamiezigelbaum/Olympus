@@ -68,6 +68,56 @@ Ask and `source answer` searched no source because every lane timed out while
 the worker thread was held (#1079, with #1056). It does not change the 1.5
 scope.
 
+1.4.4 follows it: on a Mac with more than one local account, a second account
+could open the owner's local dashboard controls (#1153, confirmed on a test
+Mac running 1.4.0; Linux is not affected). The fix (#1179) passed an
+independent Critical review. That review found three older gaps of the same
+kind, which join the Owner controls lane as Critical work: connection approval
+that trusts loopback alone (#1186), a forwarded Linux owner socket (#1188,
+fixed in #1196) and a dashboard cookie not confined to the engine's origin
+(#1187).
+
+Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
+
+- The bar for every judge offered as a default is more than 75% agreement
+  with the owner's labels, counting both errors, with no important Private
+  item missed, measured on the fresh whole-item sample (#883). A judge that
+  fails is not offered as a default.
+- Every judge holds an uncertain item Private until a re-check or the owner
+  releases it (#1184). This replaces the 5 Nov ruling that kept Venice and the
+  owner's Delphi model Personal-first; #890 is folded in. Both error rates are
+  still reported.
+- The check of the judge against the owner's own answers lives under Privacy,
+  Your items, not Private questions, and shows no percentage until it has 30
+  answers about randomly picked items.
+
+No freeze date is set. 2026-11-10 16:00Z was the target for that day's push,
+not the scope freeze.
+
+Held-out eval, first run for 1.5 (#707, 2026-11-10): 0 of 7 on main at
+`05455ae`, run on the owner's install against a copy of the Dropbox Private
+store with the owner's 7-question set from 7 Oct (answers from the local
+model on Delphi, literal-query retrieval, top 5). Failures: answer 5,
+evidence 6, gap 1, privacy 0, error 0. One miss is dataset drift (the item
+is gone since the 26 Oct reinstall); in the other five the expected item is
+still indexed but not in the top 5, and the coverage-negative question did
+not report its gap. Seven questions is a thin set, so read this as a
+direction, not a score. The retrieval miss goes to the Findable fast lane;
+#707 stays open until the eval is rerun after that fix, ideally on a broader
+fresh set. The counts are on #707.
+
+Diagnosis the same day (counts on #707): the 0 of 7 was mostly the eval
+runner, not retrieval. The item five questions expect was re-judged from
+Private to Personal on 4 Nov; the runner searched only the Private store,
+keyword-only, where the tier filter correctly hides the superseded copy. On
+the store that holds the current copy, keyword search ranks the item first for
+all five. The runner now searches every tier store through the same lanes and
+tier gate as Ask, with the built-in embedder, and grades gaps from structured
+coverage notes (#1178). The run did expose one product bug, fixed in #1181:
+the keyword lane applied its row limit before the tier filter, so superseded
+copies could crowd visible rows out (#1174; pruning those copies is a 1.6
+item that waits on the owner). The rerun is still owed.
+
 Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
 Moved to 1.6: #672, #920. Waiting on the owner: fresh calibration labels
 (#883) and, optionally, #581.
@@ -481,7 +531,8 @@ stay after 1.0.
   hostnames, DNS-01, the Let's Encrypt agreement and `olympus connections
   terms`) is deleted.
 - **Engine OAuth.** Consent only on the Mac's loopback page (one click, no
-  pairing code, no account); ChatGPT's client is pinned; codes and tokens
+  pairing code, no account), from the browser holding the owner's dashboard
+  session or over the Linux owner socket (#1186); ChatGPT's client is pinned; codes and tokens
   carry a routable install prefix.
 - **ChatGPT tools.** `olympus_search` is the primary answer tool (Olympus
   retrieves, ChatGPT reasons under the one generic Analyst instruction);

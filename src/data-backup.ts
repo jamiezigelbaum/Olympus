@@ -98,7 +98,13 @@ function normalizePassphrase(passphrase: string): string {
   return value;
 }
 
-function checkKdf(kdf: BackupKdf): void {
+/**
+ * Throws unless `kdf` is a key setting Olympus derives and opens backups with:
+ * what a backup's header, a key kept for scheduled backups and a backup about
+ * to be written must all name.
+ */
+export function checkKdf(kdf: BackupKdf): void {
+  if (!kdf || typeof kdf !== 'object') throw new OperationError('invalid_params', 'This backup names a key setting Olympus does not accept.');
   const powerOfTwo = (n: number) => Number.isInteger(n) && n > 1 && (n & (n - 1)) === 0;
   if (kdf.name !== 'scrypt' || !powerOfTwo(kdf.N) || kdf.N < MIN_SCRYPT_N || kdf.N > MAX_SCRYPT_N
     || !Number.isInteger(kdf.r) || kdf.r < 1 || kdf.r > 32 || !Number.isInteger(kdf.p) || kdf.p < 1 || kdf.p > 16
@@ -144,6 +150,9 @@ function encodeHeader(header: BackupHeader): Buffer {
 }
 
 // ---- tar (ustar) ------------------------------------------------------------
+
+/** The largest size an ustar header's 12-byte size field holds (8^11 - 1 bytes). */
+export const USTAR_MAX_SIZE = 0o77777777777;
 
 function octal(value: number, width: number): string {
   return value.toString(8).padStart(width - 1, '0') + '\0';
@@ -252,6 +261,8 @@ export async function writeBackupFile(options: {
   now?: Date;
 }): Promise<BackupFileInfo> {
   const now = options.now ?? new Date();
+  // A backup no restore could open is never written: its key setting is checked first.
+  if (options.key) checkKdf(options.key.kdf);
   const folder = resolve(options.folder);
   mkdirSync(folder, { recursive: true });
   let name = backupFileName(now);
@@ -271,12 +282,17 @@ export async function writeBackupFile(options: {
       key_check: backupKeyCheck(options.key.key),
     } : {}),
   });
+  // ustar keeps a size in 11 octal digits: refuse a file it can't describe
+  // before anything is written, so no backup is published that can't be read.
+  const entries = exportEntries(options.exportDir);
+  const tooLarge = entries.find((entry) => entry.size > USTAR_MAX_SIZE);
+  if (tooLarge) throw new OperationError('source_index_error', `A file in the export is too large to back up (64 GiB or more): ${tooLarge.rel}`);
   const handle = await openAsync(staging, 'wx', 0o600);
   try {
     await handle.write(header);
     const body = new BodyWriter(handle, header, options.key?.key, nonce);
     const buffer = Buffer.alloc(CHUNK);
-    for (const entry of exportEntries(options.exportDir)) {
+    for (const entry of entries) {
       await body.write(tarHeader(entry.rel, entry.size, entry.type === 'dir' ? '5' : '0', entry.mtime));
       if (entry.type === 'dir') continue;
       const source = await openAsync(join(options.exportDir, entry.rel), 'r');
@@ -552,13 +568,19 @@ export function openBackupFile(options: { file: string; into: string; passphrase
 
 // ---- a backup folder ----------------------------------------------------------
 
-/** The Olympus backups in a folder, newest first (by the time each says it was made). */
-export function listBackups(folder: string): BackupFileInfo[] {
+/**
+ * The Olympus backups in a folder, newest first (by the time each says it was
+ * made). By default only files named as Olympus names its backups, which is
+ * what retention may delete. `anyName` lists every `.olympusbackup` file whose
+ * header reads as a backup, whatever it was renamed to (a copy downloaded
+ * twice is `... (1).olympusbackup`): what a restore can open.
+ */
+export function listBackups(folder: string, options: { anyName?: boolean } = {}): BackupFileInfo[] {
   let names: string[];
   try { names = readdirSync(folder); } catch { return []; }
   const out: BackupFileInfo[] = [];
   for (const name of names) {
-    if (!BACKUP_NAME.test(name)) continue;
+    if (options.anyName === true ? !name.endsWith(BACKUP_FILE_EXTENSION) : !BACKUP_NAME.test(name)) continue;
     const path = join(folder, name);
     try {
       const stat = lstatSync(path);
@@ -619,6 +641,10 @@ export async function backupOlympusData(options: {
   now?: Date;
   /** Keep only this many backups in the folder afterwards. */
   keep?: number;
+  /** Throws to write nothing: asked after the export, just before the backup file is created in `folder`. */
+  beforeWrite?: () => void;
+  /** Throws to keep every older backup: asked after the new one is written, before any is removed. */
+  beforePrune?: () => void;
   exportInto: (destination: string) => unknown | Promise<unknown>;
 } & LifecyclePathContext): Promise<DataBackupResult> {
   const folder = resolve(options.folder);
@@ -627,7 +653,9 @@ export async function backupOlympusData(options: {
     mkdirSync(staging, { mode: 0o700 });
     const exportDir = join(staging, 'export');
     await options.exportInto(exportDir);
+    options.beforeWrite?.();
     const written = await writeBackupFile({ exportDir, folder, ...(options.key ? { key: options.key } : {}), ...(options.now ? { now: options.now } : {}) });
+    if (options.keep) options.beforePrune?.();
     const removed = options.keep ? pruneBackups(folder, options.keep) : [];
     return { ok: true, file: written.path, bytes: written.bytes, encrypted: written.encrypted, createdAt: written.createdAt, removed };
   } finally {

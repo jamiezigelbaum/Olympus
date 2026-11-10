@@ -100,7 +100,9 @@ for (const [id, name, redirect] of clients) {
     if (!parsed.enabled) throw new Error('fixture URLs refused');
     // Handler behavior only. OPENER owns the authenticated socket transport;
     // injected peer here deliberately does NOT claim second-UID isolation.
-    const handler = createRemoteOAuthHandler({platform:'linux',publicUrls:parsed.urls,connections:() => store,peerAddress:() => '127.0.0.1'});
+    // ownerSession stands in for the owner's dashboard session (#1186; its
+    // checks: test/remote-oauth-owner-approval.test.ts).
+    const handler = createRemoteOAuthHandler({platform:'linux',publicUrls:parsed.urls,connections:() => store,peerAddress:() => '127.0.0.1',ownerSession:() => true});
     const verifier = 'v'.repeat(50);
     const query = new URLSearchParams({response_type:'code',client_id:String(registered.body.client_id),redirect_uri:redirect,code_challenge:new Bun.CryptoHasher('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256',state:'fixture-state'});
     const response = await handler(new Request(`http://127.0.0.1:8010/connect/authorize?${query}`));

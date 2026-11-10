@@ -9,6 +9,7 @@
 // the first such tool. Full sequences against the real boundary.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { Window } from 'happy-dom';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
@@ -148,9 +149,7 @@ async function launchSession(f: ReturnType<typeof fixture>) {
 
 /** The local mint as this computer's browser makes it: same origin, a loopback socket peer, no bearer. */
 async function localMint(f: ReturnType<typeof fixture>, headers: Record<string, string> = {}): Promise<Response> {
-  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN, ...headers } });
-  recordRequestPeer(request, '127.0.0.1');
-  return f.fetch(request);
+  return ownerLocalMint(f.fetch, ORIGIN, TOKEN, headers);
 }
 
 async function localSession(f: ReturnType<typeof fixture>) {
@@ -313,9 +312,7 @@ describe('a source\'s own Import an archive names its card', () => {
       now: () => Date.parse('2026-10-23T12:00:00.000Z'),
       launchTickets: new DashboardLaunchTickets({ now: () => Date.parse('2026-10-23T12:00:00.000Z') }),
     });
-    const mint = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(mint, '127.0.0.1');
-    const minted = await fetch(mint);
+    const minted = await ownerLocalMint(fetch, ORIGIN, TOKEN);
     const session = { Cookie: cookieOf(minted), 'X-Olympus-CSRF': ((await minted.json()) as { csrf_token: string }).csrf_token };
     const approve = (body: unknown) => fetch(new Request(`${ORIGIN}/dashboard/archive-import/approve`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Origin: ORIGIN, ...session }, body: JSON.stringify(body),
@@ -408,7 +405,8 @@ describe('the computer\'s host page', () => {
     await settle();
     expect(page.fetched.map(({ url, csrf, tool, authorization }) => ({ url, csrf, tool, authorization }))).toEqual([
       { url: '/dashboard/tools/call', csrf: 'bearer-csrf', tool: DASHBOARD_TOOL_NAME, authorization: undefined },
-      { url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: undefined, tool: undefined, authorization: undefined },
+      // The mint carries the page's CSRF token: the cookie alone mints nothing (#1187).
+      { url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: 'bearer-csrf', tool: undefined, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_UPLOAD_START_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_APPROVE_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_REMOVE_TOOL_NAME, authorization: undefined },
@@ -425,7 +423,7 @@ describe('the computer\'s host page', () => {
     refused.send({ id: 1, method: 'tools/call', params: { name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST_ID } } });
     await settle();
     expect(refused.fetched.map((entry) => [entry.url, entry.csrf])).toEqual([
-      [DASHBOARD_LOCAL_CONTROL_SESSION_PATH, undefined],
+      [DASHBOARD_LOCAL_CONTROL_SESSION_PATH, 'bearer-csrf'],
       ['/dashboard/tools/call', 'bearer-csrf'],
     ]);
   });

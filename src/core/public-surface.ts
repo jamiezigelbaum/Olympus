@@ -18,6 +18,7 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_watches',
   'source_watch_cancel',
   'olympus_doctor',
+  'olympus_setup_status',
   'ask_anonymously',
   // Importing an old export (owner decision, 2026-10-23): the agent only
   // asks, and the user approves on the computer's dashboard. Not on the
@@ -51,6 +52,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'olympus_setup_status',
   'ask_anonymously',
   'archive_import',
   'privacy_item_find',
@@ -68,6 +70,7 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'olympus_setup_status',
   'ask_anonymously',
   'archive_import',
   'privacy_item_find',
@@ -197,6 +200,9 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'server-mode off',
   'server-mode auto',
   'settings show',
+  'setup status',
+  'settings schema',
+  'settings propose',
   'source answer',
   'source index status',
   'source index search',
@@ -285,8 +291,11 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/backup/run' },
   { method: 'POST', path: '/dashboard/backup/browse' },
   { method: 'POST', path: '/dashboard/backup/restore' },
+  { method: 'POST', path: '/dashboard/engine/go-easy' },
   { method: 'POST', path: '/dashboard/engine/update' },
   { method: 'POST', path: '/dashboard/engine/update/status' },
+  { method: 'POST', path: '/dashboard/settings/proposal/apply' },
+  { method: 'POST', path: '/dashboard/settings/proposal/discard' },
   { method: 'POST', path: '/dashboard/models/local/discover' },
   { method: 'POST', path: '/dashboard/models/local/test' },
   { method: 'POST', path: '/dashboard/models/local/save' },
@@ -321,7 +330,6 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // DASHBOARD_PRIVACY_ITEM_PATHS).
   { method: 'POST', path: '/dashboard/privacy/items/find' },
   { method: 'POST', path: '/dashboard/privacy/items/set' },
-  { method: 'POST', path: '/dashboard/privacy/judge-check' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as
   // every route above.
@@ -345,6 +353,14 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // Answer or Dismiss on a waiting question. Local control session only, as
   // above (workers/http.ts DASHBOARD_PRIVATE_ANSWERS_PATH).
   { method: 'POST', path: '/dashboard/private-answers' },
+  // What AI apps received (#1061): the list, its retention, Clear and "This
+  // should be Private". Local control session only, as above
+  // (workers/http.ts DASHBOARD_APPS_RECEIVED_ROUTE).
+  { method: 'POST', path: '/dashboard/apps-received' },
+  // People (#1076): Same person, Not the same, Merge, Split and Rename. The
+  // people list is Private: local control session only, as above
+  // (workers/http.ts DASHBOARD_PEOPLE_PATH).
+  { method: 'POST', path: '/dashboard/people' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [
@@ -414,6 +430,9 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/chat_list.go',
+  'tools/whatsapp-bridge/chat_kinds.go',
+  'tools/whatsapp-bridge/history_sync.go',
+  'tools/whatsapp-bridge/wa_version.go',
   'tools/whatsapp-bridge/capture_status.go',
   'tools/whatsapp-bridge/media_files.go',
   'tools/whatsapp-bridge/media_serve.go',

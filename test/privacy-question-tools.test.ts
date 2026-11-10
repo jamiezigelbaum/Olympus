@@ -11,7 +11,7 @@ function fixture() {
   const check = { private: ['Invoices'], share: ['Poems'], samples: [{ name: 'Synthetic invoice', side: 'private' as const }] };
   const backend = {
     privacySettings: () => ({ configured: true, description: 'Saved words', rules: [], pendingCount: 0, revision: 'v1' }),
-    secretLocations: () => ({ folderKeys: new Set(), pathPrefixes: [], labelIds: new Set(), senders: [] }),
+    secretLocations: () => ({ folderKeys: new Set(), pathPrefixes: [], labelIds: new Set(), senders: [], chatKeys: new Set() }),
     privacyQuestions: async (description: string) => { calls.push(description); return questions; },
     privacyCheck: async (description: string, sample?: string) => { calls.push({ description, sample }); return check; },
     savePrivacy: () => { throw new Error('draft must not save'); },

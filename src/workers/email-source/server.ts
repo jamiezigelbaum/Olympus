@@ -1,18 +1,21 @@
+import { createDashboardPeople } from './dashboard-people.ts';
+import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
-import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
-import { createJudgeCheck } from '../classification/judge-check.ts';
+import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
+import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
-import { snifferPromptVersions } from '../classification/sniffer.ts';
+import { snifferDecisionBar, snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
-import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
+import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
@@ -43,6 +46,7 @@ import {
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { unlinkHelper } from './dashboard-messaging-service.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -51,7 +55,7 @@ import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/wo
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -107,6 +111,7 @@ import {
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
 import {
+  dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
@@ -162,6 +167,7 @@ import {
   type LoadSovereigntyOptions,
   type SovereigntyModelProfile,
   type SovereigntyResolvedProfile,
+  validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import {
@@ -317,6 +323,7 @@ import type { ConnectorStoreStatusScope } from '../connector-store/local-index.t
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
+  TIER_DOMAIN_ORDER,
   onDemandTierStore,
   tieredStoreSetLedgerPath,
   rehomeChatLaneOverrides,
@@ -340,6 +347,7 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
 import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   enableSourceRegistryAdoption,
@@ -397,6 +405,7 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
+import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
@@ -468,6 +477,7 @@ import {
   fileSourceScopeMetadataEnabled,
   fileSourceScopeMetadataFilters,
   isMailSourceScopePolicyRef,
+  rebindRestoredFileScope,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
@@ -541,12 +551,13 @@ import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudg
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
-import { SNIFFER_MAX_CONCURRENT_CALLS } from '../classification/sniffer-resolver.ts';
+import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -2195,6 +2206,11 @@ export function connectorStoreAnswerScope(input: {
   request: SourceIndexAnswerRequest;
   principal?: ConnectorStoreDeclaredPrincipal;
   capabilities?: ConnectorStoreFilterCapabilityRegistry;
+  /**
+   * The shared people index (#1076): a sender label that names a person also
+   * matches every sender linked to that person, on every source.
+   */
+  people?: { senderIdentitiesFor(query: string): PeopleSenderIdentity[] };
 }): ConnectorStoreAnswerScope {
   const { store, principal, request } = input;
   const capabilities = (input.capabilities ?? CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES).resolve({
@@ -2259,12 +2275,21 @@ export function connectorStoreAnswerScope(input: {
   const senderLabel = request.sender_label?.trim() || undefined;
   const authoredAfter = request.authored_after?.trim() || undefined;
   const authoredBefore = request.authored_before?.trim() || undefined;
+  let senderIdentities: PeopleSenderIdentity[] = [];
+  if (senderLabel && !senderId && input.people) {
+    try {
+      senderIdentities = input.people.senderIdentitiesFor(senderLabel);
+    } catch {
+      senderIdentities = [];
+    }
+  }
   const filters: ConnectorStoreSearchFilters = {
     ...(provider ? { provider } : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
     ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderLabel ? { senderLabel } : {}),
+    ...(senderIdentities.length > 0 ? { senderIdentities } : {}),
     ...(authoredAfter ? { authoredAfter } : {}),
     ...(authoredBefore ? { authoredBefore } : {}),
   };
@@ -2281,6 +2306,20 @@ export function connectorStoreAnswerScope(input: {
 
 
 
+
+const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
+const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
+/** How often the worker checks whether a sync or a tier visibility change needs a rebuild. */
+const PEOPLE_INDEX_CHECK_MS = 60_000;
+
+function openPeopleIndexOrUndefined(): LocalPeopleIndex | undefined {
+  try {
+    return new LocalPeopleIndex({ dbPath: peopleIndexPath(process.env) });
+  } catch (error) {
+    console.warn(`[olympus] people index unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
 
 export function accountFromDropboxCredentialHandle(value: string | undefined): string | undefined {
   const handle = value?.trim();
@@ -2544,6 +2583,15 @@ export async function main(): Promise<void> {
   // with registerBuiltInPrivateModel before this point); without any,
   // flagged items stay pending and unflagged items are Personal at once.
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
+  // Go easy on this computer (#922): local judging and embedding trickle
+  // while the owner works; full speed when away or plugged in overnight.
+  let localWorkPending: () => boolean = () => false;
+  const localPacer = new LocalWorkPacer({
+    probe: systemIdlePowerProbe(),
+    settingPath: join(dirname(resolveClassificationLedgerPath(process.env)), 'go-easy.json'),
+    pendingLocalWork: () => localWorkPending(),
+    log: (line) => console.log(line),
+  });
   const judgeRuntimeInput = {
     engine: sovereigntyEngine,
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
@@ -2552,6 +2600,8 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  // The local judge's own speed and held share on this install, for the setup estimates (#891).
+  const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
@@ -2629,6 +2679,10 @@ export async function main(): Promise<void> {
   const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
     await captureOwnership.stopForUnpair(source);
   };
+  const unlinkWhatsAppDevice = (stateDir: string) => unlinkHelper(
+    whatsappBridgePathForPackage(packageRoot, { env: process.env }),
+    { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir },
+  );
 
   const fileSourceScopeAuthority = connectedHandleRegistryPath
     ? new FileSourceScopeAuthority({
@@ -2740,6 +2794,18 @@ export async function main(): Promise<void> {
     return 'ready';
   };
   let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
+  let deferredReloads: ModelKeyReloadRequest[] | undefined;
+  /** Run `writes` with every reload they request held until they finish, then requested once (#1050). */
+  const withDeferredReloads = async <T>(writes: () => Promise<T>): Promise<T> => {
+    if (deferredReloads) return writes();
+    deferredReloads = [];
+    try { return await writes(); }
+    finally {
+      const held = deferredReloads;
+      deferredReloads = undefined;
+      for (const request of held) requestModelReload(request);
+    }
+  };
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -3045,7 +3111,8 @@ export async function main(): Promise<void> {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  // A query's matches still waiting for their privacy judgment are judged next (#1062).
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
@@ -3814,6 +3881,29 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  // One person across sources (#1076): the shared people index, Private and
+  // on this computer, rebuilt from every authored store's senders. Without
+  // it, answers keep each item's own sender label and filters match labels.
+  const peopleIndex = openPeopleIndexOrUndefined();
+  const peopleRefresher = peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
+  // After every scheduler tick (below) and on a one-minute check: a
+  // rebuild only after a sync or a tier visibility change, at most once a
+  // minute (the markers are cheap to read); `force` rebuilds now.
+  const refreshPeople = (force = false): void => {
+    if (!peopleRefresher) return;
+    try {
+      if (force) peopleRefresher.refresh();
+      else peopleRefresher.refreshIfChanged();
+    } catch (error) {
+      console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const peopleFirstRefresh = setTimeout(() => refreshPeople(true), PEOPLE_INDEX_FIRST_REFRESH_MS);
+  peopleFirstRefresh.unref?.();
+  const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
+  peopleCheck.unref?.();
+  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
+  peopleRefresh.unref?.();
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
   // whose connector store is also configured here, so it cannot half-exist: a
@@ -4794,6 +4884,8 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+      // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
+      const sourceReranker = builtInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
@@ -4802,6 +4894,7 @@ export async function main(): Promise<void> {
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
+        ...(sourceReranker ? { reranker: sourceReranker } : {}),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
           const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');
@@ -4865,7 +4958,12 @@ export async function main(): Promise<void> {
           readScope: connectorStoreReadScope,
           answerScope: (store, request) => {
             const principal = connectorStorePrincipals.get(store.corpusId);
-            return connectorStoreAnswerScope({ store, request, ...(principal ? { principal } : {}) });
+            return connectorStoreAnswerScope({
+              store,
+              request,
+              ...(principal ? { principal } : {}),
+              ...(peopleIndex ? { people: peopleIndex } : {}),
+            });
           },
           accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
           semanticRelevanceBar: (store) => (store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined),
@@ -5704,6 +5802,9 @@ export async function main(): Promise<void> {
         providerFor: (trustDomain) => trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider,
       });
       return couldEmbed || targets().length > 0 ? targets : undefined;
+    }, {
+      trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
+      onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -5726,11 +5827,19 @@ export async function main(): Promise<void> {
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
       sources: schedulerSources,
+      ...(!(sourceIndexStatus && sourceIngestionLedger)
+        ? {
+            afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
+            afterTick: () => refreshPeople(),
+          }
+        : {}),
       ...(sourceIndexStatus && sourceIngestionLedger
         ? {
             // Each delivery reads every store's status; at most one every 30 s.
             afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
             afterTick: async (schedulerStatus) => {
+              // A sync that just completed brings new senders: link them now.
+              refreshPeople();
               const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
@@ -6046,6 +6155,25 @@ export async function main(): Promise<void> {
         // Best effort: the choice is saved either way.
         try { await browser.afterApproval({ wholeAccount: input.wholeAccount }); } catch { /* nothing to undo */ }
       }
+      if (approval.replayed !== true) {
+        // A source restored from a backup: its items are carried over to this
+        // approval, under its folders, when it is for the account they came
+        // from. Best effort: they are listed again by the run started below.
+        try {
+          const sets = fileExtractionTierSets();
+          rebindRestoredFileScope({
+            approval,
+            providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
+            sets: [...new Set(definition.corpusIdsToInvalidate.flatMap((corpusId) => sets.get(corpusId) ?? []))].map((set) => {
+              const secretLocations = set.secrets();
+              return {
+                stores: TIER_DOMAIN_ORDER.flatMap((domain) => set.store(domain) ?? []),
+                ...(secretLocations ? { secretLocations } : {}),
+              };
+            }),
+          });
+        } catch { /* the run lists them again */ }
+      }
       let invalidatedJobs = 0;
       // A replayed save (the same request delivered twice) changed nothing:
       // re-invalidating would cancel the jobs its first delivery just queued.
@@ -6087,9 +6215,14 @@ export async function main(): Promise<void> {
   // Built further down, once the ChatGPT surface exists; the worker only
   // calls it per request.
   let dashboardPanelTools: DashboardPanelTools | undefined;
+  // The setup checklist (#1077): bound once the worker exists (it reads the
+  // dashboard view through the worker), called only per request.
+  let setupStatusNow: (() => Promise<import('../../core/setup-checklist.ts').SetupChecklist>) | undefined;
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  // What AI apps received (apps-received.ts); built below, beside the waiting questions.
+  let appsReceived: import('../apps-received.ts').AppsReceived | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
   closeDesktopBridge = () => { desktopBridge?.close(); privateAgentListeners?.close(); };
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
@@ -6106,8 +6239,6 @@ export async function main(): Promise<void> {
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available(),
   });
-  // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
-  const ownerTierItemsEngine = createOwnerTierItems();
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
     ...(isStandaloneEngineProcess(process.env) ? { selfUpdate: selfUpdater } : {}),
@@ -6126,13 +6257,14 @@ export async function main(): Promise<void> {
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
     ),
+    // Local callers read Private, so only items still waiting for their
+    // judgment (found by words, not yet by meaning) are counted for them.
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
     // One item's privacy label (issue #1060): the same stores and ledgers
     // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
-    ownerTierItems: ownerTierItemsEngine,
-    // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
-    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
+    ownerTierItems: createOwnerTierItems(),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -6204,14 +6336,21 @@ export async function main(): Promise<void> {
             }),
             modelChoices,
             backup: backupService,
+            goEasy: { on: () => localPacer.goEasy(), save: (on: boolean) => localPacer.save(on) },
             judgeSetup: createJudgeSetup({
               spending: judgeSpending, cloud: cloudJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
               credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
               requestReload: () => requestModelReload(),
+              observed: () => judgeObservations.observed(),
+              secondRoundStatePath: judgeSecondRoundStatePath(process.env),
             }),
             modelSetup: getModelSetup,
+            setupStatus: async () => {
+              if (!setupStatusNow) throw new Error('the setup checklist is not ready');
+              return await setupStatusNow();
+            },
             computerSetup: macComputerSetupView,
             saveComputerUseChoice: saveMacComputerUseChoice,
             checkModelSetup: () => {
@@ -6234,6 +6373,20 @@ export async function main(): Promise<void> {
               requestModelReload();
               return true;
             },
+            deferReloads: withDeferredReloads,
+            savePrivateAnswerMode: (choice) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return { ok: false, message: 'This Olympus has no policy file to change.' };
+              // The policy on disk, not the boot copy: an earlier change may already be saved.
+              let current;
+              try { current = validateSovereigntyConfig(JSON.parse(readFileSync(sovereigntyEngine.path, 'utf8'))); }
+              catch { return { ok: false, message: 'The privacy policy file cannot be read.' }; }
+              let result;
+              try { result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current); }
+              catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'The Private-answer mode could not be saved.' }; }
+              if (!result.ok) return { ok: false, message: 'The privacy policy changed while saving. Refresh and try again.' };
+              if (!result.changed) return { ok: true, message: 'Already in use.' };
+              return { ok: true, message: requestModelReload() ? 'Saved. Olympus is applying it.' : 'Saved. Restart Olympus to apply it.' };
+            },
             connectModelKey,
             // The panel's tools on the computer; bound late (set up further
             // down; called only per request).
@@ -6244,6 +6397,10 @@ export async function main(): Promise<void> {
                 return dashboardPanelTools.call(name, args, context);
               },
             },
+            // People (#1076): the people index and the owner's corrections.
+            ...(peopleIndex
+              ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) }
+              : {}),
             // Private answers on this computer; bound late like the panel's tools.
             ...(sourceAnswerLanes
               ? {
@@ -6257,6 +6414,11 @@ export async function main(): Promise<void> {
                   },
                 }
               : {}),
+            appsReceived: {
+              handle: (body) => (appsReceived
+                ? appsReceived.handle(body)
+                : Promise.resolve({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Olympus is still starting. Try again in a moment.' } } })),
+            },
             // Outside help (consults): the Mac dashboard card's backend, the
             // one caller of the settings writer; bound late like the panel's tools.
             consult: {
@@ -6272,6 +6434,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            unlinkWhatsAppDevice,
             withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
             captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
@@ -6389,6 +6552,18 @@ export async function main(): Promise<void> {
   // revoking process could not clean up, are dropped on open and on every
   // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  {
+    // Every request an AI app or agent makes, recorded where its result leaves (core/app-release-capture.ts).
+    const { createAppsReceived } = await import('../apps-received.ts');
+    const { appReleaseLogDbPath } = await import('../../core/app-release-log.ts');
+    const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
+    appsReceived = createAppsReceived({
+      dbPath: appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env)),
+      // The per-item override (`olympus tier set <item> private`) on exactly the recorded item:
+      // its locator must still name the same provider, item and conversation, or nothing is written.
+      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem(locator, 'private', expected),
+    });
+  }
   const connectionActive = (connectionId: string): boolean => {
     if (connectionId.startsWith('@local:')) return true;
     const connections = remoteConnections();
@@ -6879,7 +7054,13 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      // An agent outside this computer reads no Private store: an item
+      // waiting for its judgment, and one judged lower whose move out of
+      // Private is still queued, are both out of its reach until then.
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
       ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
@@ -7169,7 +7350,24 @@ export async function main(): Promise<void> {
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
   const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
   const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
+  const { readSetupWorkerFacts, setupChecklistFromView } = await import('../setup-status.ts');
+  const setupWorkerFacts = () => readSetupWorkerFacts({
+    version: runningOlympusVersion(),
+    policy: { config: sovereigntyEngine.config, ...(sovereigntyEngine.source === 'file' && sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}) },
+    ...(sourceIndexReadEnabled ? { judge: judgeSpending } : {}),
+    connections: () => dashboardAgentStore?.(),
+    // Only positive evidence counts: the OpenClaw Gateway supervising this
+    // worker as its native service (as `remote` above). A hand-run worker or
+    // the standalone engine host has no AI app until one is connected.
+    ...(process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw' ? { hostAgent: 'OpenClaw' } : {}),
+  });
+  setupStatusNow = async () => {
+    const response = await worker.fetch(new Request('http://olympus-worker.internal/dashboard.json'));
+    const view = response.ok ? await response.json() as SourceDashboardViewModel : undefined;
+    return setupChecklistFromView(view, setupWorkerFacts());
+  };
   dashboardPanelTools = createDashboardPanelTools({
+    setupChecklist: (view) => setupChecklistFromView(view, setupWorkerFacts()),
     surface: () => chatgptSurface,
     setup: chatgptSetup,
     workerFetch: worker.fetch,
@@ -7228,6 +7426,9 @@ export async function main(): Promise<void> {
         requireOwnerSocket: !!socketPath,
         // Any marker, verified or not, refuses approval (fails closed).
         isRelayed: carriesRelayMarker,
+        // Approving from a browser off the owner socket needs the owner's
+        // dashboard session, checked with the same keys that sign it (#1186).
+        ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
@@ -7339,24 +7540,59 @@ export async function main(): Promise<void> {
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const snifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
+  const rawSnifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+  // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
+  const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
+  const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
+  // This computer, then Venice double-checks (#891): the local judge sorts everything, and
+  // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
+  const judgeChoice = judgeSpending.status();
+  const secondRoundVenice = snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
+    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
+      lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
+      promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
+    })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    : undefined;
+  if (judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
+    console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
+  }
+  const secondRoundSweep = secondRoundVenice ? new SecondRoundSweep({
+    statePath: judgeSecondRoundStatePath(process.env),
+    setFor: tierSetForLedger,
+    unanswered: (ledgerPath, id) => installedTierClassification.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered,
+  }) : undefined;
+  const secondRoundCounts = { asked: 0, released: 0, kept: 0, failed: 0, stopped: 0 };
+  let lastSecondRoundLog = '';
+  const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
+  const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
         lane: snifferLane,
-        model: snifferResource ? {
+        model: withSecondRound(snifferResource ? {
           ...snifferModel,
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request)),
-        } : snifferModel,
+          // The completion says how long it waited for the model slot (#893).
+          complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
+        } : snifferModel),
+        ...(secondRoundSweep ? { secondRound: async (ledgerPaths, autoMovesFor) => {
+          const reopened = await secondRoundSweep.run(ledgerPaths, autoMovesFor, ingestionTurn);
+          const counts = JSON.stringify(secondRoundCounts);
+          if (reopened > 0 || counts !== lastSecondRoundLog) {
+            lastSecondRoundLog = counts;
+            console.log(`Olympus privacy judge: Venice double-check: ${reopened} held item(s) re-opened this tick; ${secondRoundCounts.asked} asked, ${secondRoundCounts.released} released to Personal, ${secondRoundCounts.kept} kept Private, ${secondRoundCounts.failed} failed and ${secondRoundCounts.stopped} stopped (kept Private).`);
+          }
+        } } : {}),
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         ...(snifferRuntime.source === 'built_in'
@@ -7380,6 +7616,8 @@ export async function main(): Promise<void> {
         ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+        // The service applies it to the built-in judge only, never Venice or a remote judge.
+        pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved
@@ -7403,6 +7641,9 @@ export async function main(): Promise<void> {
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
+  localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
+    || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
+  localPacer.start();
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -7426,6 +7667,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopCpuSampleLog?.();
     tierSniffer?.stop();
+    localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
@@ -7446,11 +7688,17 @@ export async function main(): Promise<void> {
     // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
-  requestModelReload = shutdownSignals.modelReload({
+  const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
+  requestModelReload = (request) => {
+    // While a settings proposal is being applied, every writer's reload waits
+    // for the last write, so the restart cannot cut the batch short.
+    if (deferredReloads) { deferredReloads.push(request ?? {}); return workerRestartsItself(workerLaunch, process.env); }
+    return reloadNow(request);
+  };
   modelReloadInstalled = true;
   // After the reload handler, so a newer strongest model found at boot is
   // applied; then daily, so a long-running worker follows new releases too.

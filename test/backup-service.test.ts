@@ -3,7 +3,7 @@
 // restart, and routes served only to the unlocked local dashboard session.
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -13,10 +13,14 @@ import { BACKUP_KEY_INVALID, applyPendingRestoreAtBoot, backupDue, createBackupS
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
-import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { renderDashboardSettingsPage } from '../src/workers/dashboard/pages/local.ts';
 import { DASHBOARD_BACKUP_PATHS } from '../src/workers/dashboard/backup-paths.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { handleDashboardBackupRoute } from '../src/workers/dashboard/backup-routes.ts';
+import { scopePathOfRealPath } from '../src/workers/local-files/locations.ts';
+import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const run of cleanup.splice(0)) run(); });
@@ -30,11 +34,13 @@ function seed(path: string, value: string): void {
 }
 const storeOf = (homeDir: string) => lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({ homeDir })[0]!;
 
-function install(home: string, now: () => Date, restarts: { count: number } = { count: 0 }) {
+function install(home: string, now: () => Date, restarts: { count: number } = { count: 0 }, resolveFolderKey?: (key: string) => string | undefined, keep?: number) {
   const env = lifecycleEnv({ homeDir: home });
   const paths: BackupServicePaths = { settings: join(home, 'cfg', 'backup.json'), key: join(home, 'cfg', 'backup-key.json'), staging: sharedDataPath('backup-staging', env) };
   const service = createBackupService({
     paths, env, now,
+    ...(resolveFolderKey ? { resolveFolderKey } : {}),
+    ...(keep !== undefined ? { keep } : {}),
     exportInto: (destination) => exportOlympusData({ destination, homeDir: home }),
     canRestart: () => true,
     requestRestart: () => { restarts.count += 1; return true; },
@@ -116,6 +122,10 @@ describe('backup service', () => {
       ['malformed', () => writeFileSync(paths.key, '{"schema": "olympus.backup.key.v1", "key": ')],
       ['wrong check', () => writeFileSync(paths.key, JSON.stringify({ ...good, key_check: Buffer.alloc(16).toString('base64') }))],
       ['wrong key', () => writeFileSync(paths.key, JSON.stringify({ ...good, key: Buffer.alloc(32, 7).toString('base64') }))],
+      // A key that checks out but names a key setting no backup could be opened with.
+      ['kdf without N', () => { const { N: _n, ...kdf } = good.kdf; writeFileSync(paths.key, JSON.stringify({ ...good, kdf })); }],
+      ['kdf N 0', () => writeFileSync(paths.key, JSON.stringify({ ...good, kdf: { ...good.kdf, N: 0 } }))],
+      ['kdf short salt', () => writeFileSync(paths.key, JSON.stringify({ ...good, kdf: { ...good.kdf, salt: 'AAAA' } }))],
       // Unreadable: a folder where the file should be (root ignores chmod 000).
       ['unreadable', () => { rmSync(paths.key, { force: true }); mkdirSync(paths.key); }],
     ];
@@ -187,9 +197,10 @@ describe('backup routes', () => {
     return { fetch: withWorkerBearerAuth(instance.fetch, { authToken: 'test-worker-token' }), calls };
   }
   async function mint(fetch: ReturnType<typeof worker>['fetch'], local: boolean) {
-    const request = new Request(origin + (local ? DASHBOARD_LOCAL_CONTROL_SESSION_PATH : '/dashboard/control/session'), { method: 'POST', headers: { Origin: origin, ...(local ? {} : { Authorization: 'Bearer test-worker-token' }) } });
+    // The local session is minted as the owner's browser does it: from the control session its launch opened (#1153).
+    const request = new Request(origin + '/dashboard/control/session', { method: 'POST', headers: { Origin: origin, Authorization: 'Bearer test-worker-token' } });
     recordRequestPeer(request, '127.0.0.1');
-    const response = await fetch(request);
+    const response = local ? await ownerLocalMint(fetch, origin, 'test-worker-token') : await fetch(request);
     expect(response.status).toBe(200);
     return { Cookie: response.headers.get('Set-Cookie')!.split(';')[0]!, Origin: origin, 'X-Olympus-CSRF': (await response.json() as { csrf_token: string }).csrf_token };
   }
@@ -231,6 +242,115 @@ describe('backup routes', () => {
     expect(remote).not.toContain('data-backup-run');
   });
 
+  test('a folder with more than 100 subfolders: the picker pages on, and a folder past the first page can be chosen', async () => {
+    const dir = tempDir();
+    const parent = join(dir, 'Many');
+    const names = Array.from({ length: 130 }, (_, i) => `Folder ${String(i).padStart(3, '0')}`);
+    for (const name of names) mkdirSync(join(parent, name), { recursive: true });
+    const volumes = new VolumeResolver();
+    const saved: Array<{ folder?: string; folderKey?: string }> = [];
+    const backup = {
+      status: () => ({ schedule: 'manual' as const, passphraseSet: false, running: false, backups: [], restoreAvailable: true }),
+      saveSettings: (input: { folder?: string; folderKey?: string }) => { saved.push(input); return backup.status(); },
+      setPassphrase: () => backup.status(),
+      runNow: async () => backup.status(),
+      tick: async () => false,
+      restore: () => backup.status(),
+    };
+    const deps = { backup: backup as never, volumes };
+    const parentKey = scopePathOfRealPath(volumes, parent);
+    const first = await handleDashboardBackupRoute('/dashboard/backup/browse', { parent_key: parentKey }, deps);
+    expect(first.status).toBe(200);
+    const firstFolders = first.body.folders as Array<{ key: string; name: string; selectable: boolean }>;
+    expect(firstFolders).toHaveLength(100);
+    expect(typeof first.body.next_cursor).toBe('string');
+    const second = await handleDashboardBackupRoute('/dashboard/backup/browse', { parent_key: parentKey, cursor: first.body.next_cursor }, deps);
+    expect(second.status).toBe(200);
+    const secondFolders = second.body.folders as Array<{ key: string; name: string; selectable: boolean }>;
+    expect(secondFolders.map((f) => f.name)).toEqual(names.slice(100));
+    expect(second.body.next_cursor).toBeUndefined();
+    const last = secondFolders.at(-1)!;
+    expect(last.selectable).toBe(true);
+    const chosen = await handleDashboardBackupRoute('/dashboard/backup/settings', { folder_key: last.key }, deps);
+    expect(chosen.status).toBe(200);
+    // The folder's key is kept with it: it names the disk, so a missing or replaced disk is caught.
+    expect(saved).toEqual([{ folder: realpathSync(join(parent, 'Folder 129')), folderKey: scopePathOfRealPath(volumes, realpathSync(join(parent, 'Folder 129'))) }]);
+    // A cursor is the listing's own and bound to its folder: another folder's, a forged or a non-string one is refused.
+    for (const body of [{ parent_key: scopePathOfRealPath(volumes, dir), cursor: first.body.next_cursor }, { parent_key: parentKey, cursor: 'forged' }, { parent_key: parentKey, cursor: 100 }]) {
+      const refused = await handleDashboardBackupRoute('/dashboard/backup/browse', body, deps);
+      expect(refused.status).toBe(409);
+      expect((refused.body.error as { message: string }).message).toStartWith('Folder browse cursor is invalid');
+    }
+    // The page offers Show more for the next page.
+    const page = renderDashboardSettingsPage({ backup: backup.status(), outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' });
+    expect(page).toContain('data-browser-more hidden>Show more</button>');
+    expect(page).toContain('cursor: cursor');
+  });
+
+  test('the restore picker lists a renamed or duplicated backup the restore can open', async () => {
+    const dir = tempDir();
+    const home = join(dir, 'a');
+    const { service } = install(home, () => new Date(2026, 10, 1, 4, 0));
+    const folder = join(dir, 'Backups');
+    mkdirSync(folder);
+    service.saveSettings({ folder });
+    await service.runNow();
+    const [made] = listBackups(folder);
+    const bytes = readFileSync(made!.path);
+    writeFileSync(join(folder, `${made!.name.replace('.olympusbackup', '')} (1).olympusbackup`), bytes);
+    writeFileSync(join(folder, 'renamed.olympusbackup'), bytes);
+    writeFileSync(join(folder, 'notes.olympusbackup'), 'hello');
+    const volumes = new VolumeResolver();
+    const listed = await handleDashboardBackupRoute('/dashboard/backup/browse', { parent_key: scopePathOfRealPath(volumes, folder), files: true }, { backup: service, volumes });
+    expect(listed.status).toBe(200);
+    expect((listed.body.files as Array<{ name: string }>).map((file) => file.name).sort()).toEqual(
+      [made!.name, `${made!.name.replace('.olympusbackup', '')} (1).olympusbackup`, 'renamed.olympusbackup'].sort(),
+    );
+  });
+
+  test('a backup disk that is not connected, or was replaced, gets no backup and loses none', async () => {
+    const dir = tempDir();
+    const home = join(dir, 'a');
+    seed(storeOf(home), 'a bookmark');
+    const folder = join(dir, 'Backups');
+    mkdirSync(folder);
+    // The chosen disk's key; what it resolves to changes as the disk comes and goes.
+    let mounted: string | undefined = folder;
+    let resolutions = 0;
+    let unmountAfter = Number.POSITIVE_INFINITY;
+    const { service, paths } = install(home, () => new Date(2026, 10, 1, 4, 0), { count: 0 }, (key) => {
+      expect(key).toBe('/@vol:backup-disk/Backups');
+      resolutions += 1;
+      return resolutions > unmountAfter ? undefined : mounted;
+    }, 1);
+    service.saveSettings({ folder, folderKey: '/@vol:backup-disk/Backups' });
+    expect(JSON.parse(readFileSync(paths.settings, 'utf8')).folder_key).toBe('/@vol:backup-disk/Backups');
+    const first = await service.runNow();
+    expect(first.lastError).toBeUndefined();
+    const [kept] = readdirSync(folder);
+
+    // Gone: nothing is written anywhere, nothing is pruned, and the page says why.
+    mounted = undefined;
+    const absent = await service.runNow();
+    expect(absent.lastError?.message).toContain('isn\'t connected');
+    expect(readdirSync(folder)).toEqual([kept!]);
+
+    // Gone while the export is prepared: the vacated path gets nothing.
+    mounted = folder;
+    resolutions = 0;
+    unmountAfter = 1;
+    const duringExport = await service.runNow();
+    expect(duringExport.lastError?.message).toContain('isn\'t connected');
+    expect(readdirSync(folder)).toEqual([kept!]);
+
+    // Gone between the backup and the clean-up: the new backup stays, nothing is pruned.
+    resolutions = 0;
+    unmountAfter = 2;
+    const midway = await service.runNow();
+    expect(midway.lastError?.message).toContain('isn\'t connected');
+    expect(readdirSync(folder).filter((name) => name.endsWith('.olympusbackup'))).toHaveLength(2);
+  });
+
   test('a scheduled backup that fails is reported, and nothing half-written is left', async () => {
     const dir = tempDir();
     const home = join(dir, 'a');
@@ -242,5 +362,75 @@ describe('backup routes', () => {
     await service.tick();
     expect(service.status().lastError?.message).toBeTruthy();
     expect(readdirSync(sharedDataPath('backup-staging', env))).toEqual([]);
+  });
+});
+
+describe('restore passphrase form', () => {
+  test('opening another folder drops the picked backup, so Enter in the passphrase restores nothing', async () => {
+    const { Window } = await import('happy-dom');
+    const status = { folder: '/Volumes/T7/Backup/Olympus', schedule: 'nightly' as const, passphraseSet: true, running: false, backups: [], restoreAvailable: true };
+    const html = renderDashboardSettingsPage({ backup: status, outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' });
+    const section = html.slice(html.indexOf('<section class="setpane" id="backup"'));
+    const start = section.indexOf('<script>') + '<script>'.length;
+    const script = section.slice(start, section.indexOf('</script>', start));
+    const win = new Window({ url: 'http://127.0.0.1:4100/dashboard?settings' });
+    const posts: string[] = [];
+    const fetchStub = async (url: string, init: { body?: string }) => {
+      const path = url.split('/').pop()!;
+      posts.push(path);
+      const body = JSON.parse(init.body ?? '{}') as { parent_key?: string };
+      if (path === 'browse') {
+        return new win.Response(JSON.stringify(body.parent_key === 'other'
+          ? { ok: true, path: '/other', folders: [], files: [] }
+          : { ok: true, path: '/Volumes/T7', folders: [{ key: 'other', name: 'other', selectable: true }], files: [{ key: 'b1', name: 'olympus-backup.olyb', bytes: 2000, encrypted: true }] }), { status: 200 });
+      }
+      return new win.Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    try {
+      win.document.body.innerHTML = section.slice(0, start - '<script>'.length) + '</section>';
+      new Function('window', 'document', 'HTMLInputElement', 'HTMLFormElement', 'HTMLElement', 'Element', 'fetch', script)(win, win.document, win.HTMLInputElement, win.HTMLFormElement, win.HTMLElement, win.Element, fetchStub);
+      const settle = () => flushMicrotasks();
+      (win.document.querySelector('[data-backup-browse="restore"]') as unknown as HTMLElement).click();
+      await settle();
+      (win.document.querySelector('.bkpick') as unknown as HTMLElement).click();
+      const form = win.document.querySelector('[data-backup-restore]') as unknown as HTMLFormElement;
+      expect(form.hidden).toBe(false);
+      (form.querySelector('input[name="passphrase"]') as unknown as HTMLInputElement).value = 'correct horse battery';
+      const folder = Array.from(win.document.querySelectorAll('[data-browser-folders] button')).find((b) => b.textContent?.includes('other')) as unknown as HTMLElement;
+      folder.click();
+      await settle();
+      expect(form.hidden).toBe(true);
+      expect((form.querySelector('input[name="passphrase"]') as unknown as HTMLInputElement).value).toBe('');
+      form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }) as never);
+      await settle();
+      expect(posts).not.toContain('restore');
+    } finally {
+      await win.happyDOM.close();
+    }
+  });
+
+  test('Enter in the restore passphrase starts the restore, never a native submit that would put it in the URL', async () => {
+    const { Window } = await import('happy-dom');
+    const status = { folder: '/Volumes/T7/Backup/Olympus', schedule: 'nightly' as const, passphraseSet: true, running: false, backups: [], restoreAvailable: true };
+    const html = renderDashboardSettingsPage({ backup: status, outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' });
+    const section = html.slice(html.indexOf('<section class="setpane" id="backup"'));
+    const start = section.indexOf('<script>') + '<script>'.length;
+    const script = section.slice(start, section.indexOf('</script>', start));
+    const win = new Window({ url: 'http://127.0.0.1:4100/dashboard?settings' });
+    try {
+      win.document.body.innerHTML = section.slice(0, start - '<script>'.length) + '</section>';
+      new Function('window', 'document', 'HTMLInputElement', 'HTMLFormElement', 'HTMLElement', 'Element', script)(win, win.document, win.HTMLInputElement, win.HTMLFormElement, win.HTMLElement, win.Element);
+      const form = win.document.querySelector('[data-backup-restore]') as unknown as HTMLFormElement;
+      form.hidden = false;
+      (form.querySelector('input[name="passphrase"]') as unknown as HTMLInputElement).value = 'correct horse battery';
+      let used = 0;
+      win.document.querySelector('[data-browser-use]')!.addEventListener('click', () => { used += 1; });
+      const submit = new win.Event('submit', { bubbles: true, cancelable: true });
+      form.dispatchEvent(submit as never);
+      expect(submit.defaultPrevented).toBe(true);
+      expect(used).toBe(1);
+    } finally {
+      await win.happyDOM.close();
+    }
   });
 });

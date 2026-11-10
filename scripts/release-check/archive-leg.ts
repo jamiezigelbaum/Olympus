@@ -28,6 +28,7 @@ import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type BesideLive
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
 import { OPEN_ALL_SOURCES } from './journeys.ts';
+import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardSourceLandingToken } from '../../src/core/open-targets.ts';
 import type { CheckResult } from './report.ts';
 
 // ---------------------------------------------------------------------------
@@ -320,6 +321,8 @@ export interface SearchView {
   ok: boolean;
   isError: boolean;
   evidence: Array<{ source: string; hasToken: boolean }>;
+  /** The result said Olympus is still checking new items for privacy (the privacy-backlog note). */
+  stillChecking?: boolean;
   error?: string;
 }
 
@@ -330,6 +333,8 @@ export interface DrainView {
   last: { messages?: number; judged?: number; waiting?: number };
   privateModel?: string;
   row?: RowView;
+  /** What went wrong reading the row after the drain: the navigation, or the row still missing at the bound. */
+  rowProblem?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -450,10 +455,12 @@ const OPEN_S = 60;
 const BEFORE_NAME = (template: string): string => template.split('{name}')[0] ?? '';
 const rowTarget = (fileName: string) => ({ css: 'li.archive:not(.request)', text: fileName, contains: true });
 
-/** The dashboard opened, All sources unfolded, then what the step must find there (within the opening's bound). */
-function openDashboardSteps(name: string, expect: Journey['steps'][number]['expect'], timeoutMs: number): Journey['steps'] {
+/** Home's "Imported archives and details" landing, where every archive is listed. */
+export const ALL_SOURCES_PATH = `/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`;
+/** That landing opened, then what the step must find there (within the opening's bound). */
+function openDashboardSteps(name: string, expect: Journey['steps'][number]['expect'], timeoutMs: number, path = ALL_SOURCES_PATH): Journey['steps'] {
   return [
-    { name: 'Open the dashboard', do: { go: '/dashboard' }, expect: [], timeoutMs },
+    { name: 'Open the dashboard', do: { go: path }, expect: [], timeoutMs },
     OPEN_ALL_SOURCES,
     { name, do: { observe: true }, expect, timeoutMs },
   ];
@@ -612,7 +619,9 @@ export function unpairJourney(sourceId: string, label: string, bounds: { unpairS
     source: 'a paired chat source\'s Delete: the engine refuses it until the source is unpaired, so the owner unpairs it first',
     mutates: true,
     steps: [
-      ...openDashboardSteps('Open the dashboard: the source has its menu', [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], (bounds.openS ?? OPEN_S) * 1_000),
+      // Home lists no sources (#1085): the Sources tab's Details lands on this source's row.
+      ...openDashboardSteps('Open the dashboard: the source has its menu', [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], (bounds.openS ?? OPEN_S) * 1_000,
+        `/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(sourceId)}`),
       {
         name: `Open the source's menu: it offers ${unpair}`,
         do: { click: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' },
@@ -753,7 +762,7 @@ export function searchChecks(
     return [check(`${prefix}.search`, title, withToken.length > 0,
       withToken.length > 0
         ? `${withToken.length} cited item(s) carry the word, labelled "${fx.expect.citationLabel}" (${search.evidence.length} item(s) in all)`
-        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}`)];
+        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}${search.stillChecking ? ' (the result said items were still being checked for privacy)' : ''}`)];
   }
   const leaked = search.evidence.filter((item) => item.hasToken);
   return [check(`${prefix}.search`, title, leaked.length === 0,
@@ -833,7 +842,7 @@ export function drainChecks(id: string, drain: DrainView | undefined, fx: LegFix
   if (drain.drained && (drain.last.waiting !== 0 || drain.last.messages !== fx.expect.messages)) {
     problems.push(`the agent reports ${drain.last.waiting ?? '?'} of ${drain.last.messages ?? '?'} messages waiting, expected 0 of ${fx.expect.messages}`);
   }
-  if (drain.drained && !drain.row) problems.push('the dashboard row could not be read, so the judged count is unproven');
+  if (drain.drained && !drain.row) problems.push(`the dashboard row could not be read (${drain.rowProblem ?? 'no detail'}), so the judged count is unproven`);
   if (drain.drained && drain.row) {
     if (!judged) problems.push('the dashboard row has no judged line');
     else if (judged.held !== 0 || judged.judged !== fx.expect.messages) problems.push(`the dashboard row reads ${judged.judged} judged · ${judged.held} waiting, expected ${fx.expect.messages} judged · 0 waiting`);

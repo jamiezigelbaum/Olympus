@@ -1,3 +1,4 @@
+import { isSourceIndexLaneBusyError } from './lane-busy.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -147,6 +148,16 @@ export interface SourceIndexCorpusSearchAdapter {
   (request: SourceIndexCorpusSearchRequest): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>;
   // Optional local-only preparation before lane deadlines start.
   prepareKeywords?: (query: string) => Promise<void>;
+  /**
+   * Optional: get the query's embedding ready before lane deadlines start, so
+   * a local embedding model that is still starting (the first question after
+   * idle) can finish within `budgetMs` instead of dropping the semantic lane.
+   * It must bound itself to `budgetMs`, never throw, and never read the store:
+   * the router calls it only when the adapter already reported a servable
+   * hybrid lane, and only for searches that read content. A lane still skipped
+   * afterwards is reported as usual (semantic_lane_skipped).
+   */
+  prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
@@ -284,7 +295,36 @@ export interface RouteSourceIndexSearchOptions {
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
+  // How long preparation may wait for a starting embedding model before the
+  // lanes run (see DEFAULT_SEMANTIC_PREPARE_BUDGET_MS). Non-positive skips it.
+  semanticPrepareBudgetMs?: number;
+  // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
+  laneClock?: LaneDeadlineClock;
 }
+
+// The time seam of the lane deadline (runCorpusLaneWithDeadline).
+export interface LaneDeadlineClock {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(timer: unknown): void;
+}
+
+const REAL_LANE_CLOCK: LaneDeadlineClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+};
+
+// How long one search may wait, before its lane deadlines start, for a local
+// embedding model that is still starting (#1172). A third of the 45 s
+// source-answer hand-off (SOURCE_ANSWER_HANDOFF_DEFAULT_MS in
+// core/source-answer-jobs.ts): this wait plus the 10 s lane deadline below
+// leaves the remaining 20 s for evidence reading and the Analyst, so a cold
+// first question still answers before the hand-off instead of becoming a job.
+// A warm model never waits: preparation returns as soon as the query embeds.
+// A model still not started by then leaves the semantic lane skipped, and the
+// EvidencePack's coverage says so.
+export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
 // Default per-lane retrieval deadline (ms).
 //
@@ -308,6 +348,12 @@ export interface RouteSourceIndexSearchOptions {
 // monopolize the event loop and prevent the timer itself from firing.
 const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 10_000;
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
+// A deadline timer this late means the thread was held past it (see
+// runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
+// up to HELD_THREAD_MAX_DEADLINE_FACTOR times its deadline in all.
+const HELD_THREAD_LATE_TIMER_MS = 500;
+const HELD_THREAD_GRACE_MS = 1_000;
+const HELD_THREAD_MAX_DEADLINE_FACTOR = 6;
 
 const FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   'body',
@@ -392,10 +438,34 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     searchableCorpora.push(corpus);
   }
 
+  // Each corpus's retrieval state, read once (its hybridAvailability is a
+  // store read): preparation uses it to decide whether a semantic lane is
+  // worth warming, and the lane's honesty check below uses the same answer.
+  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
+    corpus.corpusId,
+    retrievalStateForAdapter(options.adapters[corpus.corpusId]!, {
+      query: request.query,
+      maxResults: request.maxResults,
+      corpus,
+      context: request.context,
+    }),
+  ] as const));
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
+  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
   await Promise.all(searchableCorpora.map(async (corpus) => {
-    try { await options.adapters[corpus.corpusId]!.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
+    const adapter = options.adapters[corpus.corpusId]!;
+    try { await adapter.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
+    // A metadata-only search (the Private-match probe) has its own short
+    // budget and reports an incomplete lane as unknown; it never waits here.
+    if (
+      adapter.prepareSemantic
+      && semanticPrepareBudgetMs > 0
+      && request.context.metadataOnly !== true
+      && retrievalStates.get(corpus.corpusId)!.hybridServable
+    ) {
+      try { await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs); } catch { /* the lane reports its own skip */ }
+    }
   }));
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
@@ -408,12 +478,13 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       context: request.context,
       ...(cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}),
     };
-    const retrievalState = retrievalStateForAdapter(adapter, corpusRequest);
+    const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(
       () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)),
       laneTimeoutMs,
       corpus.corpusId,
+      options.laneClock ?? REAL_LANE_CLOCK,
     );
     return { corpus, outcome, retrievalState };
   }));
@@ -673,17 +744,20 @@ function semanticLaneDegradation(
 function retrievalStateForAdapter(
   adapter: SourceIndexCorpusSearchAdapter,
   request: SourceIndexCorpusSearchRequest,
-): SourceIndexRetrievalState {
+): { state: SourceIndexRetrievalState; hybridServable: boolean } {
   let hybridAvailability: SourceIndexHybridAvailability | undefined;
   try {
     hybridAvailability = adapter.hybridAvailability?.(request);
   } catch {
     hybridAvailability = { servable: false, reason: 'hybrid_capability_unreported' };
   }
-  return assessSourceIndexRetrievalState({
-    declaredMode: request.corpus.activationMode,
-    ...(hybridAvailability ? { hybridAvailability } : {}),
-  });
+  return {
+    state: assessSourceIndexRetrievalState({
+      declaredMode: request.corpus.activationMode,
+      ...(hybridAvailability ? { hybridAvailability } : {}),
+    }),
+    hybridServable: hybridAvailability?.servable === true,
+  };
 }
 
 function normalizeSearchRequest(request: SourceIndexSearchRequest): SourceIndexSearchRequest {
@@ -716,6 +790,7 @@ async function runCorpusLaneWithDeadline(
   run: () => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
   timeoutMs: number,
   corpusId: string,
+  clock: LaneDeadlineClock = REAL_LANE_CLOCK,
 ): Promise<CorpusLaneOutcome> {
   const startedAt = Date.now();
   const runValidated = async (): Promise<SourceIndexCorpusSearchResponse> => {
@@ -736,6 +811,11 @@ async function runCorpusLaneWithDeadline(
       });
       return { kind: 'response', response, elapsedMs };
     } catch (error) {
+      if (isSourceIndexLaneBusyError(error)) {
+        const elapsedMs = Math.max(0, Date.now() - startedAt);
+        recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: 'timeout' });
+        return { kind: 'timeout', elapsedMs };
+      }
       recordSourceAnswerCorpusTiming({
         corpus_id: corpusId,
         elapsed_ms: Math.max(0, Date.now() - startedAt),
@@ -746,15 +826,36 @@ async function runCorpusLaneWithDeadline(
     }
   }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: unknown;
   const laneSettled: Promise<
     { kind: 'response'; response: SourceIndexCorpusSearchResponse } | { kind: 'error'; error: unknown }
   > = runValidated().then(
     (response) => ({ kind: 'response' as const, response }),
     (error) => ({ kind: 'error' as const, error }),
   );
+  // A held thread is not a slow lane. When the deadline's timer fires late,
+  // something else held the worker's thread past it (a judging pass, another
+  // lane's synchronous keyword search), so this lane never had its budget of
+  // turns. It gets a short grace instead of being dropped, and is dropped
+  // only when a timer fires on time after the deadline, or at the hard stop.
+  // Sparta, 2026-11-10 (#1079): with the thread held 32-45 s during a
+  // dashboard Ask, every lane missed its 10 s deadline together and the Ask
+  // reported every source as unsearchable, although the lanes had found
+  // candidates.
+  const hardStopAtMs = clock.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise<{ kind: 'timeout' }>((resolve) => {
-    timer = setTimeout(() => resolve({ kind: 'timeout' as const }), timeoutMs);
+    const arm = (delayMs: number) => {
+      const dueAtMs = clock.now() + delayMs;
+      timer = clock.setTimeout(() => {
+        const now = clock.now();
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
+          arm(HELD_THREAD_GRACE_MS);
+          return;
+        }
+        resolve({ kind: 'timeout' as const });
+      }, delayMs);
+    };
+    arm(timeoutMs);
   });
 
   try {
@@ -777,6 +878,11 @@ async function runCorpusLaneWithDeadline(
       });
       return { kind: 'timeout', elapsedMs };
     }
+    if (settled.kind === 'error' && isSourceIndexLaneBusyError(settled.error)) {
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: 'timeout' });
+      return { kind: 'timeout', elapsedMs };
+    }
     if (settled.kind === 'error') {
       recordSourceAnswerCorpusTiming({
         corpus_id: corpusId,
@@ -795,7 +901,7 @@ async function runCorpusLaneWithDeadline(
     });
     return { kind: 'response', response: settled.response, elapsedMs };
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer !== undefined) clock.clearTimeout(timer);
   }
 }
 

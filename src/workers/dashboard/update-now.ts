@@ -96,7 +96,7 @@ export function renderUpdateNotice(input: UpdateNoticeInput & { deferScript?: bo
     rootId: `${prefix}-notice`,
     words: WORDS,
   };
-  return `<section class="upd" id="${prefix}-notice" data-update-notice data-update-state="${view?.state ?? 'none'}"${view ? '' : ' hidden'} aria-live="polite">`
+  return `<section class="upd" id="${prefix}-notice" data-update-notice data-update-state="${view?.state ?? 'none'}" data-update-version="${esc(input.available?.version ?? '')}"${view ? '' : ' hidden'} aria-live="polite">`
     + `<div class="upd-row"><p class="upd-title" data-update-text><strong data-update-title>${esc(view?.title ?? '')}</strong>`
     + `<span class="upd-detail" data-update-detail${view?.detail ? '' : ' hidden'}>${view?.detail ? ` · ${esc(view.detail)}` : ''}</span></p>`
     + (input.selfUpdate ? `<button class="btn primary upd-now" type="button" data-update-now${offer ? '' : ' hidden'}>${esc(C.updateNow)}</button>` : '')
@@ -157,6 +157,9 @@ function updateNoticeProgram(config: {
   const q = <T extends Element>(selector: string) => root.querySelector<T>(selector);
   const fillIn = (template: string, values: Record<string, string | number>) =>
     template.replace(/\{(\w+)\}/g, (_m: string, key: string) => '' + (values[key] ?? ''));
+  // The version on offer: Home's own update check can find one after the page
+  // was drawn, and writes it to data-update-version (host-page refreshUpdate).
+  const available = () => root!.getAttribute('data-update-version') || config.available;
   let csrf = config.csrfToken;
   let local = config.localSession;
   let polling = false;
@@ -201,9 +204,9 @@ function updateNoticeProgram(config: {
     } else if (status.state === 'done' && status.version) {
       show('done', fillIn(words.done, { version: status.version }), '', '', 0, false);
     } else if (status.state === 'rolled_back' && status.to && status.from) {
-      show('rolled_back', fillIn(words.rolledBack, { to: status.to, from: status.from }), '', '', 0, !!config.available);
+      show('rolled_back', fillIn(words.rolledBack, { to: status.to, from: status.from }), '', '', 0, !!available());
     } else if (status.state === 'failed') {
-      show('failed', words.failures[status.reason || ''] || words.failedFallback, '', '', 0, !!config.available);
+      show('failed', words.failures[status.reason || ''] || words.failedFallback, '', '', 0, !!available());
     }
   }
   // async, not Promise.resolve: a page's VM may not expose the Promise global by name.
@@ -211,9 +214,10 @@ function updateNoticeProgram(config: {
   async function unlock(): Promise<boolean> {
     if (local && csrf) return false;
     // This computer's own session: the worker grants it only to a loopback
-    // browser presenting no bearer, so an agent never reaches Update now.
+    // browser presenting no bearer, with the page's session and its CSRF
+    // token (#1187), so an agent never reaches Update now.
     try {
-      const response = await fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' });
+      const response = await fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'X-Olympus-CSRF': csrf } });
       const body = (response.ok ? await response.json() : undefined) as { csrf_token?: unknown } | undefined;
       if (body && typeof body.csrf_token === 'string' && body.csrf_token) { csrf = body.csrf_token; local = true; return true; }
     } catch { /* The start call then says why it was refused. */ }
@@ -257,14 +261,34 @@ function updateNoticeProgram(config: {
   // A newly minted session replaces this page's control cookie, so every other
   // control here (Home's tools, Settings) would still send the old session's
   // CSRF token and be refused. The page reloads to take the new session, and
-  // these one-shot marks carry on what it was doing after the reload.
+  // these one-shot marks carry on what it was doing after the reload. A mark
+  // is the page address's fragment, never browser storage, and is taken off
+  // the address as soon as the reloaded page reads it.
   const resumeKey = 'olympus-update-now';
   const followKey = 'olympus-update-follow';
+  // The address without a launch token: a reload with ?token= would be read
+  // as a bearer page again and lose the local session it just took.
+  const here = () => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('token');
+    const rest = params.toString();
+    return window.location.pathname + (rest ? '?' + rest : '');
+  };
+  // A mark keeps the fragment it replaced (Settings shows its pane through the
+  // fragment, `#updates`), and taking the mark puts that fragment back.
   function take(key: string): string {
-    try { const value = window.sessionStorage.getItem(key) || ''; window.sessionStorage.removeItem(key); return value; } catch { return ''; }
+    try {
+      const hash = window.location.hash;
+      if (hash !== '#' + key && !hash.startsWith('#' + key + '~')) return '';
+      const prior = hash.slice(key.length + 2);
+      if (prior) window.location.replace(here() + '#' + prior);
+      else window.history.replaceState(window.history.state, '', here());
+      return '1';
+    } catch { return ''; }
   }
-  function keep(key: string, value: string): boolean {
-    try { window.sessionStorage.setItem(key, value); return true; } catch { return false; }
+  function keep(key: string, _value: string): boolean {
+    const prior = window.location.hash.replace(/^#/, '');
+    try { window.history.replaceState(window.history.state, '', here() + '#' + key + (prior ? '~' + prior : '')); return true; } catch { return false; }
   }
   const resume = take(resumeKey);
   const followed = take(followKey);
@@ -292,12 +316,14 @@ function updateNoticeProgram(config: {
       unlock().then((fresh) => {
         if (!fresh) { startUpdate(button); return; }
         // Without storage the reload still happens; a second click then starts it.
-        keep(resumeKey, config.available);
+        // The mark is the click itself, not a version: Home may have learned
+        // of the update after this page was drawn.
+        keep(resumeKey, '1');
         window.location.reload();
       });
     });
     // After that reload: the update the click asked for, once.
-    if (resume && resume === config.available && local && csrf && !button.hidden) startUpdate(button);
+    if (resume && local && csrf && !button.hidden) startUpdate(button);
   }
   // A page opened, or reloaded, while an update runs keeps following it
   // (reloading once first if that took a new session).

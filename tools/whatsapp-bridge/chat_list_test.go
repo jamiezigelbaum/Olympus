@@ -37,7 +37,7 @@ func TestListChatsRejectsUnpairedSessionWithoutConnecting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer container.Close()
-	if err = runListChatsMode(context.Background(), container); err == nil || err.Error() != "session_not_paired" {
+	if err = runListChatsMode(context.Background(), container, t.TempDir()); err == nil || err.Error() != "session_not_paired" {
 		t.Fatalf("err = %v", err)
 	}
 }

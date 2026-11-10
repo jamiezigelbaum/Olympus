@@ -29,9 +29,7 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import {
-  countOwnerTierItems,
   createOwnerTierItems,
-  getOwnerTierItem,
   ownerTierItemId,
   parseOwnerTierItemId,
   type OwnerTierItem,
@@ -69,6 +67,8 @@ const verdictFor = (material: string) => /loan terms|bank letter/i.test(material
 let root: string;
 let env: Record<string, string>;
 let ownerWords: string | undefined;
+// A file renamed or moved at its source, by id: the next sync lists it this way.
+let renamed: Record<string, { name: string; path: string }> = {};
 const closers: Array<() => void> = [];
 
 beforeEach(() => {
@@ -80,6 +80,7 @@ beforeEach(() => {
     OLYMPUS_PRIVACY_PROFILE_PATH: join(root, 'olympus', 'privacy.json'),
   };
   ownerWords = undefined;
+  renamed = {};
 });
 
 afterEach(() => {
@@ -126,11 +127,13 @@ async function start(options: { extract: boolean }) {
     lane.internal.current()?.close();
     lane.public.current()?.close();
   });
-  const entries = FILES.map((file) => ({ tag: 'file' as const, id: file.id, name: file.name, pathDisplay: file.path, rev: 'r1' }));
+  const entries = () => FILES.map((file) => ({
+    tag: 'file' as const, id: file.id, name: renamed[file.id]?.name ?? file.name, pathDisplay: renamed[file.id]?.path ?? file.path, rev: 'r1',
+  }));
   const metadataClient: DropboxMetadataClient = {
     supportsNativeRecursive: true,
-    async listFolder(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c1', hasMore: false }; },
-    async listFolderContinue(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c2', hasMore: false }; },
+    async listFolder(): Promise<DropboxMetadataPage> { return { entries: entries(), cursor: 'c1', hasMore: false }; },
+    async listFolderContinue(): Promise<DropboxMetadataPage> { return { entries: entries(), cursor: 'c2', hasMore: false }; },
   };
   const broker = new StaticCredentialBroker([{
     handle: 'dropbox.personal', provider: 'dropbox', allowedCapabilities: ['dropbox.files.sync'], token: 'test-token', trustDomain: 'secure_local',
@@ -227,40 +230,6 @@ describe('finding an item', () => {
     expect(() => parseOwnerTierItemId('oti_bm9wZQ')).toThrow('item_id');
   });
 
-  test('the dashboard reads the start of what the item says; an agent never does', async () => {
-    await judged();
-    expect(ownerItems().find({ query: 'bank letter', withPreview: true }).items[0]?.preview).toBe(FILES[1].text);
-    expect(ownerItems().find({ query: 'bank letter' }).items[0]).not.toHaveProperty('preview');
-    expect(ownerItems().find({ query: 'bank', withPreview: true, personalNamesOnly: true }).items[0]).not.toHaveProperty('preview');
-  });
-
-  test('the dashboard\'s filters and counts: by label, and the items the owner changed', async () => {
-    await judged();
-    const titles = (filter: 'personal' | 'private' | 'changed') => ownerItems().find({ recent: true, filter }).items.map((found) => found.title);
-    expect(countOwnerTierItems({ storePaths: storePaths() })).toEqual({ personal: 1, private: 1, changed: 0 });
-    expect(titles('private')).toEqual(['bank letter.pdf']);
-    expect(titles('personal')).toEqual(['orchard-plan.pdf']);
-    expect(titles('changed')).toEqual([]);
-    // Paging further back: only items decided before the given time.
-    const [newest, older] = ownerItems().find({ recent: true }).items;
-    expect(ownerItems().find({ recent: true, before: newest!.decided_at! }).items.map((found) => found.item_id))
-      .toEqual(older && older.decided_at! < newest!.decided_at! ? [older.item_id] : []);
-    expect(() => ownerItems().find({ recent: true, before: 'not a time' })).toThrow('before');
-    expect(() => ownerItems().find({ query: 'bank', filter: 'private' })).toThrow('filter');
-    ownerItems().set({ itemId: bankItem().item_id, choice: 'personal', allowLower: true });
-    expect(titles('changed')).toEqual(['bank letter.pdf']);
-    expect(ownerItems().counts!()).toMatchObject({ changed: 1 });
-  });
-
-  test('one item by its id, with its preview; a Secret or unknown item is not returned', async () => {
-    await judged();
-    const itemId = bankItem().item_id;
-    expect(getOwnerTierItem(itemId, { storePaths: storePaths() }, { withPreview: true })).toMatchObject({ title: 'bank letter.pdf', tier: 'Private', preview: FILES[1].text });
-    expect(getOwnerTierItem(ownerTierItemId({ ...bankIdentity, providerItemId: 'id:none' }), { storePaths: storePaths() })).toBeUndefined();
-    await runTierCommand(['set', 'id:bank', 'secrets'], { storePaths: storePaths() });
-    expect(getOwnerTierItem(itemId, { storePaths: storePaths() })).toBeUndefined();
-  });
-
   test('for an agent, an item whose names are Private is left out', async () => {
     await judged();
     // The bank letter's names stay Personal (only its text is Private): listed.
@@ -268,6 +237,20 @@ describe('finding an item', () => {
     await runTierCommand(['set', 'id:garden', 'private'], { storePaths: storePaths() });
     expect(ownerItems().find({ query: 'orchard-plan', personalNamesOnly: true }).items).toEqual([]);
     expect(ownerItems().find({ query: 'orchard-plan' }).items).toHaveLength(1);
+  });
+
+  test('for an agent, an item whose names still await their verdict is left out', async () => {
+    const install = await judged();
+    const current = install.lane.ledger.getCurrent(bankIdentity)!;
+    // The names are re-asked: pending, recorded at the default tier until answered.
+    install.lane.ledger.recordRoutedPlacement(bankIdentity, {
+      metadataTier: 'private', contentTier: current.contentTier, decidedBy: 'sniffer', reasons: [], state: 'pending',
+      contentRead: true, metadataPending: true, contentPending: false, metadataForced: false, metadataFlagged: true,
+      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: 'test',
+    }, { copies: [], embedHold: false }, { staleCopiesGone: true });
+    expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ metadataPending: true, metadataTier: 'private' });
+    expect(ownerItems().find({ query: 'bank', personalNamesOnly: true }).items).toEqual([]);
+    expect(ownerItems().find({ query: 'bank' }).items).toHaveLength(1);
   });
 });
 
@@ -284,10 +267,13 @@ describe('one item, Private -> Personal -> Private', () => {
 
     // The owner, on the dashboard: Personal. It applies at the next pass and then serves.
     expect(ownerItems().set({ itemId, choice: 'personal', allowLower: true })).toMatchObject({ ok: true, changed: 'set', applies: 'next_pass' });
+    // Until that pass, a reload still shows what the owner chose.
+    expect(bankItem()).toMatchObject({ tier: 'Private', owner_choice: 'Personal', owner_set: true });
     await install.service.runOnce();
     expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private', decidedBy: 'override' });
     expect(await search(install, 'loan terms')).toContain(LOAN_TEXT);
     expect(bankItem()).toMatchObject({ tier: 'Personal', decided_by: 'override', owner_set: true });
+    expect(bankItem().owner_choice).toBeUndefined();
 
     // A re-judge leaves the owner's word alone, whatever the judge would say now.
     ownerWords = 'Anything about money is private.';
@@ -340,6 +326,32 @@ describe('one item, Private -> Personal -> Private', () => {
     // Nothing left to restore, and undo on an item nobody set says so.
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
     expect(ownerItems().set({ itemId, choice: 'judge', allowLower: true })).toMatchObject({ ok: false, code: 'not_owner_set' });
+  });
+
+  test('undo after the file was renamed while the owner\'s word stood: it stays Private and is asked about under its new name', async () => {
+    const install = await judged();
+    const [garden] = ownerItems().find({ query: 'orchard-plan' }).items;
+    expect(garden).toMatchObject({ tier: 'Personal' });
+    expect(ownerItems().set({ itemId: garden!.item_id, choice: 'private', allowLower: true })).toMatchObject({ ok: true, changed: 'set' });
+    await install.service.runOnce();
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+
+    // Renamed at the source while it is held Private: the judge's Personal was about the old name.
+    renamed = { 'id:garden': { name: 'orchard-plan-2027.pdf', path: '/Notes/orchard-plan-2027.pdf' } };
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    expect(ownerItems().set({ itemId: garden!.item_id, choice: 'judge', allowLower: true })).toMatchObject({ ok: true, changed: 'cleared' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 1 });
+    // Back to the judge, still Private, and the earlier verdict's receipts are not carried over.
+    const restored = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(restored).toMatchObject({ contentTier: 'secure' });
+    expect(restored.decidedBy).not.toBe('override');
+    expect(restored.reasons.some((reason) => reason.startsWith('content:names:'))).toBe(false);
+    // The judge's question is asked again with the new name; nothing lowers it on the old one.
+    for (let pass = 0; pass < 4; pass += 1) await install.service.runOnce();
+    const judgedAgain = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(judgedAgain).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(judgedAgain.decidedBy).not.toBe('override');
+    expect(judgedAgain.reasons.some((reason) => reason.startsWith('content:names:'))).toBe(true);
   });
 
   test('undo under an always-Private rule added while the owner\'s word stood: the rule holds, across a restart', async () => {

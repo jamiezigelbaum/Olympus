@@ -16,6 +16,7 @@ test.each(cases)('%s renders its requested fixture on the local Keys page', (sta
   expect(page).toContain(`data-messaging-source="${state.split('-')[0]}"`);
   expect(page).toContain('data-messaging-kind="start"');
   expect(page).toContain('data-preview-messaging');
-  if (state === 'whatsapp-chats') expect(page).toContain('may omit unsaved chats');
+  // The chooser says the WhatsApp list shows saved contacts and groups (#1075).
+  if (state === 'whatsapp-chats') expect(fixture).toMatchObject({ coverage: 'contacts_and_joined_groups' });
   if (state.endsWith('-chats')) expect(fixture).toMatchObject({ wholeAccount: false, chatScopes: ['preview:1'] });
 });

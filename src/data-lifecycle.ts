@@ -1,4 +1,6 @@
+import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
+import { APP_RELEASE_LOG_STORE_ID, appReleaseLogDbPath } from './core/app-release-log.ts';
 import { spawnSync } from 'node:child_process';
 import {
   embeddingPrefilterDirectory,
@@ -13,7 +15,9 @@ import {
 } from './workers/classification/tier-ledger-path.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -85,6 +89,7 @@ import {
 } from './core/source-registry.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
 import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolvePrivacyProfilePath } from './workers/classification/privacy-profile.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import {
   olympusDataRoots,
@@ -154,11 +159,18 @@ export interface DataExportResult {
   files: string[];
   skipped: string[];
   artifacts: DataExportArtifact[];
+  /**
+   * The prepared pictures the exported stores' chunks reference: how many
+   * travel in the export (`media/<sha256>.jpg`), and how many were referenced
+   * but not on this computer (or not the bytes their name says), so were left
+   * out. A restore points each chunk at its picture in the new install's cache.
+   */
+  media: { exported: number; missing: number };
 }
 
 export interface DataExportArtifact {
   sourceId: string;
-  role: 'legacy_store' | 'connector_store' | 'tier_sidecar' | 'sanitized_config' | 'owner_rules';
+  role: 'legacy_store' | 'connector_store' | 'tier_sidecar' | 'sanitized_config' | 'owner_rules' | 'media';
   relativePath: string;
   /**
    * Version 3: a connector store's place in its account's store list, and
@@ -170,9 +182,11 @@ export interface DataExportArtifact {
   /**
    * `owner_rules`: which owner file this is. `mail_always_private` is the mail
    * picker's "always Private" senders on their own, without the approval
-   * (bound to this computer's grant) that holds them.
+   * (bound to this computer's grant) that holds them. `privacy_profile` is the
+   * owner's privacy profile, which owns the `privacy-` tier rules: it travels
+   * with them, or the next profile save on the new computer drops them.
    */
-  ownerFile?: 'tier_rules' | 'ingestion_exclusions' | 'mail_always_private';
+  ownerFile?: 'tier_rules' | 'privacy_profile' | 'ingestion_exclusions' | 'mail_always_private';
   bytes: number;
   sha256: string;
   sqlite?: {
@@ -362,6 +376,9 @@ export function exportOlympusData(options: {
   const files: string[] = [];
   const skipped: string[] = [];
   const artifacts: DataExportArtifact[] = [];
+  // The pictures the exported stores' chunks point at, by digest: the first
+  // source that references one carries it.
+  const mediaRefs = new Map<string, { path: string; sourceId: string }>();
 
   for (const source of selected) {
     const sourceRoot = join(destination, 'sources', safePathSegment(source.sourceId));
@@ -393,7 +410,13 @@ export function exportOlympusData(options: {
         skipped,
         artifacts,
       });
-      if (artifacts.length > before) artifacts[before]!.storeIndex = storeIndex;
+      if (artifacts.length > before) {
+        artifacts[before]!.storeIndex = storeIndex;
+        // Read from the snapshot, so the pictures are the ones the exported rows name.
+        for (const row of readChunkMediaRefs(join(destination, artifacts[before]!.relativePath))) {
+          if (!mediaRefs.has(row.media_sha256)) mediaRefs.set(row.media_sha256, { path: row.media_path, sourceId: source.sourceId });
+        }
+      }
       // The store's privacy judgments, its sniffer queue and its secret
       // locations sit beside it. Without them a restore judges every item
       // again, which on a laptop takes nights (#1065). A ledger can exist
@@ -456,12 +479,15 @@ export function exportOlympusData(options: {
   // leaves behind like every other secret. Named, so the manifest says so.
   // Waiting private questions are Private-derived questions kept only until
   // answered on this computer: never exported, named like the connections.
+  // So is the list of what each AI app received (core/app-release-log.ts).
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath)]) {
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath), appReleaseLogDbPath(connectionsPath)]) {
       if (existsSync(path)) skipped.push(path);
     }
   }
+
+  const media = exportReferencedMedia(mediaRefs, destination, durabilityBoundary, files, artifacts);
 
   const configRoot = join(destination, 'config');
   makeDurableDirectory(configRoot, durabilityBoundary);
@@ -479,6 +505,10 @@ export function exportOlympusData(options: {
     const env = envForContext(options);
     for (const [ownerFile, sourcePath, name] of [
       ['tier_rules', resolveTierRulesPath({ env }), 'tier-rules.json'],
+      // The privacy profile owns the tier rules whose id starts with
+      // `privacy-`: every save rewrites them from its own list, so rules
+      // restored without it are dropped by the owner's next save.
+      ['privacy_profile', resolvePrivacyProfilePath({ env }), 'privacy.json'],
       ['ingestion_exclusions', resolveSourceIngestionExclusionsPath(env), 'ingestion-exclusions.json'],
     ] as const) {
       const destinationPath = join(configRoot, name);
@@ -517,11 +547,83 @@ export function exportOlympusData(options: {
     secrets_excluded: true,
     files,
     skipped,
+    media,
     artifacts,
   }, null, 2));
   files.push(join(destination, 'manifest.json'));
 
-  return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
+  return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts, media };
+}
+
+/** Where an export keeps a prepared picture: its name in the media cache, under `media/`. */
+export const EXPORT_MEDIA_DIR = 'media';
+
+/** The pictures an exported store's chunks reference (none for a store without picture columns). */
+function readChunkMediaRefs(snapshotPath: string): Array<{ media_path: string; media_sha256: string }> {
+  const db = new Database(snapshotPath, { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const columns = (db.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
+    if (!columns.includes('media_path') || !columns.includes('media_sha256')) return [];
+    return db.query(`
+      SELECT DISTINCT media_path, media_sha256 FROM chunks
+      WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+    `).all() as Array<{ media_path: string; media_sha256: string }>;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Copies each referenced picture into `<export>/media/<sha256>.jpg`, its path
+ * relative to the media cache it came from, durably and owner-only. A picture
+ * that is not on this computer, is not a cache file, or whose bytes are not
+ * the digest it is named by is left out and counted: the export still holds
+ * the rows, which embed as text without it, as they would here.
+ */
+function exportReferencedMedia(
+  refs: ReadonlyMap<string, { path: string; sourceId: string }>,
+  destination: string,
+  durabilityBoundary: string,
+  files: string[],
+  artifacts: DataExportArtifact[],
+): { exported: number; missing: number } {
+  const counts = { exported: 0, missing: 0 };
+  if (refs.size === 0) return counts;
+  const mediaRoot = join(destination, EXPORT_MEDIA_DIR);
+  makeDurableDirectory(mediaRoot, durabilityBoundary);
+  for (const [sha256, { path, sourceId }] of refs) {
+    if (!isMediaCachePath(path, sha256) || !existsSync(path)) {
+      counts.missing += 1;
+      continue;
+    }
+    const target = join(mediaRoot, basename(path));
+    const staging = `${target}.${randomUUID()}.partial`;
+    try {
+      copyFileSync(path, staging);
+      chmodSync(staging, 0o600);
+      if (sha256File(staging) !== sha256) {
+        rmSync(staging, { force: true });
+        counts.missing += 1;
+        continue;
+      }
+      syncFileSync(staging);
+      renameSync(staging, target);
+    } catch (error) {
+      rmSync(staging, { force: true });
+      // Gone between the check and the copy: as missing as one never there.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        counts.missing += 1;
+        continue;
+      }
+      throw error;
+    }
+    files.push(target);
+    artifacts.push(fileArtifact(destination, target, sourceId, 'media'));
+    counts.exported += 1;
+  }
+  syncDirectorySync(mediaRoot);
+  return counts;
 }
 
 export function verifyOlympusDataExport(options: { destination: string }): DataExportVerificationResult {
@@ -981,6 +1083,7 @@ function forgetSharedRows(
     sourceAliases: source.aliases,
     knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
     tierLedgerIds: ledgers.ids,
+    tierLedgerPaths: source.files.stores.filter((store) => store !== ':memory:').map(tierLedgerPathForStore),
     unreadableTierLedgers: ledgers.unreadable,
   }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
 }
@@ -1311,6 +1414,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // connection token at once. Named on its own because XDG_DATA_HOME can put
     // it outside the known roots below.
     ...remoteConnectionsDeleteTargets(context),
+    // The people index (#1076): who is who across sources, and the owner's
+    // corrections. Named on its own because XDG_DATA_HOME can put it outside
+    // the known roots below.
+    ...sqliteDeleteTargets(peopleIndexPath(envForContext(context)), PEOPLE_INDEX_STORE_ID, context),
     // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
     // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
     // the known roots; it is always a directory Olympus created for itself.
@@ -1596,7 +1703,8 @@ function accountFolderTarget(path: string, context: LifecyclePathContext | undef
 /**
  * The connection database, its sidecars, and its pre-migration backup; and
  * the waiting private questions beside it (core/waiting-private-questions.ts),
- * which name those connections.
+ * which name those connections, and the list of what each AI app received
+ * (core/app-release-log.ts).
  */
 function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
   const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
@@ -1605,6 +1713,8 @@ function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTa
     ...targets,
     { ...targets[1]!, path: remoteConnectionsPreV2BackupPath(dbPath) },
     ...sqliteDeleteTargets(waitingPrivateQuestionsDbPath(dbPath), WAITING_PRIVATE_QUESTIONS_STORE_ID, context),
+    // What each AI app received (core/app-release-log.ts): questions and titles, kept like Private data.
+    ...sqliteDeleteTargets(appReleaseLogDbPath(dbPath), APP_RELEASE_LOG_STORE_ID, context),
   ];
 }
 

@@ -104,8 +104,10 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
   direct request must also come from a loopback peer address (not only a
   loopback Host), and the approve POST must be the browser's own navigation
   from the page (`Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: navigate`).
-  Possession of the Mac plus a click is the proof of ownership: no pairing
-  code, no account. See "Open decision: an owner-held approval" below.
+  A loopback peer is any account on the computer, so the click also needs
+  an owner proof (#1186): the owner socket on Linux, else the owner's live
+  dashboard control session in the same browser. No pairing code, no
+  account. See "Owner-held approval (decided, #1186)" below.
 - **The ChatGPT surface is chosen by a verified marker and a pinned grant.**
   The relay child writes its per-boot secret 0600 to the remote-access
   directory (`connect-relay/relay-secret`, removed when it stops); the worker
@@ -1024,7 +1026,9 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
   or through a launch ticket a bearer minted (the Gateway bridge holds that
   bearer for the agents it serves), `local` for a session minted by
   `POST /dashboard/control/session/local`, which refuses any
-  `Authorization` header and any non-loopback or proxied origin. The card
+  `Authorization` header, any non-loopback or proxied origin, and any
+  browser without a live control session of its own, owner socket or not
+  (#1153, #1188: the remote tunnel forwards the socket). The card
   shows a one-click "Unlock outside help on this Mac" to a bearer-grade
   session; a loopback browser presenting no bearer gets a local-grade
   cookie. The boundary (`DASHBOARD_CONSULT_CONTROL_PATHS` in
@@ -1390,23 +1394,50 @@ the release plan: [Olympus 1.0 (ChatGPT)](../V0_4_RELEASE.md#olympus-10-chatgpt)
 
 ## Security posture and residual risk
 
-### Open decision: an owner-held approval (for Jamie)
+### Owner-held approval (decided, #1186)
 
-Relay-mode approval today proves "a browser on this Mac clicked Connect":
-the request must come from a loopback peer with a loopback Host, carry no
-relay marker, and be a same-origin navigation POST with the page's CSRF
-token and cookie. That stops a page on the web, the LAN, and naive scripts.
-It does not stop a process on this Mac that can reach `127.0.0.1:<port>`:
-it can fetch the page, read the CSRF token and cookie, and POST with forged
-`Sec-Fetch-*` headers. That includes a process running as a different macOS
-user, which can reach loopback but cannot read the owner's files.
+Until #1186, relay-mode approval proved only "a browser on this computer
+clicked Connect": a loopback peer and Host, no relay marker, a same-origin
+navigation POST with the page's CSRF token and cookie. A program on the
+computer that can reach `127.0.0.1:<port>` could fetch the page, read the
+token and cookie, set `Sec-Fetch-*` itself and approve, including one run by
+another local account that cannot read the owner's files. An independent
+review reproduced that end to end, to a working grant.
 
-Proposed owner-held factor: the engine shows a native macOS dialog, "Allow
-ChatGPT to connect to Olympus?", on the owner's console session when an
-approval is posted, and issues the code only on Allow. A process without the
-owner's session cannot click it. Cost: one more click for the owner, and a
-dialog path to build for the standalone engine and the Gateway. Not built;
-no new confirmation step was added on 2026-10-02.
+Decision (2026-11-10): the approve POST also needs an owner proof.
+
+- **Over the Linux owner socket** (the owner bridge), the socket is the
+  proof, as for every other owner action there. Nothing changes.
+- **Elsewhere** (a Mac, a Linux engine with no owner socket, a server
+  reached through an SSH forward), the proof is a live dashboard control
+  session in the same browser, signed by this engine and bound to the page's
+  origin (`workers/http.ts` `dashboardOwnerSessionCheck`). Only the owner's
+  opening link (`olympus dashboard`, the menu bar, `olympus://open/…`, the
+  remote opening link) or the worker token opens one; since #1153 the local
+  mint needs one too. The session cookie has `Path=/dashboard`, so the
+  page's form posts to `/dashboard/connect/authorize` (the page itself stays
+  at `/connect/authorize`, where the relay's bridge sends the browser); the
+  page's own consent cookie is scoped to `/dashboard/connect` to match. The
+  page sends `Origin: null` under its `no-referrer` policy, so the engine
+  checks the cookie's origin tag against the page's own loopback origin.
+- **Without the session**, Connect does not approve: the page stays, says
+  "Open the Olympus dashboard in this browser first, then click Connect
+  again", links `olympus://open/dashboard` on a Mac, and spends nothing, so
+  the next click approves.
+
+Why this and not the native dialog proposed on 2026-10-02: it adds no step
+for an owner who has the dashboard open in that browser (sessions last 30
+days, and setup opens the dashboard), it works the same on a Mac, a Linux
+desktop and a headless server (where there is no console to show a dialog
+on, and the owner already approves through the remote opening link), and it
+reuses a proof that already guards every dashboard control rather than
+adding a dialog path to the standalone engine and the Gateway. Cost: an
+owner who connects from a browser with no live session takes one extra
+step, once per 30 days per browser.
+
+What it does not cover: a program running as the owner can read
+`worker.env` and so the worker token; that is the owner's own account and
+out of scope, as for every dashboard control.
 
 ### Accepted and proposed residual risks (2026-10-02)
 

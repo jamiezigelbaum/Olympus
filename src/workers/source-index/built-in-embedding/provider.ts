@@ -160,6 +160,11 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private pictureFaults: { count: number; heldUntilMs?: number } | undefined;
   private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
 
+  /** False when documents are embedded by a configured helper on another machine. */
+  runsOnThisComputer(): boolean {
+    return this.remote === undefined;
+  }
+
   constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
     this.env = options.env ?? process.env;
@@ -269,7 +274,13 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       // compile), so a question never waits for it; an ONNX load takes a second.
       if (this.spec.runtime === 'litert' || (status.state !== 'ready' && status.state !== 'loading')) {
         void this.load().catch(() => undefined);
-        throw new BuiltInEmbeddingNotReadyError(this.status());
+        // A model already on disk is starting, and a caller with time to spare
+        // may wait for it (awaitStartingQueryEmbedding, #1172). A download, or
+        // a start that just failed and is backing off, is not worth waiting on.
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === 'ready' || now.state === 'loading'),
+        });
       }
     }
     const model = await this.ready();
@@ -732,8 +743,8 @@ export function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddi
 export class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
   readonly status: BuiltInEmbeddingStatus;
 
-  constructor(status: BuiltInEmbeddingStatus, cause?: unknown) {
-    super(BUILT_IN_EMBEDDING_PROVIDER, 'timeout', 0);
+  constructor(status: BuiltInEmbeddingStatus, cause?: unknown, options: { modelStarting?: boolean } = {}) {
+    super(BUILT_IN_EMBEDDING_PROVIDER, 'timeout', 0, 0, options);
     this.name = 'BuiltInEmbeddingNotReadyError';
     this.status = status;
     // The status file is the shared record; a load that just failed in this

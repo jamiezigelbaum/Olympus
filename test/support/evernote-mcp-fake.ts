@@ -63,6 +63,7 @@ export const md5Hex = (bytes: Uint8Array): string => createHash('md5').update(by
 const READ_TOOLS = ['search_notes', 'search_notebooks', 'get_note', 'get_attachment', 'search_spaces'];
 
 let notebookSequence = 0;
+let noteSequence = 0;
 
 export class FakeEvernoteServer {
   readonly notebooks: FakeNotebook[];
@@ -132,7 +133,8 @@ export class FakeEvernoteServer {
   }
 
   addNote(note: Partial<FakeNote> & { title: string; created: number }): FakeNote {
-    const full: FakeNote = { id: randomUUID(), updated: note.created, ...note };
+    // Stable keys for the same reason as notebooks: a random id must never be what decides a note's tier.
+    const full: FakeNote = { id: `fixture-note-${++noteSequence}`, updated: note.created, ...note };
     this.notes.push(full);
     return full;
   }

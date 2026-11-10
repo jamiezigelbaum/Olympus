@@ -56,14 +56,22 @@ const onlyDeletedGone = (expected: string) => async ({ count, vars }: StepContex
 };
 const DISCARDED_NOTE = 'release check: this note is never saved';
 
+/** Home's status line (#1085): Home keeps source totals, and the Sources tab is the list. */
+const HOME_STATUS: Target = { css: '[data-home-status]' };
 /**
- * Home folds every source under All sources (1.4.0); the owner opens it to reach a source's row. Pressed only while it is folded, so a
- * fold the page opened on its own (an archive at work, or one that needs the owner) is left open.
+ * Home has no source list since 1.5 (#1085): a source's row is on Home only while an open link lands on it or an archive is at work
+ * or waiting on the owner. The step waits for Home to have drawn.
  */
 export const OPEN_ALL_SOURCES: Journey['steps'][number] = {
-  name: 'Open All sources',
-  do: { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
-  expect: [{ present: { css: 'details.home-sources[open]' }, frame: 'panel' }],
+  name: 'Home has drawn',
+  do: { observe: true },
+  expect: [{ present: HOME_STATUS, frame: 'panel' }],
+};
+/** The Sources tab: every connected source's row. */
+const OPEN_SOURCES_TAB: Journey['steps'][number] = {
+  name: 'Open the Sources tab',
+  do: { go: '/dashboard?connect' },
+  expect: [{ present: { css: '.srcrows' }, frame: 'host' }],
 };
 /** "Connect an agent", or "Connect another agent" once one is connected (the suite's own connection). */
 const CONNECT_AGENT: Target = { role: 'button', name: /^Connect (an|another) agent$/ };
@@ -125,58 +133,45 @@ export const JOURNEYS: readonly Journey[] = [
         name: 'Open the dashboard',
         do: { open: 'dashboard' },
         expect: [
-          { text: PANEL.home.allSources, frame: 'panel' },
+          { present: HOME_STATUS, frame: 'panel' },
           // The ingest has settled before the journeys run: nothing is still in progress, and no word says it is stuck.
           { noText: STUCK, frame: 'panel' },
           { noText: /\b[1-9]\d?% done\b/, frame: 'panel' },
         ],
       },
-      OPEN_ALL_SOURCES,
+      OPEN_SOURCES_TAB,
       {
         name: 'Readwise is listed and reads settled',
         do: { observe: true },
         expect: [
-          { text: 'Readwise', frame: 'panel' },
-          { noText: STUCK, frame: 'panel' },
-          { noText: /Readwise\s+—\s+(Needs you|Paused)/, frame: 'panel' },
+          { text: 'Readwise', frame: 'host' },
+          { noText: STUCK, frame: 'host' },
+          { noText: /Readwise\s+—\s+(Needs you|Paused)/, frame: 'host' },
         ],
       },
       {
         name: 'Look again after a reload',
         do: { reload: true },
-        expect: [{ text: PANEL.home.allSources, frame: 'panel' }, { noText: STUCK, frame: 'panel' }],
+        expect: [{ present: { css: '.srcrows' }, frame: 'host' }, { noText: STUCK, frame: 'host' }],
       },
-      OPEN_ALL_SOURCES,
-      { name: 'Readwise is still listed', do: { observe: true }, expect: [{ text: 'Readwise', frame: 'panel' }, { noText: STUCK, frame: 'panel' }] },
+      { name: 'Readwise is still listed', do: { observe: true }, expect: [{ text: 'Readwise', frame: 'host' }, { noText: STUCK, frame: 'host' }] },
     ],
   },
   {
     id: 'sources-healthy',
     title: 'Sources shows the connected source as healthy and the local-files card',
-    source: 'owner test plan: dashboard pass; the new "Files on this computer" card (#440, #443)',
+    source: 'owner test plan: dashboard pass; the new "Files on this computer" card (#440, #443); the Sources tab is the list (#1085)',
     steps: [
-      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.home.allSources, frame: 'panel' }] },
-      OPEN_ALL_SOURCES,
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
+      OPEN_SOURCES_TAB,
       {
         name: 'Look at the sources',
         do: { observe: true },
         expect: [
-          { count: { role: 'button', name: PANEL.moreActions.replace('{source}', 'Readwise'), contains: true }, equals: 1, frame: 'panel' },
-          { noText: /Readwise\s+—\s+(Needs you|Paused|Working)/, frame: 'panel' },
-          { text: 'Files on this computer', frame: 'panel' },
-          // Not yet chosen: the card offers Connect; once connected it offers Choose folders. Either way it has a control.
-          { custom: async ({ driver }) => {
-            const names = await driver.probe('panel', `(() => {
-              const label = Array.from(document.querySelectorAll('*')).filter((n) => /^Files on this computer/.test(__rc.clean(n.textContent)) && !Array.from(n.children).some((c) => /^Files on this computer/.test(__rc.clean(c.textContent))))[0];
-              for (let row = label; row && row !== document.body; row = row.parentElement) {
-                const buttons = Array.from(row.querySelectorAll('button')).filter((b) => b.getBoundingClientRect().width > 0 && !/More actions/.test(b.getAttribute('aria-label') || b.textContent));
-                if (buttons.length > 0) return buttons.map((b) => __rc.clean(b.getAttribute('aria-label') || b.textContent));
-              }
-              return [];
-            })()`) as string[];
-            const ok = names.some((name) => /^(Connect|Choose folders)$/i.test(name));
-            return { ok, expected: 'the Files on this computer card has a control: Connect, or Choose folders once connected', actual: ok ? `it has "${names.join('", "')}"` : `its controls are: ${names.join(', ') || 'none'}` };
-          } },
+          { count: { css: '[data-source-row="readwise.library"]' }, equals: 1, frame: 'host' },
+          { noText: /Readwise\s+—\s+(Needs you|Paused|Working)/, frame: 'host' },
+          // Connected, it is a row; not yet, it is a tile in Add a source. Either way the Sources tab offers it.
+          { count: { css: '[data-source-row="local.files"], [data-source-pick="local.files"]' }, atLeast: 1, frame: 'host' },
         ],
       },
     ],
@@ -216,7 +211,7 @@ export const JOURNEYS: readonly Journey[] = [
     title: 'The dashboard opens its own pages in place, and the way back works',
     source: 'bug found by hand: the dashboard opened its own pages in a new window (#370); the 1.4.0 top bar',
     steps: [
-      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: tab('Settings'), frame: 'host' }, { text: PANEL.home.allSources, frame: 'panel' }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: tab('Settings'), frame: 'host' }, { present: HOME_STATUS, frame: 'panel' }] },
       {
         name: 'Press Privacy in the top bar',
         do: { click: tab('Privacy'), frame: 'host' },
@@ -225,7 +220,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Go back with Home',
         do: { click: tab('Home'), frame: 'host' },
-        expect: [{ url: /^\/dashboard(?!\?)/ }, { noNewWindow: true }, { text: PANEL.home.allSources, frame: 'panel' }],
+        expect: [{ url: /^\/dashboard(?!\?)/ }, { noNewWindow: true }, { present: HOME_STATUS, frame: 'panel' }],
       },
       {
         name: 'Press Settings in the top bar',
@@ -240,7 +235,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Go back with Home again',
         do: { click: tab('Home'), frame: 'host' },
-        expect: [{ url: /^\/dashboard(?!\?)/ }, { text: PANEL.home.allSources, frame: 'panel' }],
+        expect: [{ url: /^\/dashboard(?!\?)/ }, { present: HOME_STATUS, frame: 'panel' }],
       },
     ],
   },

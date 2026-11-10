@@ -108,7 +108,7 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
       { id: 'private_model', label: 'Private model (on this computer, or Venice Private)', required_for: 'judging each imported item before its content may leave Private' },
     ],
     provider_ceiling: 'An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.',
-    supported_formats: ['mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)', 'headers', 'text/plain', 'text/html (stripped)', 'attachment names', 'WhatsApp chat exports (a chat .txt or .zip, or a folder of them)', 'message text', 'media file names', 'Reflect exports (JSON, or a zip of Markdown files)', 'Roam exports (JSON from Export All)', 'note titles, text, tags and dates', 'Telegram Desktop exports (result.json, Machine-readable JSON)', 'chat messages with their links', 'Telegram service messages (joins, calls, pins) and the account\'s profile, contacts, sessions and other data', 'picture and file names'],
+    supported_formats: ['mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)', 'headers', 'text/plain', 'text/html (stripped)', 'attachment names', 'WhatsApp chat exports (a chat .txt or .zip, or a folder of them)', 'message text', 'media file names', 'Reflect exports (JSON, or a zip of Markdown files)', 'Roam exports (JSON from Export All)', 'note titles, text, tags and dates', 'Telegram Desktop exports (result.json, Machine-readable JSON)', 'chat messages with their links', 'Telegram service messages (joins, calls, pins) and the account\'s profile, contacts, sessions and other data', 'picture and file names', 'ChatGPT data exports (the .zip, or its conversations.json)', 'Claude data exports (the .zip, or its conversations.json)', 'each conversation\'s title, dates and turns as shown (your prompts and the assistant\'s replies)'],
   },
   {
     source_id: 'x.bookmarks',
@@ -142,7 +142,7 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
     source_id: 'whatsapp.personal.messages',
     label: 'WhatsApp',
     authentication: { type: 'paired_session', ownership: 'one linked user device' },
-    contextual_scopes: ['live linked-device traffic', 'chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)', 'Status posts as their own kind'],
+    contextual_scopes: ['live linked-device traffic', 'the recent history WhatsApp sends at pairing, for the chats you choose', 'chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)', 'Status posts as their own kind'],
     dependencies: [{ id: 'whatsmeow_bridge', label: 'Packaged Whatsmeow bridge (Go and a C compiler for its first build)', required_for: 'QR pairing and live capture' }],
     provider_ceiling: 'Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.',
     supported_formats: ['message text', 'captions', 'link previews', 'reactions', 'media metadata', 'voice-note transcript sidecars', 'WhatsApp chat exports (a chat .txt or .zip) with their media listed by name'],

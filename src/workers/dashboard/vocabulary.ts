@@ -17,7 +17,7 @@ import type {
 } from '../source-dashboard.ts';
 import type { DashboardLivePassErrorKind, DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
-import { ARCHIVE_FORMATS } from '../../core/archive-formats.ts';
+import { ARCHIVE_FORMATS, archiveExportGuides } from '../../core/archive-formats.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { displayText } from './display-text.ts';
@@ -541,9 +541,12 @@ export function dashboardAttentionParts(
   // is in, because the row exists and has to explain itself; it just stops
   // quantifying a fault nobody can act on by the size of it.
   if (source.queue_health.needs_attention > 0) return withCapture('some items could not be read');
-  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture('a sync is retrying on its own');
+  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture(DASHBOARD_RETRYING_ON_ITS_OWN);
   return withCapture('');
 }
+
+/** A sync that failed and is trying again by itself: progress, not the owner's (#1044). */
+export const DASHBOARD_RETRYING_ON_ITS_OWN = 'a sync is retrying on its own';
 
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
@@ -1877,8 +1880,15 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     itemsOne: '1 item',
     itemsMany: '{n} items',
     checked: 'checked {when}',
-    allSources: 'All sources',
     progress: 'In progress',
+    /** A first index's time left, after its percent: "about 40 min left". */
+    left: 'about {duration} left',
+    /** Privacy items waiting to be checked: the Needs you line's button (#1085). */
+    openPrivacy: 'Open Privacy',
+    /** A source Olympus parked on its own budget (#1044), and when it resumes. */
+    waitBudget: 'daily {api} API budget used',
+    waitRateLimit: '{api} rate limit reached',
+    resumes: 'resumes at {local} ({utc} UTC)',
   },
   needsYou: 'Needs you',
   sources: 'Sources',
@@ -1985,10 +1995,12 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
   /**
    * The page-wide progress line names what stopped instead of a bare
-   * "stalled" (2026-10-10): "Dropbox paused", "Dropbox and Gmail paused",
-   * "Dropbox, Gmail and 2 more paused".
+   * "stalled" (2026-10-10), by why: a sync that keeps failing retries on its
+   * own; a lane the owner switched off says so. "Paused" is only an owner
+   * pause, and a source idle between runs is not named at all (#1044).
    */
-  stalledSources: '{sources} paused',
+  stalledRetrying: '{sources} retrying',
+  stalledOff: '{sources} switched off',
   stalledAnd: '{first} and {last}',
   stalledMore: '{count} more',
   /**
@@ -2124,6 +2136,33 @@ export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
  * "Other ways". It is the only place the locked state is explained: the
  * panel's controls are disabled without a reason of their own.
  */
+/**
+ * "Set up with my agent" (#1077, approved mockup 2-agent-brief, owner
+ * 2026-11-10): the short brief the owner copies to the agent they already
+ * use. It points the agent at `olympus setup status` (core/setup-checklist.ts)
+ * and says what the agent may and may not change.
+ */
+export const DASHBOARD_SETUP_AGENT_COPY = {
+  open: 'Set up with my agent',
+  title: 'Set up with my agent',
+  intro: "Copy this to the agent you already use (Claude, ChatGPT, Codex, OpenClaw). It will check what's done, run the steps it's allowed to, and send you a link here for anything that needs your click.",
+  brief: [
+    'Help me finish setting up Olympus on this computer.',
+    '',
+    '1. Run: olympus setup status',
+    "   It lists every setup step, what's done, and the one way forward for each.",
+    '2. Do the steps marked "you can run this" yourself.',
+    '3. For steps marked "needs the owner", give me the link it shows, wait for me, then run setup status again. Don\'t ask me what\'s on screen.',
+    "4. To change several settings at once, use olympus settings propose. I'll apply them with one click.",
+    '',
+    "You can't change what's Private, who has access, or what Olympus spends. Those always need my click in the dashboard.",
+  ].join('\n'),
+  copy: 'Copy for my agent',
+  copied: 'Copied',
+  copyFailed: 'Select the text and copy it.',
+  close: 'Close',
+} as const;
+
 export const DASHBOARD_HOST_GATE_COPY = {
   title: 'Dashboard controls are locked',
   open: 'Open dashboard controls',
@@ -2233,6 +2272,29 @@ export const DASHBOARD_ARCHIVE_COPY = {
     failed: 'The upload stopped before it finished. Nothing was imported. Try again.',
     several: '{n} items',
     chooseAnother: 'Start over',
+    /**
+     * The two paths (#660, owner 2026-10-31): the drop zone first for an
+     * archive already on this computer, then one step-by-step guide per app,
+     * from each format's registry entry, for asking that app for its export.
+     */
+    have: 'I already have my archive',
+    get: {
+      title: 'Get my archive',
+      line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+      step: 'Step {n} of {of}',
+      open: 'Open this page in {provider}',
+      next: "I've done this, next",
+      back: 'Back',
+      ready: "Come back when it's ready",
+      wait: 'Exports can take a few minutes, hours or days. When yours arrives, come back to this page.',
+    },
+    // The words only: each step's page reaches the picker in the computer
+    // meta (archiveSources guideLinks), so this page names no outside origin.
+    guides: archiveExportGuides().map((entry) => ({
+      id: entry.formatId,
+      ...entry.guide,
+      steps: entry.guide.steps.map(({ link, ...step }) => (link ? { ...step, link: { label: link.label } } : step)),
+    })),
   },
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },
@@ -2616,17 +2678,31 @@ export const DASHBOARD_PRIVACY_SETTINGS_COPY = {
   judgeLegend: 'Who sorts your items',
   judgeNow: 'Sorting now',
   judgeLocal: 'On this computer',
-  judgeLocalLead: 'Nothing leaves this computer.',
-  judgeLocalWhen: 'In the background while Olympus runs, using this computer',
+  judgeLocalLead: 'Nothing leaves this computer. When unsure, it keeps an item Private.',
+  judgeLocalWhen: 'On this computer',
   judgeLocalFit: 'Best if you can wait, or your archive is small.',
-  judgeVenice: 'Venice',
+  judgeMeasuredHere: 'Measured on this computer: {n} items a minute',
+  judgeMeasuredElsewhere: 'Measured on an {computer} on {date}, not on this computer yet',
+  judgeSecond: 'This computer, then Venice double-checks',
+  judgeSecondLead: 'This computer sorts everything. Venice re-reads only the items it kept Private, and frees the ones that are really Personal.',
+  judgeSecondWhen: 'Here first; about {n} items go to Venice',
+  judgeSecondWhenNote: 'These are the items most likely to be Private.',
+  judgeSecondFit: 'Best if you have a Venice account: fewer everyday items stuck as Private, for little money.',
+  judgeVenice: 'Venice sorts everything',
+  judgeVeniceLead: 'Venice reads every item to sort it, including items it marks Private.',
   judgeVeniceWhen: "In Venice's cloud, without slowing this computer",
-  judgeVeniceFit: 'Best for a big archive you want sorted soon. You set a spending limit and Olympus never goes past it.',
+  judgeVeniceFit: 'Best for a big archive you want sorted soon.',
   judgeCost: 'Cost',
   judgeTime: 'Time',
   judgeWhen: 'Where',
   judgeModel: 'Model',
-  judgeCap: 'Venice spending limit, in total (US dollars)',
+  judgeCap: 'Venice spending limit (total) $',
+  judgeCapDefault: 'Set to the estimate plus 25%. Olympus stops before going past it; anything not yet sorted stays Private and waits for this computer.',
+  judgeCapStops: 'Olympus stops before going past this limit; anything not yet sorted stays Private and waits for this computer.',
+  judgeOrder: 'Items you ask about are sorted first, so a question finds them within minutes. Then the newest items, taking turns between your sources.',
+  judgeToSecond: 'Have Venice double-check?',
+  judgeToSecondLine: 'This computer keeps sorting everything. Venice then re-reads only the items this computer kept Private, including those already sorted. Those are the items most likely to be Private, and Venice reads them to check. It frees an item to Personal only when it judges it Personal.',
+  judgeToSecondButton: 'Turn on the double-check',
   judgeToVenice: 'Switch sorting to Venice?',
   judgeToVeniceButton: 'Switch to Venice',
   judgeToLocal: 'Switch sorting to this computer?',
@@ -3302,6 +3378,42 @@ export const DASHBOARD_LOCAL_COPY = {
 } as const;
 
 /**
+ * What AI apps received (pages/apps-received.ts, #1061; signed-off mockup
+ * 3-shared-with-apps): one row per request an AI app or agent made.
+ */
+export const DASHBOARD_APPS_RECEIVED_COPY = {
+  title: 'What AI apps received',
+  intro: 'Every question an AI app asked Olympus, and the items Olympus shared to answer it. Only on this computer: never on a remote page or through the relay.',
+  keptFor: 'Kept for',
+  keptLabel: 'How long to keep this list',
+  includedInDeleteAll: 'included in Delete all',
+  retention: { 7: '7 days', 30: '30 days', 90: '90 days', 0: "Don't keep" } as Record<string, string>,
+  clear: 'Clear',
+  clearConfirm: 'Clear the list of what AI apps received? The items themselves stay in Olympus.',
+  none: 'No AI app has asked Olympus anything yet.',
+  notKept: 'Olympus is not keeping this list. Choose how long to keep it to start.',
+  shared: { one: '{n} Personal item shared', other: '{n} Personal items shared' } as Record<string, string>,
+  sharedPrivate: { one: '{n} Private item shared', other: '{n} Private items shared' } as Record<string, string>,
+  heldBack: '{n} Private held back',
+  noItems: 'answered without your items',
+  withheld: 'answer withheld under your privacy rules',
+  heldBackLine: { one: '1 Private item was held back.', other: '{n} Private items were held back.' } as Record<string, string>,
+  answeredPrivately: '{app} got an answer written on this computer, not the item.',
+  agentSuffix: '(agent)',
+  makePrivate: 'This should be Private',
+  madePrivate: 'Now Private',
+  makingPrivate: 'Making it Private…',
+  yesterday: 'Yesterday',
+  locked: 'Open dashboard controls to see what AI apps received.',
+  openControls: 'Open dashboard controls →',
+  unlock: 'Unlock on this computer',
+  unlockIntro: 'This list holds your questions and the titles shared, so it opens only on this computer.',
+  unavailable: 'This list is not available in this Olympus yet.',
+  failed: 'Olympus could not do that. Try again.',
+  unreachable: 'Olympus is not answering. Check that it is running.',
+} as const;
+
+/**
  * The Private answers page (pages/private-answers.ts; design
  * background-agents.md sections A and B, "Dashboard changes" 1 and 2).
  * The privacy ladder offers Local, zkAPI and Venice models; setup lives in Models.
@@ -3311,6 +3423,8 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   /** The Privacy page's two tabs: Private questions (?private-answers) and Privacy settings (?keys). */
   tabQuestions: 'Private questions',
   tabSettings: 'Privacy rules',
+  /** The third tab (#1061): what each AI app received (pages/apps-received.ts). */
+  tabApps: 'What AI apps received',
   tabsLabel: 'Privacy',
   title: 'Ask privately',
   intro: "When you ask your AI app about Private things, the app still sees the question. Asked here, it doesn't.",
@@ -3419,6 +3533,9 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   sources: 'Sources',
   open: 'Open',
   leftOut: 'Left out: {sources}. Olympus cannot search them on this computer.',
+  // A search that ran out of time (#1079): Olympus was busy, not unable.
+  busy: 'Olympus was too busy to search {sources} in time. Ask again in a moment.',
+  notSearched: 'Olympus could not search your sources this time, so it cannot say whether the answer is here.',
   unanswered: 'Not found here: {parts}.',
   notFound: 'Nothing on this computer answers this.',
   noModel: 'The model built into Olympus is not set up yet.',
@@ -3749,139 +3866,3 @@ export function privateAnswerFailure(reason: unknown, mapping = PRIVATE_ANSWER_F
   return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(mapping, reason)
     ? mapping[reason as keyof typeof mapping] : { message: 'Olympus could not answer this.', action: 'Try again.' };
 }
-
-/**
- * Privacy › Your items (issues #1060, #887; mockups release-1.5/l3/v2 L3-1 to
- * L3-3, L3-6): find one item and change its label, Personal or Private, for
- * that item only. Lowering to Personal asks first; raising never does.
- */
-export const DASHBOARD_PRIVACY_ITEMS_COPY = {
-  tab: 'Your items',
-  title: 'Your items',
-  intro: 'Olympus judges each item on its own. If it got one wrong, change it here.',
-  searchLabel: 'Search your items',
-  searchPlaceholder: 'Search by title, sender or file name',
-  recentHeading: 'Recently sorted',
-  filtersLabel: 'Show',
-  resultsHeading: 'Matching items',
-  loading: 'Loading…',
-  empty: 'Nothing sorted yet. Items show here once Olympus has read them.',
-  noMatch: 'No items match. Try part of a title, a sender or a file name.',
-  apps: 'An AI app can ask to make an item Private. Only you, here on this computer, can make one Personal.',
-  changedByYou: 'Changed by you',
-  notSorted: 'Not sorted yet',
-  moving: 'Moving to {tier}',
-  untitled: 'Untitled item',
-  close: 'Close',
-  previewCaption: 'What it says · shown only on this computer',
-  noPreview: 'Olympus has not read this item\'s text yet.',
-  whoCaption: 'Who can read this item',
-  personalLine: 'Your AI apps and agents can read it.',
-  privateLine: 'Only your private model reads it.',
-  judgeChose: 'The judge chose {tier}:',
-  judgeMarked: 'The judge marked this {tier}.',
-  youChose: 'You chose {tier}',
-  justNow: 'just now',
-  judgeSaid: 'The judge said {tier}.',
-  undo: 'Undo',
-  promise: 'Your choice changes this one item. It never becomes a rule for {group}, and re-judging leaves it alone.',
-  promiseGroup: '{sender} or your other items',
-  promiseGroupNoSender: 'its sender, chat or folder',
-  afterPersonal: 'Search and answers in your AI apps now include this item.',
-  afterPrivate: 'Your AI apps no longer see this item.',
-  afterNextPass: 'Olympus is moving it now; search and answers catch up within a few minutes.',
-  undoGivesBack: 'Undo gives it back to the judge.',
-  confirmTitle: 'Make this item Personal?',
-  now: 'now',
-  after: 'after',
-  afterPersonalLine: 'Your AI apps and agents can read it and quote it in answers.',
-  confirmOnly: 'Only this item changes. Everything else stays as the judge sorted it. You can undo this at any time.',
-  cancel: 'Cancel',
-  makePersonal: 'Make Personal',
-  toastPersonal: 'Made Personal. Your AI apps can now read it.',
-  toastPrivate: 'Made Private. Your AI apps no longer see it.',
-  toastJudge: 'Back to the judge\'s label.',
-  failed: 'That did not change. Try again.',
-  unreachable: 'Olympus is not responding. Try again in a moment.',
-  locked: 'Open dashboard controls to see and change your items.',
-  openControls: 'Open dashboard controls →',
-  unlockIntro: 'Your items need a session opened here, not by an agent or the launch link.',
-  unlock: 'Unlock on this computer',
-} as const;
-
-/**
- * The judge's stored reason is a code (`<category>:<confidence>`, sniffer.ts
- * snifferReasonCode, sometimes led by `record_held:`); the page shows a short
- * phrase for the category. One table, no per-question logic; an unknown code
- * falls back to the judge's label alone (DASHBOARD_PRIVACY_ITEMS_COPY.judgeMarked).
- */
-export const JUDGE_REASON_PHRASES: Readonly<Record<string, string>> = {
-  health: 'it is about health.',
-  therapy: 'it is about therapy or mental health.',
-  financial: 'it has money details, like amounts or account numbers.',
-  legal: 'it is about a legal matter.',
-  identity: 'it has identity details, like ID or account numbers.',
-  intimate: 'it is intimate.',
-  family: 'it is about family.',
-  work: 'it is work material.',
-  reference: 'it is reference material.',
-  ordinary: 'it is everyday material with nothing sensitive in it.',
-  injection: 'it held instructions aimed at the judge, so it was kept Private to be safe.',
-  unresolved: 'the judge could not decide, so it was kept Private to be safe.',
-};
-
-/** The phrase for a stored judge reason code, or undefined when the table has none. */
-export function judgeReasonPhrase(code: string | null | undefined): string | undefined {
-  if (!code) return undefined;
-  const bare = code.startsWith('record_held:') ? code.slice('record_held:'.length) : code;
-  const category = bare.split(':')[0] ?? '';
-  return Object.prototype.hasOwnProperty.call(JUDGE_REASON_PHRASES, category) ? JUDGE_REASON_PHRASES[category] : undefined;
-}
-
-/**
- * "Check the judge" on Private questions' Inbox (issue #887; mockups
- * release-1.5/l3/v2 L3-4, L3-5). Optional; the judge's label shows only after
- * the owner's answer; the result is a count and a likely range, measured
- * against the owner's answers, never the model's own confidence.
- */
-export const DASHBOARD_JUDGE_CHECK_COPY = {
-  title: 'Check the judge',
-  optional: 'optional',
-  roundDone: 'round done',
-  intro: '{total} of your items: the ones the judge was least sure about, plus a few picked at random. Olympus keeps reading and answering while you do this.',
-  offer: 'Answer 10 items to see how often the judge agrees with you.',
-  paused: 'You answered {answered} of {total}.',
-  start: 'Start',
-  resume: 'Continue',
-  putAway: 'Put away',
-  position: 'Item {position} of {total}',
-  question: 'How should this item be treated?',
-  personal: 'Personal',
-  personalHint: 'AI apps can read it',
-  private: 'Private',
-  privateHint: 'Only your private model',
-  notSure: 'Not sure',
-  notSureHint: 'Leave it to the judge',
-  hidden: "The judge's own answer shows after yours, so it doesn't sway you. Your answer settles this one item only. It never becomes a rule for {group}.",
-  hiddenGroup: '{sender} or this chat',
-  hiddenGroupNoSender: 'its sender, chat or folder',
-  you: 'You:',
-  agreed: 'Judge agreed',
-  changed: 'Judge said {judge} · changed',
-  notSureRow: 'Not sure · judge said {judge}',
-  soFar: 'So far the judge agreed with you on {agreed} of {compared}.',
-  tooFew: "That's too few to say how accurate it is.",
-  stop: 'Stop for now',
-  result: 'The judge agreed with you on {agreed} of {compared}.',
-  resultNone: 'You answered Not sure on every item, so there is nothing to compare yet.',
-  rangeLine: 'From {compared} answers, it would likely agree with you on {low}% to {high}% of your items.',
-  rangeLabel: 'Likely range {low}% to {high}%, on a scale of 0 to 100%',
-  honest: 'More answers make the range narrower. The number itself can go down as well as up. Your answers fix those items; they don\'t change how the judge decides.',
-  summary: '{changed} changed to your answer · {confirmed} confirmed · {notSure} “Not sure” left with the judge',
-  seeThem: 'See them in Your items',
-  done: 'Done',
-  more: 'Check 10 more',
-  nothing: 'Nothing to check yet: the judge has not sorted enough items.',
-  failed: 'That did not save. Try again.',
-  unreachable: 'Olympus is not responding. Try again in a moment.',
-} as const;

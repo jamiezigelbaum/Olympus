@@ -9,7 +9,7 @@ import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
+import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelCompletion, type SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
 import { privateChance, tierMass } from '../src/workers/classification/sniffer-decision-mass.ts';
 import { CachedTierSniffer, buildSnifferBatchPrompt, cachedSnifferVerdictHolds, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROMPT, snifferCacheModelId, snifferId, snifferPromptVersions, snifferReasonCode, snifferTierKey, snifferVerdictTier } from '../src/workers/classification/sniffer.ts';
 import { runSnifferPass, SnifferCallBudget, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY } from '../src/workers/classification/sniffer-resolver.ts';
@@ -20,7 +20,12 @@ import { TIER_CLASSIFIER_VERSION, classifyItemTiers } from '../src/workers/class
 import { BUILT_IN_REASONING_MODELS } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 
 type Event = { path: string; body: any };
+// The decision model keeps what it learned about a server per endpoint, for the whole process (an unsupported one
+// is re-probed after a minute). Port 0 can hand a later fake the port an earlier one freed, so each fake answers
+// under its own path: a new fake is a new endpoint, never a stale one (#898).
+let fakeServers = 0;
 function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; privateProbability?: number } = {}) {
+  const prefix = `/fixture-${++fakeServers}`;
   const events: Event[] = [];
   let fail = false;
   let unsupported = options.unsupported ?? false;
@@ -32,7 +37,9 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
   let peak = 0;
   const render = (messages: Array<{ role: string; content: string }>) => messages.map(m => `<${m.role}>${m.content}</${m.role}>`).join('') + '<assistant>';
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(req) {
-    const path = new URL(req.url).pathname;
+    const pathname = new URL(req.url).pathname;
+    if (!pathname.startsWith(`${prefix}/`)) return new Response('', { status: 404 });
+    const path = pathname.slice(prefix.length);
     const body = await req.json() as any;
     events.push({ path, body });
     active++; peak = Math.max(active, peak);
@@ -56,7 +63,7 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
     } finally { active--; }
   } });
   const lane: SnifferLane = { kind: 'local', modelId: 'fixture-model', profileId: 'fixture', profile: {
-    provider: 'local-openai-compatible', trust: 'local', model: 'fixture-model', baseUrl: `http://127.0.0.1:${server.port}/v1`, snifferMode: 'decision',
+    provider: 'local-openai-compatible', trust: 'local', model: 'fixture-model', baseUrl: `http://127.0.0.1:${server.port}${prefix}/v1`, snifferMode: 'decision',
   } };
   const fullRequests: unknown[] = [];
   const full: AnalystModel = { async complete(request) { fullRequests.push(request); return { modelId: lane.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', confidence: 0.7, ownRecord: false, privateKind: 'none' }] }) }; } };
@@ -206,6 +213,22 @@ describe('native sniffer decision', () => {
       expect(snifferVerdictTier(stored, { ...f.lane, cacheModelId: small.modelId }, ['content:own_record:fixture']).tier).toBe('secure');
       expect(parseSnifferBatchResponse(JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'decision', confidence: 0.7, ownRecord: false, privateKind: 'none' }] }), new Set([1])).size).toBe(0);
     } finally { store.close(); ledger.close(); f.stop(); tmp.cleanup(); }
+  });
+
+  test('the decision is taken at the lane bar and stores P(Private) recoverably (#1184)', async () => {
+    const f = fakeServer({ privateProbability: 0.2 });
+    const fourB = BUILT_IN_REASONING_MODELS.find(m => m.displayName === 'Qwen3.5 4B')!;
+    try {
+      const atDefault = await f.model().complete(request('a letter')) as SnifferModelCompletion;
+      expect(atDefault.decisionVerdict).toMatchObject({ tier: 'personal', category: 'decision' });
+      expect(atDefault.decisionVerdict!.confidence).toBeCloseTo(0.8);
+      f.lane.cacheModelId = `${fourB.modelId}:${fourB.revision}`;
+      const at4B = await f.model().complete(request('a letter')) as SnifferModelCompletion;
+      expect(at4B.decisionVerdict).toMatchObject({ tier: 'private', category: 'decision' });
+      expect(at4B.decisionVerdict!.confidence).toBeCloseTo(0.2);
+      expect(snifferVerdictTier(at4B.decisionVerdict!, f.lane, []).tier).toBe('secure');
+      expect(snifferTierKey(at4B.decisionVerdict!)).toBe('private');
+    } finally { f.stop(); }
   });
 
   test('no mass uses existing three-attempt fail-safe, re-priming each retry', async () => {

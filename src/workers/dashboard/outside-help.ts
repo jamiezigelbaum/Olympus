@@ -1038,7 +1038,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
   // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
   // (in memory), which says it again in the same form, with its section open.
   function formKey(form) {
-    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : form.hasAttribute('data-outside-save-languages') ? ':languages' : '');
   }
   function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
   (function showSaved() {
@@ -1061,7 +1061,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     var response;
     try {
       response = await fetch(path, body === null
-        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }
         : {
           method: 'POST', credentials: 'same-origin', cache: 'no-store',
           headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
@@ -1089,8 +1089,8 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       }
       message(form, config.copy.saving, false);
       try {
-        // The local unlock presents no credential at all: the boundary wants a
-        // loopback browser and nothing else. Every other form carries the CSRF token.
+        // The local unlock sends no body and no bearer, only the live session's
+        // CSRF token (#1187). Every other form carries the CSRF token and a body.
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var outcome = await send(paths[kind], body);
         if (!outcome.ok) return fail(outcome.text);
@@ -1104,7 +1104,8 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
+        // The switch's new state shows on the redrawn card; Save languages leaves nothing to see but its confirmation.
+        if ((kind !== 'enable' || form.hasAttribute('data-outside-save-languages')) && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
           redrawWhenBack(4000, form);

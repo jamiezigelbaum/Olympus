@@ -1,4 +1,5 @@
 import { escapeHtml, setupStepsSheet } from './components.ts';
+import { sourceLogoTile } from './source-logos.ts';
 
 /** Guide app registration, then use the existing local, in-memory prompt flow. */
 function telegramSetupSheet(): string {
@@ -17,20 +18,51 @@ function telegramSetupSheet(): string {
     + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
 }
 
-/** Local controls only: the QR and credentials never enter the remote panel. */
-export function renderMessagingCard(source: 'telegram' | 'whatsapp', localSession: boolean, connection: { paired: boolean; account?: string } = { paired: false }): string {
+/** Where the card sits: a dialog gives it the close button. */
+export interface MessagingCardOptions {
+  /** The card heads a dialog: its header carries the dialog's close button. */
+  closable?: boolean;
+}
+
+/**
+ * Local controls only: the QR and credentials never enter the remote panel.
+ *
+ * One primary action per state (#1086): not paired, Pair; paired, Choose chats,
+ * then Save inside the chooser. Check connection and Pair again sit in the
+ * header's ⋯ menu, so no row of buttons can overflow a phone-width dialog.
+ * The pairing explanation shows only before pairing. Elements marked
+ * data-paired-only / data-unpaired-only switch when a pairing completes.
+ */
+export function renderMessagingCard(source: 'telegram' | 'whatsapp', localSession: boolean, connection: { paired: boolean; account?: string } = { paired: false }, options: MessagingCardOptions = {}): string {
   const label = source === 'telegram' ? 'Telegram' : 'WhatsApp';
   const sourceId = source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages';
-  const form = (kind: string, text: string) => `<form method="dialog" data-messaging-kind="${kind}"${kind === 'cancel' ? ' hidden' : ''}><button class="btn${(connection.paired ? kind === 'chats' : kind === 'start') ? ' primary' : ''}" type="submit">${text}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml(label)}</h3>`
-    + (connection.paired ? `<p data-messaging-account>${connection.account ? `Linked account: ${escapeHtml(connection.account)}` : `Your linked ${label} account`}</p>` : '')
-    + (source === 'whatsapp' ? '<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>' : '')
-    + '<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>'
-    + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>'
-      : source === 'telegram'
-        ? `<p data-messaging-status role="status" aria-live="polite"></p><div class="actionrow">${connection.paired
-          // A connected state can come from old sync evidence while the session has expired, so pairing stays reachable.
-          ? form('chats', 'Choose chats') + form('status', 'Check connection') + '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>'
-          : '<button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + form('chats', 'Choose chats')}</div>${telegramSetupSheet()}<div data-messaging-chats></div></section>`
-        : `<div class="actionrow">${connection.paired ? form('chats', 'Choose chats') + form('status', 'Check connection') + form('start', 'Pair again') : form('start', `Pair ${label}`) + form('chats', 'Choose chats')}${form('cancel', 'Cancel pairing')}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
+  const paired = connection.paired;
+  const pairedOnly = paired ? ' data-paired-only' : ' data-paired-only hidden';
+  const unpairedOnly = paired ? ' data-unpaired-only hidden' : ' data-unpaired-only';
+  const accountLine = paired ? (connection.account ? `Linked account: ${escapeHtml(connection.account)}` : `Your linked ${label} account`) : 'Not paired yet';
+  const close = options.closable ? '<button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button>' : '';
+  const pairAgain = source === 'telegram'
+    // A connected state can come from old sync evidence while the session has expired, so pairing stays reachable.
+    ? '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>'
+    : '<form method="dialog" data-messaging-kind="start"><button class="btn" type="submit">Pair again</button></form>';
+  const menu = localSession
+    ? `<details class="rowmenu msgmenu"${pairedOnly}><summary class="btn" aria-label="More actions for ${label}">⋯</summary><div class="menu">`
+      + '<form method="dialog" data-messaging-kind="status"><button class="btn" type="submit">Check connection</button></form>'
+      + pairAgain + '</div></details>'
+    : '';
+  const head = `<div class="msghead">${sourceLogoTile(sourceId)}<div class="msgtitle"><h3>${escapeHtml(label)}</h3><p class="pnote" data-messaging-account>${accountLine}</p></div>${menu}${close}</div>`;
+  const intro = source === 'telegram'
+    ? 'Pair once with your Telegram app keys and a login code. Then choose which chats Olympus reads. Nothing is read until you choose.'
+    : 'Pair once with a QR code from WhatsApp on your phone. Then choose which chats Olympus reads. Nothing is read until you choose.';
+  const open = `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"${paired ? ' data-messaging-paired' : ''}>${head}`;
+  if (!localSession) {
+    return open + `<p>${intro}</p><p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>`;
+  }
+  const chats = `<form method="dialog" data-messaging-kind="chats"${pairedOnly}><button class="btn primary" type="submit">Choose chats</button></form>`;
+  const cancel = '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form>';
+  const status = '<p data-messaging-status role="status" aria-live="polite"></p>';
+  return open + `<p class="msgintro"${unpairedOnly}>${intro}</p>`
+    + (source === 'telegram'
+      ? `${status}<div class="actionrow msgactions"><button class="btn primary"${unpairedOnly} type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>${chats}</div>${telegramSetupSheet()}<div data-messaging-chats></div></section>`
+      : `<div class="actionrow msgactions"><form method="dialog" data-messaging-kind="start"${unpairedOnly}><button class="btn primary" type="submit">Pair ${label}</button></form>${chats}${cancel}</div><div data-messaging-view>${status}<img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
 }

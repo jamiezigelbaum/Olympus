@@ -17,6 +17,7 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync,
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  EXPORT_MEDIA_DIR,
   exportDurabilityBoundary,
   lifecycleAccountFiles,
   lifecycleEnv,
@@ -36,9 +37,11 @@ import {
   tierSnifferPathForStore,
 } from './workers/classification/tier-ledger-path.ts';
 import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolvePrivacyProfilePath } from './workers/classification/privacy-profile.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from './core/sqlite-store.ts';
+import { mediaCacheDir, retainMediaCacheFile } from './core/media-cache.ts';
 import {
   ACCOUNT_BOUND_SOURCE_IDS,
   readSourceAccountBindings,
@@ -50,8 +53,14 @@ import {
 import { compareProviderAccounts, mergeProviderAccountIds } from './core/provider-account-identity.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './core/source-registry.ts';
 import { placeOwnedAccount, recordProviderAccount } from './core/source-storage.ts';
-import { carryMailOwnerRules, defaultMailSourceScopeStatePath, normalizeSenders } from './core/mail-source-scope.ts';
-import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from './workers/connector-store/local-index.ts';
+import { assertMailOwnerRulesCarriable, carryMailOwnerRules, defaultMailSourceScopeStatePath, normalizeSenders } from './core/mail-source-scope.ts';
+import {
+  RESTORED_SCOPE_CONNECTOR_ID,
+  RESTORED_SCOPE_RUN_ID,
+  TIER_SET_BINDING_CONNECTOR_ID,
+  TIER_SET_BINDING_RUN_ID,
+} from './workers/connector-store/local-index.ts';
+import { getFileScopeSource } from './core/file-scope-sources.ts';
 import { TierLedger } from './workers/classification/tier-ledger.ts';
 import { TIER_LEDGER_FILE_SUFFIX } from './workers/classification/tier-ledger-path.ts';
 
@@ -61,7 +70,7 @@ export interface DataRestorePlanEntry {
   /** Where this install keeps it. */
   to: string;
   sourceId: string;
-  kind: 'store' | 'judgments' | 'owner_settings';
+  kind: 'store' | 'judgments' | 'owner_settings' | 'media';
   /** An owner settings file this computer already has: kept beside the restored one. */
   keptAs?: string;
   /** Merged into the file at `to` rather than copied over it (the mail picker's "always Private" senders). */
@@ -158,6 +167,16 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         plan.push({ from, to, sourceId: artifact.sourceId, kind: 'judgments' });
         break;
       }
+      case 'media': {
+        // A prepared picture, named by its digest: it goes into this install's
+        // media cache under the same name, and the restored rows are pointed at it.
+        const name = from.split('/').pop() ?? '';
+        if (from !== `${EXPORT_MEDIA_DIR}/${name}` || name !== `${artifact.sha256}.jpg`) {
+          throw new OperationError('invalid_params', `The backup names a picture that is not where a backup keeps one: ${from}.`);
+        }
+        plan.push({ from, to: join(mediaCacheDir(env), name), sourceId: artifact.sourceId, kind: 'media' });
+        break;
+      }
       case 'legacy_store':
         // A pre-1.0 per-family index: the stores beside it hold the same items
         // in today's layout, which is what an install opens.
@@ -170,10 +189,14 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
           const to = defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath(context));
           // Checked before anything is written: a list the picker would refuse is refused here.
           normalizeSenders((JSON.parse(readFileSync(join(input, from), 'utf8')) as { always_private_senders?: unknown }).always_private_senders, 'always Private');
+          // And the file they go into: one this computer cannot read would
+          // refuse them only after the stores were in place.
+          assertMailOwnerRulesCarriable(to);
           plan.push({ from, to, sourceId: 'olympus.config', kind: 'owner_settings', merge: 'mail_always_private' });
           break;
         }
         const to = artifact.ownerFile === 'tier_rules' ? resolveTierRulesPath({ env })
+          : artifact.ownerFile === 'privacy_profile' ? resolvePrivacyProfilePath({ env })
           : artifact.ownerFile === 'ingestion_exclusions' ? resolveSourceIngestionExclusionsPath(env)
             : undefined;
         if (!to) throw new OperationError('invalid_params', `The backup names an unknown settings file: ${from}.`);
@@ -266,7 +289,17 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
     const ledgers = plan
       .filter((entry) => entry.kind === 'judgments' && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX))
       .map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join(input, entry.from)) }));
+    // The pictures go into this install's media cache before the stores that
+    // point at them. The cache is content-addressed, so a picture this
+    // computer already holds under its digest is the same bytes and stays.
+    const pictures = new Map<string, string>();
     for (const entry of plan) {
+      if (entry.kind !== 'media') continue;
+      if (!existsSync(entry.to)) copyPrivate(join(input, entry.from), entry.to);
+      pictures.set(entry.to.split('/').pop()!.slice(0, -'.jpg'.length), entry.to);
+    }
+    for (const entry of plan) {
+      if (entry.kind === 'media') continue;
       if (entry.merge === 'mail_always_private') {
         const carried = JSON.parse(readFileSync(join(input, entry.from), 'utf8')) as { always_private_senders?: unknown };
         if (carryMailOwnerRules(entry.to, carried.always_private_senders) === 'kept_approval') {
@@ -275,10 +308,20 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
         continue;
       }
       if (entry.keptAs) copyPrivate(entry.to, entry.keptAs);
+      let held: string[] = [];
       const prepare = entry.kind === 'store'
-        ? (staged: string) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to)
+        ? (staged: string) => {
+            repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to);
+            held = repointMediaPaths(staged, (sha256) => pictures.get(sha256));
+            const secrets = plan.find((other) => other.kind === 'judgments' && other.to === secretLocationsPathForStore(entry.to));
+            recordRestoredScope(staged, entry.sourceId, identities.find((identity) => identity.sourceId === entry.sourceId)?.boundAccount, secrets ? join(input, secrets.from) : undefined);
+          }
         : undefined;
       copyPrivate(join(input, entry.from), entry.to, prepare);
+      // The restored store holds its pictures by its path until it is first
+      // opened, which holds them again under its own name: until then the
+      // cache's sweep sees a holder and keeps them.
+      for (const sha256 of held) retainMediaCacheFile(pictures.get(sha256)!, sha256, entry.to);
     }
     for (const sourceId of writeRestoredIdentities(identities, bindingsPath, env)) {
       notes.push(`${sourceId}'s history came to name another account while restoring, so its account is asked again at sign-in.`);
@@ -451,6 +494,100 @@ function storeIsTierBound(path: string): boolean {
     if (!table) return false;
     const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
     return Boolean(row?.cursor);
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Point a restored store's chunks at their pictures in this install's media
+ * cache. A chunk records the absolute path its picture had on the computer
+ * that made the backup; every reader trusts only a cache file that exists, so
+ * without this the pictures would be in the backup and never seen. A picture
+ * the backup does not hold keeps its old path and embeds as text, as it would
+ * have there. Returns the digests now pointed at this install's cache.
+ */
+function repointMediaPaths(storePath: string, pictureFor: (sha256: string) => string | undefined): string[] {
+  const db = new Database(storePath, { readwrite: true, create: false });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const columns = (db.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
+    if (!columns.includes('media_path') || !columns.includes('media_sha256')) return [];
+    const releases = Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunk_media_releases'").get());
+    const digests = (db.query('SELECT DISTINCT media_sha256 FROM chunks WHERE media_sha256 IS NOT NULL AND media_path IS NOT NULL').all() as Array<{ media_sha256: string }>)
+      .map((row) => row.media_sha256);
+    const moved: string[] = [];
+    db.transaction(() => {
+      for (const sha256 of digests) {
+        const path = pictureFor(sha256);
+        if (!path) continue;
+        db.query('UPDATE chunks SET media_path = ? WHERE media_sha256 = ? AND media_path IS NOT NULL').run(path, sha256);
+        // A release queued on the old computer names the picture where it was there.
+        if (releases) db.query('UPDATE chunk_media_releases SET media_path = ? WHERE media_sha256 = ?').run(path, sha256);
+        moved.push(sha256);
+      }
+    })();
+    return moved;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Record, in a restored store of a folder-scoped source, the scope generations
+ * its items were stamped with and the account they came from. A sign-in here
+ * mints a new generation even for the same account, so the items would be read
+ * again only once a traversal had listed them; with this record, the folder
+ * approval the owner gives for that same account carries them over
+ * (LocalConnectorStore.rebindRestoredSourceScope), under its folders. Without
+ * an account the backup recorded, nothing is recorded and nothing is carried.
+ */
+function recordRestoredScope(storePath: string, sourceId: string, providerAccountId: string | undefined, secretLocationsPath?: string): void {
+  const definition = getFileScopeSource(sourceId);
+  if (!definition || definition.account !== 'provider_account' || !providerAccountId) return;
+  // A Secret's location is kept beside the store, not in it, under the stamp
+  // its item had: those generations are carried over too.
+  const secretGenerations = secretLocationsPath ? secretLocationGenerations(secretLocationsPath, definition.provider) : [];
+  const db = new Database(storePath, { readwrite: true, create: false });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('items', 'sync_runs')").all() as Array<{ name: string }>).map((row) => row.name));
+    if (!tables.has('items') || !tables.has('sync_runs')) return;
+    const columns = (db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name);
+    if (!columns.includes('source_scope_generation')) return;
+    const generations = [...new Set([
+      ...(db.query('SELECT DISTINCT source_scope_generation AS generation FROM items WHERE provider = ? AND source_scope_generation IS NOT NULL')
+        .all(definition.provider) as Array<{ generation: string }>).map((row) => row.generation),
+      ...secretGenerations,
+    ])];
+    if (generations.length === 0) return;
+    const corpus = db.query('SELECT corpus_id FROM sync_runs LIMIT 1').get() as { corpus_id: string } | null;
+    // Like the set binding: completed at the epoch, so it is never the store's last run.
+    db.query(`
+      INSERT OR REPLACE INTO sync_runs (
+        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+        items_indexed, started_at, completed_at
+      ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+    `).run(
+      RESTORED_SCOPE_RUN_ID,
+      corpus?.corpus_id ?? '',
+      RESTORED_SCOPE_CONNECTOR_ID,
+      JSON.stringify({ provider: definition.provider, generations, providerAccountId }),
+    );
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/** The scope generations a backup's secret-locations file stamps `provider`'s locations with. */
+function secretLocationGenerations(path: string, provider: string): string[] {
+  const db = new Database(path, { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secret_locations'").get();
+    if (!table) return [];
+    return (db.query('SELECT DISTINCT scope_generation AS generation FROM secret_locations WHERE provider = ? AND scope_generation IS NOT NULL')
+      .all(provider) as Array<{ generation: string }>).map((row) => row.generation);
   } finally {
     closeSqliteStore(db);
   }

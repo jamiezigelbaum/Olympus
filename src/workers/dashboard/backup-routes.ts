@@ -72,7 +72,7 @@ export async function handleDashboardBackupRoute(
       case '/dashboard/backup/status':
         return ok(deps.backup.status());
       case '/dashboard/backup/settings': {
-        const input: { folder?: string; schedule?: BackupSchedule } = {};
+        const input: { folder?: string; folderKey?: string; schedule?: BackupSchedule } = {};
         const folderKey = text(body.folder_key);
         if (folderKey) {
           const folder = await realOf(folderKey, 'folder');
@@ -81,6 +81,8 @@ export async function handleDashboardBackupRoute(
             throw new OperationError('invalid_params', 'Choose a folder outside Olympus\'s own folders, ideally on another disk.');
           }
           input.folder = folder;
+          // Kept with its disk's identity, so a backup never lands on another disk mounted in its place.
+          input.folderKey = scopePathOfRealPath(volumes, folder);
         }
         if (body.schedule !== undefined) {
           if (!BACKUP_SCHEDULES.includes(body.schedule as BackupSchedule)) throw new OperationError('invalid_params', 'Choose when to back up.');
@@ -102,7 +104,12 @@ export async function handleDashboardBackupRoute(
       case '/dashboard/backup/browse': {
         const browser = deps.browser ?? createLocalFilesFolderScopeBrowser({ volumes });
         const parentKey = text(body.parent_key);
-        const page = await browser.browse({ ...(parentKey ? { parentKey } : {}) });
+        // The next page of a level with more than one page of folders: the
+        // opaque cursor the last page returned, which the listing checks is
+        // its own and bound to this same folder before reading past it.
+        if (body.cursor !== undefined && typeof body.cursor !== 'string') throw new OperationError('invalid_params', 'Folder browse cursor is invalid.');
+        const cursor = text(body.cursor);
+        const page = await browser.browse({ ...(parentKey ? { parentKey } : {}), ...(cursor ? { cursor } : {}) });
         const folders = page.nodes.map((node) => ({
           key: node.key,
           name: node.name,
@@ -114,8 +121,10 @@ export async function handleDashboardBackupRoute(
         let files: Array<Record<string, unknown>> = [];
         if (parentKey) {
           path = realPathOfScopePath(volumes, normalizeScopePath(parentKey)) ?? null;
-          if (path && body.files === true) {
-            files = listBackups(path).map((backup) => ({
+          // Backup files come with a level's first page only; a later page adds folders.
+          if (path && body.files === true && !cursor) {
+            // Any backup a restore can open, renamed ones included; retention keeps to its own names.
+            files = listBackups(path, { anyName: true }).map((backup) => ({
               key: scopePathOfRealPath(volumes, backup.path),
               name: backup.name,
               bytes: backup.bytes,
@@ -124,7 +133,7 @@ export async function handleDashboardBackupRoute(
             }));
           }
         }
-        return { status: 200, body: { ok: true, path, folders, files, ...(page.access && !page.nodes.length ? { note: page.access.message } : {}) } };
+        return { status: 200, body: { ok: true, path, folders, files, ...(page.nextCursor ? { next_cursor: page.nextCursor } : {}), ...(page.access && !page.nodes.length ? { note: page.access.message } : {}) } };
       }
       case '/dashboard/backup/restore': {
         const fileKey = text(body.file_key);

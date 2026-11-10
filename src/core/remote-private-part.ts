@@ -54,6 +54,7 @@
  * it, which retries a revoking process's failed cleanup. `close` stops any
  * pass in flight and any settle still waiting.
  */
+import type { PrivateQuestionRef } from './app-release-capture.ts';
 import { remoteOperationOutput } from './remote-result.ts';
 import type { ReleaseCheck } from './release-manifest.ts';
 import type { SourceAnswerJobScope } from './source-answer-jobs.ts';
@@ -99,6 +100,8 @@ export interface RemotePrivatePart {
 export interface RemotePrivatePartCall {
   /** Opaque local row locator, never a capability or answer. */
   readonly answerId?: string | undefined;
+  /** The waiting question at the generation this call recorded (what each AI app received). */
+  readonly answerRef?: PrivateQuestionRef | undefined;
   readonly secretMatch?: boolean | undefined;
   /**
    * Settles the call's raw result, given the remote output it releases:
@@ -223,7 +226,7 @@ export interface RemotePrivateParts {
 interface Handoff {
   expiresAt: number;
   settled: Promise<boolean>;
-  answerId?: string;
+  answerRef?: PrivateQuestionRef;
   secretMatch?: boolean;
 }
 
@@ -293,7 +296,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     released: Readonly<Record<string, unknown>> | undefined,
     args: Readonly<Record<string, unknown>>,
     ticket: WaitingQuestionTicket | undefined,
-    recordedId?: (id: string, secretMatch: boolean) => void,
+    recordedId?: (ref: PrivateQuestionRef, secretMatch: boolean) => void,
   ): Promise<boolean> => {
     try {
       if (closed || !ticket) return false;
@@ -323,7 +326,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     question: string,
     selectors: NonNullable<ReturnType<typeof normalizeWaitingSelectors>>,
     verdict: 'match' | 'secret_match' | 'unknown',
-    recordedId?: (id: string, secretMatch: boolean) => void,
+    recordedId?: (ref: PrivateQuestionRef, secretMatch: boolean) => void,
   ): boolean => {
     let recorded = false;
     try {
@@ -334,7 +337,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
         selectors,
       });
       recorded = ref !== undefined;
-      if (ref) recordedId?.(ref.id, verdict === 'secret_match');
+      if (ref) recordedId?.({ id: ref.id, generation: ref.generation }, verdict === 'secret_match');
     } catch {
       console.warn('[olympus:remote] waiting private question not recorded reason=store_unavailable');
     }
@@ -353,7 +356,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     const question = typeof args.question === 'string' ? args.question.trim() : '';
     // The search takes the question alone, so nothing narrows a replay of it.
     const selectors = normalizeWaitingSelectors({});
-    let answerId: string | undefined;
+    let answerRef: PrivateQuestionRef | undefined;
     let secretMatch = false;
     // Never left unhandled: when the search fails, or is cancelled, nothing reads this.
     const verdict: Promise<PrivateMatchVerdict | undefined> = (async () => {
@@ -362,7 +365,8 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       return probe({ ...selectors, question }, probeTimeoutMs);
     })().catch(() => undefined);
     return {
-      get answerId() { return answerId; },
+      get answerId() { return answerRef?.id; },
+      get answerRef() { return answerRef; },
       get secretMatch() { return secretMatch; },
       async settle() {
         try {
@@ -373,7 +377,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
           if (found === undefined || found === 'no_match' || closed || !ticket || !selectors) return false;
           // The probe may have waited: a connection revoked meanwhile records nothing.
           if (!activeNow(ticket.connectionId)) return false;
-          return recordVerdict(ticket, question, selectors, found, (id, secret) => { answerId = id; secretMatch = secret; });
+          return recordVerdict(ticket, question, selectors, found, (ref, secret) => { answerRef = ref; secretMatch = secret; });
         } catch {
           return false;
         }
@@ -388,7 +392,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     args: Readonly<Record<string, unknown>>,
     ticket: WaitingQuestionTicket | undefined,
     releaseCheck: ReleaseCheck | undefined,
-    recordedId?: (id: string, secretMatch: boolean) => void,
+    recordedId?: (ref: PrivateQuestionRef, secretMatch: boolean) => void,
   ): Promise<boolean> | undefined => {
     let finished: ReturnType<SourceAnswerJobScope['registry']['whenFinished']>;
     try {
@@ -496,15 +500,16 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
           if (operation === 'olympus_search') return startSearch(connectionId, args, context?.signal);
           if (operation === 'source_answer') {
             const ticket = ticketFor(connectionId);
-            let answerId: string | undefined;
+            let answerRef: PrivateQuestionRef | undefined;
             let secretMatch = false;
             return {
-              get answerId() { return answerId; },
+              get answerId() { return answerRef?.id; },
+              get answerRef() { return answerRef; },
               get secretMatch() { return secretMatch; },
               async settle(raw, released) {
                 const pending = asRecord(raw);
                 if (pending?.status === 'working' && typeof pending.job_id === 'string') {
-                  const settled = settleWhenFinished(context?.jobs, pending.job_id, args, ticket, context?.releaseCheck, (id, secret) => { answerId = id; secretMatch = secret; const handoff = handoffs.get(`${connectionId}\u0000${pending.job_id}`); if (handoff) { handoff.answerId = id; handoff.secretMatch = secret; } });
+                  const settled = settleWhenFinished(context?.jobs, pending.job_id, args, ticket, context?.releaseCheck, (ref, secret) => { answerRef = ref; secretMatch = secret; const handoff = handoffs.get(`${connectionId}\u0000${pending.job_id}`); if (handoff) { handoff.answerRef = ref; handoff.secretMatch = secret; } });
                   if (settled) {
                     sweep();
                     handoffs.set(`${connectionId}\u0000${pending.job_id}`, { settled, expiresAt: now() + handoffTtlMs });
@@ -512,7 +517,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
                   }
                   return false;
                 }
-                return settleAnswer(raw, released, args, ticket, (id, secret) => { answerId = id; secretMatch = secret; });
+                return settleAnswer(raw, released, args, ticket, (ref, secret) => { answerRef = ref; secretMatch = secret; });
               },
             };
           }
@@ -520,7 +525,8 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
             const jobId = typeof args.job_id === 'string' ? args.job_id : undefined;
             if (!jobId) return undefined;
             return {
-              get answerId() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.answerId; },
+              get answerId() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.answerRef?.id; },
+              get answerRef() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.answerRef; },
               get secretMatch() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.secretMatch; },
               async settle(raw) {
                 sweep();

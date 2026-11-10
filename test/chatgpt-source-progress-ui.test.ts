@@ -356,9 +356,10 @@ describe('a chosen folder the computer will not open: the action fits the cause'
     progress: { stage: 'listing', unit: 'files', done: 0, total: 0, percent: 0, stalled: true, stalledReason: reason as never },
   });
   const link = (reason: string) => {
+    // Home lists no sources (#1085): the Sources tab's Details lands on the row.
     const host = mount({});
     host.win.dispatchEvent(new host.win.MessageEvent('message', {
-      data: { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: { [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: {} } } },
+      data: { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: { [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: {}, landing: { sourceId: 'local.files' } } } },
       source: (host.win as any).parent,
     }));
     host.push({

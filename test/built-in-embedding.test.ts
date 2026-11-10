@@ -67,6 +67,7 @@ import {
   isApprovedSecureSourceEmbeddingProvider,
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  awaitStartingQueryEmbedding,
 } from '../src/workers/source-index/embeddings.ts';
 import { mediaCacheDir } from '../src/core/media-cache.ts';
 import {
@@ -491,6 +492,8 @@ describe('built-in embedding provider', () => {
     const error = await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(BuiltInEmbeddingNotReadyError);
     expect(error).toBeInstanceOf(TransientSourceEmbeddingError);
+    // A download is not worth an answer's wait (#1172).
+    expect((error as BuiltInEmbeddingNotReadyError).modelStarting).toBe(false);
     await provider.prepare();
     expect(served.requests.length).toBeGreaterThan(0);
     expect(readBuiltInEmbeddingStatus(env, served.model).state).toBe('ready');
@@ -968,6 +971,25 @@ describe('built-in embedding with a LiteRT model', () => {
     expect(log.options).toHaveLength(2); // ordinary helper and the reserved text-only probe helper
     await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' });
     expect(log.batches).toHaveLength(1);
+  });
+
+  test('the first question after a restart says the installed model is starting, and an answer can wait for it (#1172)', async () => {
+    const first = liteRtProvider();
+    await first.provider.prepare();
+    // A new process over the same installed model: nothing loaded yet.
+    const log = { batches: [] as string[][], images: [] as Array<Array<string | undefined>>, options: [] as LiteRtEmbedderOptions[] };
+    const served = servedLiteRt();
+    const cold = new BuiltInSourceEmbeddingProvider({
+      env: first.env,
+      model: first.model,
+      liteRt: stubLiteRt(log, 4, {}),
+      installerOptions: { fetchImpl: served.fetchImpl, liteRtRuntime: served.pack },
+    });
+    const error = await cold.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    expect((error as BuiltInEmbeddingNotReadyError).modelStarting).toBe(true);
+    await awaitStartingQueryEmbedding(cold, 'hello', 15_000);
+    await expect(cold.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' })).resolves.toHaveLength(1);
   });
 
   test('a document with a picture sends its usual prompt with the picture; a question never does', async () => {

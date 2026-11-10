@@ -107,6 +107,31 @@ export interface ArchiveProbe {
   readsRanOut?(): boolean;
 }
 
+/**
+ * One step of asking an app for an export (#660): what to press, in order,
+ * and the page to open for it. `**word**` marks a control's name.
+ */
+export interface ArchiveExportStep {
+  title: string;
+  instructions: readonly string[];
+  link?: { label: string; url: string };
+}
+
+/**
+ * How to ask an app for this format's export, step by step: the guided path
+ * of the Archives card (Get my archive). Exports can take hours or days, so a
+ * guide ends with `ready`, what arrives and what to drop, rather than a check.
+ */
+export interface ArchiveExportGuide {
+  /** What the person picks in the list ("Gmail, from Google Takeout"). */
+  title: string;
+  /** The app the steps' pages belong to, for "Open this page in <provider>". */
+  provider: string;
+  steps: readonly ArchiveExportStep[];
+  /** What comes back and which file or folder of it to drop. */
+  ready: string;
+}
+
 export interface ArchiveFormatDefinition {
   id: string;
   label: string;
@@ -133,6 +158,12 @@ export interface ArchiveFormatDefinition {
    * Absent: Other archives.
    */
   sourceCard?: { id: string; label: string };
+  /**
+   * How to ask the app for this export (#660). Formats that are forms of one
+   * app's export (Reflect's JSON and Markdown) give it once, on the first.
+   * Absent: the format is offered on the quick path only.
+   */
+  exportGuide?: ArchiveExportGuide;
   /**
    * File and zip-member names (`*` and `?` wildcards, case-insensitive) this
    * format recognises itself by. A folder of thousands of files, or a zip of
@@ -202,6 +233,15 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   provider: 'mbox',
   chooseHint: 'a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)',
   citationLabel: 'Imported mail',
+  exportGuide: Object.freeze({
+    title: 'Gmail, from Google Takeout',
+    provider: 'Google',
+    steps: Object.freeze([
+      { title: 'Choose your mail', instructions: ['Choose **Deselect all**.', 'Scroll to **Mail** and tick it.', 'Choose **Next step** at the bottom of the page.'], link: { label: 'Google Takeout', url: 'https://takeout.google.com/' } },
+      { title: 'Ask for the export', instructions: ['Keep **Send download link via email** and **Export once**.', 'Keep **.zip** as the file type.', 'Choose **Create export**.'] },
+    ]),
+    ready: 'Google emails you a download link when the export is ready. Download it, open the zip, and drop the .mbox file from its Mail folder.',
+  }),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return startsWithFromLine(probe.chosen.head) ? [''] : undefined;
     if (!probe.chosen.name.toLowerCase().endsWith('.mbox')) return undefined;
@@ -294,6 +334,15 @@ export const WHATSAPP_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   // The names WhatsApp gives its exports are looked at before the rest, so ordinary files ahead of them cannot hide them.
   probeNames: Object.freeze(['*.txt', '*.zip']),
   signatureNames: Object.freeze(['_chat.txt', 'WhatsApp Chat with *.txt', 'WhatsApp Chat - *.txt', 'WhatsApp Chat*.zip']),
+  exportGuide: Object.freeze({
+    title: 'A WhatsApp chat',
+    provider: 'WhatsApp',
+    steps: Object.freeze([
+      { title: 'Open the chat', instructions: ['On your phone, open WhatsApp and the chat you want.', "Tap the chat's name at the top (on Android, tap **⋮** then **More**)."] },
+      { title: 'Export it', instructions: ['Choose **Export chat**.', 'Choose **Attach media** (on Android, **Include media**) to keep photos and voice notes, or **Without media** for a smaller file.', 'Send the file to this computer, for example by AirDrop or to yourself by email.'] },
+    ]),
+    ready: 'WhatsApp makes the file straight away. Drop the .zip or the .txt file it sent.',
+  }),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return whatsAppIsExport(probe.chosen, false) ? [''] : undefined;
     const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
@@ -476,14 +525,50 @@ function isRoamRecord(keys: ReadonlySet<string>): boolean {
   return keys.has('title') && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || (keys.has('children') && keys.has('uid')));
 }
 
-/** Whether a record's keys say a note is Reflect's or a page is Roam's, or both. */
-function recordsFormat(records: readonly ReadonlySet<string>[], shape: 'list' | 'notes'): 'reflect' | 'roam' | undefined {
-  const reflect = records.some(isReflectRecord);
-  const roam = records.some(isRoamRecord);
-  if (reflect === roam) return undefined;
-  // Roam's export is a bare list of pages.
-  if (roam) return shape === 'list' ? 'roam' : undefined;
-  return 'reflect';
+/**
+ * A ChatGPT conversation, in the keys OpenAI's data export writes it with
+ * (`conversations.json`, or `conversations-000.json` and on in a large
+ * export): its graph of messages (`mapping`) beside its title, its times or
+ * the node it ends on. A `mapping` alone is any application's data.
+ */
+function isChatGptConversation(keys: ReadonlySet<string>): boolean {
+  return keys.has('mapping') && (keys.has('current_node') || keys.has('create_time') || keys.has('title'));
+}
+
+/**
+ * A Claude conversation, in the keys Anthropic's data export writes it with
+ * (`conversations.json`): its messages (`chat_messages`) beside its id, its
+ * name or its time. `chat_messages` alone is any application's data.
+ */
+function isClaudeConversation(keys: ReadonlySet<string>): boolean {
+  return keys.has('chat_messages') && (keys.has('uuid') || keys.has('name') || keys.has('created_at'));
+}
+
+/** The JSON exports told by the keys of their records. */
+type JsonExportKind = 'reflect' | 'roam' | 'chatgpt' | 'claude';
+
+const JSON_EXPORT_RECORDS: ReadonlyArray<readonly [JsonExportKind, (keys: ReadonlySet<string>) => boolean]> = [
+  ['reflect', isReflectRecord],
+  ['roam', isRoamRecord],
+  ['chatgpt', isChatGptConversation],
+  ['claude', isClaudeConversation],
+];
+
+/** Whether the keys seen so far say which export a record is. */
+function anyJsonExportRecord(keys: ReadonlySet<string>): boolean {
+  return JSON_EXPORT_RECORDS.some(([, is]) => is(keys));
+}
+
+/**
+ * Which export the records' keys say, when they say exactly one; records of
+ * two kinds are neither. Every export but Reflect's is a bare list (Reflect's
+ * may also be an object holding its notes).
+ */
+function recordsFormat(records: readonly ReadonlySet<string>[], shape: 'list' | 'notes'): JsonExportKind | undefined {
+  const found = JSON_EXPORT_RECORDS.filter(([, is]) => records.some(is)).map(([kind]) => kind);
+  if (found.length !== 1) return undefined;
+  const only = found[0]!;
+  return only === 'reflect' || shape === 'list' ? only : undefined;
 }
 
 /** What a probe entry can say of a JSON file: its first bytes, and the way on to the keys they did not reach. */
@@ -494,17 +579,18 @@ export interface ArchiveJsonProbe {
 }
 
 /**
- * Which notes export a JSON file is, if exactly one: judged on the keys of its
- * first records (a Reflect note says something and is titled or dated; a Roam
- * page is titled and has its times or blocks with an id), never on a word
- * anywhere else. A file that shows both, or neither, is neither: the person
- * is told what Olympus does import rather than have it guess.
+ * Which JSON export a file is, if exactly one: judged on the keys of its first
+ * records (a Reflect note says something and is titled or dated; a Roam page
+ * is titled and has its times or blocks with an id; a ChatGPT or a Claude
+ * conversation has its messages beside its title, id or times), never on a
+ * word anywhere else. A file that shows two, or none, is none: the person is
+ * told what Olympus does import rather than have it guess.
  *
  * The first bytes decide when they can. When they end inside the first record,
  * before the keys that would say, the probe reads on to the end of that record
  * (skipping values, `firstRecordKeys`) and the decision is made on all of it.
  */
-function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefined {
+function jsonExportFormat(probe: ArchiveJsonProbe): JsonExportKind | undefined {
   const parsed = headRecordKeys(probe.head);
   if (!parsed) return undefined;
   const fromHead = recordsFormat(parsed.records, parsed.shape);
@@ -512,7 +598,7 @@ function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefine
   // Every format asks about the same entry; the file is read on once.
   let scanned = SCANNED.get(probe);
   if (!scanned) {
-    const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], anyJsonExportRecord);
     scanned = { keys };
     SCANNED.set(probe, scanned);
   }
@@ -530,12 +616,12 @@ function isEmptyRecordList(head: Uint8Array | undefined, inNotes: boolean): bool
 
 /** Whether a file's first bytes are a Reflect JSON export: a list of notes (or an object holding a `notes` list) in Reflect's keys. */
 export function looksLikeReflectJson(head: Uint8Array | undefined): boolean {
-  return notesJsonFormat({ head }) === 'reflect';
+  return jsonExportFormat({ head }) === 'reflect';
 }
 
 /** Whether a file's first bytes are a Roam JSON export: a list of titled pages with Roam's keys. */
 export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
-  return notesJsonFormat({ head }) === 'roam';
+  return jsonExportFormat({ head }) === 'roam';
 }
 
 /**
@@ -544,7 +630,7 @@ export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
  * list with nothing in it, which reads as no notes and is not another thing.
  */
 export function acceptsReflectJson(probe: ArchiveJsonProbe): boolean {
-  if (notesJsonFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true)) return true;
+  if (jsonExportFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true)) return true;
   // An object whose notes list is further down than the first bytes reach may hold an empty one; a list with a record in it is not empty.
   if (!probe.listIsEmpty || SCANNED.get(probe)?.keys) return false;
   return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
@@ -552,7 +638,7 @@ export function acceptsReflectJson(probe: ArchiveJsonProbe): boolean {
 
 /** Whether a JSON file inside a zip may be read as a Roam export: a list of pages, or an empty list. */
 export function acceptsRoamJson(probe: ArchiveJsonProbe): boolean {
-  return notesJsonFormat(probe) === 'roam' || isEmptyRecordList(probe.head, false);
+  return jsonExportFormat(probe) === 'roam' || isEmptyRecordList(probe.head, false);
 }
 
 /**
@@ -573,20 +659,19 @@ function zipJsonMembers(entry: ArchiveProbeEntry): ArchiveProbeEntry[] {
 
 /**
  * A JSON export, as a .json file or as a zip holding one. A zip is this
- * format's when one of its JSON files is and none is the other notes
- * format's: a zip of both is not guessed at. (Its other JSON files are not
- * read as this format; the connector leaves them out and says so.)
+ * format's when one of its JSON files is and none is another export's: a zip
+ * of two is not guessed at. (Its other JSON files are not read as this
+ * format; the connector leaves them out and says so.)
  */
 function readsJsonExport(
   entry: ArchiveProbeEntry,
-  format: 'reflect' | 'roam',
+  format: JsonExportKind,
 ): boolean {
-  const other = format === 'reflect' ? 'roam' : 'reflect';
   if (entry.members) {
-    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
-    return members.includes(format) && !members.includes(other);
+    const members = zipJsonMembers(entry).map((member) => jsonExportFormat(member)).filter((kind) => kind !== undefined);
+    return members.includes(format) && members.every((kind) => kind === format);
   }
-  return notesJsonFormat(entry) === format;
+  return jsonExportFormat(entry) === format;
 }
 
 /** Reflect's export as one JSON file (or a zip holding it): the notes with their dates and tags. */
@@ -599,6 +684,14 @@ export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freez
   citationLabel: 'Reflect',
   sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
   probeNames: Object.freeze(['*.json']),
+  exportGuide: Object.freeze({
+    title: 'Reflect',
+    provider: 'Reflect',
+    steps: Object.freeze([
+      { title: 'Export your notes', instructions: ['In Reflect, open **Settings**.', 'Find the export option and choose **JSON** (Markdown works too).', 'Save the file in **Downloads**.'], link: { label: 'Reflect', url: 'https://reflect.app/' } },
+    ]),
+    ready: 'Drop the .json file, or the .zip Reflect saved.',
+  }),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'reflect')),
 });
 
@@ -639,7 +732,83 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   citationLabel: 'Roam',
   sourceCard: Object.freeze({ id: 'roam.archive', label: 'Roam' }),
   probeNames: Object.freeze(['*.json']),
+  exportGuide: Object.freeze({
+    title: 'Roam',
+    provider: 'Roam',
+    steps: Object.freeze([
+      { title: 'Export your graph', instructions: ['Open your graph in Roam.', 'Choose **⋯** at the top right, then **Export All**.', 'Set the format to **JSON** and choose **Export All**.'], link: { label: 'Roam', url: 'https://roamresearch.com/' } },
+    ]),
+    ready: 'Drop the .zip Roam saved, or the .json file inside it.',
+  }),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'roam')),
+});
+
+// --- AI conversation exports: ChatGPT and Claude ------------------------------------
+
+/** Whether a JSON file inside a zip may be read as a ChatGPT export: a list of conversations, or an empty list. */
+export function acceptsChatGptJson(probe: ArchiveJsonProbe): boolean {
+  return jsonExportFormat(probe) === 'chatgpt' || isEmptyRecordList(probe.head, false);
+}
+
+/** Whether a JSON file inside a zip may be read as a Claude export: a list of conversations, or an empty list. */
+export function acceptsClaudeJson(probe: ArchiveJsonProbe): boolean {
+  return jsonExportFormat(probe) === 'claude' || isEmptyRecordList(probe.head, false);
+}
+
+/**
+ * The files this format reads: the chosen file itself, or for a chosen folder
+ * every file in it that is this export (a large ChatGPT export, unzipped, is
+ * several `conversations-NNN.json`), in the order of their names.
+ */
+function detectFiles(probe: ArchiveProbe, reads: (entry: ArchiveProbeEntry) => boolean): readonly string[] | undefined {
+  if (probe.chosen.kind === 'file') return reads(probe.chosen) ? [''] : undefined;
+  const found = probe.children
+    .filter((entry) => entry.kind === 'file' && !isJunkArchiveMember(entry.name) && reads(entry))
+    .map((entry) => entry.relPath)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return found.length > 0 ? found : undefined;
+}
+
+/** How OpenAI and Anthropic name the conversations of a data export; a large ChatGPT export splits them into numbered files. */
+const AI_CONVERSATION_NAMES = Object.freeze(['conversations.json', 'conversations-*.json']);
+
+/**
+ * ChatGPT's data export (Settings, Data controls, Export data): a zip whose
+ * `conversations.json` (or `conversations-000.json` and on, in a large export)
+ * is a list of conversations, each a graph of messages (`mapping`) and the
+ * node the visible thread ends on (`current_node`). Told by those keys, never
+ * by a file name. Chosen as the zip, as the JSON file, or as the unzipped
+ * folder. Pictures and files in the export are not read.
+ */
+export const CHATGPT_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'chatgpt-export',
+  label: 'ChatGPT conversations (data export)',
+  family: 'chat',
+  provider: 'chatgpt_export',
+  chooseHint: 'a ChatGPT data export (the .zip from Settings, Data controls, Export data, or the conversations.json in it)',
+  citationLabel: 'ChatGPT',
+  probeNames: Object.freeze(['*.json']),
+  signatureNames: AI_CONVERSATION_NAMES,
+  detect: (probe: ArchiveProbe) => detectFiles(probe, (entry) => readsJsonExport(entry, 'chatgpt')),
+});
+
+/**
+ * Claude's data export (Settings, Privacy, Export data): a zip whose
+ * `conversations.json` is a list of conversations, each with its messages in
+ * order (`chat_messages`, each sent by `human` or `assistant`). Told by those
+ * keys, never by a file name. Chosen as the zip, as the JSON file, or as the
+ * unzipped folder. Attachments and files in the export are not read.
+ */
+export const CLAUDE_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'claude-export',
+  label: 'Claude conversations (data export)',
+  family: 'chat',
+  provider: 'claude_export',
+  chooseHint: 'a Claude data export (the .zip from Settings, Privacy, Export data, or the conversations.json in it)',
+  citationLabel: 'Claude',
+  probeNames: Object.freeze(['*.json']),
+  signatureNames: AI_CONVERSATION_NAMES,
+  detect: (probe: ArchiveProbe) => detectFiles(probe, (entry) => readsJsonExport(entry, 'claude')),
 });
 
 // --- Evernote export (.enex) ------------------------------------------------------
@@ -671,6 +840,15 @@ export const EVERNOTE_ENEX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.free
   // The live Evernote source's card: one Evernote card shows the connection and lists these imports.
   sourceCard: Object.freeze({ id: 'evernote.notes', label: 'Evernote' }),
   probeNames: Object.freeze(['*.enex']),
+  exportGuide: Object.freeze({
+    title: 'Evernote',
+    provider: 'Evernote',
+    steps: Object.freeze([
+      { title: 'Open the Evernote app', instructions: ['Export works in the Evernote app on a computer, not on the web.', 'Install it if you do not have it, and sign in.'], link: { label: 'Evernote', url: 'https://evernote.com/download' } },
+      { title: 'Export a notebook', instructions: ['In **Notebooks**, choose **⋯** beside a notebook.', 'Choose **Export notebook…** and keep the **ENEX** format.', 'Save the file. Repeat for each notebook you want.'] },
+    ]),
+    ready: 'Drop the .enex file, or a folder holding several.',
+  }),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return looksLikeEnex(probe.chosen.head) ? [''] : undefined;
     const files = probe.children
@@ -734,6 +912,15 @@ export const TELEGRAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.free
       advice: 'This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat\'s menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it.',
     }),
   ]),
+  exportGuide: Object.freeze({
+    title: 'Telegram',
+    provider: 'Telegram',
+    steps: Object.freeze([
+      { title: 'Open Telegram Desktop', instructions: ['Export works in Telegram Desktop, not in the phone app.', 'Install it if you do not have it, and sign in.'], link: { label: 'Telegram Desktop', url: 'https://desktop.telegram.org/' } },
+      { title: 'Ask for the export', instructions: ['Open **Settings**, then **Advanced**.', 'Choose **Export Telegram data**.', 'Tick the chats you want and set the format to **Machine-readable JSON**.', 'Choose **Export**. Telegram may ask you to confirm on your phone and wait before it starts.'] },
+    ]),
+    ready: 'Drop the folder Telegram saved, or the result.json file in it.',
+  }),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return isTelegramJsonHead(probe.chosen.head) ? [''] : undefined;
     const inner = probe.children.find((entry) =>
@@ -750,7 +937,25 @@ export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze
   ROAM_JSON_ARCHIVE_FORMAT,
   TELEGRAM_JSON_ARCHIVE_FORMAT,
   EVERNOTE_ENEX_ARCHIVE_FORMAT,
+  CHATGPT_ARCHIVE_FORMAT,
+  CLAUDE_ARCHIVE_FORMAT,
 ]);
+
+/** One app's export guide (#660), with the formats it yields; in registry order. */
+export interface ArchiveExportGuideEntry {
+  formatId: string;
+  guide: ArchiveExportGuide;
+}
+
+/** The export guides of these formats, each once (the Get my archive list). */
+export function archiveExportGuides(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): ArchiveExportGuideEntry[] {
+  return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
+}
+
+/** Each export guide's step pages, by format id: a step's https page, or null for a step without one. */
+export function archiveExportGuideLinks(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): Record<string, Array<string | null>> {
+  return Object.fromEntries(archiveExportGuides(formats).map((entry) => [entry.formatId, entry.guide.steps.map((step) => step.link?.url ?? null)]));
+}
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);

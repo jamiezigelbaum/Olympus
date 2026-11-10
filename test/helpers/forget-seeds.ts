@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { writeIngestionHealthState, readIngestionHealthState, defaultIngestionHealthStatePath } from '../../src/core/ingestion-health-state.ts';
 import { resolveRemoteConnectionsDbPath } from '../../src/core/remote-connections.ts';
+import { appReleaseLogDbPath, openAppReleaseLog } from '../../src/core/app-release-log.ts';
 import {
   openWaitingPrivateQuestionStore,
   waitingPrivateQuestionsDbPath,
@@ -32,8 +33,10 @@ import { TierLedger, tierLedgerPathForStore } from '../../src/workers/classifica
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../../src/workers/source-scheduler-state.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../../src/workers/file-extraction/job-store.ts';
 import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
+import { LocalPeopleIndex, peopleIndexPath } from '../../src/core/people-index.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
-import { xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
+import { accountFolder, xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
+import { judgeSecondRoundStatePath } from '../../src/workers/classification/judge-second-round.ts';
 import { LocalXBookmarksApiUsageStore } from '../../src/workers/x-bookmarks/live-control.ts';
 
 export interface SeededSource {
@@ -70,7 +73,11 @@ export const tierLedgerIdOf = (source: SeededSource): string => `ledger-of-${sou
 
 /** A context for forgetting `source` (the first seeded source by default): its tier ledger's id is known. */
 export const contextOf = (layout: ForgetLayout, source: SeededSource = MINE): ForgetContext =>
-  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)] });
+  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)], tierLedgerPaths: [sweptLedgerOf(layout, source)] });
+
+/** Where the Venice double-check's sweep position for `source` is keyed. */
+export const sweptLedgerOf = (layout: ForgetLayout, source: SeededSource): string =>
+  join(accountFolder({ source_id: source.source_id, slot: '1' }, layout.env), 'tier.ledger');
 
 /**
  * The tier ledger beside a connector store, with the id the seeded redaction
@@ -141,6 +148,9 @@ export const storedAnswer = (corpusId: string): StoredPrivateAnswer => ({
 
 export const waitingPath = (layout: ForgetLayout): string =>
   waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(layout.env));
+
+export const appReleasePath = (layout: ForgetLayout): string =>
+  appReleaseLogDbPath(resolveRemoteConnectionsDbPath(layout.env));
 
 /** The dashboard database's rows for a source, however keyed. */
 const dashboardRows = (path: string, source: SeededSource): number =>
@@ -224,6 +234,40 @@ export const SEEDED_FILES: readonly SeededFile[] = [
           question.result?.read.some((item) => item.corpusId === source.corpus_id)).length;
       } finally {
         store.close();
+      }
+    },
+  },
+  {
+    stepId: 'app-release-log',
+    mine: MINE,
+    other: OTHER,
+    path: appReleasePath,
+    seed(layout) {
+      mkdirSync(dirname(appReleasePath(layout)), { recursive: true });
+      const store = openAppReleaseLog(appReleasePath(layout));
+      try {
+        for (const source of [MINE, OTHER]) {
+          store.record({
+            at: Date.now(),
+            connection: { name: 'ChatGPT', kind: 'app' },
+            question: `What do my ${source.source_id} files say?`,
+            items: [{ source: 'Files', title: `${source.source_id} notes`, tier: 'personal', corpusId: source.corpus_id, provider: 'synthetic', providerItemId: `item-${source.source_id}` }],
+            heldBack: 0,
+            answeredPrivately: false,
+            withheld: false,
+          });
+        }
+      } finally {
+        store.close();
+      }
+    },
+    left(layout, source) {
+      if (!existsSync(appReleasePath(layout))) return 0;
+      const db = new Database(appReleasePath(layout), { readonly: true });
+      try {
+        return (db.query('SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id = ?').get(source.corpus_id) as { n: number }).n;
+      } finally {
+        db.close();
       }
     },
   },
@@ -370,6 +414,35 @@ export const SEEDED_FILES: readonly SeededFile[] = [
     },
   },
   {
+    stepId: 'people-index',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => peopleIndexPath(layout.env),
+    seed(layout) {
+      const index = new LocalPeopleIndex({ dbPath: peopleIndexPath(layout.env) });
+      try {
+        index.rebuild([MINE, OTHER].map((source) => ({
+          provider: source.ledger_id,
+          senderId: `ada@${source.ledger_id}.example`,
+          senderLabel: 'Ada Example',
+          isOwner: false,
+          itemCount: 2,
+          corpusId: source.corpus_id,
+        })));
+        index.correct({ kind: 'rename', identity: `sender:${MINE.ledger_id}:ada@${MINE.ledger_id}.example`, name: 'Ada' });
+        index.correct({ kind: 'rename', identity: `sender:${OTHER.ledger_id}:ada@${OTHER.ledger_id}.example`, name: 'Ada' });
+      } finally {
+        index.close();
+      }
+    },
+    left(layout, source) {
+      const path = peopleIndexPath(layout.env);
+      const key = `sender:${source.ledger_id}:ada@${source.ledger_id}.example`;
+      return count(path, 'people_identities', 'identity_key = ?', key)
+        + count(path, 'people_corrections', 'identity_a = ?', key);
+    },
+  },
+  {
     stepId: 'source-watches',
     mine: MINE,
     other: OTHER,
@@ -464,6 +537,26 @@ export const SEEDED_FILES: readonly SeededFile[] = [
       });
     },
     left: (layout, source) => identifyingSelectors(layout, source),
+  },
+  {
+    // The Venice double-check's sweep positions: the deleted source's in-progress position names an item.
+    stepId: 'judge-second-round-cursors',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => judgeSecondRoundStatePath(layout.env),
+    seed(layout) {
+      const ledgerOf = (source: SeededSource) => sweptLedgerOf(layout, source);
+      writeJson(judgeSecondRoundStatePath(layout.env), { v: 1, cursors: {
+        [ledgerOf(MINE)]: { account_scope: 'acct', conversation_key: 'chat-mine', item_id: 'item-mine' },
+        [ledgerOf(OTHER)]: { account_scope: 'acct', conversation_key: 'chat-other', item_id: 'item-other' },
+      } });
+    },
+    left(layout, source) {
+      const path = judgeSecondRoundStatePath(layout.env);
+      if (!existsSync(path)) return 0;
+      const { cursors } = JSON.parse(readFileSync(path, 'utf8')) as { cursors: Record<string, unknown> };
+      return Object.keys(cursors).filter((key) => key === sweptLedgerOf(layout, source)).length;
+    },
   },
   {
     // X's usage ledger is X's alone: its sync positions are the account's, the ledger itself stays.

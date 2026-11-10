@@ -16,15 +16,14 @@
 // for the owner's own dashboard, or, for an agent, only when the item's names
 // are Personal or less, the tier its names would be cited at anyway.
 
-import { Database } from 'bun:sqlite';
 import { OperationError } from '../../core/operation-error.ts';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   applyTierSet,
   knownStorePaths,
   knownTierLedgers,
   locateTierItemByIdentity,
   withLedgerAt,
+  withStore,
   type LocatedItem,
   type TierCliContext,
 } from './tier-cli.ts';
@@ -38,8 +37,6 @@ export type OwnerItemChoice = 'personal' | 'private' | 'judge';
 export const OWNER_ITEM_DEFAULT_LIMIT = 20;
 export const OWNER_ITEM_MAX_LIMIT = 50;
 const OWNER_ITEM_QUERY_MAX = 200;
-/** How much of an item's text its preview shows. */
-export const OWNER_ITEM_PREVIEW_MAX = 600;
 const ITEM_ID_PREFIX = 'oti_';
 
 export interface OwnerTierItem {
@@ -62,14 +59,14 @@ export interface OwnerTierItem {
   decided_by: string | null;
   /** The owner set this item by hand, and it is held there. */
   owner_set: boolean;
+  /**
+   * The owner's choice, when it is not yet the recorded label (a lowering
+   * waits for the next pass): what the owner last chose, so a page shows it.
+   */
+  owner_choice?: string;
   /** The judge's stored reason code (its category and confidence), where the judge decided it. */
   judge_reason: string | null;
   decided_at: string | null;
-  /**
-   * The start of what the item says, for the owner to read before deciding.
-   * Only when the dashboard on this computer asks (`withPreview`); never for an agent.
-   */
-  preview?: string | null;
 }
 
 export interface OwnerTierItemFindInput {
@@ -77,33 +74,12 @@ export interface OwnerTierItemFindInput {
   query?: string;
   /** List the items sorted most recently instead of searching. */
   recent?: boolean;
-  /**
-   * With `recent`: only items labelled Personal or Private, or only those the
-   * owner changed by hand (the dashboard's filters).
-   */
-  filter?: OwnerTierItemFilter;
-  /** With `recent`: only items decided before this time (an item's `decided_at`), to page further back. */
-  before?: string;
   limit?: number;
   /**
    * For an agent: leave out every item whose names are not Personal or less
    * (and every item with nothing recorded yet), so no Private name is shown.
    */
   personalNamesOnly?: boolean;
-  /**
-   * The dashboard on this computer: add the start of each item's stored text.
-   * Ignored with `personalNamesOnly`, so an agent never reads an item's text from here.
-   */
-  withPreview?: boolean;
-}
-
-export type OwnerTierItemFilter = 'personal' | 'private' | 'changed';
-
-/** How many items carry each label, and how many the owner changed by hand: the dashboard's filter counts. */
-export interface OwnerTierItemCounts {
-  personal: number;
-  private: number;
-  changed: number;
 }
 
 export interface OwnerTierItemSetInput {
@@ -121,15 +97,12 @@ export type OwnerTierItemSetResult =
 export interface OwnerTierItems {
   find(input: OwnerTierItemFindInput): { items: OwnerTierItem[] };
   set(input: OwnerTierItemSetInput): OwnerTierItemSetResult;
-  /** The dashboard's filter counts. Optional so a narrow engine can leave the counts off. */
-  counts?(): OwnerTierItemCounts;
 }
 
 export function createOwnerTierItems(context: TierCliContext = {}): OwnerTierItems {
   return {
     find: (input) => findOwnerTierItems(input, context),
     set: (input) => setOwnerTierItem(input, context),
-    counts: () => countOwnerTierItems(context),
   };
 }
 
@@ -179,11 +152,13 @@ interface ItemState {
 
 /**
  * Whether the item's names are, or are about to be, above Personal: decided
- * so, moving there, or set so by the owner. Nothing recorded counts as above.
+ * so, moving there, set so by the owner, or still awaiting their verdict.
+ * Nothing recorded counts as above.
  */
 function namesAbovePersonal(state: ItemState): boolean {
   const { record } = state;
-  if (!record) return true;
+  // Names still awaiting their verdict are held Private, as everywhere else (createReleaseTierCheck).
+  if (!record || record.metadataPending) return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier]
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
@@ -194,13 +169,7 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
   if (query.length > OWNER_ITEM_QUERY_MAX) throw new OperationError('invalid_params', `query is at most ${OWNER_ITEM_QUERY_MAX} characters.`);
   if (!input.recent && !query) throw new OperationError('invalid_params', 'Give words to search for, or ask for the recently sorted items.');
   if (input.recent && query) throw new OperationError('invalid_params', 'Search, or list the recently sorted items, not both.');
-  if (input.filter !== undefined && (!input.recent || !['personal', 'private', 'changed'].includes(input.filter))) {
-    throw new OperationError('invalid_params', 'filter is personal, private or changed, with the recently sorted items.');
-  }
-  if (input.before !== undefined && (!input.recent || input.filter === 'changed' || Number.isNaN(Date.parse(input.before)))) {
-    throw new OperationError('invalid_params', 'before is a time, with the recently sorted items.');
-  }
-  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before) : searchRows(query, limit * 3, context);
+  const rows = input.recent ? recentRows(limit * 3, context) : searchRows(query, limit * 3, context);
   const items: OwnerTierItem[] = [];
   for (const row of rows) {
     if (items.length >= limit) break;
@@ -208,9 +177,7 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
     const state = readItemState(identity, context);
     if (state.secret) continue;
     if (input.personalNamesOnly && namesAbovePersonal(state)) continue;
-    const item = view(row, state);
-    if (input.withPreview && !input.personalNamesOnly) item.preview = previewOf(identity, context);
-    items.push(item);
+    items.push(view(row, state));
   }
   return { items };
 }
@@ -225,21 +192,6 @@ function likePattern(words: string): string {
   return `%${words.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
 }
 
-function withStore<T>(dbPath: string, fallback: T, run: (db: Database, columns: Set<string>) => T): T {
-  let db: Database | undefined;
-  try {
-    db = new Database(dbPath, { readonly: true });
-    db.exec('PRAGMA busy_timeout = 10000;');
-    const columns = new Set((db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name));
-    if (!columns.has('provider_item_id')) return fallback;
-    return run(db, columns);
-  } catch {
-    // A store that cannot be read holds nothing to list.
-    return fallback;
-  } finally {
-    if (db) closeSqliteStore(db, { checkpoint: false });
-  }
-}
 
 function selectColumns(columns: Set<string>): string {
   const sender = columns.has('sender_label') ? 'sender_label, sender_id' : 'NULL AS sender_label, NULL AS sender_id';
@@ -268,16 +220,13 @@ function searchRows(query: string, limit: number, context: TierCliContext): Stor
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
 
-/** The items the ledgers decided most recently, newest first, as their stores keep them; with a filter, only those. */
-function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string): StoredItemRow[] {
+/** The items the ledgers decided most recently, newest first, as their stores keep them. */
+function recentRows(limit: number, context: TierCliContext): StoredItemRow[] {
   const decided = new Map<string, TierLedgerRecord>();
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
-        ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
-          .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
-        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before), ledger.boundLedgerId);
+      records = withLedgerAt(ledger.path, context.now, (opened) => opened.recentDecisions(limit), ledger.boundLedgerId);
     } catch {
       // A ledger that cannot be read lists nothing.
     }
@@ -306,40 +255,6 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
     }
   }
   return rows;
-}
-
-/** The start of the item's stored text (its first chunk), from the first store that holds it; null when none does. */
-function previewOf(identity: TierLedgerIdentity, context: TierCliContext): string | null {
-  for (const dbPath of knownStorePaths(context)) {
-    const text = withStore<string | undefined>(dbPath, undefined, (db) => (db.query(`
-      SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
-      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND COALESCE(i.provider_conversation_id, '') = ?
-      ORDER BY c.chunk_index
-      LIMIT 1
-    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? '') as { text: string } | null)?.text);
-    const trimmed = text?.trim();
-    if (trimmed) return trimmed.length > OWNER_ITEM_PREVIEW_MAX ? `${trimmed.slice(0, OWNER_ITEM_PREVIEW_MAX).trimEnd()}…` : trimmed;
-  }
-  return null;
-}
-
-/** Every ledger's items by label, and the owner's own changes. Counts only: nothing about any item. */
-export function countOwnerTierItems(context: TierCliContext = {}): OwnerTierItemCounts {
-  const counts: OwnerTierItemCounts = { personal: 0, private: 0, changed: 0 };
-  for (const ledger of knownTierLedgers(context)) {
-    try {
-      withLedgerAt(ledger.path, context.now, (opened) => {
-        const byTier = opened.counts().byContentTier;
-        counts.personal += byTier.private;
-        counts.private += byTier.secure;
-        counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').length;
-      }, ledger.boundLedgerId);
-    } catch {
-      // A ledger that cannot be read counts nothing.
-    }
-  }
-  return counts;
 }
 
 function identityOfRow(row: StoredItemRow): TierLedgerIdentity {
@@ -415,31 +330,11 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     ...(record?.state === 'moving' && record.targetContentTier ? { moving_to: tierDisplayName(record.targetContentTier) } : {}),
     decided_by: record?.decidedBy ?? null,
     owner_set: state.ownerSet,
+    ...(state.ownerTier && (!record || (record.contentTier !== state.ownerTier && record.targetContentTier !== state.ownerTier))
+      ? { owner_choice: tierDisplayName(state.ownerTier) } : {}),
     judge_reason: judgeReason(record),
     decided_at: record?.decidedAt ?? null,
   };
-}
-
-/**
- * One item by its id, as the dashboard on this computer shows it (with its
- * preview when asked); undefined when Olympus no longer holds it or it is
- * Secret. For the owner's own dashboard only (judge-check.ts): an agent finds
- * items through `findOwnerTierItems` with `personalNamesOnly`.
- */
-export function getOwnerTierItem(itemId: string, context: TierCliContext = {}, options: { withPreview?: boolean } = {}): OwnerTierItem | undefined {
-  const identity = parseOwnerTierItemId(itemId);
-  let located: LocatedItem[];
-  try {
-    located = locateTierItemByIdentity(identity, context);
-  } catch {
-    return undefined;
-  }
-  if (located.length === 0) return undefined;
-  const state = readLocatedState(located, context);
-  if (state.secret) return undefined;
-  const item = view(storedRowFor(identity, located, context), state);
-  if (options.withPreview) item.preview = previewOf(identity, context);
-  return item;
 }
 
 // --- Set -----------------------------------------------------------------------

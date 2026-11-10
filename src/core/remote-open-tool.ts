@@ -162,15 +162,37 @@ export async function openRemote(
       'Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.',
     );
   }
+  const socketPath = workerSocketPath({ env, ...(deps.platform ? { platform: deps.platform } : {}) });
+  // The tunnel on the owner's computer listens on 127.0.0.1 only, so the link
+  // names that literal origin: a name such as localhost may resolve to another
+  // address there, which is not the tunnel. The ticket is bound to the origin
+  // the mint request states, so the mint states this one too.
+  const tunnelOrigin = new URL(`http://127.0.0.1:${port}`).origin;
+  let mintOrigin: string;
+  if (socketPath) {
+    // The owner socket carries the bearer whatever host the URL names, so
+    // naming the tunnel's origin changes nothing about where the bearer goes.
+    mintOrigin = tunnelOrigin;
+  } else if (base === tunnelOrigin) {
+    mintOrigin = base;
+  } else {
+    // Over TCP the host name picks the listener the bearer reaches. Never
+    // send it anywhere but the configured address, and never mint a link for
+    // a name the tunnel does not listen on: refuse instead.
+    throw new OperationError(
+      'config_error',
+      'The Olympus engine address is a name, not 127.0.0.1, so the opening link would not be tied to the tunnel.',
+      'Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.',
+    );
+  }
   const token = (deps.token ?? workerAuthTokenProvider(ctx.config))();
   // Minted last: every refusal above leaves no ticket behind. A remote ticket
   // lives two minutes and revokes any earlier one (core/dashboard-launch.ts).
-  const link = await mintDashboardOpeningUrl(base, token, { target, remote: true, ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}) });
-  if (!isOpeningLinkForCommandLine(link)) {
+  const link = await mintDashboardOpeningUrl(mintOrigin, token, { target, remote: true, ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}) });
+  if (!isOpeningLinkForCommandLine(link) || new URL(link).origin !== tunnelOrigin) {
     throw new OperationError('email_error', 'The Olympus engine returned an opening link in an unexpected shape.', 'Update Olympus, then try again.');
   }
   const sshTarget = mode.sshTarget ?? null;
-  const socketPath = workerSocketPath({ env, ...(deps.platform ? { platform: deps.platform } : {}) });
   const byHand = remoteOpenInstructions({ port, ...(socketPath ? { socketPath } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), target });
   // One computer's commands only: the link appears exactly once in the
   // result, inside `open` (no separate link field, no other platforms).

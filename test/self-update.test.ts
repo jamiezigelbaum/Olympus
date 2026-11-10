@@ -23,7 +23,8 @@ import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_SELF_UPDATE_PATHS, withWorkerBearerAuth,
 } from '../src/workers/http.ts';
 import { checkSite, loadSigningKey, publicKeyPem, signInstaller } from '../scripts/sign-release-manifest.ts';
-import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 
 const dirs: string[] = [];
 afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true }); });
@@ -299,9 +300,8 @@ describe('Update now is this computer\'s own: never the bearer, a launch link or
 
   test('this computer\'s unlocked dashboard starts it and reads its progress', async () => {
     const f = fixture();
-    const mint = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(mint, '127.0.0.1');
-    const minted = await f.fetch(mint);
+    // Minted as the owner's browser does it: from the control session its launch opened (#1153).
+    const minted = await ownerLocalMint(f.fetch, ORIGIN, TOKEN);
     expect(minted.status).toBe(200);
     const session = { Cookie: cookieOf(minted), 'X-Olympus-CSRF': ((await minted.json()) as { csrf_token: string }).csrf_token };
     const started = await f.fetch(post(DASHBOARD_SELF_UPDATE_PATHS.start, session));
@@ -340,6 +340,25 @@ describe('the notice on Home and Settings', () => {
   test('a rollback says which version was put back', () => {
     const html = renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, updateStatus: { state: 'rolled_back', from: '1.5.0', to: '1.5.1' } });
     expect(html).toContain("Olympus 1.5.1 didn't start, so Olympus put 1.5.0 back.");
+  });
+
+  test('a rollback drawn before the update check still offers the retry once the check finds the version', async () => {
+    // A worker that just restarted has an empty update cache, so the page is
+    // drawn with no version; Home's health read brings Update now back.
+    const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+    Object.defineProperty(window, 'setInterval', { value: () => 1 });
+    Object.defineProperty(window, 'setTimeout', { value: () => 1 });
+    Object.defineProperty(window, 'fetch', { value: async () => new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } })) });
+    try {
+      window.document.write(renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', selfUpdate: true, csrfToken: 'c', localSession: true, updateStatus: { state: 'rolled_back', from: '1.5.0', to: '1.5.1' } }));
+      window.document.close();
+      const button = window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement;
+      const notice = window.document.querySelector('[data-update-notice]')!;
+      await waitFor(() => !button.hidden, { description: 'retry offered after the health read' });
+      expect(notice.getAttribute('data-update-version')).toBe('1.5.1');
+      expect(notice.getAttribute('data-update-state')).toBe('rolled_back');
+      expect(window.document.querySelector('[data-update-title]')!.textContent).toContain("Olympus 1.5.1 didn't start, so Olympus put 1.5.0 back.");
+    } finally { await window.happyDOM.close(); }
   });
 
   test('Settings › Updates carries the same notice', () => {
@@ -399,19 +418,19 @@ describe('the notice on Home and Settings', () => {
     // would keep a dead CSRF token: the page reloads before the update starts.
     const page = (csrfToken: string, localSession: boolean) => renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, csrfToken, localSession });
     const calls: { url: string; csrf: string | null }[] = [];
+    let healthReads = 0;
     const open = (html: string, resume?: string) => {
-      const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+      const window = new Window({ url: resume ? 'http://localhost/dashboard#olympus-update-now' : 'http://localhost/dashboard?token=dash_t&tab=home', settings: { enableJavaScriptEvaluation: true } });
       let reloads = 0;
       Object.defineProperty(window.location, 'reload', { value: () => { reloads++; } });
       Object.defineProperty(window, 'setInterval', { value: () => 1 });
       Object.defineProperty(window, 'setTimeout', { value: () => 1 });
       Object.defineProperty(window, 'fetch', { value: async (url: string, init?: { headers?: Record<string, string> }) => {
-        if (url === '/v1/health') return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }));
+        if (url === '/v1/health') { healthReads++; return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } })); }
         calls.push({ url, csrf: init?.headers?.['X-Olympus-CSRF'] ?? null });
         if (url === DASHBOARD_LOCAL_CONTROL_SESSION_PATH) return new window.Response(JSON.stringify({ csrf_token: 'local-c' }));
         return new window.Response(JSON.stringify({ ok: true, update: { state: 'running', step: 1, from: '1.5.0', to: '1.5.1' } }));
       } });
-      if (resume !== undefined) window.sessionStorage.setItem('olympus-update-now', resume);
       window.document.write(html); window.document.close();
       return { window, reloads: () => reloads };
     };
@@ -419,25 +438,88 @@ describe('the notice on Home and Settings', () => {
     try {
       (before.window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
       await waitFor(() => before.reloads() === 1, { description: 'reload after the new session' });
-      expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: null }]);
-      expect(before.window.sessionStorage.getItem('olympus-update-now')).toBe('1.5.1');
+      expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: 'bearer-c' }]);
+      // The one-shot mark rides on the address's fragment, never in browser storage.
+      expect(before.window.location.hash).toBe('#olympus-update-now');
+      // A launch token in the address is dropped, so the reload takes the new local session.
+      expect(before.window.location.search).toBe('?tab=home');
+      expect(before.window.sessionStorage.length).toBe(0);
     } finally { await before.window.happyDOM.close(); }
     // The reloaded page holds the local session everywhere and carries on.
     calls.length = 0;
-    const after = open(page('local-c', true), '1.5.1');
+    const after = open(page('local-c', true), '1');
     try {
       await waitFor(() => calls.length === 1, { description: 'update started after the reload' });
       expect(calls).toEqual([{ url: DASHBOARD_SELF_UPDATE_PATHS.start, csrf: 'local-c' }]);
-      expect(after.window.sessionStorage.getItem('olympus-update-now')).toBeNull();
+      expect(after.window.location.hash).toBe('');
+      expect(after.window.location.pathname).toBe('/dashboard');
       expect(after.reloads()).toBe(0);
     } finally { await after.window.happyDOM.close(); }
     // A later visit with no click behind it starts nothing.
     calls.length = 0;
+    healthReads = 0;
     const later = open(page('local-c', true));
     try {
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await waitFor(() => healthReads > 0, { description: 'Home health read on the later visit' });
+      await flushMicrotasks();
       expect(calls).toEqual([]);
     } finally { await later.window.happyDOM.close(); }
+  });
+
+  test('Home: an update found after the page was drawn still starts after the session reload', async () => {
+    // The page is drawn before the delayed update check; Home's own health
+    // read then shows Update now. The click must survive the reload.
+    const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
+    let reloads = 0;
+    Object.defineProperty(window.location, 'reload', { value: () => { reloads++; } });
+    Object.defineProperty(window, 'setInterval', { value: () => 1 });
+    Object.defineProperty(window, 'fetch', { value: async (url: string) => url === '/v1/health'
+      ? new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }))
+      : new window.Response(JSON.stringify({ csrf_token: 'local-c' })) });
+    try {
+      window.document.write(renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', selfUpdate: true, csrfToken: 'bearer-c', localSession: false }));
+      window.document.close();
+      const button = window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement;
+      await waitFor(() => !button.hidden, { description: 'Update now shown by the health read' });
+      expect(window.document.querySelector('[data-update-notice]')!.getAttribute('data-update-version')).toBe('1.5.1');
+      button.click();
+      await waitFor(() => reloads === 1, { description: 'reload after the new session' });
+      expect(window.location.hash).toBe('#olympus-update-now');
+    } finally { await window.happyDOM.close(); }
+  });
+
+  test('the reload after Update now keeps the pane the click came from (Settings › Updates)', async () => {
+    const page = (csrfToken: string, localSession: boolean) => renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, csrfToken, localSession });
+    const starts: string[] = [];
+    const open = (url: string, html: string) => {
+      const window = new Window({ url, settings: { enableJavaScriptEvaluation: true } });
+      Object.defineProperty(window.location, 'reload', { value: () => {} });
+      Object.defineProperty(window, 'setInterval', { value: () => 1 });
+      Object.defineProperty(window, 'setTimeout', { value: () => 1 });
+      Object.defineProperty(window, 'fetch', { value: async (target: string) => {
+        if (target === '/v1/health') return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }));
+        if (target === DASHBOARD_LOCAL_CONTROL_SESSION_PATH) return new window.Response(JSON.stringify({ csrf_token: 'local-c' }));
+        starts.push(target);
+        return new window.Response(JSON.stringify({ ok: true, update: { state: 'running', step: 1, from: '1.5.0', to: '1.5.1' } }));
+      } });
+      window.document.write(html); window.document.close();
+      return window;
+    };
+    const before = open('http://localhost/dashboard?settings&token=dash_t#updates', page('bearer-c', false));
+    let marked = '';
+    try {
+      (before.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
+      await waitFor(() => before.location.hash.startsWith('#olympus-update-now'), { description: 'mark set' });
+      marked = before.location.hash;
+    } finally { await before.happyDOM.close(); }
+    expect(marked).toBe('#olympus-update-now~updates');
+    const after = open('http://localhost/dashboard?settings' + marked, page('local-c', true));
+    try {
+      await waitFor(() => starts.length === 1, { description: 'update started after the reload' });
+      // The Updates pane is shown again, so its progress and outcome are visible.
+      expect(after.location.hash).toBe('#updates');
+      expect(after.location.search).toMatch(/^\?settings=?$/);
+    } finally { await after.happyDOM.close(); }
   });
 
   test('a refused update shows the reason beside the button', async () => {

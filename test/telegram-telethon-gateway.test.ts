@@ -36,6 +36,40 @@ describe('long-lived read-only Telethon capture gateway', () => {
     } finally { rmSync(fixture.root, { recursive: true, force: true }); }
   }, 30_000);
 
+  // #1075: a kind grant reads every chat of that kind, including one started after pairing; exact chats alone do not.
+  pythonTest('a one-to-one kind grant reads a one-to-one chat started later; a grant of picked chats does not', async () => {
+    const env = {
+      FAKE_TELETHON_DIALOG_IDS: '[101,303]',
+      FAKE_TELETHON_DM_IDS: '[303,404]',
+      FAKE_TELETHON_EVENTS_JSON: '[{"chat_id":404,"message_id":404},{"chat_id":505,"message_id":505}]',
+    };
+    const byKind = gatewayFixture();
+    const picked = gatewayFixture();
+    try {
+      expect((await runGateway(byKind, { ...env, OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: 'kind:dm' })).code).toBe(0);
+      const kindScopes = new Set(readJsonLines(join(byKind.spoolDir, '2026-07-22.jsonl')).map((record) => record.chat_scope));
+      // 303 is a one-to-one dialog, 404 a one-to-one chat started after pairing; 101 and 505 are groups.
+      expect(kindScopes).toEqual(new Set(['telegram.personal:chat:303', 'telegram.personal:chat:404']));
+      expect((await runGateway(picked, { ...env, OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: 'telegram.personal:chat:303' })).code).toBe(0);
+      const pickedScopes = new Set(readJsonLines(join(picked.spoolDir, '2026-07-22.jsonl')).map((record) => record.chat_scope));
+      expect(pickedScopes).toEqual(new Set(['telegram.personal:chat:303']));
+    } finally {
+      rmSync(byKind.root, { recursive: true, force: true });
+      rmSync(picked.root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  pythonTest('unknown or malformed kind tokens fail closed before provider contact', async () => {
+    const fixture = gatewayFixture();
+    try {
+      for (const scope of ['kind:everyone', 'kind:', 'kind:DM,telegram.personal:chat:101', '*,kind:dm', 'kind:community']) {
+        const result = await runGateway(fixture, { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scope });
+        expect(result.code).toBe(2);
+        expect(readJsonLines(fixture.callLog)).toEqual([]);
+      }
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
   pythonTest('mixed wildcard grants fail closed before provider contact', async () => {
     const fixture = gatewayFixture();
     try {
@@ -60,6 +94,17 @@ describe('long-lived read-only Telethon capture gateway', () => {
       expect(statSync(path).mode & 0o777).toBe(0o600);
       expect(JSON.stringify(receipt)).not.toContain(SECRET_TEXT);
       expect(JSON.stringify(receipt)).not.toContain('api_hash');
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
+  // #1075: the supervisor counts every grant token, kinds included; the receipt must say the same number.
+  pythonTest('a kind grant publishes the readiness count the native supervisor expects', async () => {
+    const fixture = gatewayFixture();
+    try {
+      const result = await runGateway(fixture, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f', FAKE_REQUIRE_NATIVE_READY: '1', OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: 'kind:dm,kind:group,telegram.personal:chat:101' });
+      expect(result.code).toBe(0);
+      const receipt = JSON.parse(readFileSync(join(fixture.stateDir, 'native-service-readiness.json'), 'utf8'));
+      expect(receipt.approved_chats).toBe(3);
     } finally { rmSync(fixture.root, { recursive: true, force: true }); }
   }, 30_000);
 
@@ -659,8 +704,12 @@ def reaction_specs():
 class Entity:
     def __init__(self, entity_id):
         self.id = entity_id
-        self.title = "Approved chat"
-        self.megagroup = True
+        # FAKE_TELETHON_DM_IDS names the one-to-one chats; every other chat is a group.
+        if entity_id in json.loads(os.environ.get("FAKE_TELETHON_DM_IDS", "[]")):
+            self.megagroup = False
+        else:
+            self.title = "Approved chat"
+            self.megagroup = True
         self.broadcast = False
         self.bot = False
 
@@ -741,7 +790,7 @@ class TelegramClient:
         return False
     async def iter_dialogs(self, limit=None):
         for chat_id in json.loads(os.environ.get("FAKE_TELETHON_DIALOG_IDS", "[101,202]")):
-            yield SimpleNamespace(id=chat_id)
+            yield SimpleNamespace(id=chat_id, entity=Entity(chat_id))
     async def get_entity(self, chat_id):
         log({"event":"entity","chat_id":str(chat_id)})
         return Entity(999 if chat_id == "me" else int(chat_id))

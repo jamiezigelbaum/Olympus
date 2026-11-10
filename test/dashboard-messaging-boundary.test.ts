@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const origin = 'http://127.0.0.1:28190';
 const paths = ['start', 'status', 'respond', 'cancel', 'chats', 'scope'].map((name) => `/dashboard/messaging/${name}`);
@@ -9,9 +10,7 @@ describe('dashboard messaging custody', () => {
   test('only a local socket, local session, same origin and CSRF can reach pairing', async () => {
     let calls = 0;
     const guarded = withWorkerBearerAuth(async () => { calls++; return new Response('ok'); }, { authToken: 'worker-secret' });
-    const mint = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
-    recordRequestPeer(mint, '127.0.0.1');
-    const minted = await guarded(mint);
+    const minted = await ownerLocalMint(guarded, origin, 'worker-secret');
     const cookie = minted.headers.get('set-cookie')!.split(';')[0]!;
     const csrf = (await minted.json() as { csrf_token: string }).csrf_token;
     const request = (path: string, headers: Record<string, string> = {}, peer?: string) => {

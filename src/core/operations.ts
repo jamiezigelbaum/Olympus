@@ -1,5 +1,6 @@
 import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { DelphiClient } from './delphi.ts';
+import { noteLocalAgentAnswer } from './app-release-agent.ts';
 import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
 import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
@@ -14,6 +15,7 @@ import {
 } from './source-corpus-registry.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
+import { readSetupStatus } from './setup-status.ts';
 import { OPEN_REMOTE_DESCRIPTION, OPEN_REMOTE_PARAMS, OPEN_REMOTE_TOOL_NAME, openRemote } from './remote-open-tool.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
@@ -372,7 +374,9 @@ export const operations: Operation[] = [
       });
       const jobs = ctx.sourceAnswerJobs;
       const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
+      return released;
     },
   },
   {
@@ -396,7 +400,11 @@ export const operations: Operation[] = [
       const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
       // Stdio's answer crossed the worker transport, so revalidate its opaque
       // manifest ticket there, before serializing the cached value.
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      // What the owner sees each AI app received (#1061) is recorded here, at
+      // the tool result, after collection and release validation.
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
+      return released;
     },
   },
   {
@@ -640,6 +648,23 @@ export const operations: Operation[] = [
     handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
   },
   {
+    // The setup checklist (#1077): the same steps, states and ways forward the
+    // dashboard's Home shows. Read-only; names and states only. A step that
+    // changes what is private, who has access or what Olympus spends comes
+    // back as a dashboard link for the owner, never as something to run.
+    name: 'olympus_setup_status',
+    description: [
+      'Read Olympus\'s setup checklist: each step (installed, Private answers, privacy judge, sources, chat choices, an AI app, first items findable) with its state (done, next, todo, skipped) and exactly one way forward.',
+      'A forward of kind "command" is an olympus command you may run yourself. A forward of kind "owner" is a dashboard link to give the owner: it needs their click because it changes what is private, who has access or what Olympus spends. After they click, call this again and carry on; do not ask what is on screen.',
+      'Read-only. Output contains names and states only, never item content, keys or tokens.',
+    ].join(' '),
+    params: {},
+    mutating: false,
+    nativeExposure: 'always',
+    cliHints: { name: 'setup status' },
+    handler: async (ctx) => readSetupStatus({ config: ctx.config }),
+  },
+  {
     name: 'ask_anonymously',
     description: [
       'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.',
@@ -688,6 +713,7 @@ export const operations: Operation[] = [
     description: [
       'Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.',
       'A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.',
+      'AI conversation exports work too: a ChatGPT data export (the .zip from Settings, Data controls, Export data) or a Claude data export (the .zip from Settings, Privacy, Export data), or the conversations.json inside either. Each conversation is imported as one item with its title, dates and turns as shown; pictures and attached files are not imported. Each conversation is judged on its own like mail.',
       'Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.',
       'Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.',
       'Never open, read or copy the file yourself, and never retry to get around the approval.',

@@ -28,6 +28,7 @@ import { withPriorityQueryEmbedding } from './embeddings.ts';
 // - The Castor-visible result carries the gated answer, citation locators, and
 //   audits — never raw chunks, packets, or pack internals.
 
+import type { EvidenceReranker } from '../../core/evidence-reranker.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
@@ -145,6 +146,12 @@ export interface AnalystAnswerLanes {
    * retrieval, and probePrivateMatch reads it as not checked.
    */
   excludedCorpusIds?: ReadonlySet<string>;
+  /**
+   * Registered corpora with no store mounted on this computer: nothing here
+   * could search them, and nothing here holds them (an answer on this
+   * computer does not name them as left out).
+   */
+  unmountedCorpusIds?: ReadonlySet<string>;
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
@@ -165,6 +172,9 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   // Optional multi-query retrieval expansion (core/query-planner.ts), passed
   // through to the EvidencePack builder. Absent = single literal query.
   queryPlanner?: (question: string) => Promise<readonly string[]>;
+  // Optional local cross-encoder over the fused candidates (core/evidence-reranker.ts),
+  // passed through to the EvidencePack builder. Absent = fused order, unchanged.
+  reranker?: EvidenceReranker;
   defaultMaxResults?: number;
   maxCharsPerCandidate?: number;
   // Total passage UTF-8 bytes across the evidence pack; see DEFAULT_EVIDENCE_BYTE_BUDGET.
@@ -428,6 +438,7 @@ export function createAnalystSourceIndexAnswerHandler(
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
           ...(request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {}),
           ...(options.queryPlanner ? { queryPlanner: options.queryPlanner } : {}),
+          ...(options.reranker ? { reranker: options.reranker } : {}),
           maxResults,
           ...(requestedCorpusIds ? { corpusIds: requestedCorpusIds } : {}),
           searchContext: {
@@ -2008,6 +2019,13 @@ export interface AnalystReleaseOutcome {
   facts: StructuredEvidenceFact[];
   opsec: OpsecReleaseAudit;
   answer: string;
+  /**
+   * The coverage notes the released answer carries, one entry per note,
+   * exactly as composed into `answer`: structured, so a reader never parses
+   * them back out of the text. Empty when nothing was released, or when the
+   * released text is not one of the composed drafts.
+   */
+  unanswered: string[];
 }
 
 export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystReleaseOutcome {
@@ -2049,10 +2067,8 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   );
   const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
-  const safeUnsupportedDraft = composeReleasedAnswer(
-    safeUnsupportedAnswer,
-    safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack),
-  );
+  const safeUnsupportedGaps = safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack);
+  const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
     unsupportedNoContent ? safeUnsupportedDraft : input.result.answer,
     unsupportedNoContent ? [] : releasedUnanswered,
@@ -2111,11 +2127,23 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
         input.detail,
         input.releaseSecureContent,
       );
+  const answer = answerForReleaseDecision(decision);
+  // Each draft the gate may release, with the notes composed into it.
+  const draftNotes: ReadonlyArray<readonly [string, readonly string[]]> = [
+    [finalDraftAnswer, unsupportedNoContent ? safeUnsupportedGaps : releasedUnanswered],
+    [safeUnsupportedDraft, safeUnsupportedGaps],
+    [originalDraftAnswer, input.result.unanswered],
+  ];
+  const released = decision.decision === 'allow' || decision.decision === 'redact';
+  const unanswered = released
+    ? (draftNotes.find(([draft]) => draft === answer)?.[1] ?? []).map((note) => note.trim()).filter(Boolean)
+    : [];
   return {
     decision,
     facts,
     opsec: buildOpsecReleaseAudit(facts, decision),
-    answer: answerForReleaseDecision(decision),
+    answer,
+    unanswered,
   };
 }
 
@@ -2426,6 +2454,7 @@ function evidenceFromCitations(
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...(item.accountScope ? { account_scope: item.accountScope } : {}),
       provider_item_id: item.providerItemId,
       ...(item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {}),
       ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
@@ -2526,6 +2555,7 @@ function appendUnreadableMatchedEvidence(
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...(item.accountScope ? { account_scope: item.accountScope } : {}),
       provider_item_id: item.providerItemId,
       ...(item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {}),
       ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
@@ -2798,7 +2828,12 @@ export async function searchReleasedEvidence(input: {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...(item.accountScope ? { account_scope: item.accountScope } : {}),
       provider_item_id: item.providerItemId,
+      // The same identity the release manifest names (a chat message's
+      // conversation included), so the owner's list of what each AI app
+      // received can point at exactly this item (core/app-release-capture.ts).
+      ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
       ...(cite?.title ? { title: cite.title } : {}),
       ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
       ...(cite?.uri ? { uri: cite.uri } : {}),

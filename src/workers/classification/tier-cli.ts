@@ -298,6 +298,27 @@ function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedIte
  * exists, and the set ledger a store is bound to. With the id each bound one
  * must have, so an open checks it (`withLedgerAt`).
  */
+/**
+ * Reads one known store read-only (the owner's one-item lookup,
+ * tier-owner-items.ts), with the columns its items table has; `fallback` when
+ * the store cannot be read or holds no items table.
+ */
+export function withStore<T>(dbPath: string, fallback: T, run: (db: Database, columns: Set<string>) => T): T {
+  let db: Database | undefined;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const columns = new Set((db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!columns.has('provider_item_id')) return fallback;
+    return run(db, columns);
+  } catch {
+    // A store that cannot be read holds nothing to list.
+    return fallback;
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
 export function knownTierLedgers(context: TierCliContext = {}): Array<{ path: string; boundLedgerId?: string }> {
   const ledgers = new Map<string, string | undefined>();
   for (const dbPath of knownStorePaths(context)) {
@@ -359,7 +380,24 @@ function orphanedOverride(ledger: TierLedger, identity: TierLedgerIdentity): Ite
 
 // --- set / explain -----------------------------------------------------------------
 
-export function runTierSet(args: readonly string[], context: TierCliContext = {}): Record<string, unknown> {
+/** The item a correction was recorded for (workers/apps-received.ts): the located item must be this one. */
+export interface TierSetExpectedItem {
+  provider: string;
+  providerItemId: string;
+  providerConversationId?: string;
+}
+
+/**
+ * `tier set <locator> <tier>` on exactly the item recorded: the locator must
+ * still resolve, and to that item's provider, item and conversation. Anything
+ * else (the item gone, or the locator now naming another item) is refused
+ * and nothing is written.
+ */
+export function runTierSetOnRecordedItem(locator: string, word: string, expected: TierSetExpectedItem, context: TierCliContext = {}): Record<string, unknown> {
+  return runTierSet([locator, word], context, expected);
+}
+
+export function runTierSet(args: readonly string[], context: TierCliContext = {}, expected?: TierSetExpectedItem): Record<string, unknown> {
   const [locator, word] = args;
   if (!locator || !word || args.length > 2) {
     throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier set']}`);
@@ -376,6 +414,14 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     override = { kind: 'tier', tier };
   }
   const items = locateTierItem(locator, context);
+  if (expected) {
+    const identity = items[0]!.identity;
+    if (identity.provider !== expected.provider
+      || identity.providerItemId !== expected.providerItemId
+      || (identity.providerConversationId ?? undefined) !== (expected.providerConversationId ?? undefined)) {
+      throw new OperationError('invalid_params', 'That locator no longer names the item it was recorded for, so nothing was changed.');
+    }
+  }
   return {
     locator,
     item: publicIdentity(items[0]!.identity),

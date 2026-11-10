@@ -10,7 +10,8 @@ import { describe, expect, test } from 'bun:test';
 import { exportOlympusData, lifecycleEnv } from '../src/data-lifecycle.ts';
 import { restoreOlympusData } from '../src/data-restore.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
-import { resolveTierRulesPath } from '../src/workers/classification/tier-rules.ts';
+import { loadOwnerTierRules, resolveTierRulesPath } from '../src/workers/classification/tier-rules.ts';
+import { PRIVACY_RULE_ID_PREFIX, readPrivacyProfile, writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 
 function seed(path: string, table: string, value: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -63,6 +64,40 @@ describe('data restore', () => {
       expect(readFileSync(join(backup, 'manifest.json'), 'utf8')).toContain('"secrets_excluded": true');
 
       expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('already holds Olympus data for x.bookmarks');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('brings the privacy profile back with its rules, so a later description-only save keeps every always-Private rule', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-privacy-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      seed(storeOf(homeA), 'rows', 'a bookmark');
+      const envA = lifecycleEnv({ homeDir: homeA });
+      writePrivacyProfile({
+        description: 'Health is private.',
+        rules: [
+          { kind: 'sender', source_id: 'gmail.email', value: '@clinic.example' },
+          { kind: 'folder', source_id: 'dropbox.files', key: '/health' },
+        ],
+      }, { env: envA });
+      const privacyIdsA = loadOwnerTierRules({ env: envA }).map((rule) => rule.id).filter((id) => id.startsWith(PRIVACY_RULE_ID_PREFIX)).sort();
+      expect(privacyIdsA).toHaveLength(2);
+
+      const exported = exportOlympusData({ destination: backup, homeDir: homeA });
+      expect(exported.artifacts.some((artifact) => artifact.role === 'owner_rules' && artifact.ownerFile === 'privacy_profile')).toBe(true);
+      restoreOlympusData({ input: backup, homeDir: homeB });
+
+      const envB = lifecycleEnv({ homeDir: homeB });
+      expect(readPrivacyProfile({ env: envB })?.rules).toHaveLength(2);
+      // The owner edits only their description on the new computer.
+      writePrivacyProfile({ description: 'Health and money are private.' }, { env: envB });
+      const privacyIdsB = loadOwnerTierRules({ env: envB }).map((rule) => rule.id).filter((id) => id.startsWith(PRIVACY_RULE_ID_PREFIX)).sort();
+      expect(privacyIdsB).toEqual(privacyIdsA);
+      expect(readPrivacyProfile({ env: envB })?.rules).toHaveLength(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -325,6 +360,49 @@ test('the mail picker\'s "always Private" senders travel without the approval, a
     });
     expect(approved.ownerTierRules).toEqual(mail.mailScopeOwnerTierRules({ alwaysPrivateSenders: senders }));
     expect(JSON.parse(readFileSync(statePath(homeB), 'utf8')).carried_owner_rules).toBeUndefined();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A mail scope file on this computer that cannot be read refuses the backup's
+// "always Private" senders. That is found before anything is written (#1098
+// review), so a retry after repairing it is not refused as already restored.
+test('an unreadable mail scope file here refuses the restore before any store is written', async () => {
+  const { lifecycleHandleRegistryPath } = await import('../src/data-lifecycle.ts');
+  const mail = await import('../src/core/mail-source-scope.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-mail-preflight-'));
+  const homeA = join(dir, 'a');
+  const homeB = join(dir, 'b');
+  const backup = join(dir, 'backup');
+  const statePath = (home: string) => mail.defaultMailSourceScopeStatePath(lifecycleHandleRegistryPath({ homeDir: home }));
+  try {
+    mkdirSync(dirname(statePath(homeA)), { recursive: true });
+    writeFileSync(statePath(homeA), JSON.stringify({
+      version: 1,
+      approvals: [{
+        source_id: 'gmail.email',
+        account_generation: 'a'.repeat(64),
+        revision: '0b0f8c6e-6c1f-4a43-9c3e-5d1f2a3b4c5d',
+        status: 'approved',
+        mail_scope: { window: 'all', skipped_categories: [], skipped_labels: [], always_private_senders: ['@clinic.example'], skip_senders: [] },
+        owner_tier_rules: [],
+        approved_at: '2026-11-01T00:00:00.000Z',
+      }],
+    }));
+    seed(storeOf(homeA), 'rows', 'a bookmark');
+    exportOlympusData({ destination: backup, homeDir: homeA });
+
+    mkdirSync(dirname(statePath(homeB)), { recursive: true });
+    writeFileSync(statePath(homeB), '{ not json');
+    expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('mail scope file');
+    expect(existsSync(storeOf(homeB))).toBe(false);
+
+    // Repaired: the retry restores everything.
+    rmSync(statePath(homeB));
+    restoreOlympusData({ input: backup, homeDir: homeB });
+    expect(rows(storeOf(homeB), 'rows')).toEqual([{ value: 'a bookmark' }]);
+    expect(mail.mailOwnerRulesForExport(statePath(homeB))?.always_private_senders).toEqual(['@clinic.example']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -25,7 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
-import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   TIER_KEYS,
@@ -323,6 +323,24 @@ interface StoredRejudgeQuestion extends TierRejudgeQuestion {
   decidedBy: string;
 }
 
+/**
+ * The SQL that narrows `state = 'moving'` rows of `tier_items` to raises or
+ * lowerings (empty for both). Shared with read-only counts that open the
+ * ledger file themselves (classification/sniffer-service.ts).
+ */
+export function tierMovingDirectionClause(direction?: 'raise' | 'lower'): string {
+  if (!direction) return '';
+  // A hide-first move also wins if it was retargeted at the same tiers.
+  const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+  const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
+    OR ${rank('target_content_tier')} > ${rank('content_tier')}
+    OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+      AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+      AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+      AND c.superseded_by_generation = tier_items.generation + 1))`;
+  return `AND ${direction === 'lower' ? 'NOT' : ''} ${raising}`;
+}
+
 export class TierLedgerGenerationConflictError extends Error {
   constructor(message = 'Tier ledger generation changed; re-read the row before flipping.') {
     super(message);
@@ -383,7 +401,7 @@ export class TierLedger {
     try {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
-        db.exec('PRAGMA query_only = ON;');
+        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
         this.db = db;
         return;
       }
@@ -396,6 +414,11 @@ export class TierLedger {
       throw error;
     }
     this.db = db;
+  }
+
+  /** Whether this file is at this build's schema (a read-only open never migrates it). */
+  hasCurrentSchema(): boolean {
+    return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
   }
 
   close(): void {
@@ -922,17 +945,9 @@ export class TierLedger {
   }
 
   private movingDirectionClause(direction?: 'raise' | 'lower'): string {
-    if (!direction) return '';
-    // A hide-first move also wins if it was retargeted at the same tiers.
-    const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
-    const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
-      OR ${rank('target_content_tier')} > ${rank('content_tier')}
-      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
-        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
-        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
-        AND c.superseded_by_generation = tier_items.generation + 1))`;
-    return `AND ${direction === 'lower' ? 'NOT' : ''} ${raising}`;
+    return tierMovingDirectionClause(direction);
   }
+
 
   /**
    * Items with a queued move (state `moving`): the fewest failed attempts
@@ -1150,6 +1165,56 @@ export class TierLedger {
       builtinPromptSkipped,
       ...(more && last ? { next: identityOfRow(last) } : {}),
     };
+  }
+
+  /**
+   * The second round's candidates (judge-second-round.ts, #891): settled rows
+   * the local judge itself held Private on their text. Never a Secret, an
+   * item the local judge cleared, a fail-safe or record hold, a rule, an
+   * owner override, names held Private, or a row with a re-judge open.
+   * Bounded exactly like `rejudgeCandidatePage`.
+   */
+  secondRoundCandidatePage(options: { after?: TierLedgerIdentity; limit?: number; scanLimit?: number } = {}): { records: TierLedgerRecord[]; next?: TierLedgerIdentity } {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : null;
+    const rows = this.db.query(`
+      WITH win AS (
+        SELECT * FROM tier_items
+        WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      SELECT i.*, CASE WHEN
+          i.routed = 1 AND i.content_read = 1 AND i.state = 'current' AND i.metadata_forced = 0
+          AND i.content_tier = 'secure' AND i.metadata_tier IN ('public', 'private') AND i.decided_by IN ('sniffer', 'move')
+          -- The local judge's own Private verdict on this text (a move only carries it out).
+          AND instr(i.reasons_json, '"content:sniffer:local:') > 0 AND instr(i.reasons_json, '"content:judge_verdict:secure:') > 0
+          AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, ':record_held:') = 0
+          AND instr(i.reasons_json, ':injection:') = 0
+          AND instr(i.reasons_json, '"override:') = 0 AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
+          AND NOT (i.rejudge_json IS NOT NULL AND json_extract(i.rejudge_json, '$.generation') = i.generation)
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_overrides o
+            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          )
+        THEN 1 ELSE 0 END AS second_round
+      FROM win i
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+    `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), scanLimit) as Array<TierItemRow & { second_round: number }>;
+    const records: TierLedgerRecord[] = [];
+    let last: TierItemRow | undefined;
+    for (const row of rows) {
+      last = row;
+      if (row.second_round !== 1) continue;
+      records.push(recordFromRow(row));
+      if (records.length >= limit) break;
+    }
+    const more = records.length >= limit || rows.length >= scanLimit;
+    return { records, ...(more && last ? { next: identityOfRow(last) } : {}) };
   }
 
   /** The candidates of `rejudgeCandidatePage` over the whole ledger (status and tests), at most `limit`. */
@@ -2717,21 +2782,12 @@ export class TierLedger {
 
   /**
    * The most recently decided items, newest first (the dashboard's "recently
-   * sorted" list, tier-owner-items.ts), optionally only those with one
-   * content tier (its Personal and Private filters), and only those decided
-   * before a time (paging further back). Content-free: ledger rows only.
+   * sorted" list, tier-owner-items.ts). Content-free: ledger rows only.
    */
-  recentDecisions(limit = 25, contentTier?: TierKey, before?: string): TierLedgerRecord[] {
-    const capped = Math.max(1, Math.min(limit, 200));
-    const where = [
-      ...(contentTier === undefined ? [] : ['content_tier = ?']),
-      ...(before === undefined ? [] : ['decided_at < ?']),
-    ];
-    const params = [...(contentTier === undefined ? [] : [contentTier]), ...(before === undefined ? [] : [before]), capped];
+  recentDecisions(limit = 25): TierLedgerRecord[] {
     const rows = this.db.query(`
-      SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
-    `).all(...params) as TierItemRow[];
+      SELECT * FROM tier_items ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 200))) as TierItemRow[];
     return rows.map(recordFromRow);
   }
 
@@ -2742,10 +2798,12 @@ export class TierLedger {
    * back to the decision the override took it over from
    * (`settledDecisionBeforeOverride`).
    */
-  listClearedOverrideRows(limit = 100): TierLedgerRecord[] {
+  listClearedOverrideRows(limit = 100, after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>): TierLedgerRecord[] {
+    // `after` pages past rows a pass could not restore, so they never block the rest.
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
       WHERE i.routed = 1 AND i.state = 'current' AND i.decided_by = 'override'
+        AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
           WHERE o.provider = i.provider AND o.account_scope = i.account_scope
@@ -2753,7 +2811,11 @@ export class TierLedger {
         )
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
       LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 1_000))) as TierItemRow[];
+    `).all(
+      after ? 1 : null,
+      after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null,
+      Math.max(1, Math.min(limit, 1_000)),
+    ) as TierItemRow[];
     return rows.map(recordFromRow);
   }
 

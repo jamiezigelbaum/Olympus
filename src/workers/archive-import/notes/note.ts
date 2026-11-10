@@ -1,5 +1,6 @@
 /**
- * What the notes formats (Reflect, Roam) have in common: the shape a parser
+ * What the notes formats (Reflect, Roam, and the AI conversation exports read
+ * the same way: ChatGPT, Claude) have in common: the shape a parser
  * hands the reader, the findings a notes archive can report, and how a note
  * becomes the one kind of item every note carries.
  *
@@ -65,6 +66,23 @@ export interface NoteDraft {
    * a body of a shape it has no rule for) while the rest of it was. Absent: none.
    */
   unsupported?: number;
+  /**
+   * The note is a conversation (a chat-family format's item: one ChatGPT or
+   * Claude conversation), with every turn in `body` under its speaker's name.
+   * The item is the owner's own: they started it and wrote its every other
+   * turn, so it carries the owner as its sender in the fields chat sources use
+   * (`senderLabel`, `senderIsOwner`, `fromMe`), its speakers as
+   * `participants`, and the conversation as its thread.
+   */
+  conversation?: NoteConversation;
+}
+
+/** Who a conversation is between, as `NoteDraft.conversation` carries it. */
+export interface NoteConversation {
+  /** How the owner is named in the text ("You"). */
+  ownerLabel: string;
+  /** Everyone who speaks in it, the owner first ("You", "ChatGPT"). */
+  participants: readonly string[];
 }
 
 export type NoteOutcome =
@@ -177,12 +195,16 @@ export function buildNoteItem(
   const text = [lines.join('\n'), draft.body].filter((part) => part !== '').join('\n\n');
   const providerItemId = sha256(`${place.fileIndex}\u0000${place.member}\u0000${place.ordinal}\u0000${draft.key ?? ''}`).slice(0, 32);
   const contentHash = sha256(text);
+  const conversation = draft.conversation;
+  // A conversation is its own thread; two conversations never share one, whatever ids the export gives.
+  const threadId = conversation ? `conversation:${providerItemId}` : undefined;
   const item: RawItem = {
     identity: {
       family: input.format.family,
       provider: input.format.provider,
       accountScope: input.accountScope,
       providerItemId,
+      ...(threadId ? { providerThreadId: threadId, providerConversationId: threadId } : {}),
       localItemId: `${input.accountScope}:${providerItemId}`,
       sourceVersion: contentHash.slice(0, 32),
     },
@@ -195,6 +217,16 @@ export function buildNoteItem(
       ...(draft.createdAt ? { createdAt: draft.createdAt } : {}),
       ...(draft.updatedAt ? { updatedAt: draft.updatedAt } : {}),
       ...(draft.blockCount !== undefined ? { blockCount: draft.blockCount } : {}),
+      ...(conversation
+        ? {
+          chat: title || '(untitled)',
+          sender: conversation.ownerLabel,
+          senderLabel: conversation.ownerLabel,
+          senderIsOwner: true,
+          fromMe: true,
+          participants: conversation.participants,
+        }
+        : {}),
       contentHash,
     }),
     fetchedAt: new Date().toISOString(),
