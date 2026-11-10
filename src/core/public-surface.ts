@@ -393,6 +393,8 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/chat_list.go',
   'tools/whatsapp-bridge/chat_kinds.go',
+  'tools/whatsapp-bridge/history_sync.go',
+  'tools/whatsapp-bridge/wa_version.go',
   'tools/whatsapp-bridge/capture_status.go',
   'tools/whatsapp-bridge/media_files.go',
   'tools/whatsapp-bridge/media_serve.go',
