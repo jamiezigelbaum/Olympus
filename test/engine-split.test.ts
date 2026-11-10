@@ -41,6 +41,7 @@ import {
   createFrontGate,
   engineStatusSnapshotPath,
   OwnerBusyMarks,
+  restartAfterFront,
   SOURCE_SYNC_WAIT_MS,
   tierCommandOnlyReads,
   waitForProcessExit,
@@ -597,9 +598,38 @@ describe('a model change restarts both processes', () => {
     expect(parseEngineCommandEnvelope({ id: 'command-0081', command: { kind: 'reload', target: 'models', frontPid: 4242 } }).command).toEqual({ kind: 'reload', target: 'models', frontPid: 4242 });
     const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
     expect(server).toMatch(/const reloadModels = engineFront\s*\?\s*frontModelReload\(/);
-    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,400}?waitForProcessExit\(frontPid\)\.then\(\(\) => \{ requestModelReload\(\); \}\)/);
+    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,500}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(\)/);
+    expect(server).toMatch(/restartForDelete = [\s\S]{0,300}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(request\)/);
     // After a delete only the front restarts: the background is already on its way.
     expect(server).toMatch(/if \(!restartFrontOnly\(\)\) console\.warn/);
+  });
+});
+
+describe('a restore or model change fences readiness before the restart (#1224)', () => {
+  test('the background stops answering ready at once and restarts only after the front ends', async () => {
+    const events: string[] = [];
+    let ended!: (value: boolean) => void;
+    const scheduled = restartAfterFront({
+      frontPid: 4242,
+      markStopping: () => events.push('stopping'),
+      restart: () => { events.push('restart'); return true; },
+      waitForExit: (pid) => { events.push(`wait ${pid}`); return new Promise((resolve) => { ended = resolve; }); },
+      log: (line) => events.push(line),
+    });
+    expect(scheduled).toBe(true);
+    expect(events).toEqual(['stopping', 'wait 4242']);
+    await flushMicrotasks();
+    expect(events).toEqual(['stopping', 'wait 4242']);
+    ended(true);
+    await flushMicrotasks();
+    expect(events).toEqual(['stopping', 'wait 4242', 'restart']);
+    // A front that outlives the wait still gets the restart, and it is said.
+    const late: string[] = [];
+    restartAfterFront({ frontPid: 7, markStopping: () => late.push('stopping'), restart: () => { late.push('restart'); return true; }, waitForExit: async () => false, log: (line) => late.push(line) });
+    await flushMicrotasks();
+    expect(late[0]).toBe('stopping');
+    expect(late.at(-1)).toBe('restart');
+    expect(late).toHaveLength(3);
   });
 });
 

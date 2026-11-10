@@ -560,7 +560,7 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
-import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
@@ -7844,8 +7844,8 @@ export async function main(): Promise<void> {
           if (target === 'models') {
             if (!modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { reloaded: target, restarting: false };
             if (frontPid === undefined) return { reloaded: target, restarting: requestModelReload() };
-            void waitForProcessExit(frontPid).then(() => { requestModelReload(); });
-            return { reloaded: target, restarting: true };
+            // Fenced like a delete: no new front passes readiness against this background (a restore runs at its boot).
+            return { reloaded: target, restarting: restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(), log: (line) => console.warn(line) }) };
           }
           // A scope approval cancels the unsettled jobs it no longer covers.
           const invalidated = target === 'scope' && fileExtractionRuntime
@@ -7964,12 +7964,7 @@ export async function main(): Promise<void> {
     restartForDelete = (request) => {
       const frontPid = deleteFromFront;
       if (frontPid === undefined) return requestModelReload(request);
-      commands.markStopping();
-      void waitForProcessExit(frontPid).then((ended) => {
-        if (!ended) console.warn('[engine-split] the front did not end within a minute of a source-data delete; restarting to delete anyway.');
-        requestModelReload(request);
-      });
-      return true;
+      return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line) => console.warn(line) });
     };
     commands.markReady();
     engineBackground = { stop: () => { status.stop(); commands.stop(); } };

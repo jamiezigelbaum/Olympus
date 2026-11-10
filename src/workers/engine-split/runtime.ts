@@ -372,3 +372,26 @@ export class OwnerBusyMarks {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
   }
 }
+
+/**
+ * The background restarts after the front that asked for it has ended: a
+ * delete, a model or judge change, a restore (#1224). It first stops answering
+ * ready, so no new front can pass readiness against this background, open
+ * stores or load settings before the restart; the answer to the command that
+ * asked stays readable. Then it waits the front out (at most a minute) and
+ * restarts. Returns whether the restart was scheduled.
+ */
+export function restartAfterFront(input: {
+  frontPid: number;
+  markStopping: () => void;
+  restart: () => boolean;
+  waitForExit?: (pid: number) => Promise<boolean>;
+  log?: (line: string) => void;
+}): boolean {
+  input.markStopping();
+  void (input.waitForExit ?? waitForProcessExit)(input.frontPid).then((ended) => {
+    if (!ended) input.log?.('[engine-split] the front did not end within a minute; restarting anyway.');
+    input.restart();
+  });
+  return true;
+}
