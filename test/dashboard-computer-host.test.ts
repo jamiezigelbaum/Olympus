@@ -993,7 +993,7 @@ describe('Privacy saves through the panel tools', () => {
       revision: saved ? 'prv1.saved' : 'prv1.unset',
     });
     const setup = {
-      secretLocations: () => ({ folderKeys: new Set<string>(), pathPrefixes: [], labelIds: new Set<string>(), senders: [] }),
+      secretLocations: () => ({ folderKeys: new Set<string>(), pathPrefixes: [], labelIds: new Set<string>(), senders: [], chatKeys: new Set<string>() }),
       privacySettings: settings,
       privacyQuestions: async () => ({ fallback: true, questions: [] }),
       privacyCheck: async () => null,
