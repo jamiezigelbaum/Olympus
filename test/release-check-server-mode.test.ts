@@ -425,6 +425,8 @@ describe('the machine scripts', () => {
     const lines = saveScript(true).split('\n');
     expect(lines.filter((line) => /authorization:/i.test(line)).every((line) => line.includes('/dashboard/control/session"'))).toBe(true);
     expect(lines.find((line) => line.includes('--data'))).not.toMatch(/authorization:/i);
+    // The local mint carries the owner session's CSRF token: the cookie alone is not the owner (#1187).
+    expect(lines.find((line) => line.includes('/dashboard/control/session/local'))).toContain('x-olympus-csrf: $csrf');
     expect(saveScript(true)).not.toMatch(/echo .*token|printf .*token/);
     expect(stateScript()).toContain(DAEMON_PLIST);
     expect(stateScript()).toContain('Library/LaunchAgents/ai.olympusplugin.engine.plist');

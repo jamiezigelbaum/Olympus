@@ -162,6 +162,8 @@ export interface RetrievalLaneAudit {
   bestCosine?: number;
   /** Semantic candidates removed by an absolute relevance gate before fusion. */
   suppressedBelowBar?: number;
+  /** Wall time this lane took inside its corpus search, in ms (counts only). */
+  elapsedMs?: number;
   modelId?: string;
   backend?: string;
   localOnly: boolean;

@@ -697,7 +697,8 @@ async function smoke(questionsFile: string): Promise<never> {
       privateAnswer: obs.privateAnswer ? { chars: answer.length, citations: obs.privateAnswer.citations.length, factsStated: facts.map((fact) => answer.includes(fact)) } : null,
     };
   });
-  const lines = printed.filter((line) => /^\s+(FAIL|warn):/.test(line) || /^\s+(PASS|\d+ failure)/.test(line)).map((line) => line.trim());
+  // "cannot start: …" is the smoke's reason when it never got a grant (no question ran): without it the report says only "no results".
+  const lines = printed.filter((line) => /^\s+(FAIL|warn):/.test(line) || /^\s+(PASS|\d+ failure)/.test(line) || /^cannot start:/.test(line)).map((line) => line.trim());
   emit({ ok: true, exit: exit ?? 1, tools, results, smokeChecks: lines });
 }
 

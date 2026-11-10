@@ -15,7 +15,6 @@
  * before them.
  */
 import {
-  DASHBOARD_CHATGPT_PAGE_COPY as PANEL,
   DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY as PRIVACY_SETUP,
   DASHBOARD_PRIVACY_ITEMS_COPY as ITEMS,
@@ -44,9 +43,10 @@ const SENDER: Target = { role: 'textbox', name: PRIVACY.senderLabel, contains: t
 const ADD_RULE = { name: 'Press Add a rule', do: { click: { role: 'button', name: PRIVACY.addRule }, frame: 'panel' as const }, expect: [{ text: PRIVACY.kindPrompt, frame: 'panel' as const }, { present: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' as const }] };
 const PICK_SENDER = { name: 'Choose Add a sender', do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' as const }, expect: [{ present: { role: 'button', name: PRIVACY.next }, frame: 'panel' as const }] };
 const SENDER_NEXT = { name: 'Press Next to the sender', do: { click: { role: 'button', name: PRIVACY.next }, frame: 'panel' as const }, expect: [{ text: PRIVACY.senderIntro, frame: 'panel' as const }, { present: SENDER, frame: 'panel' as const }] };
-const MODELS_LINE: Target = { role: 'button', name: new RegExp(`^${PANEL.models}\\s+—`) };
-// What the open section says; a closed section's content counts as hidden here (the probe's rule), whatever the page's text holds.
-const SEARCH_LINE: Target = { text: new RegExp(`^${PANEL.modelSearch}: \\S`) };
+/** Settings › Models on this computer (#1043, #1085): the models moved off Home; Private answers is a row on every platform. */
+const MODELS_ANSWERS_ROW: Target = { css: '#models [data-model-row="private-answers"]' };
+/** Settings shows one section at a time: Agents and access with no target. */
+const AGENTS_PANE_HEADING: Target = { css: '#agents h3' };
 /** The id of the first Inbox row below the top one that is settled (not "not checked yet"), or null. */
 const KEEP_ROW = `(() => { const rows = Array.from(document.querySelectorAll('[data-pa-question]')).slice(1); const keep = rows.find((row) => !(row.querySelector('.pafrom')?.textContent ?? '').includes(${JSON.stringify(ASK.unchecked)})); return keep ? keep.getAttribute('data-pa-question') : null; })()`;
 const onlyDeletedGone = (expected: string) => async ({ count, vars }: StepContext): Promise<{ ok: boolean; expected: string; actual: string }> => {
@@ -170,40 +170,45 @@ export const JOURNEYS: readonly Journey[] = [
         expect: [
           { count: { css: '[data-source-row="readwise.library"]' }, equals: 1, frame: 'host' },
           { noText: /Readwise\s+—\s+(Needs you|Paused|Working)/, frame: 'host' },
-          // Connected, it is a row; not yet, it is a tile in Add a source. Either way the Sources tab offers it.
-          { count: { css: '[data-source-row="local.files"], [data-source-pick="local.files"]' }, atLeast: 1, frame: 'host' },
         ],
+      },
+      {
+        // Connected, it is a row; not yet, it is a tile in Add a source, which is a dialog. Either way the Sources tab offers it.
+        name: 'Press + Add a source',
+        do: { click: { css: '.srcbar [data-dialog-open="add-source"]' }, frame: 'host' },
+        expect: [{ count: { css: '[data-source-row="local.files"], [data-source-pick="local.files"]' }, atLeast: 1, frame: 'host' }],
       },
     ],
   },
   {
     id: 'models-ready',
-    title: 'The models are ready and the Models line says so',
-    source: 'owner test plan: dashboard pass',
+    title: 'Settings says which models answer Private questions, and none of them is broken',
+    source: 'owner test plan: dashboard pass; the models moved to Settings › Models on this computer (#1043, #1085)',
     steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
       {
-        name: 'Open the dashboard',
-        do: { open: 'dashboard' },
-        expect: [{ text: new RegExp(`${PANEL.models}\\s+—\\s+${PANEL.modelBuiltIn}\\s+·\\s+${PANEL.modelReady}`), frame: 'panel' }],
+        name: 'Open Settings › Models on this computer',
+        do: { go: '/dashboard?settings#models' },
+        expect: [
+          { present: MODELS_ANSWERS_ROW, frame: 'host' },
+          // Settings' own words for a broken model (models-on-computer.ts): a download that failed or stopped, a model that could not start.
+          { noText: /download failed|download interrupted|couldn't start/i, frame: 'host' },
+        ],
       },
     ],
   },
   {
     id: 'models-section-opens',
-    title: 'The Models line opens to say which model does what, and closes again',
-    source: 'release check coverage: the panel\'s Models section was never opened',
+    title: 'Settings opens Models on this computer from its side list, one section at a time',
+    source: 'release check coverage: the Models section was never opened; Settings shows one section at a time (owner, 2026-11-10)',
     steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
+      { name: 'Open Settings', do: { go: '/dashboard?settings' }, expect: [{ present: AGENTS_PANE_HEADING, frame: 'host' }, { absent: MODELS_ANSWERS_ROW, frame: 'host' }] },
       {
-        name: 'Open the dashboard',
-        do: { open: 'dashboard' },
-        expect: [{ present: MODELS_LINE, frame: 'panel' }, { absent: SEARCH_LINE, frame: 'panel' }],
+        name: 'Press Models on this computer in the side list',
+        do: { click: { css: '.setside a[href="#models"]' }, frame: 'host' },
+        expect: [{ present: MODELS_ANSWERS_ROW, frame: 'host' }, { absent: AGENTS_PANE_HEADING, frame: 'host' }, { noText: STUCK, frame: 'host' }],
       },
-      {
-        name: 'Press the Models line',
-        do: { click: MODELS_LINE, frame: 'panel' },
-        expect: [{ present: SEARCH_LINE, frame: 'panel' }, { noText: STUCK, frame: 'panel' }],
-      },
-      { name: 'Press it again', do: { click: MODELS_LINE, frame: 'panel' }, expect: [{ absent: SEARCH_LINE, frame: 'panel' }] },
     ],
   },
   {
@@ -299,7 +304,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open the dashboard',
         do: { open: 'dashboard' },
-        expect: [{ text: PANEL.sources, frame: 'panel' }],
+        expect: [{ present: HOME_STATUS, frame: 'panel' }],
       },
       {
         name: 'Every "Needs you" row has a control',
@@ -401,7 +406,7 @@ export const JOURNEYS: readonly Journey[] = [
     title: 'Leaving the privacy settings with unsaved changes asks first, Discard changes keeps nothing, and Cancel puts the description back',
     source: 'owner test plan: what is private; the release check had never pressed Cancel there',
     steps: [
-      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
       { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }] },
       OPEN_DESCRIPTION,
       {
@@ -427,7 +432,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Press Discard changes',
         do: { click: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
-        expect: [{ text: PANEL.sources, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+        expect: [{ present: HOME_STATUS, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
       },
       {
         name: 'Open the privacy settings again',
@@ -446,7 +451,7 @@ export const JOURNEYS: readonly Journey[] = [
         name: 'Press Back with nothing changed',
         do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
         // Nothing is unsaved now, so there is nothing to ask about.
-        expect: [{ text: PANEL.sources, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+        expect: [{ present: HOME_STATUS, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
       },
     ],
   },
@@ -455,7 +460,7 @@ export const JOURNEYS: readonly Journey[] = [
     title: 'Add a rule for a sender refuses what is not an address, takes one that is, and backing out of the review keeps nothing',
     source: 'owner test plan: what is private; the release check had never added a sender',
     steps: [
-      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
       // The title shows while the settings still load; the description box only once they have.
       { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }] },
       ADD_RULE,
@@ -497,7 +502,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Leave the privacy settings',
         do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
-        expect: [{ text: PANEL.sources, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }],
+        expect: [{ present: HOME_STATUS, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }],
       },
       {
         name: 'Open the privacy settings again',
@@ -505,7 +510,7 @@ export const JOURNEYS: readonly Journey[] = [
         // Loaded first, so the saved senders are on the page when their absence is read.
         expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
       },
-      { name: 'Leave the privacy settings again', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Leave the privacy settings again', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
     ],
   },
   {
@@ -514,7 +519,7 @@ export const JOURNEYS: readonly Journey[] = [
     source: 'owner test plan: what is private; owner ruling: settings persist',
     mutates: true,
     steps: [
-      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: HOME_STATUS, frame: 'panel' }] },
       {
         name: 'Open the privacy settings',
         do: { click: { role: 'button', name: new RegExp(`^(${PRIVACY_SETUP.label}|${PRIVACY.edit}|${PRIVACY.editLabel})$`) }, frame: 'panel' },
@@ -538,10 +543,16 @@ export const JOURNEYS: readonly Journey[] = [
         timeoutMs: 60_000,
         expect: [{ text: PRIVACY.saved, frame: 'panel' }, { noText: PRIVACY.saveFailed, frame: 'panel' }],
       },
-      { name: 'Reload the dashboard', do: { reload: true }, expect: [{ text: PANEL.sources, frame: 'panel' }, { noText: PRIVACY_SETUP.sentence, frame: 'panel' }] },
+      { name: 'Reload the dashboard', do: { reload: true }, expect: [{ present: HOME_STATUS, frame: 'panel' }, { noText: PRIVACY_SETUP.sentence, frame: 'panel' }] },
       {
-        name: 'Open the privacy settings again',
-        do: { click: { role: 'button', name: new RegExp(`^(${PRIVACY.edit}|${PRIVACY.editLabel})$`) }, frame: 'panel' },
+        // Once privacy is saved Home has no way in; Privacy rules › What's private › Open lands on the settings (#1223, #1228).
+        name: "Privacy rules offers What's private › Open",
+        do: { go: '/dashboard?keys' },
+        expect: [{ present: { css: 'a[data-privacy-open][href*="olympus-open=privacy"]' }, frame: 'host' }],
+      },
+      {
+        name: 'Open the privacy settings again from that landing',
+        do: { go: '/dashboard#olympus-open=privacy' },
         // The saved description shows as text, with Edit (the approved #684 design), before any box opens.
         expect: [{ text: 'my medical records and my tax papers', frame: 'panel' }, { present: { css: 'button[data-key="privacy:description:edit"]', text: PRIVACY.edit }, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
       },

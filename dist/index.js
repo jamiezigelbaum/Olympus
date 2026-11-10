@@ -19746,8 +19746,8 @@ var init_sniffer = __esm(() => {
   ];
   SNIFFER_PRIVATE_KINDS = ["none", "health", "therapy", "financial", "legal", "identity", "intimate", "family", "other"];
   SNIFFER_DECISION_BARS = [
-    [QWEN35_4B.modelId, 0.15],
-    [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374]
+    [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
+    [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.374]
   ];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
@@ -26072,6 +26072,10 @@ var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
 var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
 var DASHBOARD_LAUNCH_MAX_TICKETS = 32;
 var DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120;
+var DASHBOARD_UNLOCK_STORAGE_KEY = "olympus-dashboard-unlock-v1";
+var DASHBOARD_UNLOCK_HEADER = "X-Olympus-Dashboard-Unlock";
+var DASHBOARD_UNLOCK_SHELL_HEADER = "X-Olympus-Dashboard-Shell";
+
 class DashboardLaunchTickets {
   tickets = new Map;
   now;
@@ -26191,6 +26195,15 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
+          if (!response.ok) return response;
+          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
+          return response.json().then(function (body) {
+            try {
+              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
+            } catch (e) {}
+            return response;
+          }, function () { return response; });
+        }).then(function (response) {
           // A link already used or expired (a reload, a second open) still
           // lands on the dashboard: the session it opened is in its cookie,
           // and without one the dashboard itself offers the way back in.
@@ -26213,6 +26226,72 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
+      }());
+    </script>
+  </body>
+</html>
+`;
+var DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      code { color: #e8e6e3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail"></p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
+        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
+        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
+        var status = document.getElementById('status');
+        var detail = document.getElementById('detail');
+        function locked() {
+          try { window.localStorage.removeItem(KEY); } catch (e) {}
+          status.textContent = 'Dashboard controls are locked';
+          detail.textContent = 'Run ';
+          var command = document.createElement('code');
+          command.textContent = 'olympus dashboard';
+          detail.appendChild(command);
+          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
+        }
+        function failed() {
+          status.textContent = 'Opening failed.';
+          detail.textContent = 'Reload this page to try again.';
+        }
+        var key = '';
+        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
+        if (!key) { locked(); return; }
+        var headers = {};
+        headers[HEADER] = key;
+        fetch(window.location.href, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: headers
+        }).then(function (response) {
+          // A page that moved: go there, and its own navigation proves itself the same way.
+          if (response.redirected) { window.location.replace(response.url); return; }
+          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
+          var type = response.headers.get('Content-Type') || '';
+          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
+          return response.text().then(function (html) {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        }).catch(failed);
       }());
     </script>
   </body>
@@ -29257,7 +29336,7 @@ function confirmation() {
   claiming=true;
   try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
    if(r.status===202||r.status===503)return;
-   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);await resume();return;}
    const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
    message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
   }catch{}finally{claiming=false;}
@@ -29314,7 +29393,7 @@ function approve(request,proof){return new Promise(function(done){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);
  if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
@@ -29329,6 +29408,9 @@ function approve(request,proof){return new Promise(function(done){
 })();</script>`);
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
+}
+function established(result) {
+  return Array.isArray(result) ? { cookies: result } : result;
 }
 var hashSecret = (value) => createHash2("sha256").update(value).digest("hex");
 function equalHash(value, hash) {
@@ -29452,17 +29534,17 @@ class LinuxOwnerBridge {
     const session = this.cookieSession(request);
     return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
   }
-  grantSession(dashboardCookies, extra) {
+  grantSession(dashboard, extra) {
     const cookie = secret(), proof = secret();
     const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
     this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
-    const response = Response.json({ proof, ...extra }, { headers: {
+    const response = Response.json({ proof, ...dashboard.unlockKey ? { unlock: dashboard.unlockKey } : {}, ...extra }, { headers: {
       "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
       "Cache-Control": "no-store",
       "Clear-Site-Data": '"cache"',
       "Content-Security-Policy": CSP
     } });
-    for (const cookie2 of dashboardCookies)
+    for (const cookie2 of dashboard.cookies)
       response.headers.append("Set-Cookie", cookie2);
     return response;
   }
@@ -29521,18 +29603,18 @@ class LinuxOwnerBridge {
         unlinkSync2(ticket.path);
       } catch {}
       const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
-      let dashboardCookies;
+      let dashboard;
       try {
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
         if (result === null) {
           this.clearTicket(ticket);
           return refusal();
         }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current2()) {
           ticket.claimed = false;
@@ -29550,7 +29632,7 @@ class LinuxOwnerBridge {
       const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
       if (asking)
         claim.state = "asked";
-      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
+      return this.grantSession(dashboard, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
     }
     if (url.pathname === "/owner-claim" && request.method === "POST") {
       let body2;
@@ -29574,11 +29656,11 @@ class LinuxOwnerBridge {
         return restarting(this.options.workerConflict?.());
       claim.collecting = true;
       const current2 = () => this.claim?.record === claim && claim.expires > this.now();
-      let dashboardCookies;
+      let dashboard;
       try {
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
         if (result === null) {
@@ -29586,7 +29668,7 @@ class LinuxOwnerBridge {
             this.claim = undefined;
           return refusal();
         }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current2()) {
           claim.collecting = false;
@@ -29597,7 +29679,7 @@ class LinuxOwnerBridge {
       if (!this.live() || !current2())
         return refusal(503);
       this.claim = undefined;
-      return this.grantSession(dashboardCookies, {});
+      return this.grantSession(dashboard, {});
     }
     if (url.pathname === "/owner-approve" && request.method === "POST") {
       let body2;

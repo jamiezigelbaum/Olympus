@@ -722,7 +722,7 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
     const out = await run.agent('smoke', '--questions ~/rc/questions.json', 900_000);
     const results = (out.result?.results ?? []) as Array<Record<string, any>>;
     if (out.result?.ok !== true || results.length === 0) {
-      agent.checks.push({ id: 'protocol.ran', title: 'The ChatGPT-protocol pass ran', status: 'fail', detail: `no results (exit ${out.code}; smoke exit ${out.result?.exit ?? 'n/a'}): ${(out.result?.detail ?? out.stderr.slice(-200))}` });
+      agent.checks.push({ id: 'protocol.ran', title: 'The ChatGPT-protocol pass ran', status: 'fail', detail: `no results (exit ${out.code}; smoke exit ${out.result?.exit ?? 'n/a'}): ${(out.result?.detail ?? (((out.result?.smokeChecks ?? []) as string[]).join('; ') || out.stderr.slice(-200)))}` });
       return;
     }
     run.add({ id: 'relay.reachable', title: 'The machine is reachable through the production relay', status: 'pass', detail: `ChatGPT-protocol grant minted; ${(out.result.tools as string[]).length} tool(s) listed` });

@@ -2215,26 +2215,8 @@ function connectorStoreCurrentEmbeddingRowsPage(
   afterChunkPk: number,
   limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
 ): ConnectorStoreCurrentEmbeddingRow[] {
-  const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
-  const accountScope = normalizeOptionalAccountScope(options.accountScope);
-  const selectedFilters = connectorStoreFilterSql(options.filters);
-  const pageLimit = Math.max(1, Math.floor(limit));
-  const rows = db.query(`
-    SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
-    ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
-      AND emb.model_id = ?
-      AND emb.chunk_pk > ?
-      ${accountScope ? 'AND i.account_scope = ?' : ''}
-      ${selectedFilters.sql}
-    ORDER BY emb.chunk_pk ASC
-    LIMIT ?
-  `).all(
-    modelId,
-    afterChunkPk,
-    ...(accountScope ? [accountScope] : []),
-    ...selectedFilters.params,
-    pageLimit,
-  ) as Array<{
+  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
+  const rows = db.query(sql).all(...params) as Array<{
     item_pk: number;
     chunk_pk: number;
     local_item_id: string;
@@ -2246,6 +2228,46 @@ function connectorStoreCurrentEmbeddingRowsPage(
     localItemId: row.local_item_id,
     embedding: row.embedding,
   }));
+}
+
+/**
+ * The exact page query the vector lane runs, with its parameters. Exported so
+ * the read-only store probe (eval/store-probe.ts) can time and EXPLAIN the
+ * same statement on a real store instead of a copy of it.
+ */
+export function connectorStoreCurrentEmbeddingPageQuery(
+  options: ConnectorStoreCurrentEmbeddingRowsOptions,
+  afterChunkPk: number,
+  limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
+): { sql: string; params: Array<string | number> } {
+  const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
+  const accountScope = normalizeOptionalAccountScope(options.accountScope);
+  const selectedFilters = connectorStoreFilterSql(options.filters);
+  const pageLimit = Math.max(1, Math.floor(limit));
+  return {
+    sql: `
+    SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+    ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
+      -- The unary + keeps SQLite off the model_id index (#1242). With it, every
+      -- page read all of the model's rows and sorted them, blobs included, to
+      -- find the next 256: quadratic in the store's vector count, which ran a
+      -- 1.3 GB store past the 10 s lane deadline on every question. Walking the
+      -- primary key (chunk_pk, model_id) from afterChunkPk reads each row once.
+      AND +emb.model_id = ?
+      AND emb.chunk_pk > ?
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${selectedFilters.sql}
+    ORDER BY emb.chunk_pk ASC
+    LIMIT ?
+  `,
+    params: [
+      modelId,
+      afterChunkPk,
+      ...(accountScope ? [accountScope] : []),
+      ...selectedFilters.params,
+      pageLimit,
+    ],
+  };
 }
 
 /**
@@ -14786,10 +14808,13 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
+  const keywordStartedAt = Date.now();
   let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size
     ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
     : undefined;
+  let keywordElapsedMs = Date.now() - keywordStartedAt;
+  const vectorStartedAt = Date.now();
   const vectorLane = await store.vectorSearchLane(
     request.query,
     provider,
@@ -14798,6 +14823,7 @@ async function hybridConnectorStoreSearch(
     filters,
     request.deadlineAtMs,
   );
+  const vectorElapsedMs = Date.now() - vectorStartedAt;
   let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
@@ -14822,7 +14848,10 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
+  // The relaxed retry is keyword work too, so it counts toward the keyword lane's time.
+  const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordElapsedMs += Date.now() - relaxStartedAt;
   // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
   keywordLane = revalidateKeywordLane(store, keywordLane);
   scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
@@ -14880,12 +14909,13 @@ async function hybridConnectorStoreSearch(
     // same audit fields the Dropbox retrieval audit records
     // (keyword_candidates / vector_candidates / fused_candidates).
     laneAudits: [
-      connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length),
+      { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
       {
         laneName: `${store.corpusId}:connector_store_vector`,
         laneType: 'semantic',
         candidateCount: scoredVectorRows.length,
         returnedCount: vectorRows.length,
+        elapsedMs: vectorElapsedMs,
         ...(bestCosine !== undefined ? { bestCosine } : {}),
         ...(suppressedBelowBar > 0 ? { suppressedBelowBar } : {}),
         // The lane's own refusal outranks the relevance bar: a fence that

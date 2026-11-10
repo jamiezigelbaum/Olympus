@@ -62,7 +62,7 @@ import {
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
 } from '../src/workers/source-index/analyst-answer.ts';
-import type { AnalystResult } from '../src/core/contracts.ts';
+import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -82,7 +82,7 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import type { EvalGrade } from './grade.ts';
+import { acceptableForms, answerContainsExpectedValue, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
@@ -185,7 +185,15 @@ async function main(): Promise<void> {
     config,
     env: process.env,
   });
-  const analyst = createAnalyst(model, { auditSuspiciousDrafts: true });
+  // Each run evaluates one question, so every prompt recorded here is that
+  // question's: the answer-stage audit checks the values against it.
+  const analystPrompts: string[] = [];
+  const analyst = createAnalyst({
+    complete(request) {
+      analystPrompts.push(request.prompt);
+      return model.complete(request);
+    },
+  }, { auditSuspiciousDrafts: true });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
@@ -195,8 +203,9 @@ async function main(): Promise<void> {
   const reranker = builtInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
-  const traces: PrecisionTrace[] = [];
-  const report = await runEval(dataset, {
+  const rawResultsByPack = new WeakMap<object, AnalystResult>();
+  const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
+  const evaluated = await runEval(dataset, {
     questionTimeoutMs,
     continueOnQuestionError: true,
     stopOnQuestionTimeout: true,
@@ -216,6 +225,7 @@ async function main(): Promise<void> {
     },
     analyst,
     releaseFor(pack, result) {
+      rawResultsByPack.set(pack, result);
       const detail = detailsByPack.get(pack);
       return detail ? releaseEvalAnswer(detail, result) : undefined;
     },
@@ -225,9 +235,13 @@ async function main(): Promise<void> {
     },
     trace(question, pack, result) {
       const detail = detailsByPack.get(pack);
-      traces.push(classifyPrecisionStage(question, pack, result, {
-        ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
-      }));
+      traces.push({
+        ...classifyPrecisionStage(question, pack, result, {
+          ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
+        }),
+        ...(detail ? { retrieval: evalRetrievalAudit(detail) } : {}),
+        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts),
+      });
     },
     onProgress(event) {
       if (event.type === 'question_started') {
@@ -260,6 +274,14 @@ async function main(): Promise<void> {
     },
   });
   opened.close();
+  // A question whose search lost a store or a lane to a deadline measured a
+  // different system than the one under test: it fails, loudly (#1242).
+  const report = failIncompleteRetrieval(evaluated, traces);
+  for (const grade of report.grades) {
+    for (const line of grade.detail.filter((entry) => entry.startsWith('retrieval_incomplete'))) {
+      console.error(`EVAL RETRIEVAL INCOMPLETE ${grade.questionId}: ${line}`);
+    }
+  }
   writeEvalReport(reportPath, datasetPath, report, traces, {
     ...reportConfig,
     retrieval,
@@ -335,7 +357,11 @@ export interface EvalDropboxStores {
  * the set ledger judges what it serves by that ledger itself; the ledger
  * opened here feeds the same visibility gate live Ask applies over the hits.
  */
-export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropboxStores {
+export function openEvalDropboxStores(
+  paths: EvalDropboxStorePaths,
+  /** Filled with each open's milliseconds, keyed by corpus id or 'ledger' (store probe). */
+  openMs?: Record<string, number>,
+): EvalDropboxStores {
   const files: Array<[SourceTrustDomain, string | undefined]> = [
     ['secure_local', paths.secure],
     ['internal', paths.personal],
@@ -345,6 +371,7 @@ export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropbox
   for (const [trustDomain, dbPath] of files) {
     const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
     if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
+    const startedAt = performance.now();
     stores.push(new LocalConnectorStore({
       dbPath,
       corpusId,
@@ -352,9 +379,12 @@ export function openEvalDropboxStores(paths: EvalDropboxStorePaths): EvalDropbox
       trustDomain,
       readOnly: true,
     }));
+    if (openMs) openMs[corpusId] = Math.round(performance.now() - startedAt);
   }
   const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
+  const ledgerStartedAt = performance.now();
   const ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
+  if (openMs && ledger) openMs.ledger = Math.round(performance.now() - ledgerStartedAt);
   return {
     stores,
     ...(ledger ? { ledger } : {}),
@@ -406,6 +436,164 @@ export function createEvalDropboxLanes(input: {
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
   return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+}
+
+/**
+ * Why a question's pack holds what it holds, counts and codes only (#1233):
+ * every lane's candidates before and after its own filters, the corpora
+ * skipped and why, the lanes that degraded, and the candidates dropped or
+ * left unread. Rides on the question's precision trace into the report, so a
+ * short run separates "retrieval found nothing" from "a filter or policy
+ * removed what it found" without a per-stage diagnostic. The eval builds its
+ * pack with every trust domain allowed, so the Private-exclusion rebuild an
+ * ordinary route can run never applies here; `secureExclusion` says so.
+ */
+export interface EvalRetrievalAudit {
+  packCandidates: number;
+  lanes: Array<{
+    laneName: string;
+    laneType: string;
+    candidateCount: number;
+    returnedCount: number;
+    skippedReason?: string;
+    bestCosine?: number;
+    suppressedBelowBar?: number;
+    elapsedMs?: number;
+  }>;
+  /** Each store's whole search: wall time, the adapter's own time, and whether it beat the deadline. */
+  corpusTimings: Array<{ corpusId: string; elapsedMs: number; adapterReportedMs?: number; outcome: string }>;
+  skippedCorpora: Array<{ corpusId: string; reason: string }>;
+  degradations: Array<{ laneName: string; reason: string; detail?: string; occurrences: number }>;
+  policyDeniedCandidates: number;
+  unreadCandidates: number;
+  namesOnlyCandidates: number;
+  contentPrivateCandidates: number;
+  corpusReadabilityGaps: number;
+  secureExclusion: 'not_applied';
+}
+
+export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetrievalAudit {
+  return {
+    packCandidates: detail.pack.candidates.length,
+    lanes: detail.laneAudits.map((lane) => ({
+      laneName: lane.laneName,
+      laneType: lane.laneType,
+      candidateCount: lane.candidateCount,
+      returnedCount: lane.returnedCount,
+      ...(lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {}),
+      ...(lane.bestCosine !== undefined ? { bestCosine: lane.bestCosine } : {}),
+      ...(lane.suppressedBelowBar !== undefined ? { suppressedBelowBar: lane.suppressedBelowBar } : {}),
+      ...(lane.elapsedMs !== undefined ? { elapsedMs: lane.elapsedMs } : {}),
+    })),
+    corpusTimings: (detail.corpusTimings ?? []).map((timing) => ({
+      corpusId: timing.corpusId,
+      elapsedMs: timing.elapsedMs,
+      ...(timing.adapterReportedMs !== undefined ? { adapterReportedMs: timing.adapterReportedMs } : {}),
+      outcome: timing.outcome,
+    })),
+    skippedCorpora: detail.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
+    degradations: detail.degradations.map((degradation) => ({
+      laneName: degradation.laneName,
+      reason: degradation.reason,
+      ...(degradation.detail !== undefined ? { detail: degradation.detail } : {}),
+      occurrences: degradation.occurrences,
+    })),
+    policyDeniedCandidates: detail.policyDeniedCandidates ?? 0,
+    unreadCandidates: detail.unreadCandidates ?? 0,
+    namesOnlyCandidates: detail.namesOnlyCandidateIndexes?.length ?? 0,
+    contentPrivateCandidates: detail.contentPrivateCandidateIndexes?.length ?? 0,
+    corpusReadabilityGaps: detail.corpusReadabilityGaps?.length ?? 0,
+    secureExclusion: 'not_applied',
+  };
+}
+
+/**
+ * Where each expected value was lost after retrieval (#1234), booleans only:
+ * in the pack text the Analyst read, in the Analyst's own answer, and in the
+ * answer the release step let out (what the grader sees). In the pack but not
+ * in the Analyst's answer is an Analyst miss; in the Analyst's answer but not
+ * the released one is the release step removing it.
+ */
+export interface EvalAnswerStageAudit {
+  expected: Array<{
+    /** In the pack by the grader's rules (whole token, not negated): what an answer would need. */
+    inPack: boolean;
+    /**
+     * In the pack as a plain substring of any accepted form, the looser test
+     * the precision trace uses. True here with inPack false means the value
+     * only appears inside a longer token or number, or right after a negation
+     * such as "no" or "not".
+     */
+    inPackAsSubstring: boolean;
+    /** In the prompt the Analyst model was sent; absent when no prompt was recorded. */
+    inAnalystPrompt?: boolean;
+    inAnalystAnswer: boolean;
+    inReleasedAnswer: boolean;
+  }>;
+}
+
+export function evalAnswerStageAudit(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'>,
+  pack: EvidencePack,
+  analystResult: AnalystResult | undefined,
+  releasedResult: AnalystResult,
+  analystPrompts?: readonly string[],
+): EvalAnswerStageAudit {
+  // Every evidence field the Analyst can be shown: citation metadata
+  // (title, locator, dates), chunk text, extracted facts and tables.
+  const packText = pack.candidates.map((candidate) => [
+    JSON.stringify(candidate.provenance.citation ?? {}),
+    ...candidate.chunks,
+    JSON.stringify(candidate.facts ?? []),
+    JSON.stringify(candidate.tables ?? []),
+  ].join('\n')).join('\n');
+  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
+  return {
+    expected: (question.expectedAnswerContains ?? []).map((value) => ({
+      inPack: answerContainsExpectedValue(value, packText).matched,
+      inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),
+      ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
+      inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
+      inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
+    })),
+  };
+}
+
+/**
+ * Why a question's retrieval did not run whole, if it did not: a store
+ * dropped at the lane deadline, or a lane inside a store that stopped at its
+ * deadline. Empty when every searched store and lane completed.
+ */
+export function incompleteRetrievalReasons(audit: EvalRetrievalAudit): string[] {
+  const reasons = new Set<string>();
+  for (const skip of audit.skippedCorpora) {
+    if (skip.reason === 'lane_timeout') reasons.add(`${skip.corpusId} store dropped: lane_timeout`);
+  }
+  for (const lane of audit.lanes) {
+    if (lane.skippedReason && /deadline|timeout|timed_out/.test(lane.skippedReason)) {
+      reasons.add(`${lane.laneName} lane skipped: ${lane.skippedReason}`);
+    }
+  }
+  return [...reasons];
+}
+
+/** Fails each question whose retrieval was incomplete, naming why, and recounts. */
+export function failIncompleteRetrieval<R extends EvalReport>(
+  report: R,
+  traces: ReadonlyArray<{ questionId: string; retrieval?: EvalRetrievalAudit }>,
+): R {
+  const grades = report.grades.map((grade) => {
+    const audit = traces.find((trace) => trace.questionId === grade.questionId)?.retrieval;
+    const reasons = audit ? incompleteRetrievalReasons(audit) : [];
+    if (reasons.length === 0) return grade;
+    return {
+      ...grade,
+      passed: false,
+      detail: [...grade.detail, ...reasons.map((reason) => `retrieval_incomplete: ${reason}`)],
+    };
+  });
+  const passed = grades.filter((grade) => grade.passed).length;
+  return { ...report, grades, passed, failed: report.total - passed };
 }
 
 /** One question's evidence pack, over the eval's lanes, as live Ask builds it. */

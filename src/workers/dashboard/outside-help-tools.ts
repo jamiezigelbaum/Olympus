@@ -10,6 +10,7 @@
  * It appears twice when the parts need the owner: as a "To fix" line and as
  * step 1 inside Set up zkAPI; one script serves both.
  */
+import { DASHBOARD_UNLOCK_HEADER, DASHBOARD_UNLOCK_STORAGE_KEY } from '../../core/dashboard-launch.ts';
 import type { ManagedToolName, ManagedToolsErrorCode, ManagedToolsPhase, ManagedToolSource } from '../../core/managed-tools.ts';
 import { escapeHtml, escapeScriptJson } from './components.ts';
 import { fill } from './vocabulary.ts';
@@ -221,7 +222,7 @@ export function renderOutsideHelpToolsReplace(tools: DashboardOutsideHelpTools |
 /** The one controller for every install button on the page; '' without the controls. */
 export function renderOutsideHelpToolsScript(tools: DashboardOutsideHelpTools | undefined, input: { canEdit: boolean; csrfToken?: string }): string {
   if (!tools || !input.canEdit || input.csrfToken === undefined) return '';
-  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
+  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, unlockStorageKey: DASHBOARD_UNLOCK_STORAGE_KEY, unlockHeader: DASHBOARD_UNLOCK_HEADER, copy: { starting: C.starting, failed: C.failed } })}</script>`;
 }
 
 /**
@@ -231,7 +232,7 @@ export function renderOutsideHelpToolsScript(tools: DashboardOutsideHelpTools | 
  * finishes, the whole page reloads so the route's readiness reads the new
  * programs.
  */
-export function outsideHelpToolsClientScript(config: { csrfToken: string; path: string; pollMs: number; copy: { starting: string; failed: string } }): string {
+export function outsideHelpToolsClientScript(config: { csrfToken: string; path: string; pollMs: number; unlockStorageKey: string; unlockHeader: string; copy: { starting: string; failed: string } }): string {
   return `(function () {
   // The dashboard runs this again after it swaps in a fresh page: one instance binds the new forms, and one poll runs.
   if (typeof window.__olympusOutsideHelpTools === 'function') { window.__olympusOutsideHelpTools(); return; }
@@ -249,7 +250,10 @@ export function outsideHelpToolsClientScript(config: { csrfToken: string; path: 
     timer = null;
     var running = sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; });
     try {
-      var response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' });
+      // The page renders only for this browser's stored key (#1187); the cookie alone gets the shell.
+      var headers = {};
+      try { var key = window.localStorage.getItem(config.unlockStorageKey); if (key) headers[config.unlockHeader] = key; } catch (error) {}
+      var response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store', headers: headers });
       var doc = new DOMParser().parseFromString(await response.text(), 'text/html');
       var fresh = doc.querySelectorAll('[data-outside-tools]');
       var states = Array.prototype.map.call(fresh, function (node) { return node.getAttribute('data-install-state'); });

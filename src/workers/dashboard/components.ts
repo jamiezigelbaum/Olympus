@@ -1,3 +1,4 @@
+import { DASHBOARD_UNLOCK_HEADER, DASHBOARD_UNLOCK_STORAGE_KEY } from '../../core/dashboard-launch.ts';
 import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
 /**
  * The page's shared HTML pieces: status glyphs, cards, rows, the connector
@@ -190,6 +191,8 @@ export function pageShell(input: DashboardPageShellInput): string {
       session: sessionMarker,
       intervalMs: input.poll?.intervalMs ?? 15_000,
       lockedHtml: standaloneLockedNotice(),
+      unlockStorageKey: DASHBOARD_UNLOCK_STORAGE_KEY,
+      unlockHeader: DASHBOARD_UNLOCK_HEADER,
     })];
   const scripts = !useController
     ? [...(input.scripts ?? [])].join('\n    ')
@@ -891,6 +894,9 @@ interface StandaloneDashboardControllerScriptInput {
   intervalMs: number;
   /** What the page shows once it can no longer read (locked with no reader's token in its link). */
   lockedHtml: string;
+  /** Where this browser keeps the engine's unlock key, and the header a page fetch carries it in (#1187). */
+  unlockStorageKey: string;
+  unlockHeader: string;
 }
 
 /** The locked notice: the host page's own words and one-click open link (host-page.ts, lockedGate). */
@@ -1019,6 +1025,10 @@ export function standaloneDashboardControllerScript(
             });
             var body = await json(response);
             if (response.ok && typeof body.csrf_token === 'string') csrfToken = body.csrf_token;
+            // The key a plain visit proves this browser with (#1187), in this origin's storage.
+            if (response.ok && typeof body.unlock_key === 'string') {
+              try { window.localStorage.setItem(config.unlockStorageKey, body.unlock_key); } catch (error) {}
+            }
             return { ok: response.ok, csrf_token: body.csrf_token };
           },
           async lock() {
@@ -1033,7 +1043,10 @@ export function standaloneDashboardControllerScript(
         },
         navigate: function (href) { window.location.assign(href); },
         refresh: async function () {
-          var response = await fetch(window.location.href, { cache: 'no-store' });
+          // The page itself renders only for this browser's stored key (#1187); the cookie alone gets the shell.
+          var headers = {};
+          try { var key = window.localStorage.getItem(config.unlockStorageKey); if (key) headers[config.unlockHeader] = key; } catch (error) {}
+          var response = await fetch(window.location.href, { cache: 'no-store', headers: headers });
           // Locked (here or in another tab): show the locked gate, not stale controls.
           if (response.status === 401) { if (readable) window.location.reload(); else showLocked(); return undefined; }
           if (!response.ok) return undefined;

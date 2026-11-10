@@ -106,23 +106,44 @@ export interface SnifferLaneIdentity {
    * bar of the lane's pinned model, else SNIFFER_DECISION_PRIVATE_BAR.
    */
   decisionBar?: number;
+  /**
+   * The weights file the lane's server reports (llama.cpp `/props`
+   * `model_path`, base name only), read by the decision probe. Used only to
+   * find a measured bar when the served name is an alias (#1253); never part
+   * of approval or the cache key.
+   */
+  servedWeights?: string | undefined;
 }
 
 /**
- * Measured decision bars, by the pinned weights a lane names (#1184, #890).
+ * Measured decision bars, by the weights a lane runs (#1184, #890, #1253).
  * Qwen3.5 4B: on the owner's labels (5 Nov 2026) 0.15 missed 0 of 49
  * important Private items at 79% agreement; 0.5 missed 2.
  * Qwen3.6 35B-A3B (llama.cpp): on the fresh whole-item sample (#883, 10 Nov
  * 2026) 0.374, chosen on the dev half, missed 0 of 21 important Private items
- * at 90.5% agreement; 0.5 missed 2. A lane that names it through a router
- * alias sets the profile's `snifferDecisionBar` instead. A judge with no
- * measured bar keeps SNIFFER_DECISION_PRIVATE_BAR.
+ * at 90.5% agreement; 0.5 missed 2.
+ * Matched by the pinned model id a lane names, or by the weights file its
+ * server reports (`servedWeights`), so a server alias does not hide a
+ * measured bar. A file matches only as the base weights plus a quantization
+ * suffix: a fine-tune of the same family is another judge. A judge with no
+ * measured bar keeps SNIFFER_DECISION_PRIVATE_BAR; the decision probe logs that.
+ * How a bar is measured: eval/calibration/README.md.
  */
 export const QWEN36_35B_A3B_SNIFFER_MODEL = 'qwen36-35b-a3b-text';
-const SNIFFER_DECISION_BARS: ReadonlyArray<readonly [modelId: string, bar: number]> = [
-  [QWEN35_4B.modelId, 0.15],
-  [QWEN36_35B_A3B_SNIFFER_MODEL, 0.374],
+const SNIFFER_DECISION_BARS: ReadonlyArray<readonly [modelId: string, weightsFile: string, bar: number]> = [
+  [QWEN35_4B.modelId, 'qwen3\\.5-4b', 0.15],
+  [QWEN36_35B_A3B_SNIFFER_MODEL, 'qwen3\\.6-35b-a3b', 0.374],
 ];
+const QUANTIZED_GGUF = '(?:-(?:ud-)?(?:i?q\\d\\w*|bf16|f16|f32))?(?:-\\d{5}-of-\\d{5})?\\.gguf$';
+
+/** The measured bar for the weights this lane runs, if any. */
+export function measuredSnifferDecisionBar(lane: SnifferLaneIdentity): number | undefined {
+  const id = lane.cacheModelId ?? lane.modelId;
+  const served = lane.servedWeights;
+  const bar = SNIFFER_DECISION_BARS.find(([model, file]) => id === model || id.startsWith(`${model}:`)
+    || (served !== undefined && new RegExp(`^${file}${QUANTIZED_GGUF}`, 'i').test(served)))?.[2];
+  return validDecisionBar(bar) ? bar : undefined;
+}
 
 function validDecisionBar(bar: number | undefined): bar is number {
   return typeof bar === 'number' && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
@@ -136,9 +157,7 @@ function validDecisionBar(bar: number | undefined): bar is number {
  */
 export function snifferDecisionBar(lane: SnifferLaneIdentity): number {
   if (validDecisionBar(lane.decisionBar)) return lane.decisionBar;
-  const id = lane.cacheModelId ?? lane.modelId;
-  const measured = SNIFFER_DECISION_BARS.find(([model]) => id === model || id.startsWith(`${model}:`))?.[1];
-  return validDecisionBar(measured) ? measured : SNIFFER_DECISION_PRIVATE_BAR;
+  return measuredSnifferDecisionBar(lane) ?? SNIFFER_DECISION_PRIVATE_BAR;
 }
 
 /**
