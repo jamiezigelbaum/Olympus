@@ -35,6 +35,7 @@ import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOff
 //   locators remain in the local content-provider lane and reach Castor only
 //   via the gated answer.
 
+import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -1179,6 +1180,13 @@ function visibilityMemberBits(flags: TierCorpusVisibility): number {
 
 export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
 export const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
+/**
+ * A restored store's record of the folder-scope generations its items were
+ * stamped with on the computer that made the backup, and the provider account
+ * they came from (data-restore.ts). `rebindRestoredSourceScope` reads it once.
+ */
+export const RESTORED_SCOPE_RUN_ID = 'restored-source-scope';
+export const RESTORED_SCOPE_CONNECTOR_ID = 'olympus_restored_scope';
 /** The writer a tier move copies an item into its new tier's store under (tier-move.ts). */
 export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
 /**
@@ -1187,7 +1195,7 @@ export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
  * status counts and its last run leave them out, so a source card never says
  * its last sync saw the one item a tier move copied.
  */
-const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
+const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -3307,6 +3315,69 @@ export class LocalConnectorStore {
       // A handle that cannot answer is not the bound ledger.
     }
     return findTierSetLedger(this.dbPath, binding);
+  }
+
+  /**
+   * After a restore onto another computer, carries this store's items over to
+   * the folder-scope approval the owner gave there. A stored item is read only
+   * under the approval it carries (source-scope-runtime.ts), and the
+   * generation hashes the credential handle and when it was connected, so a
+   * sign-in on the new computer, even to the same account, mints a new one,
+   * and every restored item would stay hidden until a traversal had listed it
+   * again. Runs once, when the store carries a restore record
+   * (`RESTORED_SCOPE_RUN_ID`) and the approval's account is the one the
+   * backup's items came from: then the items stamped with the backup's
+   * generations take the approval's generation and revision, and the record
+   * goes. The approval's folders still decide what is read: the folder and
+   * path filters are applied to every read on top of the stamp, so an item
+   * outside the folders approved here stays excluded. Another account, no
+   * record, or no account to compare: nothing changes. Returns how many items
+   * were carried over.
+   */
+  rebindRestoredSourceScope(input: {
+    provider: string;
+    accountGeneration: string;
+    revision: string;
+    providerAccountId: string;
+  }): number {
+    const generations = this.restoredScopeGenerations(input.provider, input.providerAccountId);
+    if (generations === undefined) return 0;
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const generation of generations) {
+        if (generation === input.accountGeneration) continue;
+        changed += this.db.query(`
+          UPDATE items SET source_scope_generation = ?, source_scope_revision = ?
+          WHERE provider = ? AND source_scope_generation = ?
+        `).run(input.accountGeneration, input.revision, input.provider, generation).changes;
+      }
+      this.db.query('DELETE FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+        .run(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID);
+      return changed;
+    }).immediate();
+  }
+
+  /**
+   * The scope generations this store's restore record names, when it has one
+   * for `provider` and its account is `providerAccountId`; otherwise
+   * undefined. Read without changing anything, so the secret locations beside
+   * the store can be carried over first (`rebindRestoredFileScope`).
+   */
+  restoredScopeGenerations(provider: string, providerAccountId: string): string[] | undefined {
+    const row = this.db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+      .get(RESTORED_SCOPE_RUN_ID, RESTORED_SCOPE_CONNECTOR_ID) as { cursor: string | null } | null;
+    if (!row?.cursor) return undefined;
+    let record: { provider?: unknown; generations?: unknown; providerAccountId?: unknown };
+    try {
+      record = JSON.parse(row.cursor) as typeof record;
+    } catch {
+      return undefined;
+    }
+    if (record.provider !== provider || typeof record.providerAccountId !== 'string') return undefined;
+    if (compareProviderAccounts(record.providerAccountId, providerAccountId) !== 'same') return undefined;
+    return Array.isArray(record.generations)
+      ? record.generations.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
   }
 
   /**

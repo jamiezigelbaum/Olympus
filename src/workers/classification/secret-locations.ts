@@ -220,6 +220,25 @@ export class SecretLocationsIndex {
     return true;
   }
 
+  /**
+   * After a restore onto another computer: the locations stamped with one of
+   * `fromGenerations` take the folder approval given there, as the restored
+   * store's items do (LocalConnectorStore.rebindRestoredSourceScope). Their
+   * folder keys and locators are unchanged, so the approval's folder filters
+   * still decide which are read. Returns how many changed.
+   */
+  rebindScopeGenerations(input: { provider: string; fromGenerations: readonly string[]; accountGeneration: string; revision: string }): number {
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const generation of input.fromGenerations) {
+        if (generation === input.accountGeneration) continue;
+        changed += this.db.query('UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?')
+          .run(input.accountGeneration, input.revision, input.provider, generation).changes;
+      }
+      return changed;
+    }).immediate();
+  }
+
   /** The provider deleted the item, or it no longer carries a secret. */
   remove(identity: SecretLocationIdentity): boolean {
     return this.db.query(`

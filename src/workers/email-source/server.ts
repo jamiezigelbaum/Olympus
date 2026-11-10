@@ -323,6 +323,7 @@ import type { ConnectorStoreStatusScope } from '../connector-store/local-index.t
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
+  TIER_DOMAIN_ORDER,
   onDemandTierStore,
   tieredStoreSetLedgerPath,
   rehomeChatLaneOverrides,
@@ -476,6 +477,7 @@ import {
   fileSourceScopeMetadataEnabled,
   fileSourceScopeMetadataFilters,
   isMailSourceScopePolicyRef,
+  rebindRestoredFileScope,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
@@ -531,7 +533,7 @@ import { compareProviderAccounts, dropboxOwnRootFolderIds, dropboxOwnsOneOfFolde
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
-import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
+import { MAIL_SCOPE_WINDOW_LABELS, defaultMailScopeSelection, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
 import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
 import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';
@@ -5900,7 +5902,11 @@ export async function main(): Promise<void> {
       scope_revision: snapshot.revision,
       // Approved mail always reads something (at least the window's metadata).
       ingestion_enabled: snapshot.status === 'approved',
-      mail_scope: mailScopeDraftView(snapshot.mailScope),
+      // No approved scope yet: the picker opens with the owner's "always
+      // Private" senders a restore carried back, as they set them.
+      mail_scope: mailScopeDraftView(snapshot.mailScope ?? (snapshot.carriedAlwaysPrivateSenders
+        ? { ...defaultMailScopeSelection(), alwaysPrivateSenders: snapshot.carriedAlwaysPrivateSenders }
+        : undefined)),
       ...(snapshot.mailScope?.contentAfter ? { content_after: snapshot.mailScope.contentAfter } : {}),
       ...(snapshot.reason === 'malformed'
         ? { error: 'Saved mail scope is unreadable. Review and save the scope again.' }
@@ -6135,6 +6141,25 @@ export async function main(): Promise<void> {
       if (approval.replayed !== true && browser.afterApproval) {
         // Best effort: the choice is saved either way.
         try { await browser.afterApproval({ wholeAccount: input.wholeAccount }); } catch { /* nothing to undo */ }
+      }
+      if (approval.replayed !== true) {
+        // A source restored from a backup: its items are carried over to this
+        // approval, under its folders, when it is for the account they came
+        // from. Best effort: they are listed again by the run started below.
+        try {
+          const sets = fileExtractionTierSets();
+          rebindRestoredFileScope({
+            approval,
+            providerAccountId: fileSourceScopeAuthority.approvedProviderAccount(approval),
+            sets: [...new Set(definition.corpusIdsToInvalidate.flatMap((corpusId) => sets.get(corpusId) ?? []))].map((set) => {
+              const secretLocations = set.secrets();
+              return {
+                stores: TIER_DOMAIN_ORDER.flatMap((domain) => set.store(domain) ?? []),
+                ...(secretLocations ? { secretLocations } : {}),
+              };
+            }),
+          });
+        } catch { /* the run lists them again */ }
       }
       let invalidatedJobs = 0;
       // A replayed save (the same request delivered twice) changed nothing:
