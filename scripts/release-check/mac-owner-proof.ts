@@ -20,7 +20,7 @@ const MINT = `${ENGINE}/dashboard/control/session/local`;
  * One script, run as the owner. Prints three `name=status` lines:
  * - `other`: the mint from the second account, with no session (expect 403 or 401)
  * - `owner_bare`: the same request from the owner with no session (expect 401)
- * - `owner_page`: the owner's opened page unlocking (expect 200)
+ * - `owner_page`: the owner's opened page unlocking with its CSRF token (expect 200)
  */
 export function macOwnerProofScript(account = MAC_OWNER_PROOF_ACCOUNT): string {
   return `set -euo pipefail
@@ -40,9 +40,11 @@ mint=(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 
 echo "other=$(cd / && sudo -n -u "$account" "\${mint[@]}")"
 echo "owner_bare=$("\${mint[@]}")"
 token="$("$HOME/.local/bin/olympus" dashboard token)"
-/usr/bin/curl -sS -o /dev/null --max-time 10 -c "$jar/owner" -X POST -H 'Origin: ${ENGINE}' -H "Authorization: Bearer $token" '${ENGINE}/dashboard/control/session'
+/usr/bin/curl -sS -o "$jar/owner.json" --max-time 10 -c "$jar/owner" -X POST -H 'Origin: ${ENGINE}' -H "Authorization: Bearer $token" '${ENGINE}/dashboard/control/session'
 unset token
-echo "owner_page=$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -b "$jar/owner" -X POST -H 'Origin: ${ENGINE}' '${MINT}')"
+# The page's CSRF token goes with the cookie, from a file so it is never in argv (#1187).
+printf 'X-Olympus-CSRF: %s\\n' "$(sed -n 's/.*"csrf_token":"\\([^"]*\\)".*/\\1/p' "$jar/owner.json")" > "$jar/csrf"
+echo "owner_page=$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -b "$jar/owner" -H @"$jar/csrf" -X POST -H 'Origin: ${ENGINE}' '${MINT}')"
 `;
 }
 

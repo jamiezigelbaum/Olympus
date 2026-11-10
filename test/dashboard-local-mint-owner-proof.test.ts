@@ -97,7 +97,7 @@ describe('the local mint on a computer with no owner socket (macOS)', () => {
     const page = await launchedPage(mac.fetch);
     // A launch session is bearer-grade: the local-only routes stay closed to it.
     expect((await mac.fetch(consult(page.cookie, page.csrf))).status).toBe(403);
-    const unlocked = await mac.fetch(localMint({ Cookie: page.cookie }));
+    const unlocked = await mac.fetch(localMint({ Cookie: page.cookie, 'X-Olympus-CSRF': page.csrf }));
     expect(unlocked.status).toBe(200);
     const local = { cookie: cookieOf(unlocked), csrf: (await unlocked.json() as { csrf_token: string }).csrf_token };
     expect(local.cookie).not.toBe(page.cookie);
@@ -105,29 +105,36 @@ describe('the local mint on a computer with no owner socket (macOS)', () => {
     expect(mac.seen.at(-1)!.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('local');
   });
 
-  test('a page already open before the update unlocks as it did: its script sends the cookie but no CSRF token', async () => {
+  test('the owner\'s cookie alone, with no in-page CSRF token, mints nothing (#1187)', async () => {
     const mac = macEngine();
     const page = await launchedPage(mac.fetch);
-    // The 1.4.x page script posts the mint with the cookie only (components.ts, host-page.ts openLocalSession).
-    expect((await mac.fetch(localMint({ Cookie: page.cookie }))).status).toBe(200);
+    // Browsers do not separate cookies by port (RFC 6265 §8.5): a server on
+    // another loopback port can be handed this cookie and replay it with the
+    // engine's own Origin. The CSRF token lives only in the owner's page.
+    const replayed = await mac.fetch(localMint({ Cookie: page.cookie }));
+    expect(replayed.status).toBe(403);
+    expect(replayed.headers.get('Set-Cookie')).toBeNull();
+    expect((await mac.fetch(localMint({ Cookie: page.cookie, 'X-Olympus-CSRF': 'not-the-token' }))).status).toBe(403);
+    expect(mac.seen).toEqual([]);
+    expect((await mac.fetch(localMint({ Cookie: page.cookie, 'X-Olympus-CSRF': page.csrf }))).status).toBe(200);
   });
 
   test('a local session already open survives the update: same signing secret, no new mint needed', async () => {
     const before = macEngine();
     const page = await launchedPage(before.fetch);
-    const unlocked = await before.fetch(localMint({ Cookie: page.cookie }));
+    const unlocked = await before.fetch(localMint({ Cookie: page.cookie, 'X-Olympus-CSRF': page.csrf }));
     const local = { cookie: cookieOf(unlocked), csrf: (await unlocked.json() as { csrf_token: string }).csrf_token };
     // The engine restarts on the new version with the secret it keeps in its state file.
     const after = macEngine(before.sessionSecret);
     expect((await after.fetch(consult(local.cookie, local.csrf))).status).toBe(200);
     // And it may mint again from that session (a second tab's Unlock).
-    expect((await after.fetch(localMint({ Cookie: local.cookie }))).status).toBe(200);
+    expect((await after.fetch(localMint({ Cookie: local.cookie, 'X-Olympus-CSRF': local.csrf }))).status).toBe(200);
   });
 
   test('server mode with nobody at the console: the owner\'s remote opening link, through a loopback forward, still unlocks', async () => {
     const mac = macEngine();
     const page = await launchedPage(mac.fetch, 'remote');
-    expect((await mac.fetch(localMint({ Cookie: page.cookie }))).status).toBe(200);
+    expect((await mac.fetch(localMint({ Cookie: page.cookie, 'X-Olympus-CSRF': page.csrf }))).status).toBe(200);
   });
 
   test('the token pasted into the page (the manual unlock) is a proof too', async () => {
@@ -135,15 +142,16 @@ describe('the local mint on a computer with no owner socket (macOS)', () => {
     const pasted = await mac.fetch(new Request(`${ORIGIN}/dashboard/control/session`, {
       method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN },
     }));
-    expect((await mac.fetch(localMint({ Cookie: cookieOf(pasted) }))).status).toBe(200);
+    const { csrf_token: csrf } = await pasted.json() as { csrf_token: string };
+    expect((await mac.fetch(localMint({ Cookie: cookieOf(pasted), 'X-Olympus-CSRF': csrf }))).status).toBe(200);
   });
 
   test('a session does not lift the older refusals: a bearer, proxy headers or a remote peer still refuse', async () => {
     const mac = macEngine();
-    const { cookie } = await launchedPage(mac.fetch);
-    expect((await mac.fetch(localMint({ Cookie: cookie, Authorization: `Bearer ${TOKEN}` }))).status).toBe(403);
-    expect((await mac.fetch(localMint({ Cookie: cookie, 'X-Forwarded-For': '203.0.113.9' }))).status).toBe(403);
-    expect((await mac.fetch(localMint({ Cookie: cookie }, '192.0.2.10'))).status).toBe(403);
+    const { cookie, csrf } = await launchedPage(mac.fetch);
+    expect((await mac.fetch(localMint({ Cookie: cookie, 'X-Olympus-CSRF': csrf, Authorization: `Bearer ${TOKEN}` }))).status).toBe(403);
+    expect((await mac.fetch(localMint({ Cookie: cookie, 'X-Olympus-CSRF': csrf, 'X-Forwarded-For': '203.0.113.9' }))).status).toBe(403);
+    expect((await mac.fetch(localMint({ Cookie: cookie, 'X-Olympus-CSRF': csrf }, '192.0.2.10'))).status).toBe(403);
     expect(mac.seen).toEqual([]);
   });
 });

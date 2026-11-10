@@ -284,11 +284,12 @@ function hostProgram(input: {
    * A tool only this computer's own session may use (approving an import):
    * open that session first, the way the local pages' Unlock does. The
    * worker grants it to a loopback browser presenting no bearer, so an
-   * agent's bearer never reaches it; refused, the tool says so itself.
+   * agent's bearer never reaches it, and with this page's CSRF token, so the
+   * session cookie alone never does (#1187); refused, the tool says so itself.
    */
   function localUnlock(name: string): Promise<void> {
     if (localSession || input.localTools.indexOf(name) < 0) return Promise.resolve();
-    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'X-Olympus-CSRF': csrfToken } })
       .then((response) => (response.ok ? response.json() : undefined))
       .then((body: { csrf_token?: unknown } | undefined) => {
         if (body && typeof body.csrf_token === 'string' && body.csrf_token) {
@@ -416,7 +417,7 @@ function hostProgram(input: {
   }
   /** Opens a local-grade session (the messaging routes need one); true once it is. */
   function openLocalSession(): Promise<boolean> {
-    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'X-Olympus-CSRF': csrfToken } })
       .then((response) => (response.ok ? response.json() : undefined))
       .then((body: { csrf_token?: unknown } | undefined) => {
         if (body && typeof body.csrf_token === 'string' && body.csrf_token) {

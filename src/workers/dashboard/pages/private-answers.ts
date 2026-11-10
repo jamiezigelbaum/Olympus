@@ -193,7 +193,7 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     notes.push(`<form class="paunlock" data-pa-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
-    script = `<script>${privateAnswersClientScript({ csrfToken: '', unlockOnly: true })}</script>`;
+    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
@@ -367,7 +367,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       event.preventDefault();
       var button = unlock.querySelector('button');
       if (button) button.disabled = true;
-      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
         if (response.ok) { window.location.reload(); return; }
         var msg = unlock.querySelector('[data-pa-msg]');
         if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }

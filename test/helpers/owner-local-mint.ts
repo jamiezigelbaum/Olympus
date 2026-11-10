@@ -4,7 +4,7 @@ import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../../src/workers/http.ts'
 /**
  * The local mint as the owner's browser makes it on a computer with no owner
  * socket (macOS): the browser already holds the control session the owner's
- * launch link or token opened, and asks from a loopback peer, same origin, no
+ * launch link or token opened and its CSRF token (#1187), and asks from a loopback peer, same origin, no
  * bearer (#1153). `headers` add to or replace the browser's own.
  */
 export async function ownerLocalMint(
@@ -18,10 +18,10 @@ export async function ownerLocalMint(
     method: 'POST', headers: { Authorization: `Bearer ${token}`, Origin: origin },
   }));
   if (owner.status !== 200) throw new Error(`the owner's control session answered ${owner.status}`);
-  await owner.body?.cancel();
+  const { csrf_token: csrf } = await owner.json() as { csrf_token: string };
   const cookie = (owner.headers.get('Set-Cookie') ?? '').split(';')[0]!;
   const request = new Request(`${origin}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, {
-    method: 'POST', headers: { Origin: origin, Cookie: cookie, ...headers },
+    method: 'POST', headers: { Origin: origin, Cookie: cookie, 'X-Olympus-CSRF': csrf, ...headers },
   });
   if (peer !== null) recordRequestPeer(request, peer);
   return fetcher(request);

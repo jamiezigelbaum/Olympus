@@ -285,7 +285,8 @@ async function waitForEngine(timeoutMs: number): Promise<number> {
 /**
  * Fresh-install setup uses exactly the unlocked local dashboard request: the
  * page the owner's launch opened (a control session the bearer minted), then
- * its local unlock, which on a Mac needs that session (#1153).
+ * its local unlock, which on a Mac needs that session and its CSRF token
+ * (#1153, #1187).
  */
 export async function saveFreshInstallPrivacyChoice(input: {
   workerFetch: Platform['workerFetch'];
@@ -298,10 +299,11 @@ export async function saveFreshInstallPrivacyChoice(input: {
     method: 'POST', headers: { authorization: `Bearer ${input.bearer()}`, origin: WORKER_ORIGIN },
   });
   if (opened.status !== 200) throw new Error(`dashboard control session answered ${opened.status}`);
-  await opened.body?.cancel();
   const ownerCookie = opened.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
+  // The page's CSRF token goes with the cookie: the cookie alone mints nothing (#1187).
+  const { csrf_token: ownerCsrf } = await opened.json() as { csrf_token?: string };
   const mint = await input.workerFetch('/dashboard/control/session/local', {
-    method: 'POST', headers: { origin: WORKER_ORIGIN, cookie: ownerCookie },
+    method: 'POST', headers: { origin: WORKER_ORIGIN, cookie: ownerCookie, 'x-olympus-csrf': ownerCsrf ?? '' },
   });
   if (mint.status !== 200) throw new Error(`local dashboard control session answered ${mint.status}`);
   const cookie = mint.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
