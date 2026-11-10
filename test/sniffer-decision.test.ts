@@ -11,7 +11,7 @@ import type { AnalystModel } from '../src/core/analyst.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelCompletion, type SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
 import { privateChance, tierMass } from '../src/workers/classification/sniffer-decision-mass.ts';
-import { CachedTierSniffer, buildSnifferBatchPrompt, cachedSnifferVerdictHolds, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROMPT, snifferCacheModelId, snifferId, snifferPromptVersions, snifferReasonCode, snifferTierKey, snifferVerdictTier } from '../src/workers/classification/sniffer.ts';
+import { CachedTierSniffer, buildSnifferBatchPrompt, cachedSnifferVerdictHolds, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROMPT, snifferCacheModelId, snifferDecisionBar, snifferId, snifferPromptVersions, snifferReasonCode, snifferTierKey, snifferVerdictTier } from '../src/workers/classification/sniffer.ts';
 import { runSnifferPass, SnifferCallBudget, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY } from '../src/workers/classification/sniffer-resolver.ts';
 import { resolveSnifferLane, type SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
@@ -24,7 +24,7 @@ type Event = { path: string; body: any };
 // is re-probed after a minute). Port 0 can hand a later fake the port an earlier one freed, so each fake answers
 // under its own path: a new fake is a new endpoint, never a stale one (#898).
 let fakeServers = 0;
-function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; privateProbability?: number } = {}) {
+function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; privateProbability?: number; weights?: string } = {}) {
   const prefix = `/fixture-${++fakeServers}`;
   const events: Event[] = [];
   let fail = false;
@@ -32,6 +32,7 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
   let noMass = false;
   let cold = false;
   let down = false;
+  let propsDown = false;
   let customReply: unknown;
   let active = 0;
   let peak = 0;
@@ -40,6 +41,8 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
     const pathname = new URL(req.url).pathname;
     if (!pathname.startsWith(`${prefix}/`)) return new Response('', { status: 404 });
     const path = pathname.slice(prefix.length);
+    // Content-free metadata probe, kept out of the decision request log.
+    if (req.method === 'GET' && path === '/props') return propsDown ? new Response('', { status: 503 }) : Response.json({ model_path: options.weights ?? '/models/fixture-model.gguf' });
     const body = await req.json() as any;
     events.push({ path, body });
     active++; peak = Math.max(active, peak);
@@ -67,7 +70,8 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
   } };
   const fullRequests: unknown[] = [];
   const full: AnalystModel = { async complete(request) { fullRequests.push(request); return { modelId: lane.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', confidence: 0.7, ownRecord: false, privateKind: 'none' }] }) }; } };
-  return { events, lane, render, fullRequests, model: () => createDecisionSnifferModel(lane, full), stop: () => server.stop(true), fail: () => { fail = true; }, noMass: () => { noMass = true; }, cold: () => { cold = true; }, peak: () => peak, unsupported: () => { unsupported = true; }, down: () => { down = true; }, recover: () => { down = false; unsupported = false; }, reply: (value: unknown) => { customReply = value; } };
+  const logs: string[] = [];
+  return { events, lane, render, fullRequests, logs, model: () => createDecisionSnifferModel(lane, full, { log: (line) => logs.push(line) }), stop: () => server.stop(true), fail: () => { fail = true; }, noMass: () => { noMass = true; }, cold: () => { cold = true; }, peak: () => peak, unsupported: () => { unsupported = true; }, down: () => { down = true; }, recover: () => { down = false; unsupported = false; }, propsDown: (value: boolean) => { propsDown = value; }, reply: (value: unknown) => { customReply = value; } };
 }
 function request(material: string, ownerContext?: string): SnifferModelRequest {
   return { system: SNIFFER_SYSTEM_PROMPT, prompt: buildSnifferBatchPrompt('content', [{ i: 1, material }], ownerContext), localOnly: true,
@@ -121,6 +125,48 @@ describe('native sniffer decision', () => {
       expect((await run()).failSafePrivate).toBe(1);
       expect(ledger.getCurrent(subject(1))?.metadataTier).toBe('secure');
     } finally { store.close(); ledger.close(); f.stop(); }
+  });
+
+  test('the probe reads the served weights, so an alias still gets its measured bar, and notes a judge with none (#1253)', async () => {
+    const measured = fakeServer({ weights: '/Volumes/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf' });
+    const unmeasured = fakeServer({ weights: 'C:\\models\\Some-Other-12B-Q4_K_M.gguf' });
+    try {
+      for (const f of [measured, unmeasured]) {
+        const model = f.model();
+        await model.prepareSniffer!();
+        await model.prepareSniffer!();
+      }
+      expect(measured.lane.servedWeights).toBe('Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf');
+      expect(snifferDecisionBar(measured.lane)).toBe(0.374);
+      expect(measured.logs).toEqual([]);
+      expect(unmeasured.lane.servedWeights).toBe('Some-Other-12B-Q4_K_M.gguf');
+      expect(snifferDecisionBar(unmeasured.lane)).toBe(0.5);
+      // Logged once per endpoint, naming only the weights file.
+      expect(unmeasured.logs).toHaveLength(1);
+      expect(unmeasured.logs[0]).toContain('no measured decision bar for weights Some-Other-12B-Q4_K_M.gguf');
+    } finally { measured.stop(); unmeasured.stop(); }
+  });
+
+  test('a failed weights read is retried a minute later, never pinned to the default bar', async () => {
+    const f = fakeServer({ weights: '/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf' });
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      f.propsDown(true);
+      const model = f.model();
+      await model.prepareSniffer!();
+      expect(f.lane.servedWeights).toBeUndefined();
+      expect(f.logs).toEqual([]); // No note until the weights are known.
+      f.propsDown(false);
+      await model.prepareSniffer!();
+      expect(f.lane.servedWeights).toBeUndefined(); // Within the minute: not asked again.
+      now += 60_000;
+      await model.prepareSniffer!();
+      expect(f.lane.servedWeights).toBe('Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf');
+      expect(snifferDecisionBar(f.lane)).toBe(0.374);
+      expect(f.logs).toEqual([]);
+    } finally { Date.now = realNow; f.stop(); }
   });
 
   test('mass at divergence, ambiguity and missing mass', () => {

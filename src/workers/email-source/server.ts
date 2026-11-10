@@ -2042,7 +2042,7 @@ function createTierSnifferModel(input: {
     return createDecisionSnifferModel(lane, createDelphiAnalystModel(new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }), {
       profile: 'source_answer',
       preflightTimeoutMs: 5_000,
-    }), { apiKey });
+    }), { apiKey, log: (line) => console.warn(line) });
   }
   if (lane.kind === 'venice' && profile.provider === 'venice') {
     const apiKey = resolveSecretRefSync(

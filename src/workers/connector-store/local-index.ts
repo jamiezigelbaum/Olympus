@@ -210,6 +210,11 @@ const MAX_SEARCH_RESULTS = 50;
 // filter serves (#1174). Bounds the work in a store that is mostly superseded
 // copies: at most a handful of page queries per search.
 const KEYWORD_CANDIDATE_SCAN_CAP = 1_000;
+// Store-wide concept counts feed only the rarity weights of the
+// minimum-signal filter, so a recent count serves: every search of a
+// question (plain, content, relaxed) and the next question reuse it.
+const CONCEPT_COUNT_MAX_AGE_MS = 5 * 60_000;
+const CONCEPT_COUNT_MEMO_LIMIT = 512;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
 // text also matches, without changing the query or candidate budget.
@@ -12932,6 +12937,9 @@ export class LocalConnectorStore {
   }
 
   private closedForPoolReads = false;
+  // Created on first use: a field initializer that constructs an object
+  // keeps this class in bundles that never use it (dist/index.js).
+  private conceptCountMemo?: Map<string, { count: number; at: number }>;
 
   /** Drives a read generator on this store's own connection. */
   private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
@@ -13199,14 +13207,33 @@ export class LocalConnectorStore {
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
   ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
-    const items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
+    const memo = this.conceptCountMemo ??= new Map();
+    const remembered = (key: string): number | undefined => {
+      const entry = memo.get(key);
+      return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+    };
+    const remember = (key: string, count: number) => {
+      if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT) memo.clear();
+      memo.set(key, { count, at: Date.now() });
+    };
+    const POPULATION = '\u0000items';
+    let items = remembered(POPULATION);
+    if (items === undefined) {
+      items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
+      remember(POPULATION, items);
+    }
     const counts: number[] = [];
     for (const group of groups) {
-      const { count } = (yield {
-        mode: 'get',
-        sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
-        params: [sourceIndexFtsGroupQuery(group, exact)],
-      }) as { count: number };
+      const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+      let count = remembered(groupQuery);
+      if (count === undefined) {
+        count = ((yield {
+          mode: 'get',
+          sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+          params: [groupQuery],
+        }) as { count: number }).count;
+        remember(groupQuery, count);
+      }
       counts.push(count);
     }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
@@ -14811,7 +14838,7 @@ async function hybridConnectorStoreSearch(
   const keywordStartedAt = Date.now();
   let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size
-    ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
+    ? keywordLane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
     : undefined;
   let keywordElapsedMs = Date.now() - keywordStartedAt;
   const vectorStartedAt = Date.now();
@@ -15016,6 +15043,8 @@ type ConnectorStoreKeywordLane = {
   matchedItemIds: ReadonlySet<string>;
   completeItemIds: ReadonlySet<string>;
   allRows: ConnectorStoreSearchRow[];
+  /** The expansion-free search, when expansion changed this one. */
+  baseline?: ConnectorStoreKeywordLane;
 };
 
 async function connectorStoreKeywordLaneRows(
@@ -15056,9 +15085,14 @@ async function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed ? undefined : await withKeywordExpansionDisabled(
-    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
-  );
+  // The expansion-free baseline is the same search when expansion changes
+  // nothing about it (no alternatives, no foreign stopwords): running it
+  // again only doubled the lane's cost (Sparta 2026-11-10, #1242).
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions)
+    ? undefined
+    : await withKeywordExpansionDisabled(
+      () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
+    );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
   const allRows = baseline
     ? [...baseline.allRows.map(row=>complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
@@ -15076,7 +15110,14 @@ async function connectorStoreKeywordLaneRows(
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
+    ...(baseline ? { baseline } : {}),
   };
+}
+
+/** Whether keyword expansion changes the SQL a keyword search would run for this question. */
+function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStoreKeywordFtsOptions): boolean {
+  const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
+  return shape() !== withKeywordExpansionDisabled(shape);
 }
 
 /**
@@ -17801,6 +17842,7 @@ function validateConnectorStoreV6Schema(db: Database): void {
 
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -17948,6 +17990,12 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
   if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error('Connector store schema FTS row ownership map is incomplete.');
   }
+}
+
+// Walks every foreign key in the file: most of a large store's open time
+// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only the writer's open runs
+// it, after its migrations; a read-only open migrates nothing.
+function validateConnectorStoreForeignKeys(db: Database): void {
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();
   if (foreignKeyErrors.length > 0) {
     throw new Error('Connector store schema has broken foreign-key references after migration.');

@@ -7,10 +7,15 @@
 //   - the time for the first page and for a full scan (capped);
 //   - the time of one FTS match;
 // and then, through the same code the eval runs:
-//   - opening the stores and the tier ledger;
+//   - opening the stores and the tier ledger, each timed (openMs);
 //   - each store's vector-lane gate (vectorLaneServable);
 //   - one keyword-only evidence-pack build, with each store's search time
-//     and outcome against the lane deadline.
+//     and outcome against the lane deadline, and every keyword search the
+//     lanes ran on the read pool (count and ms, pool wait included);
+//   - then the keyword search a lane runs, step by step on this thread:
+//     each SQL statement by kind (calls, rows, ms) and the tier and
+//     child-visibility filter's time, for the plain and the content query.
+//     It is synchronous, so a cold run holds this thread for its whole time.
 //
 // Usage (same environment the eval reads):
 //   OLYMPUS_EVAL_DROPBOX_STORE=<private.sqlite> \
@@ -22,6 +27,7 @@
 // The FTS term and the question are inputs only; neither is printed.
 
 import { Database } from 'bun:sqlite';
+import type { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { existsSync, statSync } from 'node:fs';
 import { connectorStoreCurrentEmbeddingPageQuery } from '../src/workers/connector-store/local-index.ts';
 import {
@@ -169,6 +175,131 @@ export function probeStoreFile(input: {
   }
 }
 
+/** What one SQL statement of the keyword search is, by its shape (code, never data). */
+export function keywordStatementKind(sql: string): string {
+  if (sql.includes('MIN(connector_store_fts.rank)')) return 'ranked_match_page';
+  if (sql.includes('COUNT(DISTINCT item_pk)')) return 'concept_weight_count';
+  if (sql.includes('connector_store_fts.item_pk IN (')) return 'concept_hits_for_candidates';
+  if (/FROM items WHERE tombstoned = 0/.test(sql) && sql.includes('COUNT(*)')) return 'item_population_count';
+  return `other:${sql.replace(/\s+/g, ' ').trim().slice(0, 60)}`;
+}
+
+type StepTotals = Record<string, { calls: number; rows: number; ms: number }>;
+
+function addStep(totals: StepTotals, kind: string, rows: number, ms: number): void {
+  const entry = totals[kind] ??= { calls: 0, rows: 0, ms: 0 };
+  entry.calls += 1;
+  entry.rows += rows;
+  entry.ms += ms;
+}
+
+/**
+ * The keyword lane's search on this thread, the plain query then the
+ * content-only one, with every statement timed by kind and the visibility
+ * filter timed on its own. Same SQL as the read pool runs; only the thread
+ * differs. Restores the store's methods before returning.
+ */
+export function traceKeywordSearch(
+  store: LocalConnectorStore,
+  question: string,
+  accountScope: string | undefined,
+  filters: { provider?: string; locatorPathScope?: string } | undefined,
+): Record<string, unknown> {
+  const internals = store as unknown as {
+    db: { query: (sql: string) => { all: (...params: unknown[]) => unknown[]; get: (...params: unknown[]) => unknown } };
+    tierVisibleRows: (...args: unknown[]) => unknown[];
+  };
+  const db = internals.db;
+  const query = db.query;
+  const visible = internals.tierVisibleRows;
+  const runs: Array<Record<string, unknown>> = [];
+  let steps: StepTotals = {};
+  let filter = { calls: 0, rowsIn: 0, rowsOut: 0, ms: 0 };
+  db.query = function (sql: string) {
+    const statement = query.call(db, sql);
+    const kind = keywordStatementKind(sql);
+    return {
+      all: (...params: unknown[]) => {
+        const startedAt = performance.now();
+        const rows = statement.all(...params);
+        addStep(steps, kind, rows.length, performance.now() - startedAt);
+        return rows;
+      },
+      get: (...params: unknown[]) => {
+        const startedAt = performance.now();
+        const row = statement.get(...params);
+        addStep(steps, kind, row ? 1 : 0, performance.now() - startedAt);
+        return row;
+      },
+    };
+  };
+  internals.tierVisibleRows = function (...args: unknown[]) {
+    const startedAt = performance.now();
+    const out = visible.apply(store, args);
+    filter.calls += 1;
+    filter.rowsIn += (args[0] as unknown[]).length;
+    filter.rowsOut += out.length;
+    filter.ms += performance.now() - startedAt;
+    return out;
+  };
+  try {
+    for (const [label, options] of [['plain', { prefix: false }], ['content', { prefix: false, contentOnly: true }]] as const) {
+      steps = {};
+      filter = { calls: 0, rowsIn: 0, rowsOut: 0, ms: 0 };
+      const startedAt = performance.now();
+      const result = store.searchItemsDetailed(question, 50, accountScope, filters, options);
+      runs.push({
+        query: label,
+        ms: elapsed(startedAt),
+        rows: result.rows.length,
+        saturated: result.saturated,
+        statements: Object.fromEntries(Object.entries(steps).map(([kind, entry]) => [kind, { ...entry, ms: Math.round(entry.ms) }])),
+        visibilityFilter: { ...filter, ms: Math.round(filter.ms) },
+      });
+    }
+  } finally {
+    db.query = query;
+    internals.tierVisibleRows = visible;
+  }
+  return { corpusId: store.corpusId, runs };
+}
+
+/** Counts and times every keyword search the lanes run on the read pool, until restored. */
+function countPoolSearches(stores: readonly LocalConnectorStore[]): { report: () => unknown; restore: () => void } {
+  type PoolSearch = { contentOnly: boolean; relaxed: boolean; ms: number; rows?: number; failed?: boolean };
+  const calls: Record<string, PoolSearch[]> = {};
+  const originals = stores.map((store) => [store, store.searchItemsDetailedOffThread] as const);
+  for (const [store, original] of originals) {
+    const list: PoolSearch[] = calls[store.corpusId] = [];
+    store.searchItemsDetailedOffThread = async function (...args: Parameters<typeof original>) {
+      const startedAt = performance.now();
+      const options = args[4] ?? {};
+      const entry: PoolSearch = { contentOnly: options.contentOnly === true, relaxed: options.relaxed === true, ms: 0 };
+      list.push(entry);
+      try {
+        const result = await original.apply(store, args);
+        entry.rows = result.rows.length;
+        return result;
+      } catch (error) {
+        entry.failed = true;
+        throw error;
+      } finally {
+        entry.ms = elapsed(startedAt);
+      }
+    };
+  }
+  return {
+    report: () => Object.fromEntries(Object.entries(calls).map(([corpusId, list]) => [corpusId, {
+      searches: list.length,
+      totalMs: list.reduce((sum, entry) => sum + entry.ms, 0),
+      each: list,
+    }])),
+    restore: () => {
+      for (const [store, original] of originals) store.searchItemsDetailedOffThread = original;
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseStoreProbeArgs(process.argv.slice(2));
   const paths = evalDropboxStorePaths(process.env);
@@ -197,8 +328,10 @@ async function main(): Promise<void> {
 
   // The eval's own path, keyword only: open, gate, one pack build.
   let startedAt = performance.now();
-  const opened = openEvalDropboxStores(paths);
+  const openMs: Record<string, number> = {};
+  const opened = openEvalDropboxStores(paths, openMs);
   out.openStoresAndLedgerMs = elapsed(startedAt);
+  out.openMs = openMs;
   out.ledgerBound = opened.ledger !== undefined;
   try {
     const gates: Array<Record<string, unknown>> = [];
@@ -218,8 +351,14 @@ async function main(): Promise<void> {
       ...(opened.ledger ? { ledger: opened.ledger } : {}),
       scope,
     });
+    const pool = countPoolSearches(opened.stores);
     startedAt = performance.now();
-    const detail = await buildEvalPack({ question: args.question, lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    let detail: Awaited<ReturnType<typeof buildEvalPack>>;
+    try {
+      detail = await buildEvalPack({ question: args.question, lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    } finally {
+      pool.restore();
+    }
     const audit = evalRetrievalAudit(detail);
     out.keywordOnlyPack = {
       ms: elapsed(startedAt),
@@ -227,7 +366,12 @@ async function main(): Promise<void> {
       corpusTimings: audit.corpusTimings,
       lanes: audit.lanes,
       skippedCorpora: audit.skippedCorpora,
+      poolKeywordSearches: pool.report(),
     };
+    // After the pack build, so its timings are the eval's own: these searches
+    // run synchronously on this thread, and a cold one on a large store holds
+    // it for many seconds (the probe's own "could not answer" stall).
+    out.keywordSearchSteps = opened.stores.map((store) => traceKeywordSearch(store, args.question, scope.accountScope, filters));
   } finally {
     opened.close();
   }
