@@ -14168,13 +14168,18 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25, contentTier, before) {
+  recentDecisions(limit = 25, contentTier, before, beforeItem) {
     const capped = Math.max(1, Math.min(limit, 200));
+    const tie = before !== undefined && beforeItem !== undefined ? [beforeItem.provider, beforeItem.accountScope, beforeItem.providerConversationId ?? "", beforeItem.providerItemId] : undefined;
     const where = [
       ...contentTier === undefined ? [] : ["content_tier = ?"],
-      ...before === undefined ? [] : ["decided_at < ?"]
+      ...before === undefined ? [] : [tie ? "(decided_at < ? OR (decided_at = ? AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)))" : "decided_at < ?"]
     ];
-    const params = [...contentTier === undefined ? [] : [contentTier], ...before === undefined ? [] : [before], capped];
+    const params = [
+      ...contentTier === undefined ? [] : [contentTier],
+      ...before === undefined ? [] : tie ? [before, before, ...tie] : [before],
+      capped
+    ];
     const rows = this.db.query(`
       SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?

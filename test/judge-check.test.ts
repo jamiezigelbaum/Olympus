@@ -59,6 +59,9 @@ describe('a round', () => {
       item(101, { judge_reason: 'ordinary:0.01', decided_by: 'owner_rule' }),
       item(102, { judge_reason: 'ordinary:0.01', moving_to: 'Private' }),
       item(103, { judge_reason: 'ordinary:0.01', tier: null }),
+      // Held Private by default while waiting for the judge, and a judge verdict not recorded yet.
+      item(104, { judge_reason: null, decided_by: 'default', tier: 'Private' }),
+      item(105, { judge_reason: null }),
     ];
     const { check } = fixture(items);
     const round = check.start();
@@ -73,7 +76,7 @@ describe('a round', () => {
     const leastSure = Array.from({ length: JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS }, (_, index) => `oti_${index + 1}`);
     for (const id of leastSure) expect(ids.has(id)).toBe(true);
     expect([...ids].filter((id) => !leastSure.includes(id))).toHaveLength(JUDGE_CHECK_RANDOM_PICKS);
-    for (const id of ['oti_100', 'oti_101', 'oti_102', 'oti_103']) expect(ids.has(id)).toBe(false);
+    for (const id of ['oti_100', 'oti_101', 'oti_102', 'oti_103', 'oti_104', 'oti_105']) expect(ids.has(id)).toBe(false);
   });
 
   test('the judge\'s label stays hidden until the owner answers', () => {
@@ -110,7 +113,7 @@ describe('a round', () => {
     expect(() => check.answer(first, 'Private')).toThrow('not the item waiting');
   });
 
-  test('a finished round gives the count and the likely range; Check 10 more asks about other items', () => {
+  test('a finished round gives the count, and a likely range from the random picks only; Check 10 more asks about other items', () => {
     const items = pool();
     const { check } = fixture(items);
     let view = check.start();
@@ -123,10 +126,20 @@ describe('a round', () => {
       view = check.answer(id, asked.length < JUDGE_CHECK_ROUND_SIZE ? judge : judge === 'Personal' ? 'Private' : 'Personal');
     }
     expect(view).toMatchObject({ state: 'done', compared: 10, agreed: 9, changed: 1 });
-    expect(view.range).toEqual(wilsonInterval(9, 10));
-    const next = check.start();
+    // The least-sure picks are not a fair sample of all items, so the range rests on the random ones alone.
+    const random = view.range!;
+    expect(random.from).toBe(JUDGE_CHECK_RANDOM_PICKS);
+    expect([JUDGE_CHECK_RANDOM_PICKS - 1, JUDGE_CHECK_RANDOM_PICKS]).toContain(random.agreed);
+    expect(random).toEqual({ ...wilsonInterval(random.agreed, JUDGE_CHECK_RANDOM_PICKS), from: JUDGE_CHECK_RANDOM_PICKS, agreed: random.agreed });
+    let next = check.start();
     expect(next.state).toBe('active');
     expect(asked).not.toContain(next.current!.item_id);
+    // The next round's random picks add to the earlier ones.
+    while (next.current) {
+      const judge = items.find((candidate) => candidate.item_id === next.current!.item_id)!.tier as 'Personal' | 'Private';
+      next = check.answer(next.current.item_id, judge);
+    }
+    expect(next.range).toMatchObject({ from: 2 * JUDGE_CHECK_RANDOM_PICKS, agreed: random.agreed + JUDGE_CHECK_RANDOM_PICKS });
   });
 
   test('putting it away keeps the answers, and it picks up where it stopped', () => {
@@ -187,6 +200,36 @@ describe('many rounds', () => {
     // With nothing new left, it asks again about the items asked longest ago, not the latest.
     expect(new Set(rounds[20])).toEqual(new Set(rounds[0]));
     expect(new Set(rounds[21])).toEqual(new Set(rounds[1]));
+  });
+});
+
+describe('paging through items sorted at the same moment', () => {
+  test('a page boundary inside a tie skips nothing', () => {
+    // 120 judged items all decided at the same moment; the engine pages by time and the last item, 50 at a time.
+    const items = Array.from({ length: 120 }, (_, index) => item(index + 1));
+    const engine: OwnerTierItems = {
+      find(input) {
+        const after = input.beforeItem ? items.findIndex((candidate) => candidate.item_id === input.beforeItem) + 1 : 0;
+        return { items: items.slice(after, after + (input.limit ?? 20)) };
+      },
+      set: () => ({ ok: true, item: items[0]!, changed: 'set', applies: 'now', results: [] }),
+    };
+    let seed = 5;
+    const check = createJudgeCheck({
+      items: engine,
+      get: (id) => items.find((candidate) => candidate.item_id === id),
+      path: join(root, 'judge-check.json'),
+      random: () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; },
+    });
+    const asked: string[] = [];
+    for (let round = 0; round < 12; round += 1) {
+      let view = check.start();
+      while (view.current) {
+        asked.push(view.current.item_id);
+        view = check.answer(view.current.item_id, 'not_sure');
+      }
+    }
+    expect(new Set(asked).size).toBe(120);
   });
 });
 

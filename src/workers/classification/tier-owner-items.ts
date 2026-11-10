@@ -84,6 +84,12 @@ export interface OwnerTierItemFindInput {
   filter?: OwnerTierItemFilter;
   /** With `recent`: only items decided before this time (an item's `decided_at`), to page further back. */
   before?: string;
+  /**
+   * With `before`: the item the last page ended on (its `item_id`). Items
+   * decided at that same time but sorted after it are listed too, so no item
+   * sharing a time with a page's last one is skipped.
+   */
+  beforeItem?: string;
   limit?: number;
   /**
    * For an agent: leave out every item whose names are not Personal or less
@@ -200,7 +206,11 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
   if (input.before !== undefined && (!input.recent || input.filter === 'changed' || Number.isNaN(Date.parse(input.before)))) {
     throw new OperationError('invalid_params', 'before is a time, with the recently sorted items.');
   }
-  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before) : searchRows(query, limit * 3, context);
+  if (input.beforeItem !== undefined && input.before === undefined) {
+    throw new OperationError('invalid_params', 'beforeItem goes with before.');
+  }
+  const beforeItem = input.beforeItem === undefined ? undefined : parseOwnerTierItemId(input.beforeItem);
+  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem) : searchRows(query, limit * 3, context);
   const items: OwnerTierItem[] = [];
   for (const row of rows) {
     if (items.length >= limit) break;
@@ -269,7 +279,7 @@ function searchRows(query: string, limit: number, context: TierCliContext): Stor
 }
 
 /** The items the ledgers decided most recently, newest first, as their stores keep them; with a filter, only those. */
-function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string): StoredItemRow[] {
+function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string, beforeItem?: TierLedgerIdentity): StoredItemRow[] {
   const decided = new Map<string, TierLedgerRecord>();
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
@@ -277,7 +287,7 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
       records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
         ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
           .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
-        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before), ledger.boundLedgerId);
+        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId);
     } catch {
       // A ledger that cannot be read lists nothing.
     }
@@ -287,7 +297,8 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
       if (!seen || seen.decidedAt < record.decidedAt) decided.set(key, record);
     }
   }
-  const ordered = [...decided.values()].sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit);
+  // Newest first, then the ledger's own tie order, so paging by the last item resumes where a page ended.
+  const ordered = [...decided.values()].sort(recentOrder).slice(0, limit);
   const stores = knownStorePaths(context);
   const rows: StoredItemRow[] = [];
   for (const record of ordered) {
@@ -349,6 +360,17 @@ function identityOfRow(row: StoredItemRow): TierLedgerIdentity {
     providerItemId: row.provider_item_id,
     ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
   };
+}
+
+/** The ledgers' recently-sorted order: newest first, then provider, account, chat and item (recentDecisions). */
+function recentOrder(left: TierLedgerRecord, right: TierLedgerRecord): number {
+  if (left.decidedAt !== right.decidedAt) return left.decidedAt < right.decidedAt ? 1 : -1;
+  const keys = (record: TierLedgerRecord) => [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
+  const [a, b] = [keys(left), keys(right)];
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return a[index]! < b[index]! ? -1 : 1;
+  }
+  return 0;
 }
 
 function identityOfRecord(record: TierLedgerRecord): TierLedgerIdentity {

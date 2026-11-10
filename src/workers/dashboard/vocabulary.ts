@@ -3848,7 +3848,7 @@ export const DASHBOARD_JUDGE_CHECK_COPY = {
   stop: 'Stop for now',
   result: 'The judge agreed with you on {agreed} of {compared}.',
   resultNone: 'You answered Not sure on every item, so there is nothing to compare yet.',
-  rangeLine: 'From {compared} answers, it would likely agree with you on {low}% to {high}% of your items.',
+  rangeLine: 'From {compared} answers about items picked at random, it would likely agree with you on {low}% to {high}% of your items.',
   rangeLabel: 'Likely range {low}% to {high}%, on a scale of 0 to 100%',
   honest: 'More answers make the range narrower. The number itself can go down as well as up. Your answers fix those items; they don\'t change how the judge decides.',
   summary: '{changed} changed to your answer · {confirmed} confirmed · {notSure} “Not sure” left with the judge',

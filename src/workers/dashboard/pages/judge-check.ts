@@ -160,8 +160,8 @@ export function judgeCheckClientScript(input: { csrfToken: string; token?: strin
     var result = round.compared ? esc(fill(J.result, { agreed: round.agreed, compared: round.compared })) : esc(J.resultNone);
     var range = '';
     if (round.range) {
-      var low = pct(round.range.low), high = pct(round.range.high), mark = round.compared ? pct(round.agreed / round.compared) : 0;
-      range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.compared, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
+      var low = pct(round.range.low), high = pct(round.range.high), mark = pct(round.range.agreed / round.range.from);
+      range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.range.from, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
         + '<div data-jc-range role="img" aria-label="' + esc(fill(J.rangeLabel, { low: low, high: high })) + '"><div class="jcscale"><i style="left:' + low + '%;width:' + (high - low) + '%"></i><s style="left:' + mark + '%"></s></div>'
         + '<div class="jcticks"><span>0%</span><span>50%</span><span>100%</span></div></div>';
     }

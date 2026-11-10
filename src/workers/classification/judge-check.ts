@@ -35,6 +35,8 @@ interface StoredRoundItem {
   answer?: JudgeCheckAnswer;
   /** The owner's answer differed and the item was set to it. */
   changed?: boolean;
+  /** Picked at random, not for the judge's doubt: only these answers estimate how often the judge agrees overall. */
+  random?: boolean;
 }
 
 interface StoredJudgeCheck {
@@ -44,6 +46,8 @@ interface StoredJudgeCheck {
   put_away?: boolean;
   /** Items earlier rounds asked about, so a new round asks about others. Ids only. */
   seen?: string[];
+  /** The random picks of earlier rounds: how many were compared and how many the judge agreed with. */
+  random_tally?: { compared: number; agreed: number };
 }
 
 const JUDGE_CHECK_SEEN_MAX = 500;
@@ -80,8 +84,13 @@ export interface JudgeCheckView {
   agreed: number;
   not_sure: number;
   changed: number;
-  /** The likely share of items the judge agrees with the owner on (95% Wilson interval), once the round is done. */
-  range?: { low: number; high: number };
+  /**
+   * The likely share of items the judge agrees with the owner on (95% Wilson
+   * interval), once the round is done. Drawn only from the random picks, this
+   * round's and earlier rounds', since the doubtful picks are not a fair sample;
+   * `from` is how many answers it rests on, `agreed` how many of them matched.
+   */
+  range?: { low: number; high: number; from: number; agreed: number };
 }
 
 export interface JudgeCheck {
@@ -138,13 +147,22 @@ export function judgeConfidence(reason: string | null): number {
   return Number.isFinite(value) && last.trim() !== '' ? value : 1;
 }
 
-/** Items the judge itself labelled: not the owner, not an owner rule, and not moving. */
+/**
+ * Items the judge itself labelled, with its verdict recorded: not a default
+ * still waiting for the judge, not the owner, not an owner rule, and not moving.
+ */
 function judged(item: OwnerTierItem): item is OwnerTierItem & { tier: JudgeLabel } {
   return (item.tier === 'Personal' || item.tier === 'Private')
+    && item.decided_by === 'sniffer'
+    && item.judge_reason !== null
     && !item.owner_set
-    && item.decided_by !== 'override'
-    && item.decided_by !== 'owner_rule'
     && item.moving_to === undefined;
+}
+
+/** How many of a round's random picks were compared (Not sure left out), and how many the judge agreed with. */
+function randomTally(items: readonly StoredRoundItem[]): { compared: number; agreed: number } {
+  const compared = items.filter((item) => item.random && item.answer !== undefined && item.answer !== 'not_sure');
+  return { compared: compared.length, agreed: compared.filter((item) => item.answer === item.judge).length };
 }
 
 export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
@@ -178,6 +196,13 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     };
   };
 
+  const rangeOf = (state: StoredJudgeCheck): Pick<JudgeCheckView, 'range'> => {
+    const now = randomTally(state.round?.items ?? []);
+    const from = now.compared + (state.random_tally?.compared ?? 0);
+    const agreed = now.agreed + (state.random_tally?.agreed ?? 0);
+    return from > 0 ? { range: { ...wilsonInterval(agreed, from), from, agreed } } : {};
+  };
+
   const viewOf = (state: StoredJudgeCheck): JudgeCheckView => {
     const round = state.round;
     if (!round) return { state: 'none', put_away: state.put_away === true, total: 0, answered: [], compared: 0, agreed: 0, not_sure: 0, changed: 0 };
@@ -198,7 +223,7 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
       agreed,
       not_sure: answered.length - compared.length,
       changed: answered.filter((item) => item.changed).length,
-      ...(done && compared.length > 0 ? { range: wilsonInterval(agreed, compared.length) } : {}),
+      ...(done ? rangeOf(state) : {}),
     };
   };
 
@@ -208,17 +233,19 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     // items no round has asked about, or the items run out.
     const unseen: Array<OwnerTierItem & { tier: JudgeLabel }> = [];
     const askedBefore = new Map<string, OwnerTierItem & { tier: JudgeLabel }>();
-    let before: string | undefined;
+    // The cursor is the last item's time and id, so items sorted at the same
+    // moment as a page's last one are still reached on the next page.
+    let cursor: { before: string; beforeItem: string } | undefined;
     for (let page = 0; page < JUDGE_CHECK_MAX_PAGES && unseen.length < JUDGE_CHECK_POOL; page += 1) {
-      const found = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL, ...(before ? { before } : {}) }).items;
+      const found = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL, ...cursor }).items;
       for (const item of found) {
         if (!judged(item)) continue;
         if (seen.has(item.item_id)) askedBefore.set(item.item_id, item);
         else if (!unseen.some((kept) => kept.item_id === item.item_id)) unseen.push(item);
       }
-      const last = found.at(-1)?.decided_at ?? undefined;
-      if (!last || last === before) break;
-      before = last;
+      const last = found.at(-1);
+      if (!last?.decided_at || (cursor && last.item_id === cursor.beforeItem)) break;
+      cursor = { before: last.decided_at, beforeItem: last.item_id };
     }
     // Nothing new left: ask again about the items asked longest ago.
     const pool = [...unseen];
@@ -230,16 +257,16 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
     const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
     const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
     const rest = byDoubt.slice(doubtful.length);
-    const picked = [...doubtful];
+    const picked: Array<{ item: OwnerTierItem & { tier: JudgeLabel }; random: boolean }> = doubtful.map((item) => ({ item, random: false }));
     while (picked.length < JUDGE_CHECK_ROUND_SIZE && rest.length > 0) {
-      picked.push(rest.splice(Math.floor(random() * rest.length), 1)[0]!);
+      picked.push({ item: rest.splice(Math.floor(random() * rest.length), 1)[0]!, random: true });
     }
     // Shuffled, so the least sure do not all come first.
     for (let index = picked.length - 1; index > 0; index -= 1) {
       const other = Math.floor(random() * (index + 1));
       [picked[index], picked[other]] = [picked[other]!, picked[index]!];
     }
-    return picked.map((item) => ({ item_id: item.item_id, judge: item.tier }));
+    return picked.map(({ item, random: byChance }) => ({ item_id: item.item_id, judge: item.tier, ...(byChance ? { random: true } : {}) }));
   };
 
   return {
@@ -260,6 +287,10 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
         put_away: false,
         seen,
       };
+      // The finished round's random picks join the earlier ones for the overall range.
+      const finished = randomTally(state.round?.items ?? []);
+      const tally = { compared: (state.random_tally?.compared ?? 0) + finished.compared, agreed: (state.random_tally?.agreed ?? 0) + finished.agreed };
+      if (tally.compared > 0) next.random_tally = tally;
       write(next);
       return viewOf(next);
     },

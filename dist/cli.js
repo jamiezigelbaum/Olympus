@@ -23351,13 +23351,18 @@ class TierLedger {
     }
     return result;
   }
-  recentDecisions(limit = 25, contentTier, before) {
+  recentDecisions(limit = 25, contentTier, before, beforeItem) {
     const capped = Math.max(1, Math.min(limit, 200));
+    const tie = before !== undefined && beforeItem !== undefined ? [beforeItem.provider, beforeItem.accountScope, beforeItem.providerConversationId ?? "", beforeItem.providerItemId] : undefined;
     const where = [
       ...contentTier === undefined ? [] : ["content_tier = ?"],
-      ...before === undefined ? [] : ["decided_at < ?"]
+      ...before === undefined ? [] : [tie ? "(decided_at < ? OR (decided_at = ? AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)))" : "decided_at < ?"]
     ];
-    const params = [...contentTier === undefined ? [] : [contentTier], ...before === undefined ? [] : [before], capped];
+    const params = [
+      ...contentTier === undefined ? [] : [contentTier],
+      ...before === undefined ? [] : tie ? [before, before, ...tie] : [before],
+      capped
+    ];
     const rows = this.db.query(`
       SELECT * FROM tier_items ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
@@ -57062,7 +57067,7 @@ var init_vocabulary = __esm(() => {
     stop: "Stop for now",
     result: "The judge agreed with you on {agreed} of {compared}.",
     resultNone: "You answered Not sure on every item, so there is nothing to compare yet.",
-    rangeLine: "From {compared} answers, it would likely agree with you on {low}% to {high}% of your items.",
+    rangeLine: "From {compared} answers about items picked at random, it would likely agree with you on {low}% to {high}% of your items.",
     rangeLabel: "Likely range {low}% to {high}%, on a scale of 0 to 100%",
     honest: "More answers make the range narrower. The number itself can go down as well as up. Your answers fix those items; they don't change how the judge decides.",
     summary: "{changed} changed to your answer · {confirmed} confirmed · {notSure} “Not sure” left with the judge",
@@ -144596,7 +144601,11 @@ function findOwnerTierItems(input, context2 = {}) {
   if (input.before !== undefined && (!input.recent || input.filter === "changed" || Number.isNaN(Date.parse(input.before)))) {
     throw new OperationError("invalid_params", "before is a time, with the recently sorted items.");
   }
-  const rows = input.recent ? recentRows(limit * 3, context2, input.filter, input.before) : searchRows(query, limit * 3, context2);
+  if (input.beforeItem !== undefined && input.before === undefined) {
+    throw new OperationError("invalid_params", "beforeItem goes with before.");
+  }
+  const beforeItem = input.beforeItem === undefined ? undefined : parseOwnerTierItemId(input.beforeItem);
+  const rows = input.recent ? recentRows(limit * 3, context2, input.filter, input.before, beforeItem) : searchRows(query, limit * 3, context2);
   const items = [];
   for (const row of rows) {
     if (items.length >= limit)
@@ -144665,12 +144674,12 @@ function searchRows(query, limit, context2) {
   }
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
-function recentRows(limit, context2, filter, before) {
+function recentRows(limit, context2, filter, before, beforeItem) {
   const decided = new Map;
   for (const ledger of knownTierLedgers(context2)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context2.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record: record4 }) => record4).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before), ledger.boundLedgerId);
+      records = withLedgerAt(ledger.path, context2.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record: record4 }) => record4).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId);
     } catch {}
     for (const record4 of records) {
       const key2 = tierLedgerIdentityKey(identityOfRecord2(record4));
@@ -144679,7 +144688,7 @@ function recentRows(limit, context2, filter, before) {
         decided.set(key2, record4);
     }
   }
-  const ordered = [...decided.values()].sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit);
+  const ordered = [...decided.values()].sort(recentOrder).slice(0, limit);
   const stores = knownStorePaths(context2);
   const rows = [];
   for (const record4 of ordered) {
@@ -144735,6 +144744,17 @@ function identityOfRow2(row) {
     providerItemId: row.provider_item_id,
     ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
   };
+}
+function recentOrder(left, right) {
+  if (left.decidedAt !== right.decidedAt)
+    return left.decidedAt < right.decidedAt ? 1 : -1;
+  const keys = (record4) => [record4.provider, record4.accountScope, record4.conversationKey, record4.providerItemId];
+  const [a, b] = [keys(left), keys(right)];
+  for (let index = 0;index < a.length; index += 1) {
+    if (a[index] !== b[index])
+      return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
 }
 function identityOfRecord2(record4) {
   return {
@@ -144928,7 +144948,11 @@ function judgeConfidence(reason) {
   return Number.isFinite(value2) && last.trim() !== "" ? value2 : 1;
 }
 function judged(item) {
-  return (item.tier === "Personal" || item.tier === "Private") && !item.owner_set && item.decided_by !== "override" && item.decided_by !== "owner_rule" && item.moving_to === undefined;
+  return (item.tier === "Personal" || item.tier === "Private") && item.decided_by === "sniffer" && item.judge_reason !== null && !item.owner_set && item.moving_to === undefined;
+}
+function randomTally(items) {
+  const compared = items.filter((item) => item.random && item.answer !== undefined && item.answer !== "not_sure");
+  return { compared: compared.length, agreed: compared.filter((item) => item.answer === item.judge).length };
 }
 function createJudgeCheck(options) {
   const path = options.path ?? judgeCheckPath(options.env);
@@ -144960,6 +144984,12 @@ function createJudgeCheck(options) {
       preview: item?.preview ?? null
     };
   };
+  const rangeOf = (state) => {
+    const now = randomTally(state.round?.items ?? []);
+    const from = now.compared + (state.random_tally?.compared ?? 0);
+    const agreed = now.agreed + (state.random_tally?.agreed ?? 0);
+    return from > 0 ? { range: { ...wilsonInterval(agreed, from), from, agreed } } : {};
+  };
   const viewOf = (state) => {
     const round = state.round;
     if (!round)
@@ -144984,16 +145014,16 @@ function createJudgeCheck(options) {
       agreed,
       not_sure: answered.length - compared.length,
       changed: answered.filter((item) => item.changed).length,
-      ...done && compared.length > 0 ? { range: wilsonInterval(agreed, compared.length) } : {}
+      ...done ? rangeOf(state) : {}
     };
   };
   const sample = (seenOrder) => {
     const seen = new Set(seenOrder);
     const unseen = [];
     const askedBefore = new Map;
-    let before;
+    let cursor;
     for (let page2 = 0;page2 < JUDGE_CHECK_MAX_PAGES && unseen.length < JUDGE_CHECK_POOL; page2 += 1) {
-      const found = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL, ...before ? { before } : {} }).items;
+      const found = options.items.find({ recent: true, limit: JUDGE_CHECK_POOL, ...cursor }).items;
       for (const item of found) {
         if (!judged(item))
           continue;
@@ -145002,10 +145032,10 @@ function createJudgeCheck(options) {
         else if (!unseen.some((kept) => kept.item_id === item.item_id))
           unseen.push(item);
       }
-      const last = found.at(-1)?.decided_at ?? undefined;
-      if (!last || last === before)
+      const last = found.at(-1);
+      if (!last?.decided_at || cursor && last.item_id === cursor.beforeItem)
         break;
-      before = last;
+      cursor = { before: last.decided_at, beforeItem: last.item_id };
     }
     const pool = [...unseen];
     for (const id of seenOrder) {
@@ -145018,15 +145048,15 @@ function createJudgeCheck(options) {
     const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
     const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
     const rest = byDoubt.slice(doubtful.length);
-    const picked = [...doubtful];
+    const picked = doubtful.map((item) => ({ item, random: false }));
     while (picked.length < JUDGE_CHECK_ROUND_SIZE && rest.length > 0) {
-      picked.push(rest.splice(Math.floor(random() * rest.length), 1)[0]);
+      picked.push({ item: rest.splice(Math.floor(random() * rest.length), 1)[0], random: true });
     }
     for (let index = picked.length - 1;index > 0; index -= 1) {
       const other = Math.floor(random() * (index + 1));
       [picked[index], picked[other]] = [picked[other], picked[index]];
     }
-    return picked.map((item) => ({ item_id: item.item_id, judge: item.tier }));
+    return picked.map(({ item, random: byChance }) => ({ item_id: item.item_id, judge: item.tier, ...byChance ? { random: true } : {} }));
   };
   return {
     status: () => viewOf(read()),
@@ -145045,6 +145075,10 @@ function createJudgeCheck(options) {
         put_away: false,
         seen
       };
+      const finished = randomTally(state.round?.items ?? []);
+      const tally = { compared: (state.random_tally?.compared ?? 0) + finished.compared, agreed: (state.random_tally?.agreed ?? 0) + finished.agreed };
+      if (tally.compared > 0)
+        next.random_tally = tally;
       write(next);
       return viewOf(next);
     },
@@ -164106,8 +164140,8 @@ function judgeCheckClientScript(input) {
     var result = round.compared ? esc(fill(J.result, { agreed: round.agreed, compared: round.compared })) : esc(J.resultNone);
     var range = '';
     if (round.range) {
-      var low = pct(round.range.low), high = pct(round.range.high), mark = round.compared ? pct(round.agreed / round.compared) : 0;
-      range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.compared, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
+      var low = pct(round.range.low), high = pct(round.range.high), mark = pct(round.range.agreed / round.range.from);
+      range = '<p class="jcrange">' + fill(esc(J.rangeLine), { compared: round.range.from, low: '<b>' + low, high: high + '%</b>' }).replace('%</b>%', '%</b>') + '</p>'
         + '<div data-jc-range role="img" aria-label="' + esc(fill(J.rangeLabel, { low: low, high: high })) + '"><div class="jcscale"><i style="left:' + low + '%;width:' + (high - low) + '%"></i><s style="left:' + mark + '%"></s></div>'
         + '<div class="jcticks"><span>0%</span><span>50%</span><span>100%</span></div></div>';
     }

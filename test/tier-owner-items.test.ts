@@ -245,6 +245,12 @@ describe('finding an item', () => {
     const [newest, older] = ownerItems().find({ recent: true }).items;
     expect(ownerItems().find({ recent: true, before: newest!.decided_at! }).items.map((found) => found.item_id))
       .toEqual(older && older.decided_at! < newest!.decided_at! ? [older.item_id] : []);
+    // With the last item as well, a page resumes right after it, even when both were decided at the same moment.
+    const [first] = ownerItems().find({ recent: true, limit: 1 }).items;
+    expect(first?.item_id).toBe(newest!.item_id);
+    expect(ownerItems().find({ recent: true, limit: 1, before: first!.decided_at!, beforeItem: first!.item_id }).items.map((found) => found.item_id))
+      .toEqual([older!.item_id]);
+    expect(() => ownerItems().find({ recent: true, beforeItem: first!.item_id })).toThrow('beforeItem');
     expect(() => ownerItems().find({ recent: true, before: 'not a time' })).toThrow('before');
     expect(() => ownerItems().find({ query: 'bank', filter: 'private' })).toThrow('filter');
     ownerItems().set({ itemId: bankItem().item_id, choice: 'personal', allowLower: true });
