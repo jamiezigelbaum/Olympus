@@ -39,8 +39,10 @@ ticket="$(sed -n 's/.*"ticket":"\\([A-Za-z0-9_-]*\\)".*/\\1/p' "$jar/minted")"
 rm -f "$jar/minted"
 printf '{"ticket":"%s"}' "$ticket" > "$jar/body"
 unset ticket
-"\${req[@]}" -o /dev/null -c "$jar/owner" -X POST -H 'Content-Type: application/json' --data-binary @"$jar/body" '${ENGINE}/dashboard/control/launch/redeem'
-echo "owner_page=$("\${req[@]}" -o /dev/null -w '%{http_code}' -b "$jar/owner" -X POST '${ENGINE}/dashboard/control/session/local')"
+"\${req[@]}" -o "$jar/owner.json" -c "$jar/owner" -X POST -H 'Content-Type: application/json' --data-binary @"$jar/body" '${ENGINE}/dashboard/control/launch/redeem'
+# The page's CSRF token goes with the cookie, from a file so it is never in argv (#1187).
+printf 'X-Olympus-CSRF: %s\\n' "$(sed -n 's/.*"csrf_token":"\\([^"]*\\)".*/\\1/p' "$jar/owner.json")" > "$jar/csrf"
+echo "owner_page=$("\${req[@]}" -o /dev/null -w '%{http_code}' -b "$jar/owner" -H @"$jar/csrf" -X POST '${ENGINE}/dashboard/control/session/local')"
 `;
 }
 

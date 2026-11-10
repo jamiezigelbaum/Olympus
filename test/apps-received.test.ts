@@ -5,6 +5,7 @@
  */
 import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Window } from 'happy-dom';
 import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -607,6 +608,25 @@ describe('the worker serves the list only inside a local control session', () =>
     const remote = renderDashboardAppsReceivedPage({ controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: false, appsReceivedAvailable: true });
     expect(remote).toContain('data-ar-unlock');
     expect(remote).not.toContain('<ul class="arlist"');
+  });
+
+  test('the unlock on a bearer-grade page sends the page\'s CSRF token with its session', async () => {
+    const html = renderDashboardAppsReceivedPage({ controlSessionCsrfToken: 'page-csrf', outsideHelpLocalSession: false, appsReceivedAvailable: true });
+    const win = new Window({ url: `${ORIGIN}/dashboard?apps-received` });
+    win.document.body.innerHTML = html.replace(/<script>[\s\S]*<\/script>/, '');
+    const sent: Array<{ url: string; headers: Record<string, string> }> = [];
+    Object.defineProperty(win, 'fetch', { configurable: true, value: async (url: string, init: { headers?: Record<string, string> }) => {
+      sent.push({ url, headers: init.headers ?? {} });
+      return { ok: false };
+    } });
+    const script = /<script>([\s\S]*)<\/script>/.exec(html)![1]!;
+    new Function('window', 'document', 'fetch', script)(win, win.document, (win as unknown as { fetch: unknown }).fetch);
+    const form = win.document.querySelector('form[data-ar-unlock]')!;
+    form.dispatchEvent(new win.Event('submit', { cancelable: true }));
+    await flushMicrotasks();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.headers['X-Olympus-CSRF']).toBe('page-csrf');
+    await win.happyDOM.close();
   });
 
   test('no agent or remote tool can read the list', async () => {

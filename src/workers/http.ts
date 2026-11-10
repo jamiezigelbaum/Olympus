@@ -214,11 +214,16 @@ export function withWorkerBearerAuth(
       // a loopback port on the client computer, one socket connection per TCP
       // connection, so a request any account there sends through that forward
       // arrives exactly as the owner's own would (#1188). The owner proof on
-      // every platform is a live control session in this same browser: one the
-      // owner's launch link, remote opening link, desktop bridge or token
-      // opened, each of which needs the worker token only the owner can read
-      // (worker.env, 0600). No session, no mint.
-      if (!hasOwnerControlSession(request, sessionSecret, now())) return unauthorizedWorkerResponse();
+      // every platform is a live control session in this same browser, proven
+      // the way every control POST is: the cookie the owner's launch link,
+      // remote opening link, desktop bridge or token opened (each needs the
+      // worker token only the owner can read, worker.env 0600), plus that
+      // session's CSRF token from the owner's page. The cookie alone is not
+      // enough: browsers do not separate cookies by port, so a server on
+      // another loopback port can be handed it (#1187).
+      const owner = authorizeDashboardControlSession(request, sessionSecret, now(), true);
+      if (owner.status === 'origin_mismatch' || owner.status === 'csrf_mismatch') return dashboardControlForbiddenResponse(owner.status);
+      if (owner.status !== 'allowed') return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
@@ -466,19 +471,6 @@ export const DASHBOARD_LOCAL_CONTROL_SESSION_PATH = '/dashboard/control/session/
 
 function isDashboardLocalControlSessionRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
-}
-
-/**
- * The local mint's owner proof, with or without the owner socket: this browser's
- * live control session, signed by this worker, unexpired and bound to this
- * origin. The CSRF token is not asked for, so a page opened before this check
- * existed can still unlock: the session cookie is HttpOnly and
- * SameSite=Strict, the caller has already proved a loopback Origin equal to
- * the request's own, and the answer is a new session readable only by that
- * same origin.
- */
-function hasOwnerControlSession(request: Request, sessionSecret: string, nowMs: number): boolean {
-  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === 'allowed';
 }
 
 function isLoopbackOrigin(origin: string): boolean {
