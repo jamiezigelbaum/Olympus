@@ -35594,8 +35594,9 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
   if (leader && nameLeader !== undefined) {
     const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
     const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    if (at > firstPartial && firstPartial >= 0)
-      ordered.splice(firstPartial, 0, ...ordered.splice(at, 1));
+    const seat = firstPartial + LANE_LEADER_SEATS - 1;
+    if (firstPartial >= 0 && at > seat)
+      ordered.splice(seat, 0, ...ordered.splice(at, 1));
   }
   const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions, deadlineAtMs));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));

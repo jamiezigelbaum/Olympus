@@ -15159,11 +15159,13 @@ async function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
-  // The best name match keeps the lead among partial matches. Content first
+  // The best name match keeps a seat among the partial matches. Content first
   // demoted the plain search's bm25 leader behind every readable row that
   // shares part of the question, so a file named for the question, unread or
   // with Private content, never left its store (2026-11-10 eval gap-1: first
-  // of 377 by bm25, absent from the pack). One row, never more: the titles
+  // of 377 by bm25, absent from the pack). It takes the third partial seat
+  // (LANE_LEADER_SEATS), so the two best readable rows still lead and a
+  // one-result search still gets content. One row, never more: the titles
   // after it still follow the readable rows.
   const leader = rows[0];
   const nameLeader = leader && !connectorStoreRowHasContent(leader) && !complete.has(leader.sourceItem.localItemId)
@@ -15172,7 +15174,8 @@ async function connectorStoreKeywordLaneRows(
   if (leader && nameLeader !== undefined) {
     const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
     const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    if (at > firstPartial && firstPartial >= 0) ordered.splice(firstPartial, 0, ...ordered.splice(at, 1));
+    const seat = firstPartial + LANE_LEADER_SEATS - 1;
+    if (firstPartial >= 0 && at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
   }
   // The expansion-free baseline is the same search when expansion changes
   // nothing about it (no alternatives, no foreign stopwords): running it
