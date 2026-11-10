@@ -15,6 +15,7 @@ import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-
 import {
   buildEvalPack,
   createEvalDropboxLanes,
+  evalAnswerStageAudit,
   evalRetrievalAudit,
   openEvalDropboxStores,
   prepareEvalEmbedding,
@@ -92,6 +93,29 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     // No item text in the audit.
     expect(JSON.stringify([found, empty])).not.toContain('Kestrel');
     expect(JSON.stringify([found, empty])).not.toContain('4182');
+  });
+});
+
+describe('the real eval report says where an expected value was lost (#1234)', () => {
+  test('in the pack, in the Analyst answer, and in the released answer, as booleans', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({
+      question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    });
+    const answer = (text: string): AnalystResult => ({ answer: text, citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult);
+    const question = { expectedAnswerContains: ['4182', 'April'] };
+
+    // The Analyst said it; the release removed it.
+    expect(evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is [withheld].'))).toEqual({
+      expected: [
+        { inPack: true, inAnalystAnswer: true, inReleasedAnswer: false },
+        { inPack: false, inAnalystAnswer: false, inReleasedAnswer: false },
+      ],
+    });
+    // The value was in the pack and the Analyst missed it.
+    expect(evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.')).expected[0])
+      .toEqual({ inPack: true, inAnalystAnswer: false, inReleasedAnswer: false });
   });
 });
 

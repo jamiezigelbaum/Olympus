@@ -62,7 +62,7 @@ import {
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
 } from '../src/workers/source-index/analyst-answer.ts';
-import type { AnalystResult } from '../src/core/contracts.ts';
+import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -82,7 +82,7 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import type { EvalGrade } from './grade.ts';
+import { answerContainsExpectedValue, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
@@ -195,7 +195,8 @@ async function main(): Promise<void> {
   const reranker = builtInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
-  const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit }> = [];
+  const rawResultsByPack = new WeakMap<object, AnalystResult>();
+  const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
   const report = await runEval(dataset, {
     questionTimeoutMs,
     continueOnQuestionError: true,
@@ -216,6 +217,7 @@ async function main(): Promise<void> {
     },
     analyst,
     releaseFor(pack, result) {
+      rawResultsByPack.set(pack, result);
       const detail = detailsByPack.get(pack);
       return detail ? releaseEvalAnswer(detail, result) : undefined;
     },
@@ -230,6 +232,7 @@ async function main(): Promise<void> {
           ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
         }),
         ...(detail ? { retrieval: evalRetrievalAudit(detail) } : {}),
+        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result),
       });
     },
     onProgress(event) {
@@ -467,6 +470,36 @@ export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetriev
     contentPrivateCandidates: detail.contentPrivateCandidateIndexes?.length ?? 0,
     corpusReadabilityGaps: detail.corpusReadabilityGaps?.length ?? 0,
     secureExclusion: 'not_applied',
+  };
+}
+
+/**
+ * Where each expected value was lost after retrieval (#1234), booleans only:
+ * in the pack text the Analyst read, in the Analyst's own answer, and in the
+ * answer the release step let out (what the grader sees). In the pack but not
+ * in the Analyst's answer is an Analyst miss; in the Analyst's answer but not
+ * the released one is the release step removing it.
+ */
+export interface EvalAnswerStageAudit {
+  expected: Array<{ inPack: boolean; inAnalystAnswer: boolean; inReleasedAnswer: boolean }>;
+}
+
+export function evalAnswerStageAudit(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'>,
+  pack: EvidencePack,
+  analystResult: AnalystResult | undefined,
+  releasedResult: AnalystResult,
+): EvalAnswerStageAudit {
+  const packText = pack.candidates.map((candidate) => [
+    candidate.provenance.citation?.title ?? '',
+    ...candidate.chunks,
+  ].join('\n')).join('\n');
+  return {
+    expected: (question.expectedAnswerContains ?? []).map((value) => ({
+      inPack: answerContainsExpectedValue(value, packText).matched,
+      inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
+      inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
+    })),
   };
 }
 
