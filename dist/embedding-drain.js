@@ -44981,6 +44981,9 @@ var init_source_watch = __esm(() => {
   });
 });
 
+// src/workers/dashboard/session-marker.ts
+var init_session_marker = () => {};
+
 // src/workers/chatgpt/dashboard-contract.ts
 var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
@@ -51758,6 +51761,7 @@ var init_dashboard_resource = __esm(() => {
 // src/workers/http.ts
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
 var init_http = __esm(() => {
+  init_session_marker();
   init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
@@ -71492,6 +71496,7 @@ init_corpora();
 init_zkapi_consult_settings();
 
 // src/workers/dashboard/components.ts
+init_session_marker();
 init_open_targets();
 init_source_dashboard();
 

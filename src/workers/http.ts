@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { dashboardSessionMarker } from './dashboard/session-marker.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
@@ -914,6 +915,7 @@ function dashboardControlSessionResponse(
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: csrfToken,
+    session_marker: dashboardSessionMarker(csrfToken),
     expires_at: new Date(expiresAtMs).toISOString(),
     policy: {
       bearer_token_persisted_in_browser_storage: false,
