@@ -92,6 +92,7 @@ export function renderUpdateNotice(input: UpdateNoticeInput & { deferScript?: bo
     selfUpdate: input.selfUpdate,
     available: input.available?.version ?? '',
     running,
+    initial: input.status?.state === 'running' ? input.status : undefined,
     rootId: `${prefix}-notice`,
     words: WORDS,
   };
@@ -147,6 +148,7 @@ export const UPDATE_NOTICE_CSS = `
 function updateNoticeProgram(config: {
   csrfToken: string; localSession: boolean; localSessionPath: string; startPath: string; statusPath: string;
   selfUpdate: boolean; available: string; running: boolean; rootId: string;
+  initial?: { state: string; step?: number; from?: string; to?: string } | undefined;
   words: typeof WORDS;
 }): void {
   const root = document.getElementById(config.rootId);
@@ -154,7 +156,7 @@ function updateNoticeProgram(config: {
   const words = config.words;
   const q = <T extends Element>(selector: string) => root.querySelector<T>(selector);
   const fillIn = (template: string, values: Record<string, string | number>) =>
-    template.replace(/\{(\w+)\}/g, (_m: string, key: string) => String(values[key] ?? ''));
+    template.replace(/\{(\w+)\}/g, (_m: string, key: string) => '' + (values[key] ?? ''));
   let csrf = config.csrfToken;
   let local = config.localSession;
   let polling = false;
@@ -186,7 +188,7 @@ function updateNoticeProgram(config: {
     if (noteEl) { noteEl.textContent = note; noteEl.hidden = !note; }
     if (barEl) {
       barEl.hidden = bar === 0;
-      barEl.setAttribute('aria-valuenow', String(bar));
+      barEl.setAttribute('aria-valuenow', '' + bar);
       const fillEl = barEl.querySelector<HTMLElement>('span');
       if (fillEl) fillEl.style.width = bar * 25 + '%';
     }
@@ -199,20 +201,21 @@ function updateNoticeProgram(config: {
     } else if (status.state === 'done' && status.version) {
       show('done', fillIn(words.done, { version: status.version }), '', '', 0, false);
     } else if (status.state === 'rolled_back' && status.to && status.from) {
-      show('rolled_back', fillIn(words.rolledBack, { to: status.to, from: status.from }), '', '', 0, Boolean(config.available));
+      show('rolled_back', fillIn(words.rolledBack, { to: status.to, from: status.from }), '', '', 0, !!config.available);
     } else if (status.state === 'failed') {
-      show('failed', words.failures[status.reason || ''] || words.failedFallback, '', '', 0, Boolean(config.available));
+      show('failed', words.failures[status.reason || ''] || words.failedFallback, '', '', 0, !!config.available);
     }
   }
-  function unlock(): Promise<void> {
-    if (local && csrf) return Promise.resolve();
+  // async, not Promise.resolve: a page's VM may not expose the Promise global by name.
+  async function unlock(): Promise<void> {
+    if (local && csrf) return;
     // This computer's own session: the worker grants it only to a loopback
     // browser presenting no bearer, so an agent never reaches Update now.
-    return fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
-      .then(response => (response.ok ? response.json() : undefined))
-      .then((body: { csrf_token?: unknown } | undefined) => {
-        if (body && typeof body.csrf_token === 'string' && body.csrf_token) { csrf = body.csrf_token; local = true; }
-      }, () => undefined);
+    try {
+      const response = await fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' });
+      const body = (response.ok ? await response.json() : undefined) as { csrf_token?: unknown } | undefined;
+      if (body && typeof body.csrf_token === 'string' && body.csrf_token) { csrf = body.csrf_token; local = true; }
+    } catch { /* The start call then says why it was refused. */ }
   }
   function post(path: string): Promise<{ status: number; body: { ok?: boolean; update?: Status; error?: { message?: string } } }> {
     return fetch(path, {
@@ -220,21 +223,25 @@ function updateNoticeProgram(config: {
       headers: { 'X-Olympus-CSRF': csrf, 'Content-Type': 'application/json' }, body: '{}',
     }).then(response => response.json().then(body => ({ status: response.status, body }), () => ({ status: response.status, body: {} })));
   }
-  let lastRunning: Status | undefined;
+  let lastRunning: Status | undefined = config.initial;
+  function restarting(): void {
+    if (lastRunning && lastRunning.to && lastRunning.from) {
+      show('running', fillIn(words.updating, { to: lastRunning.to }), fillIn(words.step, { n: 4, words: words.steps[3] || '' }), fillIn(words.pause, { to: lastRunning.to, from: lastRunning.from }), 4, false);
+    }
+  }
   function poll(): void {
     window.setTimeout(() => {
       post(config.statusPath).then(({ body }) => {
         const status = body && body.update;
-        if (!status) { poll(); return; }
+        // No answer from the engine (a proxy's 502 while it restarts): step 4.
+        if (!status) { restarting(); poll(); return; }
         if (status.state === 'running') { lastRunning = status; render(status); poll(); return; }
         polling = false;
         if (status.state === 'idle') { window.location.reload(); return; }
         render(status);
       }, () => {
         // The engine is restarting: step 4 until it answers again.
-        if (lastRunning && lastRunning.to && lastRunning.from) {
-          show('running', fillIn(words.updating, { to: lastRunning.to }), fillIn(words.step, { n: 4, words: words.steps[3] || '' }), fillIn(words.pause, { to: lastRunning.to, from: lastRunning.from }), 4, false);
-        }
+        restarting();
         poll();
       });
     }, 2000);
