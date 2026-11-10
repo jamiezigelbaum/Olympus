@@ -1221,7 +1221,7 @@ describe('local messaging pairing', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(selection).toEqual({ source: 'telegram', wholeAccount: true, chatScopes: [] });
+    expect(selection).toEqual({ source: 'telegram', wholeAccount: true, chatScopes: [], chatKinds: [] });
     controller.dispose();
   });
 
@@ -1350,41 +1350,41 @@ test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wh
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(choices).toEqual([]);
     expect(root.textContent).toContain('Nothing is being captured');
-    expect(root.textContent).toContain('Pick chats (recommended)');
-    expect(root.textContent).toContain('Everything in this account');
     const slot = root.querySelector('[data-messaging-chats]')!;
     expect(slot.closest('[data-messaging-setup]')).toBeNull();
     expect(root.querySelector('[data-messaging-setup].on')).toBeNull();
     const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
     expect(cancel.hidden).toBe(false);
     expect(cancel.closest('.sheet')).toBeNull();
-    const labels = [...slot.querySelectorAll('label')];
-    expect(labels.map(label => label.textContent?.trim())).toEqual(['One', 'Chat 102']);
-    for (const label of labels) expect(label.querySelector('input[name="chatScope"]')).not.toBeNull();
-    expect(slot.classList.contains('messagingchoices')).toBe(true);
-    expect(slot.classList.contains('actionrow')).toBe(false);
-    const explanation = slot.querySelector(':scope > p.hint');
-    expect(explanation?.textContent).toBe('Allow Olympus to read every chat, including new chats.');
-    expect(slot.querySelector('details > summary + form')).not.toBeNull();
-    expect(slot.querySelector(':scope > form > p')).toBeNull();
-    const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
+    // Read all chats on top, then the kinds; the suggested start has One-to-one and Groups on.
+    expect(slot.querySelector('.allrow')!.textContent).toContain('Read all chats, including new ones');
+    expect(slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.checked).toBe(false);
+    expect([...slot.querySelectorAll<HTMLInputElement>('[name="chatKind"]:checked')].map(input => input.value)).toEqual(['dm', 'group']);
+    const names = [...slot.querySelectorAll('[data-kind-group="dm"] .chatname')].map(name => name.textContent);
+    expect(names).toEqual(['Chat 102', 'One']);
+    const check = slot.querySelector<HTMLInputElement>('[name="chatScope"][value="telegram.personal:chat:101"]')!;
     expect(check.checked).toBe(false);
-    check.checked = true;
-    const form = wholeAccount ? slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.closest('form')! : check.closest('form')!;
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    if (wholeAccount) slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.click();
+    else {
+      // Only single chats: One-to-one and Groups off, one chat ticked.
+      for (const kind of ['dm', 'group']) slot.querySelector<HTMLInputElement>(`[name="chatKind"][value="${kind}"]`)!.click();
+      check.click();
+      expect(slot.querySelector('[data-kind-group="dm"] .kindnote')!.textContent).toBe('1 of 2 chosen · new one-to-one chats are not read');
+    }
+    check.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(choices).toEqual([{ source, wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
+    expect(choices).toEqual([{ source, wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'], chatKinds: [] }]);
     expect(slot.textContent).toBe('');
   } finally { controller.dispose(); }
 });
 
- test('chat disclosure list spans the row below its grey caption', () => {
-  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start;');
-  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
-  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
-  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');
-  // Pair buttons of both cards share one width, so Choose chats starts at the same left edge in every card.
-  expect(DASHBOARD_THEME_CSS).toContain('.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }');
+test('the chooser and the source dialog fit a phone: no fixed-width button row, and the switch is a styled checkbox', () => {
+  // #1086: the old 11rem minimum made three buttons overflow; buttons in the card's action row now wrap to full width.
+  expect(DASHBOARD_THEME_CSS).not.toContain('min-width: 11rem');
+  expect(DASHBOARD_THEME_CSS).toContain('.messaging-card .msgactions { flex-wrap: wrap; }');
+  expect(DASHBOARD_THEME_CSS).toContain('.msgtitle { flex: 1 1 auto; min-width: 0; }');
+  expect(DASHBOARD_THEME_CSS).toContain('.kindnote.partial { color: var(--warn); }');
+  expect(DASHBOARD_THEME_CSS).toContain('.switch:checked { background: var(--accent-fill); }');
 });
 
 
@@ -1715,7 +1715,7 @@ test('Telegram chat choices after pairing stay outside the closed sign-in sheet'
     expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
     const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
     expect(check.checked).toBe(true);
-    expect(check.closest('label')!.textContent).toBe(' <Family & friends>');
+    expect(check.closest('label')!.querySelector('.chatname')!.textContent).toBe('<Family & friends>');
     expect(slot.querySelector('family')).toBeNull();
   } finally { controller.dispose(); }
 });
