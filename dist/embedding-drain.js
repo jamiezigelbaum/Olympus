@@ -43637,13 +43637,6 @@ var init_linux_owner_bridge_host = __esm(() => {
   init_worker_transport();
 });
 
-// src/core/update-check.ts
-var UPDATE_MAX_BYTES;
-var init_update_check = __esm(() => {
-  init_package_root();
-  UPDATE_MAX_BYTES = 512 * 1024;
-});
-
 // src/core/open-targets.ts
 function allOpenTargets() {
   return [
