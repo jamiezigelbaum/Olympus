@@ -50,7 +50,7 @@ import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/
 import { defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, DASHBOARD_SETTINGS_ZKAPI_ID, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_COMPUTER_PANEL_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
 import { DASHBOARD_TOOLS_CALL_PATH } from '../src/workers/dashboard/host-page.ts';
@@ -1196,18 +1196,18 @@ describe('the worker serves Private answers only inside a local control session'
     expect(bearer).toContain('data-pa-locked');
   });
 
-  test('the old Anonymous answers address opens Private answers at its Anonymous answers section, keeping only a dash_ token', async () => {
+  test('the old Anonymous answers address opens Settings › zkAPI (#1047), keeping only a dash_ token', async () => {
     const fetcher = worker(undefined);
     const moved = await page(fetcher, { Authorization: `Bearer ${TOKEN}` }, 'outside-help');
     expect(moved.status).toBe(302);
-    expect(moved.headers.get('Location')).toBe(`/dashboard?private-answers#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`);
+    expect(moved.headers.get('Location')).toBe(`/dashboard?settings#${DASHBOARD_SETTINGS_ZKAPI_ID}`);
     const withToken = await page(fetcher, { Authorization: `Bearer ${TOKEN}` }, 'outside-help&token=dash_abc');
-    expect(withToken.headers.get('Location')).toBe(`/dashboard?private-answers&token=dash_abc#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`);
+    expect(withToken.headers.get('Location')).toBe(`/dashboard?settings&token=dash_abc#${DASHBOARD_SETTINGS_ZKAPI_ID}`);
     const other = await page(fetcher, { Authorization: `Bearer ${TOKEN}` }, 'outside-help&token=worker-secret');
-    expect(other.headers.get('Location')).toBe(`/dashboard?private-answers#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`);
-    // The new page holds the Anonymous answers section the fragment opens.
+    expect(other.headers.get('Location')).toBe(`/dashboard?settings#${DASHBOARD_SETTINGS_ZKAPI_ID}`);
+    // Private questions no longer carries the zkAPI settings.
     const html = await (await page(fetcher, { Authorization: `Bearer ${TOKEN}` })).text();
-    expect(html).toContain(`id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}"`);
+    expect(html).not.toContain(`id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}"`);
   });
 
   test('without the local answer path the route says so inside a local session', async () => {
@@ -1436,7 +1436,7 @@ describe('the Private answers page', () => {
       citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
     } }));
     expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
-      'Ask privately', 'Inbox', 'zkAPI settings',
+      'Ask privately', 'Inbox',
     ]);
     const field = page.document.querySelector('textarea')!;
     (field as unknown as { value: string }).value = 'When do I renew?';
@@ -1730,13 +1730,13 @@ describe('the Private answers page', () => {
     expect(missing.posts.length).toBe(0);
   });
 
-  test('the old fragment lands on the always-visible zkAPI settings section', () => {
+  test('nothing sits under the inbox: zkAPI keeps only its card, whose fix goes to Settings › zkAPI (#1047)', () => {
     const page = renderAndRun(() => ({ status: 500, body: {} }));
-    const section = page.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT)!;
-    expect(section.tagName).toBe('SECTION');
-    expect(section.textContent).toContain('zkAPI');
+    expect(page.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT)).toBeNull();
+    expect(page.document.querySelector('[data-outside-help]')).toBeNull();
     expect(page.document.querySelectorAll('.paask textarea').length).toBe(1);
     expect(page.document.querySelectorAll('.padestination').length).toBe(3);
+    expect(page.document.querySelector('[data-pa-card="anonymous"] .paaction a')?.getAttribute('href')).toBe(`/dashboard?settings#${DASHBOARD_SETTINGS_ZKAPI_ID}`);
   });
   test('the inbox renders temporary eligibility and queued states plainly without acknowledging an answer', async () => {
     for (const [status, words] of [['check_unavailable', "Couldn't check this answer right now"], ['queued', 'Queued on this computer.']] as const) {

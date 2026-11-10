@@ -215,7 +215,7 @@ const MESSAGES = {
   acknowledgementsIncomplete: 'Accept the statements on this page before turning anonymous answers on.',
   levelUnknown: 'Choose what zkAPI may send: Standard or Strict.',
   levelSaved: 'Saved.',
-  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements on this page.',
+  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements in Settings › zkAPI.',
   languageMissing: 'A chosen language has no vocabulary pack installed on this computer.',
   languagesEmpty: 'Choose at least one language.',
   noHome: 'Olympus cannot find your home folder, so it cannot write the settings file.',

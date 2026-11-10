@@ -241,9 +241,9 @@ function modelsHref(href: string | null, anchor: string): boolean {
   return href !== null && new RegExp(`^/dashboard\\?keys(?:&token=[^#]*)?#${anchor}$`).test(href);
 }
 
-/** The zkAPI settings on the Private questions page itself, as a fragment or a full address. */
+/** Settings › zkAPI, where the zkAPI account lives since #1047. */
 function zkapiSetupHref(href: string | null): boolean {
-  return href !== null && /^(?:\/dashboard\?private-answers(?:&token=[^#]*)?)?#anonymous-setup$/.test(href);
+  return href !== null && /^\/dashboard\?settings(?:&token=[^#]*)?#zkapi$/.test(href);
 }
 
 function destinationChecks(obs: InboxObservation): CheckResult[] {
@@ -280,7 +280,7 @@ function destinationChecks(obs: InboxObservation): CheckResult[] {
     && zkFix?.clicked === true && zkFix.anchorShown;
   out.push(check(
     'inbox.zkapi.route',
-    'zkAPI, not set up, says so and links to the zkAPI settings that fix it; nothing in the row can send',
+    'zkAPI, not set up, says so and links to Settings › zkAPI, which fixes it; nothing in the row can send',
     zkOk,
     !zk ? 'the zkAPI card was not on the page'
       : `state ${zk.state}; control ${zkControl ? `${zkControl.tag} "${zkControl.text}" -> ${zkControl.href ?? 'no address'}` : 'none'}; reason ${zk.reason.length > 0 ? 'shown' : 'missing'}; pressing it ${zkFix?.clicked ? `landed at ${zkFix.landedAt}${zkFix.anchorShown ? ' with the section shown' : ' without the section'}` : 'was not done'}`,
