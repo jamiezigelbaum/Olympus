@@ -148,8 +148,11 @@ export function createSourceAnswerLanes(
       });
     };
     const stores = deps.stores();
+    const registry = deps.registry();
+    const mounted = new Set(stores.map((store) => store.corpusId));
     return {
-      registry: deps.registry(),
+      registry,
+      unmountedCorpusIds: new Set(registry.list().map((corpus) => corpus.corpusId).filter((corpusId) => !mounted.has(corpusId))),
       ...(deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {}),
       ...(deps.parentLabels ? { parentLabels: deps.parentLabels } : {}),
       ...(deps.secretLocations
