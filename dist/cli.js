@@ -125648,7 +125648,7 @@ function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN
 var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_PREFILTER_DIMENSIONS = 768, EMBEDDING_PREFILTER_MIN_PER_CLASS = 2000, FIT_C = 10, MAX_ITERATIONS = 500, GRADIENT_TOLERANCE = 0.00000001, HISTORY_SIZE = 10, MAX_LINE_SEARCH = 40, ARMIJO = 0.0001;
 
 // src/workers/classification/embedding-prefilter.ts
-import { chmodSync as chmodSync35, existsSync as existsSync89, lstatSync as lstatSync44, mkdirSync as mkdirSync53, readFileSync as readFileSync76 } from "node:fs";
+import { chmodSync as chmodSync35, existsSync as existsSync89, lstatSync as lstatSync44, mkdirSync as mkdirSync52, readFileSync as readFileSync76 } from "node:fs";
 import { join as join116 } from "node:path";
 import { createHash as createHash80, randomUUID as randomUUID30 } from "node:crypto";
 function prefilterVector(copy, reject = () => {
@@ -126210,7 +126210,7 @@ class EmbeddingPrefilter {
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync89(directory) && (!lstatSync44(directory).isDirectory() || lstatSync44(directory).isSymbolicLink()))
                   throw new Error;
-                mkdirSync53(directory, { recursive: true, mode: 448 });
+                mkdirSync52(directory, { recursive: true, mode: 448 });
                 chmodSync35(directory, 448);
                 const saved = { model: run2.model, judge: judge3, revisions, trainedAt: this.now(), version: randomUUID30() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
@@ -126554,7 +126554,7 @@ __export(exports_prefilter_training_dry_run, {
   runPrefilterTrainingDryRun: () => runPrefilterTrainingDryRun,
   prefilterTrainingDryRunMain: () => prefilterTrainingDryRunMain
 });
-import { copyFileSync as copyFileSync4, existsSync as existsSync90, lstatSync as lstatSync45, mkdirSync as mkdirSync54, readdirSync as readdirSync26, rmSync as rmSync34, statSync as statSync39 } from "node:fs";
+import { copyFileSync as copyFileSync4, existsSync as existsSync90, lstatSync as lstatSync45, mkdirSync as mkdirSync53, readdirSync as readdirSync26, rmSync as rmSync34, statSync as statSync39 } from "node:fs";
 import { join as join117, resolve as resolve24 } from "node:path";
 function emptyReport() {
   return { ledgers: [], errors: 0, error_reasons: Object.fromEntries(ERROR_REASONS.map((reason) => [reason, 0])), snapshot_retries: 0 };
@@ -126622,7 +126622,7 @@ function runPrefilterTrainingDryRun(options = {}) {
     const inspected = [];
     for (const original of databaseFiles(root)) {
       const dir = join117(scratch, String(inspected.length));
-      mkdirSync54(dir, { mode: 448 });
+      mkdirSync53(dir, { mode: 448 });
       const target = join117(dir, "snapshot.sqlite");
       let db;
       try {
@@ -142928,7 +142928,7 @@ var init_server4 = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync55, readFileSync as readFileSync77, rmSync as rmSync36, writeFileSync as writeFileSync21 } from "node:fs";
+import { mkdirSync as mkdirSync54, readFileSync as readFileSync77, rmSync as rmSync36, writeFileSync as writeFileSync21 } from "node:fs";
 import { dirname as dirname91, join as join118 } from "node:path";
 import { homedir as homedir39 } from "node:os";
 function guardStateDir(env) {
@@ -142976,7 +142976,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync36(path, { force: true });
     return;
   }
-  mkdirSync55(dirname91(path), { recursive: true, mode: 448 });
+  mkdirSync54(dirname91(path), { recursive: true, mode: 448 });
   writeFileSync21(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
@@ -143604,7 +143604,7 @@ __export(exports_engine_host, {
   engineHostServices: () => engineHostServices,
   ENGINE_STATUS_SCHEMA: () => ENGINE_STATUS_SCHEMA
 });
-import { mkdirSync as mkdirSync56 } from "node:fs";
+import { mkdirSync as mkdirSync55 } from "node:fs";
 import { join as join120 } from "node:path";
 function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
@@ -143700,7 +143700,7 @@ async function startEngineHost(options) {
       return;
     status.updated_at = now();
     try {
-      mkdirSync56(join120(statusPath, ".."), { recursive: true, mode: 448 });
+      mkdirSync55(join120(statusPath, ".."), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}
 `);
       lastStatus = content;
@@ -144066,12 +144066,12 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync36, existsSync as existsSync91, lstatSync as lstatSync46, mkdirSync as mkdirSync57, readFileSync as readFileSync79, renameSync as renameSync20, writeFileSync as writeFileSync22 } from "node:fs";
+import { chmodSync as chmodSync36, existsSync as existsSync91, lstatSync as lstatSync46, mkdirSync as mkdirSync56, readFileSync as readFileSync79, renameSync as renameSync20, writeFileSync as writeFileSync22 } from "node:fs";
 import { join as join121 } from "node:path";
 function ensureStateDir(stateDir) {
-  mkdirSync57(stateDir, { recursive: true, mode: 448 });
+  mkdirSync56(stateDir, { recursive: true, mode: 448 });
   const dir = join121(stateDir, "connect-relay");
-  mkdirSync57(dir, { recursive: true, mode: 448 });
+  mkdirSync56(dir, { recursive: true, mode: 448 });
   const stat6 = lstatSync46(dir);
   if (!stat6.isDirectory() || stat6.isSymbolicLink() || typeof process.getuid === "function" && stat6.uid !== process.getuid()) {
     throw new Error("the connect-relay state directory must be a directory owned by this user");
@@ -147582,7 +147582,7 @@ var init_model_setup = __esm(() => {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes24 } from "node:crypto";
-import { chmodSync as chmodSync37, lstatSync as lstatSync48, mkdirSync as mkdirSync58, readFileSync as readFileSync81 } from "node:fs";
+import { chmodSync as chmodSync37, lstatSync as lstatSync48, mkdirSync as mkdirSync57, readFileSync as readFileSync81 } from "node:fs";
 import { dirname as dirname94, join as join123 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join123(dirname94(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
@@ -147617,7 +147617,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   }
   const secret2 = newDashboardSessionSecret();
   try {
-    mkdirSync58(dirname94(path), { recursive: true, mode: 448 });
+    mkdirSync57(dirname94(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${secret2}
 `);
     chmodSync37(path, 384);
@@ -148216,7 +148216,7 @@ var init_analyst_openai = __esm(() => {
 // src/core/venice-model-catalog.ts
 import {
   existsSync as existsSync93,
-  mkdirSync as mkdirSync59,
+  mkdirSync as mkdirSync58,
   readFileSync as readFileSync82,
   renameSync as renameSync21,
   rmSync as rmSync37,
@@ -148434,7 +148434,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID33()}.tmp`;
   try {
-    mkdirSync59(dirname95(path), { recursive: true, mode: 448 });
+    mkdirSync58(dirname95(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync23(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -149871,7 +149871,7 @@ var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes27 } from "node:crypto";
-import { existsSync as existsSync94, mkdirSync as mkdirSync60, readdirSync as readdirSync27, realpathSync as realpathSync21, rmSync as rmSync38, statSync as statSync41, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { existsSync as existsSync94, mkdirSync as mkdirSync59, readdirSync as readdirSync27, realpathSync as realpathSync21, rmSync as rmSync38, statSync as statSync41, statfsSync as statfsSync4, utimesSync } from "node:fs";
 import { open as open5 } from "node:fs/promises";
 import { sep as sep20, join as join126, resolve as resolve27 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -149922,7 +149922,7 @@ function createArchiveUploads(options) {
   const stagingRoot = () => {
     if (rootPath)
       return rootPath;
-    mkdirSync60(options.root, { recursive: true, mode: 448 });
+    mkdirSync59(options.root, { recursive: true, mode: 448 });
     rootPath = realpathSync21.native(options.root);
     return rootPath;
   };
@@ -150001,7 +150001,7 @@ function createArchiveUploads(options) {
     try {
       const parent = join126(found.files, ...segments.slice(0, -1));
       try {
-        mkdirSync60(parent, { recursive: true, mode: 448 });
+        mkdirSync59(parent, { recursive: true, mode: 448 });
         if (!contained(realpathSync21.native(found.files), realpathSync21.native(parent)))
           throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       } catch (error2) {
@@ -150103,7 +150103,7 @@ function createArchiveUploads(options) {
       const root = stagingRoot();
       const uploadId = randomBytes27(16).toString("hex");
       const dir = join126(root, uploadId);
-      mkdirSync60(join126(dir, "files"), { recursive: true, mode: 448 });
+      mkdirSync59(join126(dir, "files"), { recursive: true, mode: 448 });
       sessions.set(uploadId, {
         id: uploadId,
         dir,
@@ -169964,7 +169964,7 @@ __export(exports_live_sync, {
   EVERNOTE_HANDLE: () => EVERNOTE_HANDLE,
   EVERNOTE_ACCOUNT_ROLE: () => EVERNOTE_ACCOUNT_ROLE
 });
-import { existsSync as existsSync95, mkdirSync as mkdirSync61, readFileSync as readFileSync86 } from "node:fs";
+import { existsSync as existsSync95, mkdirSync as mkdirSync60, readFileSync as readFileSync86 } from "node:fs";
 import { dirname as dirname97 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
@@ -170031,7 +170031,7 @@ function readPassFile(path) {
   }
 }
 function writePassFile(path, file) {
-  mkdirSync61(dirname97(path), { recursive: true, mode: 448 });
+  mkdirSync60(dirname97(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify(file));
 }
 function evernotePassStatus(env = process.env) {
@@ -178902,7 +178902,7 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync97, mkdirSync as mkdirSync62, opendirSync, readFileSync as readFileSync90 } from "node:fs";
+import { existsSync as existsSync97, mkdirSync as mkdirSync61, opendirSync, readFileSync as readFileSync90 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname100, join as join133 } from "node:path";
 function folderAccessMemoryPath() {
@@ -179120,7 +179120,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync62(dirname100(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync61(dirname100(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -192992,7 +192992,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync63, readdirSync as readdirSync31, realpathSync as realpathSync29, renameSync as renameSync22, rmdirSync as rmdirSync8, statSync as statSync44, unlinkSync as unlinkSync4 } from "node:fs";
+import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync62, readdirSync as readdirSync31, realpathSync as realpathSync29, renameSync as renameSync22, rmdirSync as rmdirSync8, statSync as statSync44, unlinkSync as unlinkSync4 } from "node:fs";
 import { basename as basename20, dirname as dirname101, isAbsolute as isAbsolute37, join as join137, relative as relative17, resolve as resolve30, sep as sep21 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -193346,7 +193346,7 @@ function makeFolders(ctx, moves) {
           continue;
         if (found.kind !== "absent")
           throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
-        mkdirSync63(current2, { mode: 448 });
+        mkdirSync62(current2, { mode: 448 });
       }
     }
     syncFolderChains(ctx, [...destinations]);
@@ -195617,7 +195617,7 @@ var init_installed_tier_classification = __esm(() => {
 
 // src/workers/classification/sniffer-resolver.ts
 import { createHash as createHash101 } from "node:crypto";
-import { mkdirSync as mkdirSync64, readFileSync as readFileSync92 } from "node:fs";
+import { mkdirSync as mkdirSync63, readFileSync as readFileSync92 } from "node:fs";
 import { dirname as dirname103 } from "node:path";
 
 class SnifferCallBudget {
@@ -195655,7 +195655,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync64(dirname103(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync63(dirname103(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -217754,7 +217754,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync38, lstatSync as lstatSync54, mkdirSync as mkdirSync65, statSync as statSync46 } from "node:fs";
+import { chmodSync as chmodSync38, lstatSync as lstatSync54, mkdirSync as mkdirSync64, statSync as statSync46 } from "node:fs";
 import { dirname as dirname104, isAbsolute as isAbsolute38 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -217845,7 +217845,7 @@ function ensureSettingsDirectory(directory) {
       return "home_missing";
     }
     try {
-      mkdirSync65(directory, { mode: 448 });
+      mkdirSync64(directory, { mode: 448 });
       chmodSync38(directory, 448);
     } catch {
       return "directory_unavailable";
@@ -227051,7 +227051,7 @@ init_source_storage();
 init_local_index();
 init_tier_ledger();
 init_tier_ledger_path();
-import { closeSync as closeSync31, copyFileSync as copyFileSync3, existsSync as existsSync84, fsyncSync as fsyncSync9, mkdirSync as mkdirSync51, openSync as openSync30, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
+import { closeSync as closeSync31, copyFileSync as copyFileSync3, existsSync as existsSync84, fsyncSync as fsyncSync9, openSync as openSync30, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
 import { dirname as dirname87, join as join113, resolve as resolve22 } from "node:path";
 import { randomUUID as randomUUID29 } from "node:crypto";
 import { Database as Database24 } from "bun:sqlite";
@@ -227274,7 +227274,7 @@ function writeRestoredIdentities(identities, bindingsPath, env) {
   return unrecorded;
 }
 function copyPrivate(from, to, prepare) {
-  mkdirSync51(dirname87(to), { recursive: true, mode: 448 });
+  makeDurableDirectory(dirname87(to), exportDurabilityBoundary(dirname87(to)));
   const staging = `${to}.${randomUUID29()}.restoring`;
   try {
     copyFileSync3(from, staging);
@@ -227665,7 +227665,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync19 } from "node:child_process";
-import { existsSync as existsSync87, lstatSync as lstatSync43, mkdirSync as mkdirSync52, mkdtempSync as mkdtempSync6, renameSync as renameSync19, rmSync as rmSync33 } from "node:fs";
+import { existsSync as existsSync87, lstatSync as lstatSync43, mkdirSync as mkdirSync51, mkdtempSync as mkdtempSync6, renameSync as renameSync19, rmSync as rmSync33 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 import { join as join114, resolve as resolve23 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -227695,7 +227695,7 @@ function installEngineHelper(options = {}) {
   const homeDir = resolve23(options.homeDir ?? homedir37());
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
-  mkdirSync52(paths.appSupportDir, { recursive: true, mode: 448 });
+  mkdirSync51(paths.appSupportDir, { recursive: true, mode: 448 });
   const staging = mkdtempSync6(join114(paths.appSupportDir, ".helper-"));
   try {
     let built = false;

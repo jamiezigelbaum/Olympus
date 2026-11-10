@@ -1936,7 +1936,7 @@ export function exportDurabilityBoundary(destination: string): string {
  * reached the disk is still gone after a power loss, so the export's
  * directories are made durable before anything is written into them.
  */
-function makeDurableDirectory(path: string, boundary: string): void {
+export function makeDurableDirectory(path: string, boundary: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   let current = resolve(path);
   for (;;) {

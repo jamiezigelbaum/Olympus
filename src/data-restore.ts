@@ -13,14 +13,16 @@
  * them, and judgments travel in the tier ledgers beside them, so an install
  * running the same models neither embeds nor judges again.
  */
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  exportDurabilityBoundary,
   lifecycleAccountFiles,
   lifecycleEnv,
   lifecycleHandleRegistryPath,
   lifecycleStoreLayouts,
+  makeDurableDirectory,
   verifyOlympusDataExport,
   type DataExportArtifact,
   type LifecyclePathContext,
@@ -383,7 +385,10 @@ function writeRestoredIdentities(identities: readonly RestoredAccountIdentity[],
 
 /** Copy owner-only and durably: a temporary file beside the target, then rename. */
 function copyPrivate(from: string, to: string, prepare?: (staged: string) => void): void {
-  mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
+  // Every directory level the restore creates is flushed, as an export's are:
+  // a file renamed into a directory whose own entry never reached the disk is
+  // still gone after a power loss.
+  makeDurableDirectory(dirname(to), exportDurabilityBoundary(dirname(to)));
   const staging = `${to}.${randomUUID()}.restoring`;
   try {
     copyFileSync(from, staging);
