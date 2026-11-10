@@ -21648,25 +21648,29 @@ var init_control_path_headroom = __esm(() => {
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
 // src/workers/connector-store/off-thread-reads.ts
+function live() {
+  return threads.filter((reader) => !reader.retired);
+}
 function busy(reader) {
   return reader.pending.size + reader.snapshots + (reader.job ? 1 : 0);
 }
+function runtimeHasWorkers() {
+  return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
+}
 function readerThread() {
-  if (unavailable)
+  if (!runtimeHasWorkers())
     return;
-  const idle = threads.reduce((best, reader) => !best || busy(reader) < busy(best) ? reader : best, undefined);
-  if (idle && (busy(idle) === 0 || threads.length >= READ_POOL_SIZE))
+  const idle = live().reduce((best, reader) => !best || busy(reader) < busy(best) ? reader : best, undefined);
+  if (idle && busy(idle) === 0)
     return idle;
   return startThread() ?? idle;
 }
 function startThread() {
+  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
+    return;
   try {
-    if (typeof Worker !== "function" || typeof Blob !== "function" || !globalThis.Bun) {
-      unavailable = true;
-      return;
-    }
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
-    const worker = new Worker(url);
+    const worker = workerFactory(url);
     worker.unref?.();
     const started = { worker, pending: new Map, snapshots: 0 };
     worker.onmessage = (event) => {
@@ -21685,11 +21689,17 @@ function startThread() {
     worker.onerror = (event) => {
       retire(started, new Error(event.message || "off-thread reader stopped"));
     };
+    worker.addEventListener("close", () => {
+      const at = threads.indexOf(started);
+      if (at >= 0)
+        threads.splice(at, 1);
+      if (!started.retired)
+        retire(started, new Error("off-thread reader stopped"));
+      dispatch();
+    });
     threads.push(started);
     return started;
   } catch {
-    if (threads.length === 0)
-      unavailable = true;
     return;
   }
 }
@@ -21697,9 +21707,6 @@ function retire(stopped, error) {
   if (stopped.retired)
     return;
   stopped.retired = true;
-  const at = threads.indexOf(stopped);
-  if (at >= 0)
-    threads.splice(at, 1);
   for (const waiting of stopped.pending.values()) {
     if (waiting.timer !== undefined)
       clearTimeout(waiting.timer);
@@ -21710,8 +21717,11 @@ function retire(stopped, error) {
     stopped.worker.terminate();
   } catch {}
 }
+function offThreadReadsSupported(dbPath) {
+  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
+}
 function offThreadReadsAvailable(dbPath) {
-  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && readerThread() !== undefined;
+  return offThreadReadsSupported(dbPath) && readerThread() !== undefined;
 }
 function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
   if (reader.retired)
@@ -21720,7 +21730,6 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
   return new Promise((resolve7, reject) => {
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
       retire(reader, new Error("off-thread read timed out"));
-      dispatch();
     }, timeoutMs);
     reader.pending.set(id, { resolve: resolve7, reject, ...timer !== undefined ? { timer } : {} });
     try {
@@ -21760,7 +21769,7 @@ function readOnPool(dbPath, read, options = {}) {
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve7, reject) => {
-    const job = { store: dbPath, read, resolve: resolve7, reject, timer: undefined };
+    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve7, reject, timer: undefined };
     job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -21769,6 +21778,13 @@ function readOnPool(dbPath, read, options = {}) {
     }
     dispatch();
   });
+}
+function releaseOffThreadReads(dbPath) {
+  for (const reader of live()) {
+    try {
+      reader.worker.postMessage({ op: "release", path: dbPath });
+    } catch {}
+  }
 }
 function settle(job, outcome) {
   if (job.settled)
@@ -21786,7 +21802,6 @@ function missedDeadline(job) {
   settle(job, { error: new OffThreadReadBusyError });
   if (job.thread) {
     retire(job.thread, new OffThreadReadBusyError);
-    dispatch();
     return;
   }
   const waiting = queues.get(job.store);
@@ -21795,22 +21810,17 @@ function missedDeadline(job) {
     waiting.splice(at, 1);
 }
 function freeThread() {
-  const free = threads.filter((reader) => !reader.job && reader.pending.size === 0);
-  const clear = free.find((reader) => reader.snapshots === 0);
-  if (clear)
-    return clear;
-  if (threads.length < READ_POOL_SIZE) {
-    const started = startThread();
-    if (started)
-      return started;
-  }
-  return free[0];
+  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
 }
 function nextJob() {
   while (turns.length > 0) {
     const store = turns.shift();
     const waiting = queues.get(store);
-    const job = waiting?.shift();
+    let job = waiting?.shift();
+    while (job && clock2.now() >= job.deadlineAtMs) {
+      settle(job, { error: new OffThreadReadBusyError });
+      job = waiting?.shift();
+    }
     if (waiting && waiting.length > 0)
       turns.push(store);
     else
@@ -21830,14 +21840,15 @@ function dispatch() {
       return;
     job.thread = reader;
     reader.job = job;
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    observer?.(job.store, job.read);
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
     });
   }
 }
-var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, WORKER_SOURCE = `
+var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -21859,6 +21870,12 @@ const connection = (path) => {
 };
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode } = event.data;
+  if (op === 'release') {
+    const held = connections.get(path);
+    connections.delete(path);
+    try { held?.db.close(); } catch {}
+    return;
+  }
   try {
     if (op === 'open') {
       const db = open(path);
@@ -21883,7 +21900,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 };
-`, threads, unavailable = false, nextId = 1, queues, turns;
+`, threads, nextId = 1, queues, turns;
 var init_off_thread_reads = __esm(() => {
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -25091,6 +25108,21 @@ function chunkText(text2, maxChunkChars) {
   }
   return chunks;
 }
+function chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms) {
+  const chunkChars = row.bounded_text.length;
+  const { charStart, charEnd } = queryTerms?.length ? firstTermSpan(row.bounded_text, queryTerms) : { charStart: 0, charEnd: chunkChars };
+  return {
+    chunkId: String(chunkPk),
+    chunkIndex: row.chunk_index,
+    contentHash: row.content_hash,
+    charStart,
+    charEnd,
+    itemCharStart: itemOffset + charStart,
+    itemCharEnd: itemOffset + charEnd,
+    chunkChars,
+    lane
+  };
+}
 function firstTermSpan(text2, terms) {
   const haystack = text2.toLowerCase();
   let bestStart = -1;
@@ -26698,6 +26730,8 @@ var init_local_index = __esm(() => {
         this.boundLedgerHandle = undefined;
       } finally {
         this.tierLedgerHandle = undefined;
+        if (offThreadReadsSupported(this.dbPath))
+          releaseOffThreadReads(this.dbPath);
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       }
     }
@@ -32310,7 +32344,7 @@ var init_local_index = __esm(() => {
       return this.readHere(this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions));
     }
     async searchItemsDetailedOffThread(query, maxResults, accountScope, filters, ftsOptions = {}, pool = {}) {
-      if (!offThreadReadsAvailable(this.dbPath))
+      if (!offThreadReadsSupported(this.dbPath))
         return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
       const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
       let step = steps.next();
@@ -32318,6 +32352,14 @@ var init_local_index = __esm(() => {
         step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
       }
       return step.value;
+    }
+    stillVisibleSearchRows(rows) {
+      return this.tierVisibleRows(rows, (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
+      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
     readHere(steps) {
       let step = steps.next();
@@ -32380,15 +32422,17 @@ var init_local_index = __esm(() => {
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
         const placeholders = pks.map(() => "?").join(", ");
+        const itemAt = new Map(rows.map((row) => [row.item_pk, row.local_item_id]));
+        const sameItem = (hit) => itemAt.get(hit.item_pk) === hit.local_item_id;
         for (const [groupIndex, group] of groups.entries()) {
-          const hits = yield { mode: "all", sql: `
-          SELECT DISTINCT connector_store_fts.item_pk
+          const hits = (yield { mode: "all", sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
           FROM connector_store_fts
           JOIN items i ON i.item_pk = connector_store_fts.item_pk
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] };
+        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
             matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
@@ -32399,11 +32443,11 @@ var init_local_index = __esm(() => {
         const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
         const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
         const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
-        SELECT DISTINCT connector_store_fts.item_pk
+        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
         FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
         WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
           ${selectedFtsScope.sql}
-      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).map((row) => row.item_pk));
+      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
         selected = rows.filter((row) => {
           if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
             return true;
@@ -32425,21 +32469,26 @@ var init_local_index = __esm(() => {
       const spanTerms = queryTermsForSpan(query);
       const kept = selected.slice(0, limit);
       const located = [];
+      const locatedRows = [];
       for (const row of kept) {
         const base = searchRowFromItemRow(row);
-        if (ftsOptions.locate === false) {
-          located.push(row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true });
+        if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
+          located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
+          locatedRows.push(row);
           continue;
         }
-        const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : yield* this.chunkMatchSteps(row.chunk_pk, "keyword", spanTerms);
-        located.push(chunk ? { ...base, chunk } : base);
+        const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+        if (!chunk)
+          continue;
+        located.push({ ...base, chunk });
+        locatedRows.push(row);
       }
       return {
         rows: located,
         saturated: rows.length >= fetchLimit || selected.length > limit,
         concepts: {
           total: groups.length,
-          matched: new Map(kept.map((row) => [
+          matched: new Map(locatedRows.map((row) => [
             row.local_item_id,
             minimumSignal ? matchedGroups.get(row.item_pk) ?? 0 : groups.length
           ]))
@@ -32490,35 +32539,28 @@ var init_local_index = __esm(() => {
       return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
-      return this.readHere(this.chunkMatchSteps(chunkPk, lane, queryTerms));
-    }
-    *chunkMatchSteps(chunkPk, lane, queryTerms) {
-      const row = yield {
-        mode: "get",
-        sql: "SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?",
-        params: [chunkPk]
-      };
+      const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
       if (!row)
         return;
-      const priorRows = yield {
-        mode: "all",
-        sql: "SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index",
-        params: [row.item_pk, row.chunk_index]
-      };
+      const priorRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index").all(row.item_pk, row.chunk_index);
       const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-      const chunkChars = row.bounded_text.length;
-      const { charStart, charEnd } = queryTerms?.length ? firstTermSpan(row.bounded_text, queryTerms) : { charStart: 0, charEnd: chunkChars };
-      return {
-        chunkId: String(chunkPk),
-        chunkIndex: row.chunk_index,
-        contentHash: row.content_hash,
-        charStart,
-        charEnd,
-        itemCharStart: itemOffset + charStart,
-        itemCharEnd: itemOffset + charEnd,
-        chunkChars,
-        lane
+      return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+    }
+    *keywordChunkMatchSteps(item, chunkPk, queryTerms) {
+      const rows = yield {
+        mode: "all",
+        sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
+        ORDER BY c.chunk_index`,
+        params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk]
       };
+      const row = rows.at(-1);
+      if (!row || row.chunk_pk !== chunkPk)
+        return;
+      const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+      return chunkMatchFromRows(chunkPk, row, itemOffset, "keyword", queryTerms);
     }
     recentItems(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -35552,14 +35594,14 @@ class BuiltInSourceEmbeddingProvider {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
     }
     const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
-    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
+    const live2 = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
     const out = images.map(() => {
       return;
     });
-    if (live.length === 0)
+    if (live2.length === 0)
       return out;
-    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
-    live.forEach(({ index }, row) => {
+    const { vectors } = await this.liteRtVectors(model.embedder, live2.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
+    live2.forEach(({ index }, row) => {
       out[index] = vectors[row];
     });
     return out;
@@ -35835,12 +35877,12 @@ function workerPath() {
 function scanThread() {
   if (thread)
     return thread;
-  if (unavailable2)
+  if (unavailable)
     return;
   try {
     const path = typeof Worker === "function" && globalThis.Bun ? workerPath() : undefined;
     if (!path) {
-      unavailable2 = true;
+      unavailable = true;
       return;
     }
     const worker = new Worker(path);
@@ -35862,7 +35904,7 @@ function scanThread() {
     thread = started;
     return started;
   } catch {
-    unavailable2 = true;
+    unavailable = true;
     return;
   }
 }
@@ -35896,7 +35938,7 @@ async function scanSecretsAhead(text2) {
     scanner.pending.delete(id);
   }
 }
-var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable2 = false, nextId2 = 1;
+var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId2 = 1;
 var init_secret_scan_off_thread = __esm(() => {
   init_engine();
 });
@@ -48823,19 +48865,19 @@ function chatgptPickerProgram(kit) {
     return confirm;
   }
   function segKeys(event, buttons, current2) {
-    const live = buttons.filter((button) => !button.disabled);
-    if (!live.length)
+    const live2 = buttons.filter((button) => !button.disabled);
+    if (!live2.length)
       return;
-    const at = live.indexOf(current2);
+    const at = live2.indexOf(current2);
     let next;
     if (event.key === "ArrowRight" || event.key === "ArrowDown")
-      next = live[(at + 1) % live.length];
+      next = live2[(at + 1) % live2.length];
     else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
-      next = live[(at - 1 + live.length) % live.length];
+      next = live2[(at - 1 + live2.length) % live2.length];
     else if (event.key === "Home")
-      next = live[0];
+      next = live2[0];
     else if (event.key === "End")
-      next = live[live.length - 1];
+      next = live2[live2.length - 1];
     if (!next)
       return;
     event.preventDefault();
@@ -48871,8 +48913,8 @@ function chatgptPickerProgram(kit) {
       buttons.push(button);
       add(group2, button);
     }
-    const live = buttons.filter((button) => !button.disabled);
-    const home = live.filter((button) => button.getAttribute("data-key") === p.lastSeg)[0] || live.filter((button) => button.getAttribute("aria-pressed") === "true")[0] || live.filter((button) => button.className.indexOf("inherited") >= 0)[0] || live[0];
+    const live2 = buttons.filter((button) => !button.disabled);
+    const home = live2.filter((button) => button.getAttribute("data-key") === p.lastSeg)[0] || live2.filter((button) => button.getAttribute("aria-pressed") === "true")[0] || live2.filter((button) => button.className.indexOf("inherited") >= 0)[0] || live2[0];
     for (const button of buttons)
       button.tabIndex = button === home ? 0 : -1;
     return group2;
@@ -71894,9 +71936,9 @@ class WatchHub {
   async close() {
     this.closed = true;
     this.listeners.clear();
-    const live = [...this.subscriptions.values()];
+    const live2 = [...this.subscriptions.values()];
     this.subscriptions.clear();
-    await Promise.all(live.map((entry) => entry === "pending" ? undefined : entry.unsubscribe().catch(() => {
+    await Promise.all(live2.map((entry) => entry === "pending" ? undefined : entry.unsubscribe().catch(() => {
       return;
     })));
   }

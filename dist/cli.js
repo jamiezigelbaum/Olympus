@@ -27224,25 +27224,29 @@ function isSourceIndexLaneBusyError(error) {
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
 // src/workers/connector-store/off-thread-reads.ts
+function live() {
+  return threads.filter((reader) => !reader.retired);
+}
 function busy(reader) {
   return reader.pending.size + reader.snapshots + (reader.job ? 1 : 0);
 }
+function runtimeHasWorkers() {
+  return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
+}
 function readerThread() {
-  if (unavailable)
+  if (!runtimeHasWorkers())
     return;
-  const idle = threads.reduce((best, reader) => !best || busy(reader) < busy(best) ? reader : best, undefined);
-  if (idle && (busy(idle) === 0 || threads.length >= READ_POOL_SIZE))
+  const idle = live().reduce((best, reader) => !best || busy(reader) < busy(best) ? reader : best, undefined);
+  if (idle && busy(idle) === 0)
     return idle;
   return startThread() ?? idle;
 }
 function startThread() {
+  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
+    return;
   try {
-    if (typeof Worker !== "function" || typeof Blob !== "function" || !globalThis.Bun) {
-      unavailable = true;
-      return;
-    }
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
-    const worker = new Worker(url);
+    const worker = workerFactory(url);
     worker.unref?.();
     const started = { worker, pending: new Map, snapshots: 0 };
     worker.onmessage = (event) => {
@@ -27261,11 +27265,17 @@ function startThread() {
     worker.onerror = (event) => {
       retire(started, new Error(event.message || "off-thread reader stopped"));
     };
+    worker.addEventListener("close", () => {
+      const at = threads.indexOf(started);
+      if (at >= 0)
+        threads.splice(at, 1);
+      if (!started.retired)
+        retire(started, new Error("off-thread reader stopped"));
+      dispatch();
+    });
     threads.push(started);
     return started;
   } catch {
-    if (threads.length === 0)
-      unavailable = true;
     return;
   }
 }
@@ -27273,9 +27283,6 @@ function retire(stopped, error) {
   if (stopped.retired)
     return;
   stopped.retired = true;
-  const at = threads.indexOf(stopped);
-  if (at >= 0)
-    threads.splice(at, 1);
   for (const waiting of stopped.pending.values()) {
     if (waiting.timer !== undefined)
       clearTimeout(waiting.timer);
@@ -27286,8 +27293,11 @@ function retire(stopped, error) {
     stopped.worker.terminate();
   } catch {}
 }
+function offThreadReadsSupported(dbPath) {
+  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
+}
 function offThreadReadsAvailable(dbPath) {
-  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && readerThread() !== undefined;
+  return offThreadReadsSupported(dbPath) && readerThread() !== undefined;
 }
 function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
   if (reader.retired)
@@ -27296,7 +27306,6 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
   return new Promise((resolve10, reject) => {
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
       retire(reader, new Error("off-thread read timed out"));
-      dispatch();
     }, timeoutMs);
     reader.pending.set(id, { resolve: resolve10, reject, ...timer !== undefined ? { timer } : {} });
     try {
@@ -27336,7 +27345,7 @@ function readOnPool(dbPath, read, options = {}) {
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve10, reject) => {
-    const job = { store: dbPath, read, resolve: resolve10, reject, timer: undefined };
+    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve10, reject, timer: undefined };
     job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -27345,6 +27354,13 @@ function readOnPool(dbPath, read, options = {}) {
     }
     dispatch();
   });
+}
+function releaseOffThreadReads(dbPath) {
+  for (const reader of live()) {
+    try {
+      reader.worker.postMessage({ op: "release", path: dbPath });
+    } catch {}
+  }
 }
 function settle(job, outcome) {
   if (job.settled)
@@ -27362,7 +27378,6 @@ function missedDeadline(job) {
   settle(job, { error: new OffThreadReadBusyError });
   if (job.thread) {
     retire(job.thread, new OffThreadReadBusyError);
-    dispatch();
     return;
   }
   const waiting = queues.get(job.store);
@@ -27371,22 +27386,17 @@ function missedDeadline(job) {
     waiting.splice(at, 1);
 }
 function freeThread() {
-  const free = threads.filter((reader) => !reader.job && reader.pending.size === 0);
-  const clear = free.find((reader) => reader.snapshots === 0);
-  if (clear)
-    return clear;
-  if (threads.length < READ_POOL_SIZE) {
-    const started = startThread();
-    if (started)
-      return started;
-  }
-  return free[0];
+  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
 }
 function nextJob() {
   while (turns.length > 0) {
     const store = turns.shift();
     const waiting = queues.get(store);
-    const job = waiting?.shift();
+    let job = waiting?.shift();
+    while (job && clock2.now() >= job.deadlineAtMs) {
+      settle(job, { error: new OffThreadReadBusyError });
+      job = waiting?.shift();
+    }
     if (waiting && waiting.length > 0)
       turns.push(store);
     else
@@ -27406,14 +27416,15 @@ function dispatch() {
       return;
     job.thread = reader;
     reader.job = job;
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    observer?.(job.store, job.read);
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
     });
   }
 }
-var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, WORKER_SOURCE = `
+var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -27435,6 +27446,12 @@ const connection = (path) => {
 };
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode } = event.data;
+  if (op === 'release') {
+    const held = connections.get(path);
+    connections.delete(path);
+    try { held?.db.close(); } catch {}
+    return;
+  }
   try {
     if (op === 'open') {
       const db = open(path);
@@ -27459,7 +27476,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 };
-`, threads, unavailable = false, nextId = 1, queues, turns;
+`, threads, nextId = 1, queues, turns;
 var init_off_thread_reads = __esm(() => {
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -31933,7 +31950,7 @@ function createConnectorStoreCorpusAdapter(options) {
     }
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
-        const keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs);
+        const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
         const rows = keywordLane.rows;
         const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
         if (recencyRows.length === 0) {
@@ -32039,9 +32056,8 @@ function createConnectorStoreCorpusAdapter(options) {
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.hasEmbeddings(embeddingProvider.modelId);
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
-    const keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
-    const rows = [...keywordLane.rows];
-    let semanticOnly = 0;
+    const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
+    const semanticRows = [];
     let incomplete = false;
     if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
@@ -32050,13 +32066,16 @@ function createConnectorStoreCorpusAdapter(options) {
         if (lane.skippedReason !== undefined)
           incomplete = true;
         for (const row of lane.rows) {
-          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId))
+          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId))
             continue;
-          rows.push(row);
-          semanticOnly += 1;
+          semanticRows.push(row);
         }
       }
     }
+    const keywordLane = revalidateKeywordLane(store, readKeywordLane);
+    const visibleSemanticRows = store.stillVisibleSearchRows(semanticRows);
+    const rows = [...keywordLane.rows, ...visibleSemanticRows];
+    const semanticOnly = visibleSemanticRows.length;
     return {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
@@ -32148,10 +32167,10 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
   const vectorLane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
-  const scoredVectorRows = vectorLane.rows;
+  let scoredVectorRows = vectorLane.rows;
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  const vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
+  let vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
     const extra = keywordLane.allRows.filter((row) => !baselineKeywordLane.matchedItemIds.has(row.sourceItem.localItemId) && keywordLane.completeItemIds.has(row.sourceItem.localItemId));
     const improved = new Map(keywordLane.allRows.map((row) => [row.sourceItem.localItemId, row]));
@@ -32164,6 +32183,9 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     } };
   }
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordLane = revalidateKeywordLane(store, keywordLane);
+  scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
+  vectorRows = store.stillVisibleSearchRows(vectorRows);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
@@ -32303,6 +32325,24 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []])
+  };
+}
+function revalidateKeywordLane(store, lane) {
+  const allRows = store.stillVisibleSearchRows(lane.allRows);
+  if (allRows.length === lane.allRows.length)
+    return lane;
+  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+  return {
+    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
+    allRows,
+    matchedItemIds: served,
+    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    matchCount: {
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      saturated: lane.matchCount.saturated,
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length
+    }
   };
 }
 async function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled, ftsOptions = {}, deadlineAtMs) {
@@ -32968,6 +33008,21 @@ function chunkText(text2, maxChunkChars) {
     chunks.push(trimmed.slice(offset, offset + maxChunkChars));
   }
   return chunks;
+}
+function chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms) {
+  const chunkChars = row.bounded_text.length;
+  const { charStart, charEnd } = queryTerms?.length ? firstTermSpan(row.bounded_text, queryTerms) : { charStart: 0, charEnd: chunkChars };
+  return {
+    chunkId: String(chunkPk),
+    chunkIndex: row.chunk_index,
+    contentHash: row.content_hash,
+    charStart,
+    charEnd,
+    itemCharStart: itemOffset + charStart,
+    itemCharEnd: itemOffset + charEnd,
+    chunkChars,
+    lane
+  };
 }
 function firstTermSpan(text2, terms) {
   const haystack = text2.toLowerCase();
@@ -34576,6 +34631,8 @@ var init_local_index = __esm(() => {
         this.boundLedgerHandle = undefined;
       } finally {
         this.tierLedgerHandle = undefined;
+        if (offThreadReadsSupported(this.dbPath))
+          releaseOffThreadReads(this.dbPath);
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       }
     }
@@ -40188,7 +40245,7 @@ var init_local_index = __esm(() => {
       return this.readHere(this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions));
     }
     async searchItemsDetailedOffThread(query, maxResults, accountScope, filters, ftsOptions = {}, pool = {}) {
-      if (!offThreadReadsAvailable(this.dbPath))
+      if (!offThreadReadsSupported(this.dbPath))
         return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
       const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
       let step = steps.next();
@@ -40196,6 +40253,14 @@ var init_local_index = __esm(() => {
         step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
       }
       return step.value;
+    }
+    stillVisibleSearchRows(rows) {
+      return this.tierVisibleRows(rows, (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
+      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
     readHere(steps) {
       let step = steps.next();
@@ -40258,15 +40323,17 @@ var init_local_index = __esm(() => {
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
         const placeholders = pks.map(() => "?").join(", ");
+        const itemAt = new Map(rows.map((row) => [row.item_pk, row.local_item_id]));
+        const sameItem = (hit) => itemAt.get(hit.item_pk) === hit.local_item_id;
         for (const [groupIndex, group] of groups.entries()) {
-          const hits = yield { mode: "all", sql: `
-          SELECT DISTINCT connector_store_fts.item_pk
+          const hits = (yield { mode: "all", sql: `
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
           FROM connector_store_fts
           JOIN items i ON i.item_pk = connector_store_fts.item_pk
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] };
+        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
             matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
@@ -40277,11 +40344,11 @@ var init_local_index = __esm(() => {
         const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
         const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
         const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
-        SELECT DISTINCT connector_store_fts.item_pk
+        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
         FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
         WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
           ${selectedFtsScope.sql}
-      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).map((row) => row.item_pk));
+      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
         selected = rows.filter((row) => {
           if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
             return true;
@@ -40303,21 +40370,26 @@ var init_local_index = __esm(() => {
       const spanTerms = queryTermsForSpan(query);
       const kept = selected.slice(0, limit);
       const located = [];
+      const locatedRows = [];
       for (const row of kept) {
         const base = searchRowFromItemRow(row);
-        if (ftsOptions.locate === false) {
-          located.push(row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true });
+        if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
+          located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
+          locatedRows.push(row);
           continue;
         }
-        const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : yield* this.chunkMatchSteps(row.chunk_pk, "keyword", spanTerms);
-        located.push(chunk ? { ...base, chunk } : base);
+        const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+        if (!chunk)
+          continue;
+        located.push({ ...base, chunk });
+        locatedRows.push(row);
       }
       return {
         rows: located,
         saturated: rows.length >= fetchLimit || selected.length > limit,
         concepts: {
           total: groups.length,
-          matched: new Map(kept.map((row) => [
+          matched: new Map(locatedRows.map((row) => [
             row.local_item_id,
             minimumSignal ? matchedGroups.get(row.item_pk) ?? 0 : groups.length
           ]))
@@ -40368,35 +40440,28 @@ var init_local_index = __esm(() => {
       return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
-      return this.readHere(this.chunkMatchSteps(chunkPk, lane, queryTerms));
-    }
-    *chunkMatchSteps(chunkPk, lane, queryTerms) {
-      const row = yield {
-        mode: "get",
-        sql: "SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?",
-        params: [chunkPk]
-      };
+      const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
       if (!row)
         return;
-      const priorRows = yield {
-        mode: "all",
-        sql: "SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index",
-        params: [row.item_pk, row.chunk_index]
-      };
+      const priorRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index").all(row.item_pk, row.chunk_index);
       const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-      const chunkChars = row.bounded_text.length;
-      const { charStart, charEnd } = queryTerms?.length ? firstTermSpan(row.bounded_text, queryTerms) : { charStart: 0, charEnd: chunkChars };
-      return {
-        chunkId: String(chunkPk),
-        chunkIndex: row.chunk_index,
-        contentHash: row.content_hash,
-        charStart,
-        charEnd,
-        itemCharStart: itemOffset + charStart,
-        itemCharEnd: itemOffset + charEnd,
-        chunkChars,
-        lane
+      return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+    }
+    *keywordChunkMatchSteps(item, chunkPk, queryTerms) {
+      const rows = yield {
+        mode: "all",
+        sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
+        ORDER BY c.chunk_index`,
+        params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk]
       };
+      const row = rows.at(-1);
+      if (!row || row.chunk_pk !== chunkPk)
+        return;
+      const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+      return chunkMatchFromRows(chunkPk, row, itemOffset, "keyword", queryTerms);
     }
     recentItems(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -57541,7 +57606,7 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
   if (previous !== undefined && measureDone(previous.measure) === 0 && measureDone(phase.measure) === 0) {
     return { ...phase, state: "waiting", state_words: `Waiting for ${previous.label.toLowerCase()}` };
   }
-  const live = laneReportsLive(source, phase.id, embeddingRuntime);
+  const live2 = laneReportsLive(source, phase.id, embeddingRuntime);
   const movedAt = Date.parse(movementFor(source, phase.id) ?? "");
   if (Number.isFinite(movedAt)) {
     const sinceMs = Math.max(0, now.getTime() - movedAt);
@@ -57549,9 +57614,9 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
       return { ...phase, state: "working", state_words: `Working · moved ${dashboardRelativeFromMs(sinceMs)}` };
     }
     const still = `Stalled · nothing moved for ${dashboardDuration(sinceMs / 1000)}`;
-    return { ...phase, state: "stalled", state_words: live ? `${still} · lane reports running` : still };
+    return { ...phase, state: "stalled", state_words: live2 ? `${still} · lane reports running` : still };
   }
-  if (live) {
+  if (live2) {
     return { ...phase, state: "working", state_words: "Working" };
   }
   const due = nextSyncDue(source, phase.id, now);
@@ -63301,14 +63366,14 @@ class BuiltInSourceEmbeddingProvider {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
     }
     const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
-    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
+    const live2 = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
     const out = images.map(() => {
       return;
     });
-    if (live.length === 0)
+    if (live2.length === 0)
       return out;
-    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
-    live.forEach(({ index }, row) => {
+    const { vectors } = await this.liteRtVectors(model.embedder, live2.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
+    live2.forEach(({ index }, row) => {
       out[index] = vectors[row];
     });
     return out;
@@ -63966,12 +64031,12 @@ function workerPath() {
 function scanThread() {
   if (thread)
     return thread;
-  if (unavailable2)
+  if (unavailable)
     return;
   try {
     const path = typeof Worker === "function" && globalThis.Bun ? workerPath() : undefined;
     if (!path) {
-      unavailable2 = true;
+      unavailable = true;
       return;
     }
     const worker = new Worker(path);
@@ -63993,7 +64058,7 @@ function scanThread() {
     thread = started;
     return started;
   } catch {
-    unavailable2 = true;
+    unavailable = true;
     return;
   }
 }
@@ -64027,7 +64092,7 @@ async function scanSecretsAhead(text2) {
     scanner.pending.delete(id);
   }
 }
-var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable2 = false, nextId2 = 1;
+var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId2 = 1;
 var init_secret_scan_off_thread = __esm(() => {
   init_engine();
 });
@@ -70380,7 +70445,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           }
           assertDispatchAllowed(analysisDetail);
         };
-        const live = (analyst) => options.inferenceGuard ? {
+        const live2 = (analyst) => options.inferenceGuard ? {
           async analyze(legPack, legOptions) {
             await guard();
             return analyst.analyze(legPack, legOptions);
@@ -70390,13 +70455,13 @@ function createAnalystSourceIndexAnswerHandler(options) {
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
-          local: live(localLeg(options.analyst)),
-          ...options.cloudAnalyst ? { cloud: live(cloudLeg(options.cloudAnalyst)) } : {},
-          ...veniceAnalyst ? { venice: live(trustedLeg(veniceAnalyst)) } : {},
+          local: live2(localLeg(options.analyst)),
+          ...options.cloudAnalyst ? { cloud: live2(cloudLeg(options.cloudAnalyst)) } : {},
+          ...veniceAnalyst ? { venice: live2(trustedLeg(veniceAnalyst)) } : {},
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? (input) => options.sovereigntyAnalystRoute({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, (analyst) => live(localLeg(analyst)), (analyst) => live(cloudLeg(analyst)), (analyst) => live(trustedLeg(analyst))) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? (input) => options.sovereigntyAnalystRoute({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, (analyst) => live2(localLeg(analyst)), (analyst) => live2(cloudLeg(analyst)), (analyst) => live2(trustedLeg(analyst))) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
@@ -70610,9 +70675,9 @@ function secureLocalExclusionCoverageNotes(detail) {
   if (noRoute.length > 0) {
     notes.push(`Private sources were not searched (${noRoute.join(", ")}): the active sovereignty policy ` + "approves no private analyst for them under this request.");
   }
-  const unavailable3 = corpora("private_analyst_unavailable");
-  if (unavailable3.length > 0) {
-    notes.push(`Private sources were left out of this answer (${unavailable3.join(", ")}): ` + "the private analyst is unavailable right now.");
+  const unavailable2 = corpora("private_analyst_unavailable");
+  if (unavailable2.length > 0) {
+    notes.push(`Private sources were left out of this answer (${unavailable2.join(", ")}): ` + "the private analyst is unavailable right now.");
   }
   const bulk = corpora("bulk_secure_local_release_requires_approval");
   if (bulk.length > 0) {
@@ -75866,11 +75931,11 @@ function createDropboxSourceConnector(options) {
     contentAllowedByLocalItemId.set(item.identity.localItemId, entry.tag === "file" && (!options.scope || options.scope.allowsContent(path)));
     return [item];
   });
-  const expandDeletedFolder = (entry, room, live, deleted, fetchedAt) => {
+  const expandDeletedFolder = (entry, room, live2, deleted, fetchedAt) => {
     const resolver = options.deletedItemIdentityResolver;
     if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0)
       return [];
-    const baseLimit = room + live.size + deleted.size;
+    const baseLimit = room + live2.size + deleted.size;
     const found = new Map;
     for (const folder of deletedFolderPaths(entry)) {
       let limit = baseLimit;
@@ -75888,7 +75953,7 @@ function createDropboxSourceConnector(options) {
             continue;
           }
           const id = descendant.identity.providerItemId;
-          if (live.has(id) || deleted.has(id) || found.has(id))
+          if (live2.has(id) || deleted.has(id) || found.has(id))
             continue;
           found.set(id, descendant);
         }
@@ -81595,8 +81660,8 @@ function prepareExtractionSpool(dir, options = {}) {
       }
       for (const account of readdirSync11(path)) {
         const accountDir = join65(path, account);
-        const live = ownersWithJobs();
-        if (live && !live.has(`${name}/${account}`)) {
+        const live2 = ownersWithJobs();
+        if (live2 && !live2.has(`${name}/${account}`)) {
           remove(accountDir);
           continue;
         }
@@ -83749,8 +83814,8 @@ function createRecordBuilder(account, fetchItem, authenticate, readChild) {
 }
 function createWhatsAppRecordBuilder(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty7(options.account, "WhatsApp account");
-  const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
-  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), async () => {
+  const live2 = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
+  return createRecordBuilder(account, (localItemId) => live2.fetchItem(localItemId), async () => {
     return;
   }, options.readChild);
 }
@@ -91785,7 +91850,7 @@ function modelLoadFailedReason(message2) {
     return "port_taken";
   return "unknown";
 }
-function builtInTranscriptionDashboardState(read, live = { installing: false }) {
+function builtInTranscriptionDashboardState(read, live2 = { installing: false }) {
   if (read.file === "missing")
     return { state: "not_needed" };
   if (read.file === "unreadable")
@@ -91798,7 +91863,7 @@ function builtInTranscriptionDashboardState(read, live = { installing: false }) 
   if (status.state === "failed") {
     return status.failure?.reason === "runtime_load_failed" ? { state: "load_failed", loadFailedReason: modelLoadFailedReason(status.failure.message) } : { state: "failed", failedReason: modelInstallFailedReason(status.failure) };
   }
-  if (!live.installing)
+  if (!live2.installing)
     return { state: "interrupted" };
   return {
     state: status.state === "verifying" ? "verifying" : "downloading",
@@ -92003,7 +92068,7 @@ function createBuiltInTranscriber(options = {}) {
   const chunkTimeoutMs = options.chunkTimeoutMs ?? DEFAULT_CHUNK_TIMEOUT_MS;
   const fileDeadlineMs = options.fileDeadlineMs ?? DEFAULT_FILE_DEADLINE_MS;
   const maxChars = options.maxTranscriptChars ?? Number.POSITIVE_INFINITY;
-  let unavailable3 = (options.totalMemoryBytes ?? totalmem()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
+  let unavailable2 = (options.totalMemoryBytes ?? totalmem()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
   let installed;
   let installing2;
   let failedAt;
@@ -92012,7 +92077,7 @@ function createBuiltInTranscriber(options = {}) {
   const readyListeners = [];
   let server;
   const prepare = () => {
-    if (unavailable3)
+    if (unavailable2)
       return "unavailable";
     if (installed)
       return "ready";
@@ -92032,7 +92097,7 @@ function createBuiltInTranscriber(options = {}) {
       }
     }, (error) => {
       if (error instanceof BuiltInReasoningInstallError && (error.reason === "unsupported_platform" || error.reason === "insufficient_memory")) {
-        unavailable3 = error.message;
+        unavailable2 = error.message;
       } else {
         failedAt = now();
         consecutiveFailures = error instanceof BuiltInReasoningInstallError && error.reason === "insufficient_space" ? 1 : consecutiveFailures + 1;
@@ -92075,7 +92140,7 @@ function createBuiltInTranscriber(options = {}) {
   return {
     prepare,
     downloadNow() {
-      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed && !unavailable3) {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed && !unavailable2) {
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
@@ -92108,7 +92173,7 @@ function createBuiltInTranscriber(options = {}) {
         state = prepare();
       }
       if (state === "unavailable")
-        throw new TranscriberUnavailableError(unavailable3 ?? "Built-in transcription is unavailable.");
+        throw new TranscriberUnavailableError(unavailable2 ?? "Built-in transcription is unavailable.");
       if (state === "pending" || !installed) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
@@ -92120,7 +92185,7 @@ function createBuiltInTranscriber(options = {}) {
           await convert(input.inputPath, wavPath);
         } catch (error) {
           if (error instanceof TranscriberUnavailableError)
-            unavailable3 = error.message;
+            unavailable2 = error.message;
           throw error;
         }
         let audio;
@@ -104753,8 +104818,8 @@ import { spawn as spawnProcess } from "node:child_process";
 function setNativeProcessChildStdio(mode) {
   childStdio = mode;
 }
-function setNativeProcessChildObserver(observer) {
-  childObserver = observer;
+function setNativeProcessChildObserver(observer2) {
+  childObserver = observer2;
 }
 function notifyChildObserver(event, serviceId, pid, argv) {
   if (!childObserver || !pid || process.platform === "win32")
@@ -121548,7 +121613,7 @@ function createBuiltInAnalystModel(options = {}) {
         const pending = ensureInstalled();
         if (options.waitForInstall) {
           paths = await pending.catch((error) => {
-            throw unavailable3(error);
+            throw unavailable2(error);
           });
         } else {
           pending.catch(() => {
@@ -121570,13 +121635,13 @@ function createBuiltInAnalystModel(options = {}) {
           throw error;
         if (error instanceof LlamaServerStillExitingError) {
           reportBuiltInReasoningState({ model: spec, env }, "ready");
-          throw unavailable3(error);
+          throw unavailable2(error);
         }
         reportBuiltInReasoningState({ model: spec, env }, "failed", {
           reason: "runtime_load_failed",
           message: error instanceof Error ? error.message : String(error)
         });
-        throw unavailable3(error);
+        throw unavailable2(error);
       }
       try {
         return await chatCompletion(fetchImpl, endpoint, spec, request, requestTimeoutMs);
@@ -121587,7 +121652,7 @@ function createBuiltInAnalystModel(options = {}) {
   };
   return model;
 }
-function unavailable3(error) {
+function unavailable2(error) {
   if (error instanceof OperationError)
     return error;
   const message2 = error instanceof Error ? error.message : String(error);
@@ -125070,15 +125135,15 @@ function zkapiFundingDateRefresher(path) {
     return known;
   };
   return (profiles2) => {
-    const live = current2();
-    if (!live)
+    const live2 = current2();
+    if (!live2)
       return profiles2;
-    const profile = profiles2[live.id];
-    if (!profile || profile.provider !== "zkapi" || !profile.zkapi || profile.zkapi.fundingDate === live.fundingDate)
+    const profile = profiles2[live2.id];
+    if (!profile || profile.provider !== "zkapi" || !profile.zkapi || profile.zkapi.fundingDate === live2.fundingDate)
       return profiles2;
     const { fundingDate: _old, ...rest } = profile.zkapi;
-    const zkapi = live.fundingDate === undefined ? rest : { ...rest, fundingDate: live.fundingDate };
-    return { ...profiles2, [live.id]: { ...profile, zkapi } };
+    const zkapi = live2.fundingDate === undefined ? rest : { ...rest, fundingDate: live2.fundingDate };
+    return { ...profiles2, [live2.id]: { ...profile, zkapi } };
   };
 }
 var RouteMissing;
@@ -143416,17 +143481,17 @@ function drainReportIsLive(report) {
   return report.activePhase !== undefined && LIVE_DRAIN_PHASES.includes(report.activePhase);
 }
 function deriveEmbeddingRunState(input) {
-  const live = drainReportIsLive(input.drain);
+  const live2 = drainReportIsLive(input.drain);
   if (input.override === "embedding_priority") {
     return {
       state: "operator_priority",
-      stateLine: live ? "Embeddings: running now (operator priority)" : "Embeddings: operator priority is on — the guard keeps this lane running"
+      stateLine: live2 ? "Embeddings: running now (operator priority)" : "Embeddings: operator priority is on — the guard keeps this lane running"
     };
   }
   if (input.override === "guard_paused") {
     return {
       state: "guard_paused",
-      stateLine: live ? "Embeddings: running now, but the guard is paused — nothing will park or restart this lane" : "Embeddings: off (guard paused) — nothing will start this lane until the pause is lifted"
+      stateLine: live2 ? "Embeddings: running now, but the guard is paused — nothing will park or restart this lane" : "Embeddings: off (guard paused) — nothing will start this lane until the pause is lifted"
     };
   }
   if (input.override === "unreadable") {
@@ -143435,7 +143500,7 @@ function deriveEmbeddingRunState(input) {
       stateLine: "Embeddings: state unknown — the operator override file could not be read"
     };
   }
-  if (live) {
+  if (live2) {
     const phase = input.drain?.activePhase;
     const phaseText = phase === "embedding" ? "metadata caught up" : phase === "sleeping" || phase === "backoff" ? "between passes" : phase === "starting" ? "starting up" : phase ?? "up";
     return {
@@ -145260,8 +145325,8 @@ class JudgeRateLimitPacer {
   reportSeq = 0;
   blockedUntil = 0;
   calls = new AsyncLocalStorage7;
-  constructor(clock2 = realClock) {
-    this.clock = clock2;
+  constructor(clock3 = realClock) {
+    this.clock = clock3;
   }
   async acquire(signal) {
     for (;; ) {
@@ -146135,10 +146200,10 @@ function createBuiltInPrivateAnswerModel(options) {
         const ok = await checkPrivateEvidence(options.eligible, indexes.map(hitOf));
         return indexes.filter((_, position) => ok[position]);
       };
-      let live = read.items.map((_, index) => index);
+      let live2 = read.items.map((_, index) => index);
       let scores;
-      if (options.relevance && live.length > 1) {
-        const offered = live;
+      if (options.relevance && live2.length > 1) {
+        const offered = live2;
         let admitted;
         let raw;
         try {
@@ -146156,19 +146221,19 @@ function createBuiltInPrivateAnswerModel(options) {
           raw = undefined;
         }
         if (admitted)
-          live = admitted;
+          live2 = admitted;
         if (raw && raw.length === offered.length) {
           const byIndex = new Map(offered.map((index, position) => [index, raw[position]]));
-          const kept = live.map((index) => byIndex.get(index));
+          const kept = live2.map((index) => byIndex.get(index));
           scores = kept.every((score) => Number.isFinite(score)) ? kept : undefined;
         }
       }
       const liveRead = {
-        items: live.map((index) => read.items[index]),
-        neighbours: live.map((index) => hitOf(index).neighbour === true)
+        items: live2.map((index) => read.items[index]),
+        neighbours: live2.map((index) => hitOf(index).neighbour === true)
       };
       const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
-      let picked = selection.items.map((position) => live[position]);
+      let picked = selection.items.map((position) => live2[position]);
       const deepItems = new Map;
       let pickedRevoked = false;
       if (options.readItem && picked.length > 0) {
@@ -146183,7 +146248,7 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       const hadReadable = read.items.length > 0;
       const readableMatch = read.sources.some((source) => evidence[source].neighbour !== true);
-      const siblings = unreadVersions(live, picked, (index) => read.items[index]);
+      const siblings = unreadVersions(live2, picked, (index) => read.items[index]);
       let eligibleSiblings = [];
       {
         const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
@@ -146313,11 +146378,11 @@ function citedVersionNote(items, citedIds) {
 function versionText(item) {
   return { text: item.text, ...item.date ? { date: item.date } : {}, ...item.family ? { family: item.family } : {} };
 }
-function unreadVersions(live, picked, itemAt) {
+function unreadVersions(live2, picked, itemAt) {
   const chosen = new Set(picked);
   const out = [];
-  for (const group of evidenceVersionGroups(live.map((index) => versionText(itemAt(index))))) {
-    const members = group.map((position) => live[position]);
+  for (const group of evidenceVersionGroups(live2.map((index) => versionText(itemAt(index))))) {
+    const members = group.map((position) => live2[position]);
     if (!members.some((index) => chosen.has(index)))
       continue;
     for (const index of members)
@@ -150187,12 +150252,12 @@ p.small a { color: var(--accent); }
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
-import { createHash as createHash84 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 function isRetiredGooglePilotClientId(clientId) {
   const trimmed2 = clientId?.trim();
   if (!trimmed2)
     return false;
-  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash84("sha256").update(trimmed2).digest("hex"));
+  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash85("sha256").update(trimmed2).digest("hex"));
 }
 function resolveGooglePilotClientId(packaged, shipped) {
   const substituted = packaged.trim();
@@ -151088,7 +151153,7 @@ var init_locator_result_projector2 = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 import { readFileSync as readFileSync83 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir42 } from "node:os";
@@ -151581,7 +151646,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2568(value2) {
-  return createHash85("sha256").update(value2, "utf8").digest("hex");
+  return createHash86("sha256").update(value2, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -154391,7 +154456,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash86 } from "node:crypto";
+import { createHash as createHash87 } from "node:crypto";
 function escapeHtml2(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -154442,14 +154507,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash86("sha256").update(normalised).digest("hex");
+  return createHash87("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash86("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash87("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -155127,22 +155192,22 @@ function renderOutsideHelpCard(status, input) {
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const on = status.settings.state === "on";
-  const unavailable4 = summary.state === "unavailable";
+  const unavailable3 = summary.state === "unavailable";
   const parts = [];
   if (input.untitled !== true)
     parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
-  if (canUnlock && (on || !unavailable4 || status.confinementInstallRequired)) {
+  if (canUnlock && (on || !unavailable3 || status.confinementInstallRequired)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
-  const missingRoute = !unavailable4 && route.state === "not_configured";
+  const missingRoute = !unavailable3 && route.state === "not_configured";
   const writerHref = input.part === "account" && input.otherPartHref ? `${input.otherPartHref.split("#")[0]}#outside-writer` : undefined;
   if (missingRoute)
     parts.push(renderProblems(status, access, writerHref));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
-  if (unavailable4) {
+  if (unavailable3) {
     if (status.confinementInstallRequired)
       parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
@@ -155231,12 +155296,12 @@ function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
   const invalid4 = status.settings.state === "invalid";
-  const unavailable4 = summary.state === "unavailable";
+  const unavailable3 = summary.state === "unavailable";
   const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable4 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const button = access === "read" || unavailable3 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
-  const usage = !unavailable4 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
-  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable4 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  const usage = !unavailable3 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable3 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
@@ -160024,19 +160089,19 @@ function chatgptPickerProgram(kit) {
     return confirm;
   }
   function segKeys(event, buttons, current2) {
-    const live = buttons.filter((button) => !button.disabled);
-    if (!live.length)
+    const live2 = buttons.filter((button) => !button.disabled);
+    if (!live2.length)
       return;
-    const at = live.indexOf(current2);
+    const at = live2.indexOf(current2);
     let next;
     if (event.key === "ArrowRight" || event.key === "ArrowDown")
-      next = live[(at + 1) % live.length];
+      next = live2[(at + 1) % live2.length];
     else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
-      next = live[(at - 1 + live.length) % live.length];
+      next = live2[(at - 1 + live2.length) % live2.length];
     else if (event.key === "Home")
-      next = live[0];
+      next = live2[0];
     else if (event.key === "End")
-      next = live[live.length - 1];
+      next = live2[live2.length - 1];
     if (!next)
       return;
     event.preventDefault();
@@ -160072,8 +160137,8 @@ function chatgptPickerProgram(kit) {
       buttons.push(button);
       add(group2, button);
     }
-    const live = buttons.filter((button) => !button.disabled);
-    const home2 = live.filter((button) => button.getAttribute("data-key") === p.lastSeg)[0] || live.filter((button) => button.getAttribute("aria-pressed") === "true")[0] || live.filter((button) => button.className.indexOf("inherited") >= 0)[0] || live[0];
+    const live2 = buttons.filter((button) => !button.disabled);
+    const home2 = live2.filter((button) => button.getAttribute("data-key") === p.lastSeg)[0] || live2.filter((button) => button.getAttribute("aria-pressed") === "true")[0] || live2.filter((button) => button.className.indexOf("inherited") >= 0)[0] || live2[0];
     for (const button of buttons)
       button.tabIndex = button === home2 ? 0 : -1;
     return group2;
@@ -165658,9 +165723,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash87 } from "node:crypto";
+import { createHash as createHash88 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash87("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash88("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -166854,7 +166919,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash88 } from "node:crypto";
+import { createHash as createHash89 } from "node:crypto";
 function parseStructuredChatScope(value2) {
   const parts = value2.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -166882,7 +166947,7 @@ function unresolvedChatTitleResolution(value2) {
   };
 }
 function safeDigest(value2) {
-  return createHash88("sha256").update(value2).digest("hex");
+  return createHash89("sha256").update(value2).digest("hex");
 }
 function conversationTitleTerms(value2) {
   const seen = new Set;
@@ -169773,7 +169838,7 @@ var init_file_mime = __esm(() => {
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash89 } from "node:crypto";
+import { createHash as createHash90 } from "node:crypto";
 function isRecord11(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
@@ -169827,7 +169892,7 @@ function cleanTags(tags) {
   return out;
 }
 function sha2569(value2) {
-  return createHash89("sha256").update(value2).digest("hex");
+  return createHash90("sha256").update(value2).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -170189,7 +170254,7 @@ var init_listing = __esm(() => {
 });
 
 // src/workers/evernote/connector.ts
-import { createHash as createHash90 } from "node:crypto";
+import { createHash as createHash91 } from "node:crypto";
 function evernoteDeletionCap(storedNotes) {
   return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
 }
@@ -170296,7 +170361,7 @@ function createEvernoteSourceConnector(options) {
         ...createdAt ? { createdAt } : {},
         ...updatedAt ? { updatedAt } : {},
         attachmentCount: resources.length,
-        contentHash: createHash90("sha256").update(text4).digest("hex")
+        contentHash: createHash91("sha256").update(text4).digest("hex")
       }),
       fetchedAt: now().toISOString()
     };
@@ -170589,7 +170654,7 @@ function createEvernoteSourceConnector(options) {
       bytes.set(chunk, at);
       at += chunk.byteLength;
     }
-    if (createHash90("md5").update(bytes).digest("hex") !== hash)
+    if (createHash91("md5").update(bytes).digest("hex") !== hash)
       throw new FileExtractionSourceError("source_content_unavailable");
     allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? "application/octet-stream";
@@ -170630,7 +170695,7 @@ function createEvernoteSourceConnector(options) {
     lastOutcome: () => outcome
   };
 }
-var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash90("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
+var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash91("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
 var init_connector5 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
@@ -170861,7 +170926,7 @@ function createEvernoteLiveSync(options) {
   const runPass = async () => {
     const file = readPassFile(passPath);
     const previous = evernotePassWithUnfinished(file.record, file.unfinished);
-    const live = connector(() => previous, (notes) => {
+    const live2 = connector(() => previous, (notes) => {
       file.unfinished = evernoteUnfinishedWith(file.unfinished, notes);
       writePassFile(passPath, file);
     });
@@ -170879,11 +170944,11 @@ function createEvernoteLiveSync(options) {
     let run2;
     try {
       options.lane.secure.open();
-      run2 = await options.lane.set.sync(live, sync, { commitCursor: false, embed: false });
+      run2 = await options.lane.set.sync(live2, sync, { commitCursor: false, embed: false });
     } catch (error2) {
       return failed(file, error2);
     }
-    const outcome = live.lastOutcome();
+    const outcome = live2.lastOutcome();
     if (!outcome)
       return failed(file, new Error("The Evernote pass ended without its outcome."));
     const stored = run2.routing.itemsUnstored === 0;
@@ -170996,7 +171061,7 @@ var init_live_sync3 = __esm(() => {
 });
 
 // src/workers/email-source/index.ts
-import { createHash as createHash91, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash92, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync86, statSync as statSync41 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 import { join as join128, resolve as resolve28 } from "node:path";
@@ -175031,7 +175096,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual8(createHash91("sha256").update(expected).digest(), createHash91("sha256").update(state).digest());
+  return timingSafeEqual8(createHash92("sha256").update(expected).digest(), createHash92("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -175297,7 +175362,7 @@ function dashboardOAuthClientSecretRequired(source) {
 }
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash91("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash92("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url2, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -176392,9 +176457,9 @@ class WatchHub {
   async close() {
     this.closed = true;
     this.listeners.clear();
-    const live = [...this.subscriptions.values()];
+    const live2 = [...this.subscriptions.values()];
     this.subscriptions.clear();
-    await Promise.all(live.map((entry) => entry === "pending" ? undefined : entry.unsubscribe().catch(() => {
+    await Promise.all(live2.map((entry) => entry === "pending" ? undefined : entry.unsubscribe().catch(() => {
       return;
     })));
   }
@@ -176553,7 +176618,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash92, randomUUID as randomUUID33 } from "node:crypto";
+import { createHash as createHash93, randomUUID as randomUUID33 } from "node:crypto";
 import { realpathSync as realpathSync22, rmSync as rmSync38, readdirSync as readdirSync28 } from "node:fs";
 import { join as join131, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -176568,7 +176633,7 @@ function nameAsOnDisk(scopeRoot, rel) {
   return dir;
 }
 function localFilesItemId(scopePath) {
-  return `f1.${createHash92("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
+  return `f1.${createHash93("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
 function identityFor(scopePath, version2) {
   const providerItemId = localFilesItemId(scopePath);
@@ -177125,7 +177190,7 @@ var init_connector6 = __esm(() => {
 });
 
 // src/workers/local-files/provider-store-sync.ts
-import { createHash as createHash93 } from "node:crypto";
+import { createHash as createHash94 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   const prefix = `${LOCAL_FILES_POLICY_SOURCE}:`;
   if (!approvedScopeKey.startsWith(prefix))
@@ -177135,7 +177200,7 @@ function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   return root;
 }
 function localFilesConnectorIdForScope(approvedScopeKey, scope) {
-  const hash = createHash93("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const hash = createHash94("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
 function localFilesStoreView(tierSet) {
@@ -177290,7 +177355,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash93("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash94("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
@@ -177601,7 +177666,7 @@ var init_whatsapp = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash94 } from "node:crypto";
+import { createHash as createHash95 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -178629,7 +178694,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash94("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash95("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -179384,7 +179449,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value2) {
-  return createHash94("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash95("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -185188,9 +185253,9 @@ var init_postal_mime = __esm(() => {
 });
 
 // src/workers/archive-import/mbox/parse.ts
-import { createHash as createHash95 } from "node:crypto";
+import { createHash as createHash96 } from "node:crypto";
 function sha25610(value2) {
-  return createHash95("sha256").update(value2).digest("hex");
+  return createHash96("sha256").update(value2).digest("hex");
 }
 function headerValue(email2, key2) {
   const value2 = email2.headers.find((header2) => header2.key === key2)?.value?.trim();
@@ -186243,9 +186308,9 @@ var init_place = __esm(() => {
 });
 
 // src/workers/archive-import/whatsapp/connector.ts
-import { createHash as createHash96 } from "node:crypto";
+import { createHash as createHash97 } from "node:crypto";
 function sha25611(value2) {
-  return createHash96("sha256").update(value2).digest("hex");
+  return createHash97("sha256").update(value2).digest("hex");
 }
 function stoppedFrom2(error2, relPath) {
   if (error2 instanceof WhatsAppFormatError) {
@@ -188564,9 +188629,9 @@ var init_xml_stream = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/connector.ts
-import { createHash as createHash97 } from "node:crypto";
+import { createHash as createHash98 } from "node:crypto";
 function sha25612(value2) {
-  return createHash97("sha256").update(value2).digest("hex");
+  return createHash98("sha256").update(value2).digest("hex");
 }
 function enexTime(value2) {
   const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
@@ -188643,7 +188708,7 @@ function decodeBase64Range(reader, start, end, cap) {
   return bytes;
 }
 function md5OfBase64Range(reader, start, end) {
-  const hash2 = createHash97("md5");
+  const hash2 = createHash98("md5");
   decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash2.update(chunk));
   return hash2.digest("hex");
 }
@@ -190006,10 +190071,10 @@ function createArchiveImportDashboard(options) {
     }
   };
   const resumeOne = (requestId) => {
-    const live = requests.get(requestId);
-    if (closed || !live || live.status !== "checking" || running.has(requestId) || cancelled2.has(requestId))
+    const live2 = requests.get(requestId);
+    if (closed || !live2 || live2.status !== "checking" || running.has(requestId) || cancelled2.has(requestId))
       return;
-    const reopened = live.approved ? reopenApproved(live.approved) : { kind: "failed", code: "replaced" };
+    const reopened = live2.approved ? reopenApproved(live2.approved) : { kind: "failed", code: "replaced" };
     if (reopened.kind !== "ready") {
       requests.settle(requestId, { status: "failed", code: reopened.code });
       return;
@@ -190477,15 +190542,15 @@ function createArchiveImportDashboard(options) {
       } catch {
         return [];
       }
-      const live = options.runtime.targets.sourceIds().flatMap((sourceId) => {
+      const live2 = options.runtime.targets.sourceIds().flatMap((sourceId) => {
         const target = options.runtime.targets.forSource(sourceId);
         const formats = target ? sourceFormats(target) : [];
         if (!target || formats.length === 0)
           return [];
         return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
       });
-      const imported = archiveSourceCards().filter((card) => !live.some((entry) => entry.sourceId === card.id)).map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
-      return [...live, ...imported];
+      const imported = archiveSourceCards().filter((card) => !live2.some((entry) => entry.sourceId === card.id)).map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
+      return [...live2, ...imported];
     },
     cardViews() {
       let records;
@@ -190884,7 +190949,7 @@ var init_extraction_runtime = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash98 } from "node:crypto";
+import { createHash as createHash99 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -190910,7 +190975,7 @@ function receiptOf(record8, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash98("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash99("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -191532,7 +191597,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash99 } from "node:crypto";
+import { createHash as createHash100 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
 import { existsSync as existsSync99, lstatSync as lstatSync50, readFileSync as readFileSync90, readdirSync as readdirSync29, realpathSync as realpathSync27 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
@@ -191696,7 +191761,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash99("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash100("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -193259,12 +193324,12 @@ function createEvernoteRuntime(options) {
         leg.open();
     return opened;
   };
-  let live;
+  let live2;
   const liveSync = (handle) => {
     const key2 = `${handle.handle}:${handle.connectedAt ?? ""}`;
-    if (live?.key === key2)
-      return live.sync;
-    live = {
+    if (live2?.key === key2)
+      return live2.sync;
+    live2 = {
       key: key2,
       sync: createEvernoteLiveSync({
         lane: openLane(),
@@ -193279,7 +193344,7 @@ function createEvernoteRuntime(options) {
         ...options.pacer ? { pacer: options.pacer } : {}
       })
     };
-    return live.sync;
+    return live2.sync;
   };
   let extraction;
   const extractionRuntime = (sync, accountScope) => {
@@ -193372,7 +193437,7 @@ function createEvernoteRuntime(options) {
         lastSyncCompletedAt: () => sync.lastStoreRunCompletedAt()
       };
     },
-    dashboardPass: () => evernoteDashboardPass(live?.sync.status() ?? evernotePassStatus(env))
+    dashboardPass: () => evernoteDashboardPass(live2?.sync.status() ?? evernotePassStatus(env))
   };
 }
 function evernoteSchedulerFailure(error2) {
@@ -194710,11 +194775,11 @@ var init_export_zone = __esm(() => {
 });
 
 // src/workers/whatsapp/archive-input.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 import { existsSync as existsSync102 } from "node:fs";
 import { posix as posix7 } from "node:path";
 function hash2(value2) {
-  return createHash100("sha256").update(value2).digest("hex").slice(0, 24);
+  return createHash101("sha256").update(value2).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -195172,7 +195237,7 @@ var init_archive_input = __esm(() => {
 
 // src/workers/whatsapp/archive-target.ts
 function whatsAppConnectorWithInputs(options) {
-  const live = {
+  const live2 = {
     ...createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE }),
     id: WHATSAPP_PRODUCT_CONNECTOR_ID
   };
@@ -195181,7 +195246,7 @@ function whatsAppConnectorWithInputs(options) {
     account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
     ...options.readChild ? { readChild: options.readChild } : {}
   });
-  const connector = withInputs(live, builder);
+  const connector = withInputs(live2, builder);
   connector.fetchItem = (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions);
   return connector;
 }
@@ -195945,12 +196010,12 @@ function gmailAttachmentConnector(input) {
     if (!locator)
       throw new FileExtractionSourceError("source_content_unavailable");
     if (locator.startsWith(gmailPartLocatorPrefix())) {
-      const live = input.live();
-      if (!live)
+      const live2 = input.live();
+      if (!live2)
         throw new FileExtractionSourceError("source_unavailable");
       let item;
       try {
-        item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
+        item = await live2.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
       } catch (error2) {
         if (error2 instanceof GoogleRequestBudgetError) {
           throw new FileExtractionSourceError("source_budget_exhausted", { retryAt: error2.retryAt });
@@ -196014,7 +196079,7 @@ var init_gmail_attachment_extraction = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash101 } from "node:crypto";
+import { createHash as createHash102 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -196050,7 +196115,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash101("sha256").update(`${accessToken}
+    const key2 = createHash102("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -196108,7 +196173,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash101("sha256").update(session.token).digest("hex");
+    const key2 = createHash102("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -196332,7 +196397,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash102 } from "node:crypto";
+import { createHash as createHash103 } from "node:crypto";
 import { mkdirSync as mkdirSync63, readFileSync as readFileSync91 } from "node:fs";
 import { dirname as dirname102 } from "node:path";
 
@@ -196390,7 +196455,7 @@ class SnifferCallBudget {
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash102("sha256").update(own3).digest("base64");
+  const key2 = createHash103("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -200812,20 +200877,20 @@ function chatgptPrivateAnswerProgram(config2) {
     else
       setTimeout(measure, 0);
   }
-  let observer = null;
+  let observer2 = null;
   let observed = null;
   function observeCard() {
-    if (!observer && typeof window.ResizeObserver === "function") {
-      observer = new window.ResizeObserver(() => afterLayout());
+    if (!observer2 && typeof window.ResizeObserver === "function") {
+      observer2 = new window.ResizeObserver(() => afterLayout());
     }
     const node = info ? root.firstChild : null;
-    if (!observer || node === observed)
+    if (!observer2 || node === observed)
       return;
     if (observed)
-      observer.unobserve(observed);
+      observer2.unobserve(observed);
     observed = node;
     if (node)
-      observer.observe(node);
+      observer2.observe(node);
   }
   const fonts = doc2.fonts;
   if (fonts && fonts.ready && typeof fonts.ready.then === "function")
@@ -202167,20 +202232,20 @@ function chatgptPrivateQuestionProgram(config2) {
     else
       setTimeout(measure, 0);
   }
-  let observer = null;
+  let observer2 = null;
   let observed = null;
   function observeCard() {
-    if (!observer && typeof window.ResizeObserver === "function") {
-      observer = new window.ResizeObserver(() => afterLayout());
+    if (!observer2 && typeof window.ResizeObserver === "function") {
+      observer2 = new window.ResizeObserver(() => afterLayout());
     }
     const node = info ? root : null;
-    if (!observer || node === observed)
+    if (!observer2 || node === observed)
       return;
     if (observed)
-      observer.unobserve(observed);
+      observer2.unobserve(observed);
     observed = node;
     if (node)
-      observer.observe(node);
+      observer2.observe(node);
   }
   const fonts = doc2.fonts;
   if (fonts && fonts.ready && typeof fonts.ready.then === "function")
@@ -214989,7 +215054,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash103, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash104, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -215357,7 +215422,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash103("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash104("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -215624,7 +215689,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha25613(value2) {
-  return createHash103("sha256").update(value2).digest("hex");
+  return createHash104("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -217817,7 +217882,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash104 } from "node:crypto";
+import { createHash as createHash105 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -217834,7 +217899,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash104("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash105("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -218212,7 +218277,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync92 } from "node:fs";
-import { createHash as createHash105 } from "node:crypto";
+import { createHash as createHash106 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -218236,7 +218301,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash105("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash106("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -218244,7 +218309,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync92(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
-    const policyRevision = createHash105("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
+    const policyRevision = createHash106("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
       return {
         configured: false,

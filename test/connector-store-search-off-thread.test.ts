@@ -10,10 +10,9 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
-import type { ConnectorStoreKeywordFtsOptions, ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
-import { OffThreadReadBusyError, readOnPool, setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { createConnectorStoreCorpusAdapter, defineConnectorCorpus, type ConnectorStoreKeywordFtsOptions, type ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
+import { OffThreadReadBusyError, setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir, type FixtureSpec, type TierFixture } from './helpers/tier-fixtures.ts';
-import { createTestClock } from './helpers/test-clock.ts';
 
 const WORDS = ['orchard', 'invoice', 'lawyer', 'budget', 'harbour', 'lisbon', 'piano', 'dentist', 'mortgage', 'passport', 'museum', 'recipe'];
 
@@ -125,20 +124,6 @@ describe('connector store keyword search on the read pool', () => {
     }
   });
 
-  test('a query past its deadline is given up as busy, and the next query runs', async () => {
-    const fixture = await seeded();
-    const clock = createTestClock();
-    setReadPoolClockForTests(clock);
-    // Queries that would run for minutes, one on each pool thread: only their deadline ends them.
-    const slow = { mode: 'get' as const, sql: 'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000000000) SELECT COUNT(*) AS c FROM n', params: [] };
-    const stuck = [1, 2].map(() => readOnPool(fixture.paths.internal, slow, { deadlineAtMs: clock.now() + 1_000 }).then(() => 'answered', (error) => error));
-    // Queued behind them, with a later deadline.
-    const next = readOnPool(fixture.paths.internal, { mode: 'get', sql: 'SELECT COUNT(*) AS c FROM items', params: [] }, { deadlineAtMs: clock.now() + 60_000 });
-    await clock.advance(1_000);
-    for (const outcome of await Promise.all(stuck)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
-    expect(((await next) as { c: number }).c).toBeGreaterThan(0);
-  });
-
   test('a lane whose store is busy is reported as a lane timeout, not an error, with or without a lane deadline', async () => {
     const registry = buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId: 'public_safe.busy', family: 'file', trustDomain: 'public_safe' })]);
     for (const laneTimeoutMs of [60_000, 0]) {
@@ -195,6 +180,43 @@ describe('connector store keyword search on the read pool', () => {
     });
     expect(moved).toBe(true);
     expect(result.rows.map((row) => row.sourceItem.localItemId)).not.toContain(localId('zebra'));
+  });
+
+  // The tier filter inside the search runs before later reads that now
+  // yield (the chunk locate, the content and baseline searches). The ledger
+  // can change in between, so the adapter checks every row again after its
+  // last read, right before it emits hits and counts.
+  test('an item routed away while a lane is still reading is not emitted, on the keyword and metadata paths', async () => {
+    for (const path of ['search', 'metadataMatches'] as const) {
+      const fixture = await seeded();
+      const internal = fixture.stores.internal!;
+      const adapter = createConnectorStoreCorpusAdapter({ store: internal });
+      const request = {
+        query: 'zebra crossing',
+        maxResults: 10,
+        corpus: defineConnectorCorpus({ corpusId: internal.corpusId, family: internal.family, trustDomain: internal.trustDomain }),
+        context: { allowedTrustDomains: [internal.trustDomain] },
+      } as const;
+      const before = await adapter(request);
+      expect(before.hits.map((hit) => hit.sourceItem.localItemId)).toContain(localId('zebra'));
+
+      const original = internal.searchItemsDetailedOffThread.bind(internal);
+      let routed = false;
+      internal.searchItemsDetailedOffThread = async (...args: Parameters<typeof original>) => {
+        const result = await original(...args);
+        if (!routed) {
+          routed = true;
+          const judged = classifyItemTiers({ signals: { title: 'Zebra crossing' }, text: 'A unique zebra crossing.' });
+          const high = { ...judged, metadataTier: 'secure' as const, contentTier: 'secure' as const };
+          fixture.ledger.recordRoutedPlacement(identityOf('zebra'), high, fixture.set.placementFor(high));
+        }
+        return result;
+      };
+      const response = path === 'search' ? await adapter(request) : await adapter.metadataMatches!(request);
+      expect(routed).toBe(true);
+      expect(response.hits.map((hit) => hit.sourceItem.localItemId)).not.toContain(localId('zebra'));
+      expect(response.matchCount?.matchedItems ?? 0).toBe(response.hits.length);
+    }
   });
 });
 

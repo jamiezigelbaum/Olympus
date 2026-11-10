@@ -6,7 +6,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import { offThreadReadsAvailable, readOnPool, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { offThreadReadsAvailable, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -2890,6 +2890,8 @@ export class LocalConnectorStore {
       this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
+      // The read pool's connections to this file go with the store.
+      if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     }
   }
@@ -11911,8 +11913,9 @@ export class LocalConnectorStore {
    * At `deadlineAtMs` a query still waiting or running on the pool is given
    * up and this rejects with OffThreadReadBusyError, which the router reports
    * as a lane timeout. It never falls back to reading on this thread: that
-   * fallback is the freeze this exists to end. Only a store the pool cannot
-   * read at all (an in-memory store, no Bun Worker) is searched here.
+   * fallback is the freeze this exists to end. A thread that cannot start
+   * right now makes the lane busy too. Only a store the pool never reads (an
+   * in-memory store, a runtime without Bun's Worker) is searched here.
    */
   async searchItemsDetailedOffThread(
     query: string,
@@ -11922,13 +11925,36 @@ export class LocalConnectorStore {
     ftsOptions: ConnectorStoreKeywordFtsOptions = {},
     pool: { deadlineAtMs?: number } = {},
   ): Promise<ConnectorStoreKeywordSearch> {
-    if (!offThreadReadsAvailable(this.dbPath)) return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
+    if (!offThreadReadsSupported(this.dbPath)) return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
     const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
     let step = steps.next();
     while (!step.done) {
       step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
     }
     return step.value;
+  }
+
+  /**
+   * Search rows that this store still serves, by the current tier ledger and
+   * child visibility: the same filter the search applied, applied again.
+   * A keyword lane's reads yield to the event loop (they run on the read
+   * pool), and a tier move or a parent being hidden can land between the
+   * search's own filter and the moment the lane emits its hits. The adapter
+   * calls this after its last read, so the filter at emit time decides
+   * (#1079). A row with a chunk or a content match is checked at the content
+   * layer, as the search did.
+   */
+  stillVisibleSearchRows<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): T[] {
+    return this.tierVisibleRows(
+      rows,
+      (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...(row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}),
+      }),
+      (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
+    );
   }
 
   /** Drives a read generator on this store's own connection. */
@@ -13403,9 +13429,9 @@ export function createConnectorStoreCorpusAdapter(
     }
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
-      const keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+      const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
         await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
-        options.localKeywordFallback, {}, request.deadlineAtMs);
+        options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
       const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
@@ -13572,13 +13598,12 @@ export function createConnectorStoreCorpusAdapter(
     const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
-    const keywordLane = await relaxEmptyLocalKeywordLane(
+    const readKeywordLane = await relaxEmptyLocalKeywordLane(
       store, request.query, maxResults, options.accountScope, filters,
       await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs),
       options.localKeywordFallback, ftsOptions, request.deadlineAtMs,
     );
-    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
-    let semanticOnly = 0;
+    const semanticRows: ConnectorStoreSearchRow[] = [];
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
     // it would have matched is unknown, and the response says so.
@@ -13597,12 +13622,16 @@ export function createConnectorStoreCorpusAdapter(
         );
         if (lane.skippedReason !== undefined) incomplete = true;
         for (const row of lane.rows) {
-          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
-          rows.push(row);
-          semanticOnly += 1;
+          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
+          semanticRows.push(row);
         }
       }
     }
+    // Checked again after the last read, right before the hits and counts go out.
+    const keywordLane = revalidateKeywordLane(store, readKeywordLane);
+    const visibleSemanticRows = store.stillVisibleSearchRows(semanticRows);
+    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
+    const semanticOnly = visibleSemanticRows.length;
     return {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
@@ -13759,7 +13788,7 @@ async function hybridConnectorStoreSearch(
     filters,
     request.deadlineAtMs,
   );
-  const scoredVectorRows = vectorLane.rows;
+  let scoredVectorRows = vectorLane.rows;
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
   // hits stand on their own lexical merit (live calibration 2026-07-25:
@@ -13768,7 +13797,7 @@ async function hybridConnectorStoreSearch(
   // questions the bar exists for).
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  const vectorRows = gateArmed
+  let vectorRows = gateArmed
     ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
@@ -13784,6 +13813,10 @@ async function hybridConnectorStoreSearch(
     }};
   }
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
+  keywordLane = revalidateKeywordLane(store, keywordLane);
+  scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
+  vectorRows = store.stillVisibleSearchRows(vectorRows);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
@@ -14002,6 +14035,29 @@ async function connectorStoreKeywordLaneRows(
     },
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
+  };
+}
+
+/**
+ * A keyword lane with every row this store no longer serves taken out, and
+ * its counts recounted (stillVisibleSearchRows). Unchanged when every row is
+ * still served.
+ */
+function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreKeywordLane): ConnectorStoreKeywordLane {
+  const allRows = store.stillVisibleSearchRows(lane.allRows);
+  if (allRows.length === lane.allRows.length) return lane;
+  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+  return {
+    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
+    allRows,
+    matchedItemIds: served,
+    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    matchCount: {
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      saturated: lane.matchCount.saturated,
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+    },
   };
 }
 
