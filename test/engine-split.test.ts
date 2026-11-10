@@ -766,6 +766,19 @@ describe('state the front shows from the snapshot', () => {
       await front.client.post({ kind: 'archive_changed' });
       expect(front.status()).toMatchObject({ stale: true });
       publisher.stop();
+      // The other way round: the background that answered restarts, and its
+      // successor publishes before any command answers. Its fresh snapshots are current.
+      await clock.advance(2_000);
+      const successor = startEngineStatusPublisher({
+        path: engineStatusSnapshotPath(env), instanceId: 'background-3', now: clock.date,
+        setInterval: clock.setInterval, clearInterval: (timer) => clock.clearInterval(timer as never),
+        collect: () => ({ scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
+      });
+      await clock.advance(1_000);
+      expect(front.status()).toMatchObject({ stale: false, snapshot: { instance_id: 'background-3' } });
+      await clock.advance(3_000);
+      expect(front.status()).toMatchObject({ stale: false });
+      successor.stop();
     } finally {
       front.stop();
     }

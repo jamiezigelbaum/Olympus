@@ -118,20 +118,24 @@ export function createEngineFront(input: {
   let relay: OwnerBusyRelay | undefined;
   // The background instance that last answered a command: a snapshot another
   // instance wrote is not about the background running now.
-  let answering: string | undefined;
+  // A fresh snapshot written after that answer by another instance is from
+  // its successor (the background restarted): it becomes the instance now.
+  let answering: { instance: string; at: number } | undefined;
   const client = new EngineCommandClient({
     fetch: input.fetch ?? createUnixSocketFetch(input.socketPath),
     authToken: input.authToken,
-    onInstance: (instanceId) => { answering = instanceId; relay?.observeInstance(instanceId); },
+    onInstance: (instanceId) => { answering = { instance: instanceId, at: now() }; relay?.observeInstance(instanceId); },
   });
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
   let cached: { at: number; read: EngineStatusRead | undefined } | undefined;
-  const judged = (read: EngineStatusRead, age: number): EngineStatusRead => ({
-    ...read,
-    age_ms: age,
-    stale: age > ENGINE_STATUS_STALE_MS || (answering !== undefined && answering !== read.snapshot.instance_id),
-  });
+  const judged = (read: EngineStatusRead, age: number): EngineStatusRead => {
+    const old = age > ENGINE_STATUS_STALE_MS;
+    if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
+      answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
+    }
+    return { ...read, age_ms: age, stale: old || (answering !== undefined && answering.instance !== read.snapshot.instance_id) };
+  };
   const status = (): EngineStatusRead | undefined => {
     const at = now();
     if (cached && at - cached.at < 1_000) {
