@@ -51,6 +51,15 @@ export const ENGINE_FORWARDED_ROUTES = {
   storage_registry: ['/v1/cli/pairing-placement', '/v1/cli/pairing-account'],
   capture: ['/dashboard/messaging/start', '/dashboard/messaging/respond', '/dashboard/messaging/cancel', '/dashboard/messaging/scope'],
   embed_chunks: ['/v1/source/index/embed'],
+  // The background runs source watches' passes and owns their store.
+  source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
+  // The extraction queue's writes, under the generic path or a family's alias.
+  extraction_queue: [
+    '/v1/source/index/files/plan', '/v1/source/index/files/transcribe', '/v1/source/index/files/recycle-leases',
+    '/v1/source/index/files/janitor-requeue', '/v1/source/index/files/extract-pdfs', '/v1/source/index/files/extract',
+    '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/content/recycle-leases',
+    '/v1/source/index/dropbox/content/janitor-requeue', '/v1/source/index/dropbox/content/extract', '/v1/source/index/dropbox/transcribe',
+  ],
 } as const;
 export type EngineForwardedKind = keyof typeof ENGINE_FORWARDED_ROUTES;
 
@@ -203,6 +212,8 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'storage_registry':
     case 'capture':
     case 'embed_chunks':
+    case 'source_watch':
+    case 'extraction_queue':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');

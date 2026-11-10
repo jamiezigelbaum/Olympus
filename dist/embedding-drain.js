@@ -78814,12 +78814,6 @@ class OwnerBusyRelay {
 // src/workers/engine-split/snapshot.ts
 init_atomic_file();
 
-// src/workers/engine-split/runtime.ts
-var FRONT_REFUSED_POSTS = new Set([
-  "/source/watch/create",
-  "/source/watch/cancel"
-]);
-
 // src/workers/engine-split/front-history.ts
 init_source_dashboard();
 

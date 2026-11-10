@@ -38,7 +38,6 @@ import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-
 import {
   createEngineFrontRoutes,
   createFrontGate,
-  engineFrontRefusal,
   tierCommandOnlyReads,
   waitForEngineBackground,
   waitForProcessExit,
@@ -597,19 +596,37 @@ describe('the front writes nothing the background owns', () => {
     expect(() => parseEngineCommandEnvelope({ id: 'command-0010', command: { kind: 'dashboard_samples', samples: [{ ...sample, title: 'secret' }] } })).toThrow('count samples');
   });
 
-  test('owner actions without a command yet are refused in the front, everything else passes', () => {
-    for (const path of ['/v1/source/watch/create', '/v1/source/index/files/extract', '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/transcribe']) {
-      expect(engineFrontRefusal(new Request(`http://127.0.0.1${path}`, { method: 'POST' }))?.status, path).toBe(503);
+  test('source watches and the extraction queue are forwarded to the background, not refused', async () => {
+    const sent: EngineCommand[] = [];
+    const routes = createEngineFrontRoutes({
+      client: { send: async (command) => { sent.push(command); return { id: 'c', state: 'done', instance_id: 'b', result: { status: 200, headers: {}, body: JSON.stringify({ ran: command.kind }) } }; } },
+      gate: createFrontGate(),
+      restartFront: () => {},
+    });
+    const forwarded = {
+      source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
+      extraction_queue: [
+        '/v1/source/index/files/plan', '/v1/source/index/files/transcribe', '/v1/source/index/files/recycle-leases',
+        '/v1/source/index/files/janitor-requeue', '/v1/source/index/files/extract-pdfs', '/v1/source/index/files/extract',
+        '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/content/recycle-leases',
+        '/v1/source/index/dropbox/content/janitor-requeue', '/v1/source/index/dropbox/content/extract', '/v1/source/index/dropbox/transcribe',
+      ],
+    } as const;
+    for (const [kind, paths] of Object.entries(forwarded)) {
+      for (const path of paths) {
+        const response = await routes(new Request(`http://127.0.0.1${path}`, { method: 'POST', body: '{}' }));
+        expect(response?.status, path).toBe(200);
+        expect(await response!.json(), path).toEqual({ ran: kind });
+        expect(sent.at(-1), path).toMatchObject({ kind, request: { path } });
+      }
     }
-    // The forwarded owner actions are no longer refused: they run in the background.
-    for (const path of ['/dashboard/delete-source-data', '/v1/cli/tier', '/v1/source/index/embed', '/dashboard/messaging/start']) {
-      expect(engineFrontRefusal(new Request(`http://127.0.0.1${path}`, { method: 'POST' })), path).toBeUndefined();
+    // Each kind carries only its own routes.
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0101', command: { kind: 'source_watch', request: { path: '/v1/source/index/files/extract', headers: {}, body: '{}' } } })).toThrow();
+    expect(() => parseEngineCommandEnvelope({ id: 'command-0102', command: { kind: 'extraction_queue', request: { path: '/v1/source/watch/create', headers: {}, body: '{}' } } })).toThrow();
+    // Reads of the same families stay in the front.
+    for (const path of ['/v1/source/watches', '/v1/source/index/files/status']) {
+      expect(routes(new Request(`http://127.0.0.1${path}`, { method: 'POST', body: '{}' })), path).toBeUndefined();
     }
-    expect(engineFrontRefusal(new Request('http://127.0.0.1/dashboard/sync-now', { method: 'POST' }))).toBeUndefined();
-    expect(engineFrontRefusal(new Request('http://127.0.0.1/dashboard/messaging/status', { method: 'POST' }))).toBeUndefined();
-    expect(engineFrontRefusal(new Request('http://127.0.0.1/v1/cli/tier'))).toBeUndefined();
-    expect(engineFrontRefusal(new Request('http://127.0.0.1/v1/source/index/files/status', { method: 'POST' }))).toBeUndefined();
-    expect(engineFrontRefusal(new Request('http://127.0.0.1/v1/source/watches', { method: 'POST' }))).toBeUndefined();
   });
 });
 

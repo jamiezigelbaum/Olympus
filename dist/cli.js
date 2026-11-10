@@ -199432,7 +199432,9 @@ function parseEngineCommandEnvelope(value2) {
     case "tier_override":
     case "storage_registry":
     case "capture":
-    case "embed_chunks": {
+    case "embed_chunks":
+    case "source_watch":
+    case "extraction_queue": {
       const frontPid = command.frontPid;
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
@@ -199627,7 +199629,21 @@ var init_commands = __esm(() => {
     tier_override: ["/v1/cli/tier"],
     storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
     capture: ["/dashboard/messaging/start", "/dashboard/messaging/respond", "/dashboard/messaging/cancel", "/dashboard/messaging/scope"],
-    embed_chunks: ["/v1/source/index/embed"]
+    embed_chunks: ["/v1/source/index/embed"],
+    source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
+    extraction_queue: [
+      "/v1/source/index/files/plan",
+      "/v1/source/index/files/transcribe",
+      "/v1/source/index/files/recycle-leases",
+      "/v1/source/index/files/janitor-requeue",
+      "/v1/source/index/files/extract-pdfs",
+      "/v1/source/index/files/extract",
+      "/v1/source/index/dropbox/content/plan",
+      "/v1/source/index/dropbox/content/recycle-leases",
+      "/v1/source/index/dropbox/content/janitor-requeue",
+      "/v1/source/index/dropbox/content/extract",
+      "/v1/source/index/dropbox/transcribe"
+    ]
   };
   ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
   EngineCommandError = class EngineCommandError extends Error {
@@ -199953,17 +199969,6 @@ function createEngineFront(input) {
     relay?.stop();
   } };
 }
-function engineFrontRefusal(request) {
-  if (request.method !== "POST")
-    return;
-  const path = new URL(request.url).pathname.replace(/^\/v1(?=\/)/, "").replace(/\/$/, "");
-  if (!FRONT_REFUSED_POSTS.has(path) && !FRONT_REFUSED_EXTRACTION.test(path))
-    return;
-  return Response.json({
-    error: ENGINE_FRONT_REFUSAL_CODE,
-    message: "This action is not available while Olympus runs its engine split (worker.engineSplit) yet. Turn the switch off to use it."
-  }, { status: 503 });
-}
 function restartingResponse() {
   return Response.json({ error: { code: "worker_restarting", message: "Olympus is restarting; try again in a moment." } }, { status: 503 });
 }
@@ -200025,7 +200030,7 @@ function createEngineFrontRoutes(input) {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? 120000 });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
     } catch (error2) {
       return Response.json({ error: { code: "engine_background_unavailable", message: error2 instanceof Error ? error2.message : "The background engine is not answering." } }, { status: 503 });
     }
@@ -200086,7 +200091,6 @@ async function waitForProcessExit(pid, options = {}) {
   }
   return true;
 }
-var FRONT_REFUSED_POSTS, FRONT_REFUSED_EXTRACTION, ENGINE_FRONT_REFUSAL_CODE = "not_available_in_split_mode";
 var init_runtime4 = __esm(() => {
   init_engine_split();
   init_olympus_layout();
@@ -200095,11 +200099,6 @@ var init_runtime4 = __esm(() => {
   init_client3();
   init_commands();
   init_snapshot();
-  FRONT_REFUSED_POSTS = new Set([
-    "/source/watch/create",
-    "/source/watch/cancel"
-  ]);
-  FRONT_REFUSED_EXTRACTION = /^\/source\/index\/(?:files\/(?:plan|transcribe|recycle-leases|janitor-requeue|extract-pdfs|extract)|dropbox\/(?:content\/(?:plan|recycle-leases|janitor-requeue|extract)|transcribe))$/;
 });
 
 // src/workers/engine-split/front-state.ts
@@ -226697,9 +226696,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     })), withWorkerBearerAuth(withEngineBriefRoute2(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker2 }), !!socketPath)
   };
   if (engineFront) {
-    const serveFront = serverOptions.fetch;
-    const gated = frontGate.wrap(serveFront);
-    serverOptions.fetch = (request, server2) => engineFrontRefusal(request) ?? gated(request, server2);
+    serverOptions.fetch = frontGate.wrap(serverOptions.fetch);
   }
   await localFilesInitialCleanup;
   const startServer = () => socketPath ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server2) {
@@ -226959,6 +226956,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
         embed_chunks: ({ request }) => runForwarded(request),
+        source_watch: ({ request }) => runForwarded(request),
+        extraction_queue: ({ request }) => runForwarded(request),
         judge_boost: () => ({ applied: false, reason: "matched_first_not_in_build" })
       }
     });

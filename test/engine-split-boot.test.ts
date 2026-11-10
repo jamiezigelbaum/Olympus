@@ -72,10 +72,12 @@ describe('the engine split boots as two processes', () => {
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     await health.body?.cancel();
-    // An owner action with no command yet is refused in the front.
-    const refused = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
-    expect(refused.status).toBe(503);
-    await refused.body?.cancel();
+    // Source watches are the background's: a create is answered by its route, not refused.
+    const watch = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
+    expect(watch.status).not.toBe(503);
+    const answered = JSON.stringify(await watch.json());
+    expect(answered).not.toContain('not_available_in_split_mode');
+    expect(answered).not.toContain('engine_background_');
     // A forwarded one passes the front's authorization first, then the background's route answers it.
     const unauthorized = await workerFetch(`http://127.0.0.1:${port}/v1/cli/tier`, { method: 'POST', body: '{}' });
     expect(unauthorized.status).toBe(401);

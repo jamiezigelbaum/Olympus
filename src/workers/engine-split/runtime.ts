@@ -141,32 +141,6 @@ export function createEngineFront(input: {
   return { client, ownerBusy: relay, status, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
-/**
- * Owner actions that still have no command in the split (source watch
- * create and cancel, the extraction queue routes): the front refuses them
- * plainly instead of writing from the front.
- */
-const FRONT_REFUSED_POSTS = new Set([
-  // Source watches are the background's (it runs their passes).
-  '/source/watch/create',
-  '/source/watch/cancel',
-]);
-
-/** Extraction queue writes, under the generic path or a family's alias. The background owns the queue. */
-const FRONT_REFUSED_EXTRACTION = /^\/source\/index\/(?:files\/(?:plan|transcribe|recycle-leases|janitor-requeue|extract-pdfs|extract)|dropbox\/(?:content\/(?:plan|recycle-leases|janitor-requeue|extract)|transcribe))$/;
-
-export const ENGINE_FRONT_REFUSAL_CODE = 'not_available_in_split_mode';
-
-export function engineFrontRefusal(request: Request): Response | undefined {
-  if (request.method !== 'POST') return undefined;
-  const path = new URL(request.url).pathname.replace(/^\/v1(?=\/)/, '').replace(/\/$/, '');
-  if (!FRONT_REFUSED_POSTS.has(path) && !FRONT_REFUSED_EXTRACTION.test(path)) return undefined;
-  return Response.json({
-    error: ENGINE_FRONT_REFUSAL_CODE,
-    message: 'This action is not available while Olympus runs its engine split (worker.engineSplit) yet. Turn the switch off to use it.',
-  }, { status: 503 });
-}
-
 function restartingResponse(): Response {
   return Response.json({ error: { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' } }, { status: 503 });
 }
@@ -267,7 +241,8 @@ export function createEngineFrontRoutes(input: {
     try {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
-        { timeoutMs: input.timeoutMs ?? 120_000 },
+        // Extraction and embedding batches can run for minutes, as they did in the one process.
+        { timeoutMs: input.timeoutMs ?? (kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
       );
     } catch (error) {
       return Response.json({ error: { code: 'engine_background_unavailable', message: error instanceof Error ? error.message : 'The background engine is not answering.' } }, { status: 503 });

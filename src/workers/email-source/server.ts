@@ -549,7 +549,7 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
-import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, engineFrontRefusal, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineBackgroundSocketFromEnv, startEngineBackgroundServer, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
@@ -7323,12 +7323,8 @@ export async function main(): Promise<void> {
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
   if (engineFront) {
-    // Owner actions that have no command yet are refused, not written from the
-    // front; every other request passes the read gate.
-    const serveFront = serverOptions.fetch;
-    const gated = frontGate!.wrap(serveFront);
-    serverOptions.fetch = ((request: Request, server: Parameters<typeof serveFront>[1]) =>
-      engineFrontRefusal(request) ?? gated(request, server)) as typeof serveFront;
+    // Every request passes the read gate a source-data delete closes.
+    serverOptions.fetch = frontGate!.wrap(serverOptions.fetch) as typeof serverOptions.fetch;
   }
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
@@ -7588,6 +7584,8 @@ export async function main(): Promise<void> {
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
         embed_chunks: ({ request }) => runForwarded(request),
+        source_watch: ({ request }) => runForwarded(request),
+        extraction_queue: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         judge_boost: () => ({ applied: false, reason: 'matched_first_not_in_build' }),
       },
