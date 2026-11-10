@@ -703,8 +703,17 @@ revoking a route's last key stops its listener.
 ```bash
 olympus doctor              # diagnoses anything unhealthy, with fix-it hints
 olympus data export --output ~/olympus-export    # your data, out (secrets excluded)
+olympus data backup --output /Volumes/T7/Backup --passphrase-stdin   # one encrypted backup file
+olympus data restore --input /Volumes/T7/Backup/olympus-backup-2026-11-10-0310.olympusbackup --passphrase-stdin
 olympus data delete --all   # complete removal: indexes, embeddings, configs, tokens
 ```
+
+A backup is one file, `olympus-backup-<date>-<time>.olympusbackup`. With a
+passphrase it is encrypted (scrypt and AES-256-GCM); without one, anyone with
+the file can read your Private and Secret items. Olympus can't recover a lost
+passphrase. Restore onto a fresh install with Olympus stopped, before you
+connect sources; afterwards you sign in to each source once. Settings › Back up
+and restore in the dashboard does the same, and can back up every night or week.
 
 Olympus owns seven directories, and `data delete --all` covers all of them:
 `~/.olympus`, `~/.config/olympus`, `~/.local/share/olympus`,

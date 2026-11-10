@@ -37,6 +37,7 @@ import {
   tierSnifferPathForStore,
 } from './workers/classification/tier-ledger-path.ts';
 import { resolveTierRulesPath } from './workers/classification/tier-rules.ts';
+import { resolvePrivacyProfilePath } from './workers/classification/privacy-profile.ts';
 import { resolveSourceIngestionExclusionsPath } from './workers/source-dispositions.ts';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from './core/sqlite-store.ts';
@@ -195,6 +196,7 @@ export function restoreOlympusData(options: { input: string; dryRun?: boolean } 
           break;
         }
         const to = artifact.ownerFile === 'tier_rules' ? resolveTierRulesPath({ env })
+          : artifact.ownerFile === 'privacy_profile' ? resolvePrivacyProfilePath({ env })
           : artifact.ownerFile === 'ingestion_exclusions' ? resolveSourceIngestionExclusionsPath(env)
             : undefined;
         if (!to) throw new OperationError('invalid_params', `The backup names an unknown settings file: ${from}.`);

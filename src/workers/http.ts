@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { DASHBOARD_BACKUP_PATHS } from './dashboard/backup-paths.ts';
 import { dashboardSessionMarker } from './dashboard/session-marker.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
@@ -683,6 +684,7 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request)
+    || (request.method === 'POST' && (DASHBOARD_BACKUP_PATHS as readonly string[]).includes(new URL(request.url).pathname))
     || isDashboardSelfUpdateRoute(request)
     || isDashboardPrivacyItemRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/engine/go-easy', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable', '/dashboard/settings/proposal/apply', '/dashboard/settings/proposal/discard'].includes(new URL(request.url).pathname));

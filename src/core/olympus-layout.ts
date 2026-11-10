@@ -77,6 +77,9 @@ export const SHARED_DATA_FILES = {
   // What each AI app received (core/app-release-log.ts), beside them too.
   'app-release-log': 'app-release-log.sqlite',
   'tier-migration': 'tier-migration',
+  // Private, short-lived: an export being packed into a backup, or a backup
+  // being opened for a restore (data-backup.ts). Removed when each finishes.
+  'backup-staging': 'backup-staging',
   // One person across sources (#1076): Private, on this computer only.
   'people-index': 'people-index.sqlite',
   models: 'models',
