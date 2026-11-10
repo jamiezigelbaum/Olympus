@@ -448,6 +448,19 @@ describe('owner actions the background runs, forwarded from the front', () => {
   });
 });
 
+describe('the private-answer queue has one consumer', () => {
+  test('only the front (or the single worker) starts the queue and the unchecked retry', () => {
+    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    expect(server).toMatch(/const frontOwnsPrivateAnswerQueue = engineRole !== 'background';/);
+    const starts = server.match(/^.*localPrivateAnswers\.start\(\);.*$/gm) ?? [];
+    expect(starts.length).toBeGreaterThan(0);
+    for (const line of starts) expect(line).toContain('if (frontOwnsPrivateAnswerQueue) localPrivateAnswers.start();');
+    const retries = server.match(/^.*retryUnchecked\(\).*$/gm) ?? [];
+    expect(retries.length).toBe(1);
+    expect(server).toMatch(/const uncheckedRetry = frontOwnsPrivateAnswerQueue \? setInterval\(/);
+  });
+});
+
 describe('Make Private from the front', () => {
   test('the recorded item goes to the background with its identity; a refusal marks nothing', async () => {
     const seen: EngineCommand[] = [];

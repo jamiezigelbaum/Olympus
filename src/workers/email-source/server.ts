@@ -6520,6 +6520,11 @@ export async function main(): Promise<void> {
   // revoking process could not clean up, are dropped on open and on every
   // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  // The waiting questions belong to the process that serves the panel and the
+  // agents (the front, or the single worker). A background in the split runs
+  // no queue consumer: it has none of the panel's claims, and two consumers
+  // could answer one question twice.
+  const frontOwnsPrivateAnswerQueue = engineRole !== 'background';
   {
     // Every request an AI app or agent makes, recorded where its result leaves (core/app-release-capture.ts).
     const { createAppsReceived } = await import('../apps-received.ts');
@@ -6824,7 +6829,7 @@ export async function main(): Promise<void> {
         },
       } : {}),
     });
-    localPrivateAnswers.start();
+    if (frontOwnsPrivateAnswerQueue) localPrivateAnswers.start();
   } else {
     const { createLocalPrivateAnswers } = await import('./local-private-answers.ts');
     localPrivateAnswers = createLocalPrivateAnswers({
@@ -6835,7 +6840,7 @@ export async function main(): Promise<void> {
       eligible: async items => items.map(() => false),
       anonymousAsk: localAnonymousAsk,
     });
-    localPrivateAnswers.start();
+    if (frontOwnsPrivateAnswerQueue) localPrivateAnswers.start();
   }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
@@ -7003,10 +7008,10 @@ export async function main(): Promise<void> {
     // own answer is in flight.
     interactiveBusy: () => answerActivity.interactiveInFlight > 0,
   });
-  const uncheckedRetry = setInterval(() => {
+  const uncheckedRetry = frontOwnsPrivateAnswerQueue ? setInterval(() => {
     void remotePrivateParts.retryUnchecked().catch(() => undefined);
-  }, 10 * 60_000);
-  uncheckedRetry.unref?.();
+  }, 10 * 60_000) : undefined;
+  uncheckedRetry?.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     // A demo sign-in grant gets only the read-only tools, on /mcp and OpenAPI alike.
@@ -7792,7 +7797,7 @@ export async function main(): Promise<void> {
     stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     // The re-check timer, any pass or settle in flight, then the store.
-    clearInterval(uncheckedRetry);
+    if (uncheckedRetry) clearInterval(uncheckedRetry);
     remotePrivateParts.close();
     localPrivateAnswers?.close();
     waitingStoreClosed = true;
