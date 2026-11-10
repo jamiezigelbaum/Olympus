@@ -57,7 +57,8 @@ function server() {
       if (body.n_predict === 0) return Response.json({});
       calls++;
       if (mode === 'error') return new Response(TEXT, { status: 500 });
-      if (mode === 'slow') { await Bun.sleep(100); }
+      // Never answers: the replay's own deadline must end the call, whatever the machine's load.
+      if (mode === 'slow') await new Promise<void>((resolveAbort) => { req.signal.addEventListener('abort', () => resolveAbort(), { once: true }); });
       return Response.json({ completion_probabilities: [{ top_logprobs: mode === 'parse' ? [{ token: 'p', logprob: 0 }] : [
         { token: 'personal', logprob: Math.log(mode === 'coverage' ? 0.1 : 0.8) },
         { token: 'private', logprob: Math.log(0.2) },
