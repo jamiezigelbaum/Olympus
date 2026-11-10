@@ -2841,6 +2841,8 @@ var init_public_surface = __esm(() => {
     "source extract-pdfs",
     "data export",
     "data verify",
+    "data backup",
+    "data restore",
     "data delete",
     "tier set",
     "tier explain",
@@ -28689,6 +28691,12 @@ function snifferReasonCode(verdict) {
 function cachedSnifferVerdictHolds(verdict) {
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
 }
+function schemaReference(text2, verb, field) {
+  if (SCHEMA_ONLY_FIELD.test(field[0]))
+    return true;
+  const tail = text2.slice(field.index + field[0].length);
+  return SCHEMA_VALUE.test(tail) || ASSIGN_VERBS.has(verb) && /^\s+to\b/.test(tail);
+}
 function hasClassifierInstruction(text2) {
   const words2 = [...text2.matchAll(/[a-z][a-z0-9_]*/g)];
   for (let i = 0;i < words2.length; i++) {
@@ -28700,24 +28708,27 @@ function hasClassifierInstruction(text2) {
         continue;
       const left = Math.min(verb.index, words2[j].index);
       const right = Math.max(verb.index, words2[j].index);
-      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)))
+      if (right - left <= 100 && !/[.!?;]/.test(text2.slice(left, right)) && schemaReference(text2, verb[0], words2[j]))
         return true;
     }
+    let outputShaped = !SETTING_VERBS.has(verb[0]);
     for (let j = i + 1;j < Math.min(words2.length, i + 13); j++) {
       const object = words2[j];
       if (object.index - verb.index > 100 || /[.!?;]/.test(text2.slice(verb.index, object.index)))
         break;
       if (TIER_WORD.test(object[0])) {
         const tail = text2.slice(object.index + object[0].length);
-        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
+        if (outputShaped && /^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail) || /^\s+(?:tier|verdict|regardless)\b/.test(tail))
           return true;
         break;
       }
       if (!OBJECT_GLUE.has(object[0]))
         break;
+      if (object[0] === "with" || object[0] === "as")
+        outputShaped = true;
     }
   }
-  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text2);
+  return /\byour verdict\b(?:\s+(?:for|on)\s+[^.!?;:]{0,40})?\s*(?:[:=]|\bis\b|\bshould be\b|\bmust be\b)\s*["'`]?(?:personal|private|public)\b/.test(text2);
 }
 function normalizeSnifferMaterial(material) {
   return normalizeSnifferSurface(canonicalizeScreeningText(material));
@@ -28928,7 +28939,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -28957,16 +28968,23 @@ var init_sniffer = __esm(() => {
       this.reason = reason;
     }
   };
+  ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+  TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+  TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
   INJECTION_RULES = [
-    ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
-    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
-    ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-    ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
+    ["role_boundary", ROLE_TAG],
+    ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+    ["forged_verdict", new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+    ["cross_item_steering", new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)]
   ];
   INSTRUCTION_VERBS = new Set(["reply", "answer", "respond", "output", "return", "mark", "set", "label", "classify", "treat", "tag", "rate", "assign", "choose", "use", "emit", "produce", "make"]);
   VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
   TIER_WORD = /^(?:personal|public|private)$/;
   OBJECT_GLUE = new Set(["only", "with", "as", "to", "be", "is", "the", "a", "an", "this", "that", "it", "these", "them", "every", "each", "all", "item", "items", "file", "files", "document", "documents", "message", "messages", "entry", "entries", "list", "batch", "not"]);
+  SCHEMA_ONLY_FIELD = /^(?:ownrecord|privatekind)$/;
+  SCHEMA_VALUE = /^["'`]?\s*(?:[:=]|\b(?:of|as|at|is|be|to)\b)?\s*["'`({[]*\s*(?:(?:0?[.,]\d+|1(?:[.,]0+)?|0)(?![\d.,]*\d)|(?:personal|private|public|ordinary|true|false|none|null)\b)/;
+  ASSIGN_VERBS = new Set(["set", "assign"]);
+  SETTING_VERBS = new Set(["set", "make", "use", "choose"]);
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy classifier. Judge the ONE item independently.",
     "PERSONAL means the owner permits their trusted cloud assistant to read it.",
@@ -101869,9 +101887,8 @@ function exportOlympusData(options) {
         skipped: skipped2,
         artifacts
       });
-      if (artifacts.length === before)
-        return;
-      artifacts[before].storeIndex = storeIndex;
+      if (artifacts.length > before)
+        artifacts[before].storeIndex = storeIndex;
       for (const [sidecar, path, storeId] of [
         ["tier_ledger", tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
         ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
@@ -103155,6 +103172,16 @@ function envForHome(homeDir) {
     XDG_DATA_HOME: join92(homeDir, ".local", "share"),
     XDG_STATE_HOME: join92(homeDir, ".local", "state")
   };
+}
+function lifecycleStoreLayouts(sourceId, context2 = {}) {
+  const env = envForContext(context2);
+  return ["legacy", "folder"].map((layout) => {
+    try {
+      return accountFiles({ source_id: sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout }, { env, ...context2.homeDir ? { homeDir: context2.homeDir } : {} }).stores;
+    } catch {
+      return [];
+    }
+  });
 }
 function lifecycleEnv(context2) {
   return envForContext(context2);
@@ -105006,7 +105033,7 @@ function createNativeProcessService(options) {
         return;
       }
       const cleanup = stopChild(lifetime, child2);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null ? `Olympus ${options.label} is restarting, as it asked to.` : signal === "SIGTERM" || signal === null && code === 0 ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ""}; starting it again.` : `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then((result) => {
         if (result === "unconfirmed") {
           reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
@@ -124330,9 +124357,10 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/data-restore.ts
-import { copyFileSync as copyFileSync3, existsSync as existsSync84, mkdirSync as mkdirSync51, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
+import { closeSync as closeSync31, copyFileSync as copyFileSync3, existsSync as existsSync84, fsyncSync as fsyncSync9, mkdirSync as mkdirSync51, openSync as openSync30, readFileSync as readFileSync70, renameSync as renameSync18, rmSync as rmSync32, statSync as statSync37, chmodSync as chmodSync34 } from "node:fs";
 import { dirname as dirname87, join as join113, resolve as resolve22 } from "node:path";
 import { randomUUID as randomUUID29 } from "node:crypto";
+import { Database as Database24 } from "bun:sqlite";
 function restoreOlympusData(options) {
   const input = resolve22(options.input);
   verifyOlympusDataExport({ destination: input });
@@ -124361,9 +124389,11 @@ function restoreOlympusData(options) {
         return target;
     } else {
       const name = artifact.relativePath.split("/").pop();
-      const target = stores.find((path) => path.split("/").pop() === name);
-      if (target)
-        return target;
+      for (const layout of lifecycleStoreLayouts(artifact.sourceId, context2)) {
+        const index = layout.findIndex((path) => path.split("/").pop() === name);
+        if (index >= 0 && stores[index])
+          return stores[index];
+      }
     }
     throw new OperationError("invalid_params", `This backup holds a ${artifact.sourceId} store this version of Olympus does not keep (${artifact.relativePath}).`, "Restore with the Olympus version that made the backup, then update.");
   };
@@ -124407,12 +124437,24 @@ function restoreOlympusData(options) {
         throw new OperationError("invalid_params", `The backup holds a file this version of Olympus does not know: ${from}.`);
     }
   }
+  const ledgerSources = new Set(plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => entry.sourceId));
+  const unbound = plan.filter((entry) => entry.kind === "store" && !ledgerSources.has(entry.sourceId) && storeIsTierBound(join113(input, entry.from)));
+  if (unbound.length > 0) {
+    throw new OperationError("invalid_params", `This backup holds ${[...new Set(unbound.map((entry) => entry.sourceId))].join(", ")} items that were judged into Private or Secret stores, but not the judgments themselves, so they could not be opened after a restore. Nothing was restored.`, "Make a new backup with this version of Olympus (olympus data export), then restore that one.");
+  }
   if (manifest2.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
-  const occupied = plan.filter((entry) => entry.kind !== "owner_settings" && existsSync84(entry.to) && statSync37(entry.to).size > 0);
-  if (occupied.length > 0) {
-    const sources = [...new Set(occupied.map((entry) => entry.sourceId))];
+  const holds2 = (path) => existsSync84(path) && statSync37(path).size > 0;
+  const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== "owner_settings").map((entry) => entry.sourceId))];
+  const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
+    store,
+    tierLedgerPathForStore(store),
+    tierSnifferPathForStore(store),
+    secretLocationsPathForStore(store)
+  ].some(holds2)));
+  if (occupiedSources.length > 0) {
+    const sources = occupiedSources;
     throw new OperationError("invalid_params", `This computer already holds Olympus data for ${sources.join(", ")}, so nothing was restored.`, "Restore onto a fresh install, or delete that data first with olympus data delete --source <id>.");
   }
   for (const entry of plan) {
@@ -124421,10 +124463,12 @@ function restoreOlympusData(options) {
   }
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === "store").map((entry) => entry.sourceId))];
   if (!options.dryRun) {
+    const ledgers = plan.filter((entry) => entry.kind === "judgments" && entry.to.endsWith(TIER_LEDGER_FILE_SUFFIX)).map((entry) => ({ sourceId: entry.sourceId, to: entry.to, id: TierLedger.readLedgerId(join113(input, entry.from)) }));
     for (const entry of plan) {
       if (entry.keptAs)
         copyPrivate(entry.to, entry.keptAs);
-      copyPrivate(join113(input, entry.from), entry.to);
+      const prepare = entry.kind === "store" ? (staged) => repointLedgerHint(staged, (id) => ledgers.find((ledger) => ledger.sourceId === entry.sourceId && ledger.id === id)?.to) : undefined;
+      copyPrivate(join113(input, entry.from), entry.to, prepare);
     }
   }
   return {
@@ -124438,12 +124482,19 @@ function restoreOlympusData(options) {
     notes
   };
 }
-function copyPrivate(from, to) {
+function copyPrivate(from, to, prepare) {
   mkdirSync51(dirname87(to), { recursive: true, mode: 448 });
   const staging = `${to}.${randomUUID29()}.restoring`;
   try {
     copyFileSync3(from, staging);
     chmodSync34(staging, 384);
+    prepare?.(staging);
+    const descriptor = openSync30(staging, "r");
+    try {
+      fsyncSync9(descriptor);
+    } finally {
+      closeSync31(descriptor);
+    }
     renameSync18(staging, to);
   } catch (error) {
     rmSync32(staging, { force: true });
@@ -124464,6 +124515,35 @@ function sourceSettingsTarget(artifact, context2) {
   }
   return target;
 }
+function storeIsTierBound(path) {
+  const db = new Database24(path, { readonly: true });
+  try {
+    const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
+    if (!table)
+      return false;
+    const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+    return Boolean(row?.cursor);
+  } finally {
+    db.close();
+  }
+}
+function repointLedgerHint(storePath, ledgerFor) {
+  if (!storeIsTierBound(storePath))
+    return;
+  const db = new Database24(storePath, { readwrite: true, create: false });
+  try {
+    const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+    const binding = JSON.parse(row.cursor);
+    if (typeof binding.ledgerId !== "string")
+      return;
+    const ledgerPath = ledgerFor(binding.ledgerId);
+    if (!ledgerPath || ledgerPath === binding.ledgerPath)
+      return;
+    db.query("UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?").run(JSON.stringify({ ...binding, ledgerPath }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+  } finally {
+    db.close();
+  }
+}
 var init_data_restore = __esm(() => {
   init_data_lifecycle();
   init_operation_error();
@@ -124472,11 +124552,14 @@ var init_data_restore = __esm(() => {
   init_tier_ledger_path();
   init_tier_rules();
   init_source_dispositions();
+  init_local_index();
+  init_tier_ledger();
+  init_tier_ledger_path();
 });
 
 // src/data-backup.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash80, createHmac as createHmac5, randomBytes as randomBytes19, randomUUID as randomUUID30, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { closeSync as closeSync31, existsSync as existsSync85, lstatSync as lstatSync43, mkdirSync as mkdirSync52, openSync as openSync30, readdirSync as readdirSync26, readSync as readSync12, renameSync as renameSync19, rmSync as rmSync33, statSync as statSync38, unlinkSync as unlinkSync4, writeSync as writeSync9, chmodSync as chmodSync35, fsyncSync as fsyncSync9 } from "node:fs";
+import { closeSync as closeSync32, existsSync as existsSync85, lstatSync as lstatSync43, mkdirSync as mkdirSync52, openSync as openSync31, readdirSync as readdirSync26, readSync as readSync12, renameSync as renameSync19, rmSync as rmSync33, statSync as statSync38, unlinkSync as unlinkSync4, writeSync as writeSync9, chmodSync as chmodSync35, fsyncSync as fsyncSync10 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename19, dirname as dirname88, join as join114, resolve as resolve23, sep as sep19 } from "node:path";
 function normalizePassphrase(passphrase) {
@@ -124692,7 +124775,7 @@ function notABackup(path) {
   return new OperationError("invalid_params", `${basename19(path)} is not an Olympus backup.`, "Choose a file whose name ends in .olympusbackup, or a folder made by olympus data export.");
 }
 function readBackupHeader(path) {
-  const fd2 = openSync30(path, "r");
+  const fd2 = openSync31(path, "r");
   try {
     const size = statSync38(path).size;
     const lead = readExactly(fd2, MAGIC.length + 4, 0);
@@ -124720,16 +124803,16 @@ function readBackupHeader(path) {
       throw new OperationError("invalid_params", "This backup is incomplete: it ends early.");
     return { header, headerBytes: Buffer.concat([lead, json]), bodyStart, size };
   } finally {
-    closeSync31(fd2);
+    closeSync32(fd2);
   }
 }
 function isBackupFile(path) {
   try {
-    const fd2 = openSync30(path, "r");
+    const fd2 = openSync31(path, "r");
     try {
       return readExactly(fd2, MAGIC.length, 0).equals(MAGIC);
     } finally {
-      closeSync31(fd2);
+      closeSync32(fd2);
     }
   } catch {
     return false;
@@ -124773,8 +124856,8 @@ class TarExtractor {
           data2 = data2.subarray(take);
         }
         if (this.file.left === 0) {
-          fsyncSync9(this.file.fd);
-          closeSync31(this.file.fd);
+          fsyncSync10(this.file.fd);
+          closeSync32(this.file.fd);
           this.skip = this.file.pad;
           this.file = undefined;
         }
@@ -124825,10 +124908,10 @@ class TarExtractor {
       if (type !== "0")
         throw this.bad();
       mkdirSync52(dirname88(path), { recursive: true, mode: 448 });
-      const fd2 = openSync30(path, "wx", 384);
+      const fd2 = openSync31(path, "wx", 384);
       this.file = { fd: fd2, left: size, pad: (512 - size % 512) % 512 };
       if (size === 0) {
-        closeSync31(fd2);
+        closeSync32(fd2);
         this.file = undefined;
       }
     }
@@ -124840,7 +124923,7 @@ class TarExtractor {
   abort() {
     if (this.file) {
       try {
-        closeSync31(this.file.fd);
+        closeSync32(this.file.fd);
       } catch {}
       this.file = undefined;
     }
@@ -124894,7 +124977,7 @@ function openBackupFile(options) {
       archiveError = error;
     }
   };
-  const fd2 = openSync30(options.file, "r");
+  const fd2 = openSync31(options.file, "r");
   try {
     const buffer = Buffer.alloc(CHUNK);
     for (let at = bodyStart;at < bodyEnd; ) {
@@ -124929,7 +125012,7 @@ function openBackupFile(options) {
     rmSync33(into, { recursive: true, force: true });
     throw error;
   } finally {
-    closeSync31(fd2);
+    closeSync32(fd2);
   }
 }
 function listBackups(folder) {
@@ -127462,7 +127545,7 @@ var exports_prefilter_train_offline = {};
 __export(exports_prefilter_train_offline, {
   prefilterTrainOfflineMain: () => prefilterTrainOfflineMain
 });
-import { closeSync as closeSync32, fsyncSync as fsyncSync10, openSync as openSync31, realpathSync as realpathSync20, rmSync as rmSync36, writeFileSync as writeFileSync20 } from "node:fs";
+import { closeSync as closeSync33, fsyncSync as fsyncSync11, openSync as openSync32, realpathSync as realpathSync20, rmSync as rmSync36, writeFileSync as writeFileSync20 } from "node:fs";
 import { dirname as dirname91, relative as relative16, resolve as resolve26, sep as sep20 } from "node:path";
 import { randomUUID as randomUUID32 } from "node:crypto";
 function prefilterTrainOfflineMain(args) {
@@ -127528,15 +127611,15 @@ function prefilterTrainOfflineMain(args) {
     if (scan.errors)
       throw new Error;
     if (saved) {
-      const fd2 = openSync31(output, "wx", 384);
+      const fd2 = openSync32(output, "wx", 384);
       try {
         writeFileSync20(fd2, JSON.stringify(saved));
-        fsyncSync10(fd2);
+        fsyncSync11(fd2);
       } catch (error) {
         rmSync36(output, { force: true });
         throw error;
       } finally {
-        closeSync32(fd2);
+        closeSync33(fd2);
       }
       report.outcome = "trained";
     }
@@ -149888,7 +149971,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 
 // src/workers/email-source/dashboard-messaging-service.ts
 import { spawn as spawn12 } from "node:child_process";
-import { closeSync as closeSync33, constants as constants17, fstatSync as fstatSync8, openSync as openSync32, readFileSync as readFileSync83 } from "node:fs";
+import { closeSync as closeSync34, constants as constants17, fstatSync as fstatSync8, openSync as openSync33, readFileSync as readFileSync83 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename20, join as join126 } from "node:path";
 function sourceOf(value2) {
@@ -149930,7 +150013,7 @@ function retainApprovedCaptureScope(source, env) {
 function readQr(path) {
   if (basename20(path) !== "qr.png")
     throw new Error("Invalid QR artifact.");
-  const fd2 = openSync32(path, constants17.O_RDONLY | (constants17.O_NOFOLLOW ?? 0));
+  const fd2 = openSync33(path, constants17.O_RDONLY | (constants17.O_NOFOLLOW ?? 0));
   try {
     const stat6 = fstatSync8(fd2);
     if (!stat6.isFile() || stat6.size > 1024 * 1024 || (stat6.mode & 63) !== 0 || typeof process.getuid === "function" && stat6.uid !== process.getuid())
@@ -149940,7 +150023,7 @@ function readQr(path) {
       throw new Error("Invalid QR artifact.");
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } finally {
-    closeSync33(fd2);
+    closeSync34(fd2);
   }
 }
 async function unlinkHelper(command, env) {
@@ -150020,6 +150103,7 @@ function createDashboardMessagingService(options) {
   const packageRoot = olympusPackageRoot();
   const available = new Map;
   const selecting = new Set;
+  const held = new Map;
   const initialGrants = new Map;
   const grantSnapshot = (source) => {
     const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
@@ -150150,17 +150234,31 @@ function createDashboardMessagingService(options) {
     available.set(source, { fingerprint: current2.fingerprint, chats });
     return { ok: true, state: "paired", chats, wholeAccount: rawScope === "*", chatScopes: selected, ...source === "whatsapp" ? { coverage: "contacts_and_joined_groups" } : {} };
   };
+  const withCaptureFact = (source, status) => {
+    if (status.state !== "failed" && status.state !== "cancelled")
+      return status;
+    try {
+      const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      return read.kind === "valid" && read.grant.source === source && read.grant.pairingPending ? { ...status, capturePaused: true } : status;
+    } catch {
+      return status;
+    }
+  };
   return {
     async handle(operation, record6) {
       const source = sourceOf(record6.source);
       if (operation === "start") {
         if (selecting.has(source))
           throw new Error("Finish choosing chats first.");
+        if (held.get(source))
+          throw new Error("Disconnect is running. Pair again after it finishes.");
         if (manager.busy(source))
           return manager.status(source);
         return options.withGrantMutation(async () => {
           if (manager.busy(source))
             throw new Error("Pairing is already running.");
+          if (held.get(source))
+            throw new Error("Disconnect is running. Pair again after it finishes.");
           grantSnapshot(source);
           const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
           const prior = readCaptureGrantFile(path);
@@ -150175,12 +150273,12 @@ function createDashboardMessagingService(options) {
       if (operation === "status") {
         const status = manager.status(source);
         if (status.state !== "idle")
-          return status;
+          return withCaptureFact(source, status);
         const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
         return read.kind === "valid" && read.grant.source === source && !read.grant.pairingPending ? { ok: true, state: "paired" } : status;
       }
       if (operation === "cancel")
-        return manager.cancel(source);
+        return withCaptureFact(source, manager.cancel(source));
       if (operation === "respond") {
         if (typeof record6.field !== "string" || typeof record6.value !== "string")
           throw new Error("Invalid response.");
@@ -150234,6 +150332,19 @@ function createDashboardMessagingService(options) {
       }
     },
     cancelAndWait: (source) => manager.cancelAndWait(source),
+    async withPairingHeld(source, operation) {
+      held.set(source, (held.get(source) ?? 0) + 1);
+      try {
+        await manager.cancelAndWait(source);
+        return await operation();
+      } finally {
+        const left = (held.get(source) ?? 1) - 1;
+        if (left > 0)
+          held.set(source, left);
+        else
+          held.delete(source);
+      }
+    },
     close: () => manager.close()
   };
 }
@@ -152157,7 +152268,48 @@ function mountDashboardController(options) {
     if (keys)
       keys.hidden = working || !firstRunCheckRequested;
   }
-  async function readFirstRunReadiness() {
+  function refreshAroundWalkthrough(template) {
+    const walkthrough = query("[data-first-run-sheet]");
+    if (!walkthrough)
+      return;
+    const active = activeElement();
+    const dirty = (region) => Array.from(region.querySelectorAll('input:not([type="hidden"]):not([data-source-search]),textarea,select')).some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
+    for (const region of queryAll("[id]")) {
+      if (!region.isConnected || !root.contains(region))
+        continue;
+      if (region.contains(walkthrough) || walkthrough.contains(region))
+        continue;
+      if (region.matches("[data-messaging-source]") || region.querySelector("[data-messaging-source]"))
+        continue;
+      if (active && region.contains(active) || region.querySelector("dialog[open]") || dirty(region))
+        continue;
+      const next = Array.from(template.content.querySelectorAll("[id]")).find((candidate) => candidate.id === region.id);
+      if (!next || next.querySelector("[data-first-run-sheet]"))
+        continue;
+      const openSheets = new Set(Array.from(region.querySelectorAll(".sheet.on")).map((sheet) => sheet.id).concat(region.matches(".sheet.on") ? [region.id] : []));
+      const open7 = new Set(Array.from(region.querySelectorAll("details[open]")).map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
+      const fresh2 = document.importNode(next, true);
+      region.replaceWith(fresh2);
+      fresh2.querySelectorAll("details").forEach((node) => {
+        if (open7.has(node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""))
+          node.open = true;
+      });
+      [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].filter((sheet) => sheet.classList.contains("sheet") && openSheets.has(sheet.id)).forEach((sheet) => setSheetOpen(sheet, true));
+      const wait = authorizationWait;
+      const waitingSheet = wait && [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].find((candidate) => candidate.id === wait.sheetId);
+      if (wait && waitingSheet)
+        say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
+      fresh2.querySelectorAll("script[data-dashboard-rerun]").forEach((inert) => {
+        const script2 = root.ownerDocument.createElement("script");
+        for (const attribute2 of Array.from(inert.attributes))
+          script2.setAttribute(attribute2.name, attribute2.value);
+        script2.text = inert.text;
+        inert.replaceWith(script2);
+      });
+    }
+    applyWriteCapability();
+  }
+  async function readFirstRunReadiness(refreshAround = false) {
     try {
       const page2 = await options.refresh();
       if (disposed || options.signal.aborted || !firstRunChoice)
@@ -152168,6 +152320,8 @@ function mountDashboardController(options) {
       applyWriteCapability();
       const template = document.createElement("template");
       template.innerHTML = page2.body;
+      if (refreshAround)
+        refreshAroundWalkthrough(template);
       const previousProgress = query("[data-private-model-progress]");
       const nextProgress = template.content.querySelector("[data-private-model-progress]");
       if (previousProgress) {
@@ -153043,9 +153197,11 @@ function mountDashboardController(options) {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
       return;
     if (firstRunChoice) {
+      const around = force || requested || redrawOwed;
+      redrawOwed = false;
       inFlight = true;
       try {
-        await readFirstRunReadiness();
+        await readFirstRunReadiness(around);
       } finally {
         inFlight = false;
       }
@@ -153319,8 +153475,9 @@ function mountDashboardController(options) {
       const cardCancel = card.querySelector('.actionrow [data-messaging-kind="cancel"]');
       if (cardCancel)
         cardCancel.hidden = ["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
+      const cancelledLead = body.capturePaused === true ? "Setup cancelled. Your chat choices were not changed, but capture of this account stays paused until pairing again succeeds" : "Setup cancelled. Capture permission was not changed";
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? "Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? "Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : body.capturePaused === true ? "Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? cancelledLead + ", and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? cancelledLead + ". Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : cancelledLead + ". If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : cancelledLead + ". If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -172752,6 +172909,10 @@ function createEmailSourceWorker(options = {}) {
     withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
     withGrantMutation: withDashboardGrantMutation
   }) : undefined;
+  const withMessagingPairingHeld = (record8, operation) => {
+    const source = record8.acknowledge !== true ? undefined : record8.source_id === "telegram.messages" ? "telegram" : record8.source_id === "whatsapp.personal.messages" ? "whatsapp" : undefined;
+    return source && dashboardMessaging ? dashboardMessaging.withPairingHeld(source, operation) : operation();
+  };
   const basePath = normalizeBasePath2(options.basePath ?? "/v1");
   return {
     close() {
@@ -173899,13 +174060,7 @@ function createEmailSourceWorker(options = {}) {
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/disconnect") {
           const disconnectRecord = await parseObjectBody(request);
-          if (disconnectRecord.acknowledge === true) {
-            if (disconnectRecord.source_id === "telegram.messages")
-              await dashboardMessaging?.cancelAndWait("telegram");
-            if (disconnectRecord.source_id === "whatsapp.personal.messages")
-              await dashboardMessaging?.cancelAndWait("whatsapp");
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(disconnectRecord, () => withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -174027,17 +174182,11 @@ function createEmailSourceWorker(options = {}) {
                 }
               });
             });
-          });
+          }));
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/delete-source-data") {
           const mutationRecord = await parseObjectBody(request);
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === "telegram.messages")
-              await dashboardMessaging?.cancelAndWait("telegram");
-            if (mutationRecord.source_id === "whatsapp.personal.messages")
-              await dashboardMessaging?.cancelAndWait("whatsapp");
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -174062,17 +174211,11 @@ function createEmailSourceWorker(options = {}) {
                 raw_runtime_secrets_exposed: false
               }
             });
-          });
+          }));
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/unpair") {
           const mutationRecord = await parseObjectBody(request);
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === "telegram.messages")
-              await dashboardMessaging?.cancelAndWait("telegram");
-            if (mutationRecord.source_id === "whatsapp.personal.messages")
-              await dashboardMessaging?.cancelAndWait("whatsapp");
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -174232,7 +174375,7 @@ function createEmailSourceWorker(options = {}) {
                 }
               });
             });
-          });
+          }));
         }
         if (request.method === "POST" && url2.pathname.startsWith("/dashboard/archive-import/")) {
           const archiveImports = sourceDashboard?.archiveImports;
@@ -197378,7 +197521,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database24 } from "bun:sqlite";
+import { Database as Database25 } from "bun:sqlite";
 import { existsSync as existsSync106 } from "node:fs";
 function unrefTimer(timer) {
   timer?.unref?.();
@@ -197569,7 +197712,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database24(ledgerPath, { readonly: true, create: false });
+      db = new Database25(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {
@@ -198859,6 +199002,12 @@ function createStandaloneRemoteAccessConfigWriter(options) {
       return { ok: false, status: 503, code: "restart_unavailable", message: "The setting was saved, but Olympus could not apply it yet. Try again in a moment." };
     return { ok: true };
   };
+}
+function createStandaloneRemoteAccessControl(options) {
+  const reason = options.unsupportedReason;
+  if (reason)
+    return { manual: () => reason };
+  return createDashboardRemoteAccessControl({ setEnabled: createStandaloneRemoteAccessConfigWriter(options) });
 }
 function createDashboardEngineRestart(options) {
   let pending = false;
@@ -220495,11 +220644,14 @@ function createWorkerMessagingCaptureOwnership(options) {
         } finally {
           paused[source] -= 1;
           if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
+            let resumed;
             try {
-              await capture.reconcile();
+              resumed = await capture.reconcile();
             } catch {
               options.onResumeFailure?.(source);
             }
+            if (resumed)
+              options.onResumeSuccess?.(source, resumed);
           }
         }
       });
@@ -221687,17 +221839,21 @@ async function main() {
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
   const captureFailures = {};
+  const captureStatuses = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
     onResumeFailure: (source) => {
       captureFailures[source] = true;
+    },
+    onResumeSuccess: (source, status) => {
+      delete captureFailures[source];
+      captureStatuses[source] = status;
     },
     registryPath: connectedHandleRegistryPath,
     packageRoot
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  const captureStatuses = {};
   const captureEntries = () => Object.entries(captures);
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning)
@@ -224520,24 +224676,22 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         console.warn("[olympus] remote_access_restart_failed");
       }
     });
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: remoteAccessHostKind === "standalone" ? createStandaloneRemoteAccessConfigWriter({
-        write: (enabled) => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
-        ...process.platform !== "darwin" ? { unsupportedReason: "Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support." } : {},
-        canRestart: () => {
-          try {
-            waitForQuietEngine({ quietWaitMs: 0 });
-            return inspectEngine().state === "running";
-          } catch {
-            return false;
-          }
-        },
-        requestRestart: () => {
-          remoteAccessRestartFailed = false;
-          return requestEngineRestart();
+    dashboardRemoteAccessControl = remoteAccessHostKind === "standalone" ? createStandaloneRemoteAccessControl({
+      write: (enabled) => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
+      ...process.platform !== "darwin" ? { unsupportedReason: "Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support." } : {},
+      canRestart: () => {
+        try {
+          waitForQuietEngine({ quietWaitMs: 0 });
+          return inspectEngine().state === "running";
+        } catch {
+          return false;
         }
-      }) : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
-    });
+      },
+      requestRestart: () => {
+        remoteAccessRestartFailed = false;
+        return requestEngineRestart();
+      }
+    }) : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   function isBackgroundConnection(connectionId) {
     if (!connectionId)
@@ -226660,7 +226814,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes34 } from "node:crypto";
-import { existsSync as existsSync109, readFileSync as readFileSync95, openSync as openSync33, closeSync as closeSync34, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync109, readFileSync as readFileSync95, openSync as openSync34, closeSync as closeSync35, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve32 } from "node:path";
@@ -231321,7 +231475,7 @@ function formatMessagingPairingResult(source, result) {
 async function runMessagingPairing(source, secretStore, registryPath) {
   let terminal;
   try {
-    terminal = openSync33("/dev/tty", "r+");
+    terminal = openSync34("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
@@ -231348,7 +231502,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = restartCaptureWorker();
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally {
-    closeSync34(terminal);
+    closeSync35(terminal);
   }
 }
 function parseConnectOptions(args) {

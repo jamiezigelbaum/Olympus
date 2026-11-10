@@ -85,3 +85,95 @@ describe('data restore', () => {
     }
   });
 });
+
+describe('data restore across tier stores', () => {
+  const storesOf = (homeDir: string) => lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({ homeDir });
+
+  test('a ledger beside a store that was never created still travels, and lands beside the same store', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-lane-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      const [secureA, otherA] = storesOf(homeA);
+      expect(otherA).toBeDefined();
+      seed(otherA!, 'rows', 'a routed bookmark');
+      seed(tierLedgerPathForStore(secureA!), 'judgments', 'Personal');
+      expect(existsSync(secureA!)).toBe(false);
+      exportOlympusData({ destination: backup, homeDir: homeA });
+      restoreOlympusData({ input: backup, homeDir: homeB });
+      const [secureB, otherB] = storesOf(homeB);
+      expect(rows(otherB!, 'rows')).toEqual([{ value: 'a routed bookmark' }]);
+      expect(rows(tierLedgerPathForStore(secureB!), 'judgments')).toEqual([{ value: 'Personal' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses when this computer holds another of the source\'s stores, even one the backup lacks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-other-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      seed(storesOf(homeA)[1]!, 'rows', 'from the backup');
+      exportOlympusData({ destination: backup, homeDir: homeA });
+      const secureB = storesOf(homeB)[0]!;
+      seed(secureB, 'rows', 'already here');
+      expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('already holds Olympus data for x.bookmarks');
+      expect(existsSync(storesOf(homeB)[1]!)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('refuses a store bound to a ledger the backup does not hold, and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-bound-'));
+  const homeA = join(dir, 'a');
+  const homeB = join(dir, 'b');
+  const backup = join(dir, 'backup');
+  try {
+    const store = storeOf(homeA);
+    mkdirSync(dirname(store), { recursive: true });
+    const db = new Database(store, { create: true });
+    db.exec('CREATE TABLE sync_runs (sync_run_id TEXT, connector_id TEXT, cursor TEXT);');
+    db.query('INSERT INTO sync_runs VALUES (?, ?, ?)').run('tiered-store-set-binding', 'tiered_store_set_binding', JSON.stringify({ ledgerId: 'l1', ledgerPath: '/x' }));
+    db.close();
+    exportOlympusData({ destination: backup, homeDir: homeA });
+    expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('not the judgments themselves');
+    expect(existsSync(storeOf(homeB))).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a bound store\'s ledger hint points at where this computer keeps the restored ledger', async () => {
+  const { TierLedger } = await import('../src/workers/classification/tier-ledger.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-hint-'));
+  const homeA = join(dir, 'a');
+  const homeB = join(dir, 'b');
+  const backup = join(dir, 'backup');
+  const views = () => lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
+  try {
+    const [secureA, otherA] = views().connectorStorePaths!({ homeDir: homeA });
+    mkdirSync(dirname(secureA!), { recursive: true });
+    const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(secureA!) });
+    const ledgerId = ledger.ledgerId();
+    ledger.close();
+    const db = new Database(otherA!, { create: true });
+    db.exec('CREATE TABLE sync_runs (sync_run_id TEXT, connector_id TEXT, cursor TEXT);');
+    db.query('INSERT INTO sync_runs VALUES (?, ?, ?)').run('tiered-store-set-binding', 'tiered_store_set_binding', JSON.stringify({ ledgerId, ledgerPath: '/another/computer/old-name.sqlite' }));
+    db.close();
+    exportOlympusData({ destination: backup, homeDir: homeA });
+    restoreOlympusData({ input: backup, homeDir: homeB });
+    const [secureB, otherB] = views().connectorStorePaths!({ homeDir: homeB });
+    const restored = new Database(otherB!, { readonly: true });
+    const cursor = JSON.parse((restored.query('SELECT cursor FROM sync_runs').get() as { cursor: string }).cursor);
+    restored.close();
+    expect(cursor).toEqual({ ledgerId, ledgerPath: tierLedgerPathForStore(secureB!) });
+    expect(TierLedger.readLedgerId(tierLedgerPathForStore(secureB!))).toBe(ledgerId);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

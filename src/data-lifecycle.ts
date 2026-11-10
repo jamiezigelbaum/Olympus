@@ -364,11 +364,12 @@ export function exportOlympusData(options: {
         skipped,
         artifacts,
       });
-      if (artifacts.length === before) return;
-      artifacts[before]!.storeIndex = storeIndex;
+      if (artifacts.length > before) artifacts[before]!.storeIndex = storeIndex;
       // The store's privacy judgments, its sniffer queue and its secret
       // locations sit beside it. Without them a restore judges every item
-      // again, which on a laptop takes nights (#1065).
+      // again, which on a laptop takes nights (#1065). A ledger can exist
+      // beside a store that was never created (a tier lane shares the secure
+      // store's ledger), so each one is taken whether or not its store is.
       for (const [sidecar, path, storeId] of [
         ['tier_ledger', tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID],
         ['tier_sniffer', tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
@@ -2320,6 +2321,22 @@ function envForHome(homeDir: string | undefined): Record<string, string | undefi
 }
 
 /** The environment the lifecycle resolves paths in for this context. */
+/**
+ * A source's store paths in each layout an install can keep them in (legacy
+ * and folder), index-aligned with `lifecycleAccountFiles(...).stores`: a
+ * version 2 backup names stores only by file name, from either layout.
+ */
+export function lifecycleStoreLayouts(sourceId: string, context: LifecyclePathContext = {}): string[][] {
+  const env = envForContext(context);
+  return (['legacy', 'folder'] as const).map((layout) => {
+    try {
+      return accountFiles({ source_id: sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout }, { env, ...(context.homeDir ? { homeDir: context.homeDir } : {}) }).stores;
+    } catch {
+      return [];
+    }
+  });
+}
+
 export function lifecycleEnv(context: LifecyclePathContext | undefined): Record<string, string | undefined> {
   return envForContext(context);
 }

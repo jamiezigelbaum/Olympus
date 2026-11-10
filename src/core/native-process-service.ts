@@ -499,7 +499,13 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       // zero exit when clean exits are supervised. Entered synchronously to
       // keep the exact PGID.
       const cleanup = stopChild(lifetime, child);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      // Say what happened (#1034): a restart the child asked for, or a stop
+      // signal, is not a crash and must not read like one in the engine log.
+      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null
+        ? `Olympus ${options.label} is restarting, as it asked to.`
+        : signal === 'SIGTERM' || (signal === null && code === 0)
+          ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ''}; starting it again.`
+          : `Olympus ${options.label} exited unexpectedly.`);
       void cleanup.then(
         (result) => {
           if (result === 'unconfirmed') {
