@@ -100,12 +100,19 @@ export function applyOwnerOverrides(options: {
   // Overrides the owner cleared ("undo", tier-owner-items.ts): the item goes
   // back to the decision the override took it over from, through the same
   // router write a listing makes.
-  for (const record of ledger.listClearedOverrideRows()) {
-    try {
-      if (restoreClearedOverride(set, record)) report.restored += 1;
-    } catch {
-      // Left as it was; the next pass tries again.
+  // Paged by identity, so items that cannot be restored (set by the owner
+  // before anything else decided them) never hold back the ones after them.
+  const CLEARED_PAGE = 100;
+  for (let after: TierLedgerRecord | undefined, page: TierLedgerRecord[]; ; after = page[page.length - 1]) {
+    page = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
+    for (const record of page) {
+      try {
+        if (restoreClearedOverride(set, record)) report.restored += 1;
+      } catch {
+        // Left as it was; the next pass tries again.
+      }
     }
+    if (page.length < CLEARED_PAGE) break;
   }
   // Items that left Secrets since the last tick (here, in a listing, a move
   // landing or another process): their job names come back.

@@ -23523,10 +23523,11 @@ class TierLedger {
     `).all(Math.max(1, Math.min(limit, 200)));
     return rows.map(recordFromRow);
   }
-  listClearedOverrideRows(limit = 100) {
+  listClearedOverrideRows(limit = 100, after) {
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
       WHERE i.routed = 1 AND i.state = 'current' AND i.decided_by = 'override'
+        AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
           WHERE o.provider = i.provider AND o.account_scope = i.account_scope
@@ -23534,7 +23535,7 @@ class TierLedger {
         )
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
       LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 1000)));
+    `).all(after ? 1 : null, after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null, Math.max(1, Math.min(limit, 1000)));
     return rows.map(recordFromRow);
   }
   settledDecisionBeforeOverride(identity2) {
@@ -64681,11 +64682,17 @@ function applyOwnerOverrides(options) {
       applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
     } catch {}
   }
-  for (const record of ledger.listClearedOverrideRows()) {
-    try {
-      if (restoreClearedOverride(set, record))
-        report.restored += 1;
-    } catch {}
+  const CLEARED_PAGE = 100;
+  for (let after, page2;; after = page2[page2.length - 1]) {
+    page2 = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
+    for (const record of page2) {
+      try {
+        if (restoreClearedOverride(set, record))
+          report.restored += 1;
+      } catch {}
+    }
+    if (page2.length < CLEARED_PAGE)
+      break;
   }
   retireSecretRedactions(ledger);
   return report;

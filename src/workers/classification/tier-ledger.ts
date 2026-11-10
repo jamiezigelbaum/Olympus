@@ -2743,10 +2743,12 @@ export class TierLedger {
    * back to the decision the override took it over from
    * (`settledDecisionBeforeOverride`).
    */
-  listClearedOverrideRows(limit = 100): TierLedgerRecord[] {
+  listClearedOverrideRows(limit = 100, after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>): TierLedgerRecord[] {
+    // `after` pages past rows a pass could not restore, so they never block the rest.
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
       WHERE i.routed = 1 AND i.state = 'current' AND i.decided_by = 'override'
+        AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
           WHERE o.provider = i.provider AND o.account_scope = i.account_scope
@@ -2754,7 +2756,11 @@ export class TierLedger {
         )
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
       LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 1_000))) as TierItemRow[];
+    `).all(
+      after ? 1 : null,
+      after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null,
+      Math.max(1, Math.min(limit, 1_000)),
+    ) as TierItemRow[];
     return rows.map(recordFromRow);
   }
 
