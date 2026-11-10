@@ -22,7 +22,19 @@ const lane: SnifferLane = { kind: 'local', modelId: 'fixture', profileId: 'fixtu
 } };
 const judge = snifferId(lane);
 const cleanups: Array<() => void> = [];
-afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
+// A test that outlives its time limit keeps running after Bun moves on. Its
+// stores are closed only once that body has settled, never under a running
+// preparation (#992).
+let running: Promise<unknown> | undefined;
+function settled<A extends unknown[]>(body: (...args: A) => Promise<void>) {
+  return (...args: A) => { const result = body(...args); running = result; return result; };
+}
+afterEach(async () => {
+  const body = running;
+  running = undefined;
+  await body?.catch(() => {});
+  for (const cleanup of cleanups.splice(0)) cleanup();
+});
 const subject = (n: number) => ({ provider: 'fixture', accountScope: 'fixture', providerItemId: String(n) });
 const ownText = 'Please bring the picnic basket and the sandwiches on Sunday.';
 function copy(n: number, sign = 1): ConnectorStoreItemCopy {
@@ -598,6 +610,14 @@ function trainingRow(f: ReturnType<typeof fixture>, n: number, extra: string[] =
     placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }),
   });
 }
+// Seed many rows in one transaction per store. Per-row commits to a
+// disk-backed ledger and sniffer store cost seconds of fsync under parallel CI
+// and ate the test's own time budget (#992). TierSnifferStore has no batch
+// API, so the fixture opens the transaction on its connection directly.
+function trainingRows(f: ReturnType<typeof fixture>, count: number, row: (n: number) => void = n => trainingRow(f, n)) {
+  const sniffer = (f.sniffer as unknown as { db: { transaction<T>(work: () => T): () => T } }).db;
+  sniffer.transaction(() => f.ledger.withMoveBatch(() => { for (let n = 0; n < count; n++) row(n); }))();
+}
 function trainingState(f: ReturnType<typeof fixture>) {
   return JSON.parse(f.stateLedger.readMeta('embedding-prefilter:training-v1')!);
 }
@@ -821,7 +841,7 @@ test('a failed completion watermark stays a failed attempt with a three-hour ret
 });
 
 test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'publication secrets', 'fit error'] as const)(
-  'fitting discards retained examples after a selected item changes: %s', async change => {
+  'fitting discards retained examples after a selected item changes: %s', settled(async change => {
     let clock = 0;
     const dir = mkdtempSync(join(tmpdir(), 'prefilter-publication-'));
     const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
@@ -829,7 +849,7 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
     // is still suspended inside the fit when the mutation is injected.
     const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.1), log: () => {} });
     cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
-    for (let n = 0; n < 4000; n++) trainingRow(f, n);
+    trainingRows(f, 4000);
     const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown>; model?: unknown } }).training;
     for (let tick = 0; tick < 100 && !runtime()?.fit; tick++) await f.filter.prepare(judge);
     expect(runtime()?.fit).toBeDefined();
@@ -854,7 +874,7 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
     expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: change === 'fit error' ? 'training_failed' : 'ledger_or_judge_changed' });
     expect(runtime()).toBeUndefined();
     expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
-  }, 30_000);
+  }), 30_000);
 
 
 test.each(['legacy', 'receipt'] as const)('a historical metadata raise never replaces a %s content judge training label', async provenance => {
@@ -1044,13 +1064,13 @@ test('a newer content verdict replaces the historical tier receipt even when its
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 0] });
 });
 
-test('costly retained-copy validation yields and still lets fitting finish', async () => {
+test('costly retained-copy validation yields and still lets fitting finish', settled(async () => {
   let clock = 0;
   const dir = mkdtempSync(join(tmpdir(), 'prefilter-budget-'));
   const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
   const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => clock, log: () => {} });
   cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
-  for (let n = 0; n < 4000; n++) trainingRow(f, n);
+  trainingRows(f, 4000);
   f.setCopy(n => { clock += 0.1; return copy(n); }); // 400 ms for a complete retained-copy sweep.
   for (let tick = 0; tick < 50 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
     const started = clock;
@@ -1060,13 +1080,13 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
   }
   expect(trainingState(f)).toMatchObject({ outcome: 'trained', counts: [2000, 2000] });
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(true);
-}, 30_000);
+}), 30_000);
 
-test('a scanned attempt finishes between continuous judge passes and backlog-sized lowering slices', async () => {
+test('a scanned attempt finishes between continuous judge passes and backlog-sized lowering slices', settled(async () => {
   let clock = 0;
   const logs: string[] = [];
   const f = fixture({ trained: false, monotonicNow: () => clock, log: line => logs.push(line) });
-  for (let n = 0; n < 4000; n++) trainingRow(f, n);
+  trainingRows(f, 4000);
   const readCopy = (n: number) => { clock += 0.1; return copy(n); };
   f.setCopy(readCopy); // The complete freshness sweep needs 400 ms, spanning slices.
   const runtime = () => (f.filter as unknown as { training?: { finalValidation?: { index: number } } }).training;
@@ -1150,10 +1170,10 @@ test('a scanned attempt finishes between continuous judge passes and backlog-siz
   } finally {
     service.stop(); wake.mockRestore(); pass.mockRestore(); moves.mockRestore(); installed.close();
   }
-}, 30_000);
+}), 30_000);
 
 test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
-  'final validation fences an already-checked example changed between ticks: %s', async change => {
+  'final validation fences an already-checked example changed between ticks: %s', settled(async change => {
     let clock = 0;
     const f = fixture({ trained: false, memory: change !== 'external secrets', monotonicNow: () => clock, log: () => {} });
     // In-memory examples still publish to a separate durable control ledger.
@@ -1165,7 +1185,7 @@ test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
       copyChangeMarker: () => String(copyRevision), monotonicNow: () => clock, log: () => {} });
     let currentCopy = (n: number) => copy(n);
     let copyRevision = 0;
-    for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', change === 'legacy verdict' && n === 0);
+    trainingRows(f, 4000, n => trainingRow(f, n, [], 'other:1.00', change === 'legacy verdict' && n === 0));
     if (change === 'legacy verdict') {
       const row = f.ledger.getCurrent(subject(0))!;
       f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
@@ -1198,7 +1218,7 @@ test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
     await filter.finishValidation(judge, () => false);
     expect(JSON.parse(control.readMeta('embedding-prefilter:training-v1')!)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
     expect(existsSync(weights)).toBe(false);
-  }, 30_000);
+  }), 30_000);
 
 test('production-shaped held and judged rows retain usable judge provenance and digest', async () => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
