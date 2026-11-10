@@ -7,10 +7,15 @@
 //   - the time for the first page and for a full scan (capped);
 //   - the time of one FTS match;
 // and then, through the same code the eval runs:
-//   - opening the stores and the tier ledger;
+//   - opening the stores and the tier ledger, each timed (openMs);
 //   - each store's vector-lane gate (vectorLaneServable);
 //   - one keyword-only evidence-pack build, with each store's search time
-//     and outcome against the lane deadline.
+//     and outcome against the lane deadline, and every keyword search the
+//     lanes ran on the read pool (count and ms, pool wait included);
+//   - then the keyword search a lane runs, step by step on this thread:
+//     each SQL statement by kind (calls, rows, ms) and the tier and
+//     child-visibility filter's time, for the plain and the content query.
+//     It is synchronous, so a cold run holds this thread for its whole time.
 //
 // Usage (same environment the eval reads):
 //   OLYMPUS_EVAL_DROPBOX_STORE=<private.sqlite> \
@@ -341,9 +346,6 @@ async function main(): Promise<void> {
     }
     out.vectorLaneGates = gates;
 
-    // Cold, before any lane has read: the keyword search step by step.
-    out.keywordSearchSteps = opened.stores.map((store) => traceKeywordSearch(store, args.question, scope.accountScope, filters));
-
     const lanes = createEvalDropboxLanes({
       stores: opened.stores,
       ...(opened.ledger ? { ledger: opened.ledger } : {}),
@@ -366,6 +368,10 @@ async function main(): Promise<void> {
       skippedCorpora: audit.skippedCorpora,
       poolKeywordSearches: pool.report(),
     };
+    // After the pack build, so its timings are the eval's own: these searches
+    // run synchronously on this thread, and a cold one on a large store holds
+    // it for many seconds (the probe's own "could not answer" stall).
+    out.keywordSearchSteps = opened.stores.map((store) => traceKeywordSearch(store, args.question, scope.accountScope, filters));
   } finally {
     opened.close();
   }

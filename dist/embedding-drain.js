@@ -22301,6 +22301,7 @@ function validateConnectorStoreV6Schema(db) {
 }
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -22365,6 +22366,8 @@ function validateConnectorStoreFtsOwnership(db, versionLabel) {
   if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
     throw new Error("Connector store schema FTS row ownership map is incomplete.");
   }
+}
+function validateConnectorStoreForeignKeys(db) {
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
   if (foreignKeyErrors.length > 0) {
     throw new Error("Connector store schema has broken foreign-key references after migration.");
