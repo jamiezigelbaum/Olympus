@@ -553,7 +553,7 @@ import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
  */
 const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
-import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
+import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -572,6 +572,8 @@ export function createWorkerMessagingCaptureOwnership(options: {
   revokeGrant?: (path: string) => void;
   shouldResumeCapture?: () => boolean;
   onResumeFailure?: (source: MessagingCaptureSource) => void;
+  /** A resume after a pause worked: a failure recorded earlier no longer holds (#687). */
+  onResumeSuccess?: (source: MessagingCaptureSource, status: MessagingCaptureStatus) => void;
 }): {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   nativeOwners: Record<MessagingCaptureSource, boolean>;
@@ -650,8 +652,10 @@ export function createWorkerMessagingCaptureOwnership(options: {
         } finally {
           paused[source] -= 1;
           if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
-            try { await capture.reconcile(); }
+            let resumed: MessagingCaptureStatus | undefined;
+            try { resumed = await capture.reconcile(); }
             catch { options.onResumeFailure?.(source); }
+            if (resumed) options.onResumeSuccess?.(source, resumed);
           }
         }
       });
@@ -2588,17 +2592,18 @@ export async function main(): Promise<void> {
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
   const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  // What each supervisor last reported, for the dashboard. Absent for a source
+  // whose capture the native service owns: this worker runs nothing there.
+  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
     onResumeFailure: (source) => { captureFailures[source] = true; },
+    onResumeSuccess: (source, status) => { delete captureFailures[source]; captureStatuses[source] = status; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  // What each supervisor last reported, for the dashboard. Absent for a source
-  // whose capture the native service owns: this worker runs nothing there.
-  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   // Sources whose last reconcile threw: their old status is no fact about the helper.
   const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
@@ -6416,9 +6421,8 @@ export async function main(): Promise<void> {
       restart: () => { restartEngine({ quietWaitMs: 0 }); },
       failed: () => { remoteAccessRestartFailed = true; console.warn('[olympus] remote_access_restart_failed'); },
     });
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: remoteAccessHostKind === 'standalone'
-        ? createStandaloneRemoteAccessConfigWriter({
+    dashboardRemoteAccessControl = remoteAccessHostKind === 'standalone'
+      ? createStandaloneRemoteAccessControl({
             write: enabled => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
             ...(process.platform !== 'darwin' ? { unsupportedReason: 'Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support.' } : {}),
             canRestart: () => {
@@ -6427,8 +6431,7 @@ export async function main(): Promise<void> {
             },
             requestRestart: () => { remoteAccessRestartFailed = false; return requestEngineRestart(); },
           })
-        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
-    });
+      : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   // A background connection: a live remote agent that is not ChatGPT (the
   // owner's ChatGPT is the owner's own work). An unknown id is not one.

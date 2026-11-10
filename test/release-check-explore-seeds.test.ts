@@ -17,6 +17,8 @@ class FakeEngine {
   readonly home = temp();
   readonly env: Record<string, string | undefined> = { HOME: this.home };
   readonly calls: string[] = [];
+  restartsOnDelete = false;
+  restart: string[] = [];
   local = { connected: false, approved: false, items: 0, missing: false, refuseList: false, stickyMissing: false, reading: false };
   ctx: SeedContext = {
     call: async (method, path, body) => this.route(method, path, body),
@@ -48,7 +50,14 @@ class FakeEngine {
     const ok = (json: any = { ok: true }) => ({ status: 200, json, text: JSON.stringify(json) });
     if (path === '/dashboard/delete-source-data') {
       this.local.items = 0;
-      return ok();
+      if (!this.restartsOnDelete) return ok();
+      // The real worker answers, then restarts a moment later: still up for one read, then down for two.
+      this.restart = ['up', 'down', 'down'];
+      return ok({ ok: true, worker_restarting: true });
+    }
+    if (method === 'GET' && path === '/dashboard.json') {
+      if (this.restart.shift() === 'down') throw new Error('connection refused');
+      return ok({});
     }
     if (path === '/dashboard/connect/this-computer') { this.local.connected = true; return ok(); }
     if (path === '/dashboard/disconnect') { this.local.connected = false; return ok(); }
@@ -111,6 +120,16 @@ describe('Files on this computer', () => {
     expect(engine.local).toMatchObject({ connected: false, items: 3 });
     expect((await driver.states.empty!()).ok).toBe(true);
     expect(engine.local.items).toBe(0);
+  });
+
+  test('empty waits out the worker restart a delete announces before the next step reads a page (#1034)', async () => {
+    const engine = new FakeEngine();
+    engine.restartsOnDelete = true;
+    const driver = localFilesDriver(engine.ctx);
+    expect((await driver.states.disconnected!()).ok).toBe(true);
+    expect((await driver.states.empty!()).ok).toBe(true);
+    expect(engine.restart).toEqual([]);
+    expect(engine.calls.at(-1)).toBe('GET /dashboard.json');
   });
 
   test('a state told to stop stops at its next call or wait, before it changes anything more', async () => {
