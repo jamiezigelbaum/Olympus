@@ -6704,14 +6704,17 @@ export async function main(): Promise<void> {
     // holds the conversation), or named by the caller.
     const { consultChatgptFrontierModel, consultChatgptModelUnavailableMessage } = await import('../../core/consult-settings.ts');
     const chatgptModel = (): string => consultChatgptFrontierModel(readConsultSettings().settings);
+    // The funding date follows the policy file (`olympus zkapi funding-date`) without a restart.
+    const { zkapiFundingDateRefresher } = await import('../../core/zkapi-funding-date.ts');
+    const zkapiProfiles = zkapiFundingDateRefresher(sovereigntyEngine.source === 'file' ? sovereigntyEngine.path : undefined);
     const transport = (model: string) => resolveZkapiConsultTransport(
-      sovereigntyEngine.config.modelProfiles,
+      zkapiProfiles(sovereigntyEngine.config.modelProfiles),
       (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
       { env: process.env, model },
     );
     // The route's settings and today's record only: no key is resolved for this check.
     zkapiDailyLimitNow = () => {
-      const route = resolveZkapiConsultTransport(sovereigntyEngine.config.modelProfiles, () => undefined, { env: process.env });
+      const route = resolveZkapiConsultTransport(zkapiProfiles(sovereigntyEngine.config.modelProfiles), () => undefined, { env: process.env });
       return route ? zkapiDailyLimitState(route.settings, route.statePath ?? defaultZkapiStatePath(), new Date()) : 'unset';
     };
     // The owner's own writer model (consult.json `writer`) arrives as the Ask
