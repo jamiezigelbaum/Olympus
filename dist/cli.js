@@ -34661,11 +34661,22 @@ function embeddingFailureKind(error) {
   return /^[A-Za-z0-9_]{1,64}$/.test(name) ? name.toLowerCase() : "error";
 }
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
+  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
+  const rows = db.query(sql).all(...params);
+  return rows.map((row) => ({
+    itemPk: row.item_pk,
+    chunkPk: row.chunk_pk,
+    localItemId: row.local_item_id,
+    embedding: row.embedding
+  }));
+}
+function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const pageLimit = Math.max(1, Math.floor(limit));
-  const rows = db.query(`
+  return {
+    sql: `
     SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
     ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
       -- The unary + keeps SQLite off the model_id index (#1242). With it, every
@@ -34679,13 +34690,15 @@ function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit
       ${selectedFilters.sql}
     ORDER BY emb.chunk_pk ASC
     LIMIT ?
-  `).all(modelId, afterChunkPk, ...accountScope ? [accountScope] : [], ...selectedFilters.params, pageLimit);
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding
-  }));
+  `,
+    params: [
+      modelId,
+      afterChunkPk,
+      ...accountScope ? [accountScope] : [],
+      ...selectedFilters.params,
+      pageLimit
+    ]
+  };
 }
 async function syncAndEmbedFromConnector(options) {
   const localItemIds = new Set;
@@ -34993,9 +35006,13 @@ function connectorStoreRecencyLaneAudit(corpusId, candidateCount) {
 async function hybridConnectorStoreSearch(store, provider, request, startedAt, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
+  const keywordStartedAt = Date.now();
   let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
+  let keywordElapsedMs = Date.now() - keywordStartedAt;
+  const vectorStartedAt = Date.now();
   const vectorLane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
+  const vectorElapsedMs = Date.now() - vectorStartedAt;
   let scoredVectorRows = vectorLane.rows;
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
@@ -35011,7 +35028,9 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
       saturated: keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated
     } };
   }
+  const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordElapsedMs += Date.now() - relaxStartedAt;
   keywordLane = revalidateKeywordLane(store, keywordLane);
   scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
   vectorRows = store.stillVisibleSearchRows(vectorRows);
@@ -35050,12 +35069,13 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     hits,
     latencyMs: Date.now() - startedAt,
     laneAudits: [
-      connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length),
+      { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
       {
         laneName: `${store.corpusId}:connector_store_vector`,
         laneType: "semantic",
         candidateCount: scoredVectorRows.length,
         returnedCount: vectorRows.length,
+        elapsedMs: vectorElapsedMs,
         ...bestCosine !== undefined ? { bestCosine } : {},
         ...suppressedBelowBar > 0 ? { suppressedBelowBar } : {},
         ...vectorLane.skippedReason !== undefined ? { skippedReason: vectorLane.skippedReason } : gateArmed && scoredVectorRows.length > 0 && vectorRows.length === 0 ? { skippedReason: "semantic_below_relevance_bar" } : {},
@@ -73031,6 +73051,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
     degradations: routed.degradations,
+    ...routed.corpusTimings && routed.corpusTimings.length > 0 ? { corpusTimings: routed.corpusTimings } : {},
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
@@ -73251,6 +73272,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
     secureLaneAudits: runs.flatMap((run) => [...run.secureLaneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
+    corpusTimings: runs.flatMap((run) => [...run.corpusTimings ?? []]),
     ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {},
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal)
   };

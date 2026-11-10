@@ -78,6 +78,10 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     const personalKeyword = found.lanes.find((lane) => lane.laneName.startsWith(DROPBOX_TIER_CORPUS_IDS.internal!) && lane.laneType === 'keyword');
     expect(personalKeyword?.returnedCount).toBeGreaterThan(0);
     expect(found.secureExclusion).toBe('not_applied');
+    // Each searched store reports its wall time and outcome.
+    expect(found.corpusTimings.map((timing) => timing.corpusId).sort())
+      .toEqual([DROPBOX_TIER_CORPUS_IDS.internal!, DROPBOX_TIER_CORPUS_IDS.secure_local!].sort());
+    expect(found.corpusTimings.every((timing) => timing.outcome === 'success' && timing.elapsedMs >= 0)).toBe(true);
 
     const empty = evalRetrievalAudit(await buildEvalPack({
       question: 'zebra quartz harmonica', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
@@ -143,7 +147,7 @@ describe('the real eval fails a question whose search was incomplete (#1242)', (
   const audit = (overrides: Record<string, unknown>) => ({
     packCandidates: 5, lanes: [], skippedCorpora: [], degradations: [], policyDeniedCandidates: 0,
     unreadCandidates: 0, namesOnlyCandidates: 0, contentPrivateCandidates: 0, corpusReadabilityGaps: 0,
-    secureExclusion: 'not_applied' as const, ...overrides,
+    secureExclusion: 'not_applied' as const, corpusTimings: [], ...overrides,
   });
   const report = (passed: boolean[]) => ({
     total: passed.length, completed: passed.length, remaining: 0,
