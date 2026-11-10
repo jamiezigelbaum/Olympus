@@ -566,6 +566,8 @@ export interface ComputerArchiveSourceMeta {
   label: string;
   /** The picker's opening sentence: the exports this source reads, and how to choose one. */
   intro: string;
+  /** The formats whose export guides (Get my archive, #660) this source's picker offers; absent: none. */
+  guideIds?: string[];
 }
 
 /** The imports that joined one source, and the history that source's inputs cover. */

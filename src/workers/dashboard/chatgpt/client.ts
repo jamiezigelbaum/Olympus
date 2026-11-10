@@ -1466,8 +1466,10 @@ export function chatgptDashboardClient(
     state.confirming = '';
     const A = H.copy.archives;
     const own = sourceId ? archiveSourceMeta(sourceId) : null;
+    // A source's own picker offers only the export guides of its formats (#660).
+    const ownGuides = own && Array.isArray(own.guideIds) ? A.pick.guides.filter((guide: Any) => own.guideIds.indexOf(guide.id) >= 0) : [];
     const words = own
-      ? { ...A.pick, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
+      ? { ...A.pick, guides: ownGuides, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
       : { ...A.pick, account: A.account };
     // Names in the line are the person's own files, shown only on this computer.
     picker!.pickArchive(words, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key), own ? String(own.sourceId) : '');

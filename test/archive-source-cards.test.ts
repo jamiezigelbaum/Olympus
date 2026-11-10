@@ -133,6 +133,10 @@ describe('an import-only source\'s card', () => {
     const reflect = f.dashboard.archiveSources().find((entry) => entry.sourceId === 'reflect.archive')!;
     expect(reflect.intro).toContain('a Reflect export');
     expect(reflect.intro).not.toContain('mail export');
+    // Its picker's Get my archive offers its own formats' guides, from their registry entries (#660).
+    expect(f.dashboard.archiveSources().map((entry) => [entry.sourceId, entry.guideIds])).toEqual([
+      ['reflect.archive', ['reflect-json']], ['roam.archive', ['roam-json']], ['evernote.notes', ['evernote-enex']],
+    ]);
 
     const path = f.write('Reflect notes.json', reflectJson(reflectNotes(3)));
     const started = await approveStaged(f.dashboard, path, { sourceId: 'reflect.archive' });
