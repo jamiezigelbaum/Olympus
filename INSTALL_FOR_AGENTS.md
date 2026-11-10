@@ -1845,7 +1845,8 @@ them, give one complete SSH command with the correct host, account, and
 resolved Olympus executable. Do not ask for login codes, API hashes, or 2FA
 passwords in chat. Telegram uses the operator's own app API ID/hash from
 https://my.telegram.org, then phone/code/2FA entry; it needs Python 3, and
-installs its pinned Telethon into an Olympus cache on first pairing. WhatsApp needs Go and a C compiler for the packaged bridge build;
+installs its pinned Telethon into an Olympus cache on first pairing, only from the
+hash-checked list in `scripts/telegram-requirements.txt`. WhatsApp needs Go and a C compiler for the packaged bridge build;
 the command builds into an Olympus cache, never into the managed plugin.
 WhatsApp shows a scannable QR in the private terminal. This guided pairing
 flow treats messaging as Private data; it refuses under `no-sensitive`

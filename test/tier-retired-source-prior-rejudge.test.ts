@@ -4,26 +4,107 @@
 // nobody's approval; an item the user's own rule holds is left alone.
 
 import { afterEach, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { join } from 'node:path';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import { TIER_CLASSIFIER_VERSION, type TierSniffer, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const personal: TierSniffer = { id: 'fixture-personal', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) };
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const close of cleanups.splice(0)) close(); });
 
-function lane(rules: OwnerTierRule[] = []) {
+function lane(rules: OwnerTierRule[] = [], sniffer: TierSniffer = personal) {
   const tmp = tempDir();
   const fixture = openTierFixture(tmp.dir, { embed: false });
   const set = new TieredStoreSet({ setId: 'retired-prior', ledger: fixture.ledger, secretLocations: fixture.secrets,
-    tierClassification: { sniffer: personal, rules },
+    tierClassification: { sniffer, rules },
     legs: (['internal', 'secure_local'] as const).map(domain => ({ trustDomain: domain, corpusId: CORPORA[domain], store: fixture.stores[domain]! })),
   });
   cleanups.push(() => { fixture.close(); tmp.cleanup(); });
   return { ...fixture, set };
 }
+
+for (const scenario of [
+  { name: 'queued names and content, Private answer', cachedNames: false, alreadyPersonal: false, tier: 'secure' },
+  { name: 'queued names and content, Personal answer lowers the prior', cachedNames: false, alreadyPersonal: false, tier: 'private' },
+  { name: 'cached Personal names and queued content on an already Personal prior row', cachedNames: true, alreadyPersonal: true, tier: 'private' },
+] as const) test(`retired-prior rows are asked once: ${scenario.name}`, async () => {
+  const tmp = tempDir();
+  const queue = new TierSnifferStore({ dbPath: join(tmp.dir, 'sniffer.sqlite') });
+  cleanups.push(() => { queue.close(); tmp.cleanup(); });
+  const cached = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
+  const requests: string[] = [];
+  let delayed = false;
+  const sniffer: TierSniffer = { id: cached.id, judge(request) {
+    if (!delayed) return personal.judge(request);
+    requests.push(`${request.subject?.providerItemId}:${request.pass}`);
+    if (scenario.cachedNames && request.pass === 'metadata') return personal.judge(request);
+    return cached.judge(request);
+  } };
+  const f = lane([], sniffer);
+  const items = Array.from({ length: 6 }, (_, n) => ({ id: `item-${n}`, name: `Picnic ${n}`, text: `Bring bananas on Saturday ${n}.` }));
+  await f.set.sync(restingPrivate(fixtureConnector(() => items), 'source_config:trust_domain:secure_local'),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  if (scenario.alreadyPersonal) for (const item of items) {
+    // The live rows retain the historical reason after a move to Personal.
+    await moveTieredItem({ set: f.set, identity: identityOf(item.id), target: { metadataTier: 'private', contentTier: 'private' } });
+  }
+  delayed = true;
+  for (let pass = 0; pass < 3; pass++) {
+    expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report).toMatchObject({
+      seen: pass === 0 ? items.length : 0, asked: pass === 0 ? items.length : 0, failed: 0,
+    });
+  }
+  expect(new Set(requests).size).toBe(requests.length);
+  expect(requests.filter(request => request.endsWith(':metadata'))).toHaveLength(items.length);
+  const db = new Database(f.ledger.dbPath);
+  try {
+    // #1078's counts-only shape: the old row has no stamp or names verdict
+    // and neither pending flag, because the open question is kept beside it.
+    expect(db.query(`SELECT count(*) AS n FROM tier_items WHERE rejudged_key IS NULL
+      AND state = 'current' AND metadata_pending = 0 AND content_pending = 0
+      AND instr(reasons_json, 'metadata:prior:source_') > 0
+      AND instr(reasons_json, 'metadata:sniffer:') = 0
+      AND instr(reasons_json, 'metadata:names_from_store') = 0`).get()).toEqual({ n: items.length });
+    for (const item of items) {
+      expect(f.ledger.rejudgeQuestion(identityOf(item.id))?.decision).toMatchObject({
+        metadataPending: !scenario.cachedNames, contentPending: true,
+      });
+    }
+  } finally { db.close(); }
+  let calls = 0;
+  const report = await runSnifferPass({ lane: BUILT_IN_SNIFFER_LANE,
+    targets: [{ ledger: f.ledger, sniffer: queue, placementFor: f.set.placementFor.bind(f.set) }],
+    model: { async complete() { calls++; return { text: JSON.stringify({ verdicts: [{ i: 1,
+      tier: scenario.tier === 'secure' ? 'private' : 'personal', category: 'ordinary', confidence: 0.99,
+      ownRecord: false, privateKind: 'none' }] }), modelId: 'fixture' }; } },
+  });
+  expect(report.verdictsApplied).toBeGreaterThanOrEqual(items.length);
+  expect(calls).toBe(items.length * (!scenario.cachedNames && scenario.tier === 'private' ? 2 : 1));
+  const settledDb = new Database(f.ledger.dbPath);
+  try {
+    for (const item of items) {
+      const identity = identityOf(item.id);
+      expect(f.ledger.getCurrent(identity)!.reasons.some(reason => reason.startsWith('metadata:prior:source_'))).toBe(false);
+      expect(f.ledger.rejudgeQuestion(identity)).toBeUndefined();
+      if (f.ledger.getCurrent(identity)!.state === 'moving') {
+        await moveTieredItem({ set: f.set, identity, target: { metadataTier: scenario.tier, contentTier: scenario.tier } });
+      }
+      expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', metadataTier: scenario.tier, contentTier: scenario.tier });
+    }
+    expect(settledDb.query('SELECT count(*) AS n FROM tier_items WHERE rejudged_key IS NULL').get()).toEqual({ n: 0 });
+  } finally { settledDb.close(); }
+  expect(queue.counts().questions).toBe(0);
+  expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report.seen).toBe(0);
+});
 
 /** The connector as builds before 2026-10-28 published it: every item rests Private by source. */
 function restingPrivate(inner: SourceConnector, basis: string): SourceConnector {

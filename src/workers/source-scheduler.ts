@@ -414,6 +414,7 @@ export interface SourceSchedulerStateStore {
   recordAttempt(input: Parameters<LocalSourceSchedulerStateStore['recordAttempt']>[0]): PersistedSourceSchedulerTaskState;
   recordSuccess(input: Parameters<LocalSourceSchedulerStateStore['recordSuccess']>[0]): PersistedSourceSchedulerTaskState;
   recordFailure(input: Parameters<LocalSourceSchedulerStateStore['recordFailure']>[0]): PersistedSourceSchedulerTaskState;
+  recordInterruption?(input: Parameters<LocalSourceSchedulerStateStore['recordInterruption']>[0]): PersistedSourceSchedulerTaskState;
   adoptExternalSuccess?(
     input: Parameters<LocalSourceSchedulerStateStore['adoptExternalSuccess']>[0],
   ): PersistedSourceSchedulerTaskState;
@@ -548,6 +549,12 @@ export class SourceScheduler {
   private lastAfterTickAt: number | undefined;
   private afterTickTimer: ReturnType<typeof setTimeout> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * Bumped by every stop(). A pass that ends in an error after a stop it did
+   * not start under was interrupted by the shutdown (the worker stops the
+   * scheduler before the models its passes use), not failed by its source.
+   */
+  private stops = 0;
   private readonly fastWakeTimers = new Map<number, ReturnType<typeof setInterval>>();
   private readonly continueAfterMs: number;
   private readonly setTimeoutImpl: typeof setTimeout;
@@ -628,6 +635,7 @@ export class SourceScheduler {
   }
 
   stop(): void {
+    this.stops += 1;
     this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
@@ -1037,6 +1045,7 @@ export class SourceScheduler {
     // ticks and UTC rollovers).
     const attemptedAt = this.now().toISOString();
     state.lastAttemptAt = attemptedAt;
+    const stopsAtStart = this.stops;
     try {
       if (this.stateStore) {
         if (state.pendingUnpark && this.stateStore.claimUnparkAttempt) {
@@ -1066,7 +1075,7 @@ export class SourceScheduler {
           }));
         }
       }
-      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance);
+      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       // The streak is derived BEFORE state.lastResult is replaced, so it reads
       // the previous run's counts. It is carried inside the counts the
@@ -1151,6 +1160,10 @@ export class SourceScheduler {
       if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
+      if (this.stops !== stopsAtStart) {
+        this.recordShutdownInterruption(state);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
       const errorHash = hash(message);
@@ -1192,6 +1205,31 @@ export class SourceScheduler {
     }
   }
 
+  /**
+   * A pass the shutdown interrupted leaves the task due again: no failure
+   * counted, no backoff, the last real result kept. A restart says nothing
+   * about the source's health (#803). The pass resumes from its checkpoint.
+   */
+  private recordShutdownInterruption(state: SchedulerTaskState): void {
+    const interruptedAt = this.now().toISOString();
+    if (this.stateStore?.recordInterruption) {
+      try {
+        this.applyPersistedState(state, this.stateStore.recordInterruption({
+          ...schedulerTaskStateKey(state.source, state.task),
+          interruptedAt,
+        }));
+      } catch (stateError) {
+        console.error(
+          `[olympus:source-scheduler] state_persist_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${safeSchedulerErrorKind(stateError)}`,
+        );
+      }
+    }
+    state.nextRunAt = Date.parse(interruptedAt);
+    console.info(
+      `[olympus:source-scheduler] task_interrupted_by_shutdown source_id=${state.source.sourceId} task_id=${state.task.id}`,
+    );
+  }
+
   private applyPendingUnparks(dueAt: number): void {
     if (!this.stateStore?.pendingUnparks) return;
     const states = new Map(this.states.map((state) => [
@@ -1213,6 +1251,7 @@ export class SourceScheduler {
     task: SourceSchedulerTask,
     attemptedAt: string,
     provenance: SourceSchedulerRunProvenance,
+    stopsAtStart: number,
   ): Promise<SourceSchedulerTaskRunResult> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.maxTransientRetries; attempt += 1) {
@@ -1237,7 +1276,10 @@ export class SourceScheduler {
       } catch (error) {
         lastError = error;
         if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries) break;
+        // A stopped scheduler starts no new attempt.
+        if (this.stops !== stopsAtStart) break;
         await this.sleep(this.errorBackoffMs);
+        if (this.stops !== stopsAtStart) break;
       }
     }
     throw lastError;
