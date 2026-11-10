@@ -25846,7 +25846,7 @@ function createNativeProcessService(options) {
         return;
       }
       const cleanup = stopChild(lifetime, child);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      reportFailure(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null ? `Olympus ${options.label} is restarting, as it asked to.` : signal === "SIGTERM" || signal === null && code === 0 ? `Olympus ${options.label} stopped${signal ? ` on ${signal}` : ""}; starting it again.` : `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then((result) => {
         if (result === "unconfirmed") {
           reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
