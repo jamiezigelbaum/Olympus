@@ -16,7 +16,7 @@
  */
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { loadConfig, normalizeSourceWorkerBaseUrl } from './config.ts';
+import { loadConfig, normalizeSourceWorkerBaseUrl, type OlympusConfig } from './config.ts';
 import { DataOwnerBusyError, STOP_OLYMPUS_HINT, tryDataOwnerLock } from './data-owner-lock.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
@@ -27,7 +27,7 @@ import { createWorkerFetch } from './worker-transport.ts';
 export const WORKER_CLI_ROUTE_PREFIX = '/cli/';
 
 /** What the worker runs for a CLI command while it owns the data. */
-export const WORKER_CLI_OPERATIONS = ['ingestion-status', 'data-export', 'data-delete', 'tier', 'pairing-placement', 'pairing-account', 'settings', 'settings-propose'] as const;
+export const WORKER_CLI_OPERATIONS = ['ingestion-status', 'data-export', 'data-delete', 'tier', 'pairing-placement', 'pairing-account', 'settings', 'setup-status', 'settings-propose'] as const;
 export type WorkerCliOperation = (typeof WORKER_CLI_OPERATIONS)[number];
 
 /** How long a worker gets to answer a health probe before it counts as not answering. */
@@ -86,6 +86,8 @@ export interface WorkerCliCallOptions {
   /** Test seam: replaces the worker transport (the owner socket on Linux, plain fetch elsewhere). */
   fetchImpl?: typeof fetch;
   connectTimeoutMs?: number;
+  /** The caller's own configuration (a native tool's plugin config); the command line's otherwise. */
+  config?: OlympusConfig;
 }
 
 /**
@@ -102,7 +104,7 @@ export async function callWorkerCli<T = unknown>(
   options: WorkerCliCallOptions = {},
 ): Promise<T> {
   const env = options.env ?? process.env;
-  const config = loadConfig(env);
+  const config = options.config ?? loadConfig(env);
   // The token the worker authenticates with (its environment, then worker.env), not a stale config's.
   const authToken = resolveWorkerAuthToken(env, config);
   if (!authToken) throw new WorkerUnreachableError('this command has no worker token to present');

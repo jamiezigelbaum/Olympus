@@ -6135,9 +6135,14 @@ export async function main(): Promise<void> {
   // Built further down, once the ChatGPT surface exists; the worker only
   // calls it per request.
   let dashboardPanelTools: DashboardPanelTools | undefined;
+  // The setup checklist (#1077): bound once the worker exists (it reads the
+  // dashboard view through the worker), called only per request.
+  let setupStatusNow: (() => Promise<import('../../core/setup-checklist.ts').SetupChecklist>) | undefined;
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  // What AI apps received (apps-received.ts); built below, beside the waiting questions.
+  let appsReceived: import('../apps-received.ts').AppsReceived | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
   closeDesktopBridge = () => { desktopBridge?.close(); privateAgentListeners?.close(); };
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
@@ -6250,6 +6255,10 @@ export async function main(): Promise<void> {
               requestReload: () => requestModelReload(),
             }),
             modelSetup: getModelSetup,
+            setupStatus: async () => {
+              if (!setupStatusNow) throw new Error('the setup checklist is not ready');
+              return await setupStatusNow();
+            },
             computerSetup: macComputerSetupView,
             saveComputerUseChoice: saveMacComputerUseChoice,
             checkModelSetup: () => {
@@ -6309,6 +6318,11 @@ export async function main(): Promise<void> {
                   },
                 }
               : {}),
+            appsReceived: {
+              handle: (body) => (appsReceived
+                ? appsReceived.handle(body)
+                : Promise.resolve({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Olympus is still starting. Try again in a moment.' } } })),
+            },
             // Outside help (consults): the Mac dashboard card's backend, the
             // one caller of the settings writer; bound late like the panel's tools.
             consult: {
@@ -6441,6 +6455,18 @@ export async function main(): Promise<void> {
   // revoking process could not clean up, are dropped on open and on every
   // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  {
+    // Every request an AI app or agent makes, recorded where its result leaves (core/app-release-capture.ts).
+    const { createAppsReceived } = await import('../apps-received.ts');
+    const { appReleaseLogDbPath } = await import('../../core/app-release-log.ts');
+    const { runTierSetOnRecordedItem } = await import('../classification/tier-cli.ts');
+    appsReceived = createAppsReceived({
+      dbPath: appReleaseLogDbPath(resolveRemoteConnectionsDbPath(process.env)),
+      // The per-item override (`olympus tier set <item> private`) on exactly the recorded item:
+      // its locator must still name the same provider, item and conversation, or nothing is written.
+      setItemPrivate: async ({ locator, ...expected }) => runTierSetOnRecordedItem(locator, 'private', expected),
+    });
+  }
   const connectionActive = (connectionId: string): boolean => {
     if (connectionId.startsWith('@local:')) return true;
     const connections = remoteConnections();
@@ -7227,7 +7253,24 @@ export async function main(): Promise<void> {
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
   const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
   const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
+  const { readSetupWorkerFacts, setupChecklistFromView } = await import('../setup-status.ts');
+  const setupWorkerFacts = () => readSetupWorkerFacts({
+    version: runningOlympusVersion(),
+    policy: { config: sovereigntyEngine.config, ...(sovereigntyEngine.source === 'file' && sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}) },
+    ...(sourceIndexReadEnabled ? { judge: judgeSpending } : {}),
+    connections: () => dashboardAgentStore?.(),
+    // Only positive evidence counts: the OpenClaw Gateway supervising this
+    // worker as its native service (as `remote` above). A hand-run worker or
+    // the standalone engine host has no AI app until one is connected.
+    ...(process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw' ? { hostAgent: 'OpenClaw' } : {}),
+  });
+  setupStatusNow = async () => {
+    const response = await worker.fetch(new Request('http://olympus-worker.internal/dashboard.json'));
+    const view = response.ok ? await response.json() as SourceDashboardViewModel : undefined;
+    return setupChecklistFromView(view, setupWorkerFacts());
+  };
   dashboardPanelTools = createDashboardPanelTools({
+    setupChecklist: (view) => setupChecklistFromView(view, setupWorkerFacts()),
     surface: () => chatgptSurface,
     setup: chatgptSetup,
     workerFetch: worker.fetch,

@@ -18,6 +18,7 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_watches',
   'source_watch_cancel',
   'olympus_doctor',
+  'olympus_setup_status',
   'ask_anonymously',
   // Importing an old export (owner decision, 2026-10-23): the agent only
   // asks, and the user approves on the computer's dashboard. Not on the
@@ -51,6 +52,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'olympus_setup_status',
   'ask_anonymously',
   'archive_import',
   'privacy_item_find',
@@ -68,6 +70,7 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'olympus_setup_status',
   'ask_anonymously',
   'archive_import',
   'privacy_item_find',
@@ -197,6 +200,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'server-mode off',
   'server-mode auto',
   'settings show',
+  'setup status',
   'settings schema',
   'settings propose',
   'source answer',
@@ -336,6 +340,10 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // Answer or Dismiss on a waiting question. Local control session only, as
   // above (workers/http.ts DASHBOARD_PRIVATE_ANSWERS_PATH).
   { method: 'POST', path: '/dashboard/private-answers' },
+  // What AI apps received (#1061): the list, its retention, Clear and "This
+  // should be Private". Local control session only, as above
+  // (workers/http.ts DASHBOARD_APPS_RECEIVED_ROUTE).
+  { method: 'POST', path: '/dashboard/apps-received' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [
