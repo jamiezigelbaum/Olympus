@@ -48,6 +48,7 @@ import {
   cachedSnifferVerdictHolds,
   snifferVerdictTier,
 } from './sniffer.ts';
+import { judgeBoosts, type JudgeBoosts } from './judge-boost.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
 import { contentVerdictReusable, snifferSubjectKey } from './sniffer-store.ts';
 import type {
@@ -188,6 +189,8 @@ export interface SnifferPassOptions {
   signal?: AbortSignal;
   /** Service-owned idle scheduler; receives the identity after capability preparation. */
   trainingReady?: (judge: string) => void;
+  /** Items a question matched while they wait: asked first (judge-boost.ts). Default: the worker's set. */
+  boosts?: JudgeBoosts;
 }
 
 export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted' | 'cloud_stopped';
@@ -551,8 +554,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // pending rows: a store with many unread items would otherwise fill every
   // page with rows that have no sniffer question and starve the rest.
   const work: Record<SnifferPass, WorkItem[]> = { metadata: [], content: [] };
+  const boosts = options.boosts ?? judgeBoosts;
+  const raised = boosts.live();
+  const raisedFound = new Set<string>();
   for (const target of options.targets) {
-    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: question => {
+    const admit = (question: SnifferQuestion): boolean => {
       report.pendingSeen += 1;
       if (target.embeddingPrefilter?.retained(question)) return false;
       if (finishContentDonor(target, question) || midMove(target, question)) return false;
@@ -560,7 +566,21 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
-    } });
+    };
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: admit });
+    // A raised item may sit past the page (a store with thousands waiting):
+    // read its questions directly, through the same checks.
+    if (raised.length > 0) {
+      const listed = new Set(questions.map(question => `${question.pass}\u0000${tierLedgerIdentityKey(question)}`));
+      for (const identity of raised) {
+        for (const pass of ['metadata', 'content'] as const) {
+          const question = target.sniffer.questionFor(identity, pass);
+          if (!question) continue;
+          raisedFound.add(tierLedgerIdentityKey(identity));
+          if (!listed.has(`${pass}\u0000${tierLedgerIdentityKey(question)}`) && admit(question)) questions.push(question);
+        }
+      }
+    }
     for (const question of questions) {
       // Queued material whose question is no longer open (the item was
       // re-synced, overridden, deleted or re-decided) must not linger.
@@ -586,6 +606,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       if (row.metadataPending && !target.sniffer.questionFor(row, 'metadata')) report.awaitingResync += 1;
     }
   }
+  // A raised item with no question left in any store is judged (or gone).
+  for (const identity of raised) if (!raisedFound.has(tierLedgerIdentityKey(identity))) boosts.drop(identity);
 
   // All item screens run before capability probing or inference. The probe
   // contains synthetic material only; it selects the cache/re-judge identity.
@@ -645,14 +667,20 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     let turnCallMs = 0;
     try {
       // Reserve every fifth dispatch for an aged question, even across short passes.
-      const aged = pending.filter(item => dispatches % 5 === 4
+      // Paid cloud judging spends its calls on new items, never an aged backlog.
+      const aged = pending.filter(item => options.lane.kind !== 'venice' && dispatches % 5 === 4
         && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60_000)
         .sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+      // Then an item a question just matched (#1062): the asker may ask again.
+      const raisedNext = aged.length === 0 ? pending.find(item => boosts.has(item.question)) : undefined;
       // Otherwise take turns between stores (each target is one store's
       // ledger, so one source's lane): newest first within a store, but a busy
       // source's steady stream of new mail no longer keeps every other source
       // waiting (Sparta, 2026-11-03: Dropbox questions never asked in 5 hours).
-      let next = options.lane.kind === 'venice' ? pending[0]! : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+      // Priority orders a store's own questions, never one store over another
+      // (#866: Dropbox at -1 waited behind all of Gmail at 0). A cloud lane
+      // takes turns too.
+      let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
       // Within an item, names go first: a Private names verdict can settle both.
       if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
         && item.target === next.target
