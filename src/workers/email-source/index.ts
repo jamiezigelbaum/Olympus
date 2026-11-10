@@ -3730,7 +3730,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // title noise. Without embeddings it stays keyword, with no
               // skipped-lane marker for a lane nobody asked for.
               const retrievalMode = searchRequest.retrievalMode
-                ?? (searchEmbeddingProvider && store.hasEmbeddings(searchEmbeddingProvider.modelId)
+                ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId)
                   ? 'hybrid'
                   : 'keyword');
               const combinedFilters = searchRequest.filters || mandatoryScope?.filters
