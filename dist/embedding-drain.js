@@ -1073,6 +1073,7 @@ var init_olympus_layout = __esm(() => {
     "google-drive-request-budget": "google-drive-daily-request-budget.json",
     "credential-broker-state": "credential-broker-state.json",
     "waiting-private-questions": "waiting-private-questions.sqlite",
+    "app-release-log": "app-release-log.sqlite",
     "tier-migration": "tier-migration",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -42142,9 +42143,20 @@ var init_first_run_privacy_gate = __esm(() => {
   init_request_peer();
   init_remote_request_body();
 });
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage8;
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
 // src/core/remote-result.ts
 var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA;
 var init_remote_result = __esm(() => {
+  init_app_release_capture();
   init_operation_error();
   init_opsec();
   init_parent_label();
@@ -42476,6 +42488,7 @@ var init_remote_result = __esm(() => {
 // src/core/waiting-private-questions.ts
 var WAITING_QUESTION_LIMITS;
 var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
   init_sqlite_migrations();
   init_olympus_layout();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -44300,6 +44313,13 @@ var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
+// src/core/app-release-agent.ts
+var init_app_release_agent = __esm(() => {
+  init_app_release_capture();
+  init_release_manifest();
+  init_remote_result();
 });
 
 // src/workers/remote-oauth/consent-page.ts
@@ -51061,6 +51081,14 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// src/core/app-release-log.ts
+var DAY_MS2;
+var init_app_release_log = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  DAY_MS2 = 24 * 60 * 60000;
+});
+
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
@@ -51381,6 +51409,7 @@ var init_tier_migration_reports = __esm(() => {
 
 // src/core/source-forget-registry.ts
 var init_source_forget_registry = __esm(() => {
+  init_app_release_log();
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
@@ -51407,6 +51436,7 @@ var init_source_forget_registry = __esm(() => {
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_mac_engine_daemon();
+  init_app_release_log();
   init_tier_ledger_path();
   init_olympus_layout();
   init_source_placement();
@@ -51523,6 +51553,37 @@ var init_installed_sniffer_runtime = __esm(() => {
   init_sovereignty();
   init_worker_auth();
   init_built_in_sniffer();
+});
+
+// src/workers/classification/tier-cli.ts
+var TIER_CLI_USAGE;
+var init_tier_cli = __esm(() => {
+  init_classification_ledger();
+  init_data_lifecycle();
+  init_mail_source_scope();
+  init_connected_handles();
+  init_operation_error();
+  init_classification_ledger();
+  init_sniffer();
+  init_privacy_profile();
+  init_installed_sniffer_runtime();
+  init_sniffer_store();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_ledger_path();
+  init_tier_set_binding();
+  init_local_index();
+  init_secrets_disposition();
+  init_tiered_store_set();
+  init_tier_rules();
+  TIER_CLI_USAGE = {
+    "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
+    "tier explain": "olympus tier explain <locator>",
+    "tier recheck": "olympus tier recheck chat:<chat id> [--source <provider>] | source:<provider> [--account <account>]",
+    "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
+    "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
+    "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
+  };
 });
 
 // src/core/consult-gate.ts
@@ -70548,6 +70609,7 @@ var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 
 // src/workers/email-source/index.ts
 init_source_scope_approval();
+init_app_release_agent();
 init_release_manifest();
 init_update_check();
 init_google_handle_compatibility();
@@ -71289,6 +71351,9 @@ ${SETTINGS_SECTIONS.map((section) => `.setlayout:has(#${section.id}:target) .set
 @media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
 `;
 
+// src/workers/dashboard/pages/apps-received.ts
+init_vocabulary();
+
 // src/workers/dashboard/index.ts
 init_vocabulary();
 
@@ -71459,36 +71524,7 @@ init_olympus_layout();
 init_operation_error();
 init_source_storage();
 init_data_lifecycle();
-
-// src/workers/classification/tier-cli.ts
-init_classification_ledger();
-init_data_lifecycle();
-init_mail_source_scope();
-init_connected_handles();
-init_operation_error();
-init_classification_ledger();
-init_sniffer();
-init_privacy_profile();
-init_installed_sniffer_runtime();
-init_sniffer_store();
-init_tier_classifier();
-init_tier_ledger();
-init_tier_ledger_path();
-init_tier_set_binding();
-init_local_index();
-init_secrets_disposition();
-init_tiered_store_set();
-init_tier_rules();
-var TIER_CLI_USAGE = {
-  "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
-  "tier explain": "olympus tier explain <locator>",
-  "tier recheck": "olympus tier recheck chat:<chat id> [--source <provider>] | source:<provider> [--account <account>]",
-  "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
-  "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
-  "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
-};
-
-// src/workers/cli-operations.ts
+init_tier_cli();
 init_source_ingestion_ledger();
 
 // src/workers/email-source/index.ts
@@ -73026,7 +73062,7 @@ ${task.id}`;
 init_mac_permissions();
 init_paths();
 init_scope();
-var DAY_MS2 = 24 * 60 * 60 * 1000;
+var DAY_MS3 = 24 * 60 * 60 * 1000;
 var PERMISSION_RETRY_MS = 10 * 60 * 1000;
 
 // src/workers/archive-import/runtime.ts
@@ -75058,7 +75094,7 @@ var formatters = new Map;
 var SAMPLE_BYTES = 1024 * 1024 * 1024;
 var LIVE_INDEX_BYTES = 64 * 1024 * 1024;
 var SLOT_LOOKAHEAD_BYTES = 4 * 1024 * 1024;
-var DAY_MS3 = 24 * 3600000;
+var DAY_MS4 = 24 * 3600000;
 
 // src/workers/whatsapp/archive-target.ts
 init_live_connector();
