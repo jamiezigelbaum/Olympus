@@ -11433,15 +11433,17 @@ export class LocalConnectorStore {
    */
   vectorLaneServable(modelId: string): boolean {
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
-    const memo = this.vectorLaneMemo.get(modelId);
+    const memo = this.vectorLaneMemo?.get(modelId);
     if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
     const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
-    if (servable) this.vectorLaneMemo.set(modelId, Date.now());
-    else this.vectorLaneMemo.delete(modelId);
+    if (servable) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
+    else this.vectorLaneMemo?.delete(modelId);
     return servable;
   }
 
-  private readonly vectorLaneMemo = new Map<string, number>();
+  // No initializer: a class-field initializer is a load-time side effect that
+  // pulls this store, and bun:sqlite, into the Node plugin bundle.
+  private vectorLaneMemo: Map<string, number> | undefined;
 
   // Vector lane: embed the query via the provider, cosine over the stored
   // vectors (exact scan, like the Dropbox lane), best chunk score per item,

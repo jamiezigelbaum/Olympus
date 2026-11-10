@@ -39602,17 +39602,17 @@ var init_local_index = __esm(() => {
     vectorLaneServable(modelId) {
       if (this.embeddingCurrencyRebuildPending(modelId))
         return false;
-      const memo = this.vectorLaneMemo.get(modelId);
+      const memo = this.vectorLaneMemo?.get(modelId);
       if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
         return true;
       const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
       if (servable)
-        this.vectorLaneMemo.set(modelId, Date.now());
+        (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
       else
-        this.vectorLaneMemo.delete(modelId);
+        this.vectorLaneMemo?.delete(modelId);
       return servable;
     }
-    vectorLaneMemo = new Map;
+    vectorLaneMemo;
     async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
       const scoredRows = await this.vectorSearchItemsWithScores(query, provider, maxResults, accountScope, filters, deadlineAtMs);
       return scoredRows.map(({ bestCosine: _bestCosine, ...row }) => row);
