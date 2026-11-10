@@ -15,6 +15,7 @@ import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-
 import {
   buildEvalPack,
   createEvalDropboxLanes,
+  evalRetrievalAudit,
   openEvalDropboxStores,
   prepareEvalEmbedding,
   releaseEvalAnswer,
@@ -62,6 +63,37 @@ async function twoTierWorld(embedWith?: SourceEmbeddingProvider) {
   cleanups.push(() => opened.close());
   return opened;
 }
+
+describe('the real eval report says why a pack is empty (#1233)', () => {
+  test('a found item and a question with no match each carry lane counts, skips and drops, counts only', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+
+    const found = evalRetrievalAudit(await buildEvalPack({
+      question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    }));
+    expect(found.packCandidates).toBeGreaterThan(0);
+    const personalKeyword = found.lanes.find((lane) => lane.laneName.startsWith(DROPBOX_TIER_CORPUS_IDS.internal!) && lane.laneType === 'keyword');
+    expect(personalKeyword?.returnedCount).toBeGreaterThan(0);
+    expect(found.secureExclusion).toBe('not_applied');
+
+    const empty = evalRetrievalAudit(await buildEvalPack({
+      question: 'zebra quartz harmonica', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    }));
+    expect(empty).toMatchObject({ packCandidates: 0, policyDeniedCandidates: 0, unreadCandidates: 0 });
+    // Both tier stores were searched and reported, so "nothing matched" is
+    // told apart from "a corpus was skipped" or "a lane degraded".
+    const searched = new Set(empty.lanes.map((lane) => lane.laneName.split(':')[0]));
+    expect(searched.has(DROPBOX_TIER_CORPUS_IDS.internal!)).toBe(true);
+    expect(searched.has(DROPBOX_TIER_CORPUS_IDS.secure_local!)).toBe(true);
+    expect(empty.lanes.every((lane) => lane.returnedCount === 0)).toBe(true);
+    expect(empty.skippedCorpora).toEqual([]);
+    expect(empty.degradations).toEqual([]);
+    // No item text in the audit.
+    expect(JSON.stringify([found, empty])).not.toContain('Kestrel');
+    expect(JSON.stringify([found, empty])).not.toContain('4182');
+  });
+});
 
 describe('the real eval runner searches the way Ask does', () => {
   test('reaches an item that lives only in the Personal store, with its name and path in the Analyst prompt', async () => {

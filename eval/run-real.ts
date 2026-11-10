@@ -195,7 +195,7 @@ async function main(): Promise<void> {
   const reranker = builtInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
-  const traces: PrecisionTrace[] = [];
+  const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit }> = [];
   const report = await runEval(dataset, {
     questionTimeoutMs,
     continueOnQuestionError: true,
@@ -225,9 +225,12 @@ async function main(): Promise<void> {
     },
     trace(question, pack, result) {
       const detail = detailsByPack.get(pack);
-      traces.push(classifyPrecisionStage(question, pack, result, {
-        ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
-      }));
+      traces.push({
+        ...classifyPrecisionStage(question, pack, result, {
+          ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
+        }),
+        ...(detail ? { retrieval: evalRetrievalAudit(detail) } : {}),
+      });
     },
     onProgress(event) {
       if (event.type === 'question_started') {
@@ -406,6 +409,65 @@ export function createEvalDropboxLanes(input: {
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
   return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+}
+
+/**
+ * Why a question's pack holds what it holds, counts and codes only (#1233):
+ * every lane's candidates before and after its own filters, the corpora
+ * skipped and why, the lanes that degraded, and the candidates dropped or
+ * left unread. Rides on the question's precision trace into the report, so a
+ * short run separates "retrieval found nothing" from "a filter or policy
+ * removed what it found" without a per-stage diagnostic. The eval builds its
+ * pack with every trust domain allowed, so the Private-exclusion rebuild an
+ * ordinary route can run never applies here; `secureExclusion` says so.
+ */
+export interface EvalRetrievalAudit {
+  packCandidates: number;
+  lanes: Array<{
+    laneName: string;
+    laneType: string;
+    candidateCount: number;
+    returnedCount: number;
+    skippedReason?: string;
+    bestCosine?: number;
+    suppressedBelowBar?: number;
+  }>;
+  skippedCorpora: Array<{ corpusId: string; reason: string }>;
+  degradations: Array<{ laneName: string; reason: string; detail?: string; occurrences: number }>;
+  policyDeniedCandidates: number;
+  unreadCandidates: number;
+  namesOnlyCandidates: number;
+  contentPrivateCandidates: number;
+  corpusReadabilityGaps: number;
+  secureExclusion: 'not_applied';
+}
+
+export function evalRetrievalAudit(detail: EvidencePackBuildDetail): EvalRetrievalAudit {
+  return {
+    packCandidates: detail.pack.candidates.length,
+    lanes: detail.laneAudits.map((lane) => ({
+      laneName: lane.laneName,
+      laneType: lane.laneType,
+      candidateCount: lane.candidateCount,
+      returnedCount: lane.returnedCount,
+      ...(lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {}),
+      ...(lane.bestCosine !== undefined ? { bestCosine: lane.bestCosine } : {}),
+      ...(lane.suppressedBelowBar !== undefined ? { suppressedBelowBar: lane.suppressedBelowBar } : {}),
+    })),
+    skippedCorpora: detail.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
+    degradations: detail.degradations.map((degradation) => ({
+      laneName: degradation.laneName,
+      reason: degradation.reason,
+      ...(degradation.detail !== undefined ? { detail: degradation.detail } : {}),
+      occurrences: degradation.occurrences,
+    })),
+    policyDeniedCandidates: detail.policyDeniedCandidates ?? 0,
+    unreadCandidates: detail.unreadCandidates ?? 0,
+    namesOnlyCandidates: detail.namesOnlyCandidateIndexes?.length ?? 0,
+    contentPrivateCandidates: detail.contentPrivateCandidateIndexes?.length ?? 0,
+    corpusReadabilityGaps: detail.corpusReadabilityGaps?.length ?? 0,
+    secureExclusion: 'not_applied',
+  };
 }
 
 /** One question's evidence pack, over the eval's lanes, as live Ask builds it. */
