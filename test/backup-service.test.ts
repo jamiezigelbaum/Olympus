@@ -19,7 +19,7 @@ import { DASHBOARD_BACKUP_PATHS } from '../src/workers/dashboard/backup-paths.ts
 import { handleDashboardBackupRoute } from '../src/workers/dashboard/backup-routes.ts';
 import { scopePathOfRealPath } from '../src/workers/local-files/locations.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 
 const cleanup: Array<() => void> = [];
@@ -389,7 +389,7 @@ describe('restore passphrase form', () => {
     try {
       win.document.body.innerHTML = section.slice(0, start - '<script>'.length) + '</section>';
       new Function('window', 'document', 'HTMLInputElement', 'HTMLFormElement', 'HTMLElement', 'Element', 'fetch', script)(win, win.document, win.HTMLInputElement, win.HTMLFormElement, win.HTMLElement, win.Element, fetchStub);
-      const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
+      const settle = () => flushMicrotasks();
       (win.document.querySelector('[data-backup-browse="restore"]') as unknown as HTMLElement).click();
       await settle();
       (win.document.querySelector('.bkpick') as unknown as HTMLElement).click();
