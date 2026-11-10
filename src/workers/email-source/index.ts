@@ -26,7 +26,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { WHATSAPP_SESSION_FILE } from '../../core/olympus-layout.ts';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { isRetiredGooglePilotClientId, packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
@@ -632,6 +633,13 @@ export interface EmailSourceWorkerOptions {
      */
     people?: DashboardPeopleBackend;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
+    /**
+     * Logs this computer's WhatsApp linked device out (the bridge's `--unlink`
+     * against that state folder), which removes it from the phone's Linked
+     * devices (#761). Unpair runs it after capture has stopped and before the
+     * session is deleted. Absent: the phone keeps its entry.
+     */
+    unlinkWhatsAppDevice?: (stateDir: string) => Promise<'removed' | 'offline' | 'failed'>;
     /**
      * How live capture runs on this computer, by source id: the supervisor's
      * last report and what the grant approved (counts only). Absent for a
@@ -3081,6 +3089,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 }
               }
 
+              // WhatsApp only: sign this linked device out at WhatsApp while the
+              // session still exists, so the phone's Linked devices loses the
+              // entry instead of keeping one of its four slots (#761). Telegram's
+              // session is a login the owner ends in Telegram's Active sessions.
+              let phoneUnlinked: 'removed' | 'offline' | 'failed' | undefined;
+              const whatsappSessionDb = sourceId === 'telegram.messages'
+                ? undefined
+                : session.paths.find((path) => basename(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== 'gone');
+              if (whatsappSessionDb && sourceDashboard.unlinkWhatsAppDevice) {
+                phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname(whatsappSessionDb)).catch(() => 'failed' as const);
+              }
+              const phoneNote = phoneUnlinked === 'offline' || phoneUnlinked === 'failed'
+                ? ' Olympus could not reach WhatsApp to remove itself from your phone: remove Olympus in WhatsApp → Settings → Linked devices.'
+                : '';
+
               const removedSessionPaths: string[] = [];
               const unremovedSessionPaths: string[] = [];
               for (const target of removalPlan.plan.targets) {
@@ -3209,8 +3232,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // rendered as the ordinary "Done" was a completion claim over
                 // a session file still sitting on disk.
                 ...(outstandingSteps.length > 0 ? { failed_steps: outstandingSteps } : {}),
+                ...(phoneUnlinked ? { phone_unlinked: phoneUnlinked } : {}),
                 status_message: complete
-                  ? 'Unpaired. Waiting for the next refresh.'
+                  ? (phoneUnlinked === 'removed' ? 'Unpaired, and removed from your phone\'s linked devices. Waiting for the next refresh.' : 'Unpaired. Waiting for the next refresh.') + phoneNote
                   : outstandingPaths.length > 0
                     ? `Unpair incomplete — remove by hand: ${outstandingPaths.join(', ')}`
                     : failedSteps.includes('connected_handle')
@@ -3227,7 +3251,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   connected_handle_removed: !outstandingSteps.includes('connected_handle'),
                   indexed_data_deleted: false,
                   captured_messages_deleted: false,
-                  provider_device_still_linked: true,
+                  provider_device_still_linked: phoneUnlinked !== 'removed',
                   capture_service_stopped: false,
                   restart_required: false,
                   raw_runtime_secrets_exposed: false,

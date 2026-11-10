@@ -43,6 +43,7 @@ import {
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { unlinkHelper } from './dashboard-messaging-service.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -2655,6 +2656,10 @@ export async function main(): Promise<void> {
   const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
     await captureOwnership.stopForUnpair(source);
   };
+  const unlinkWhatsAppDevice = (stateDir: string) => unlinkHelper(
+    whatsappBridgePathForPackage(packageRoot, { env: process.env }),
+    { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir },
+  );
 
   const fileSourceScopeAuthority = connectedHandleRegistryPath
     ? new FileSourceScopeAuthority({
@@ -6342,6 +6347,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            unlinkWhatsAppDevice,
             withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
             captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
