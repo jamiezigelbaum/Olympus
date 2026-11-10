@@ -182,6 +182,23 @@ describe('connector store keyword search on the read pool', () => {
     expect(result.rows.map((row) => row.sourceItem.localItemId)).not.toContain(localId('zebra'));
   });
 
+  test('an item updated to a new version before the follow-up concept reads drops the row', async () => {
+    const internal = (await seeded()).stores.internal!;
+    const db = (internal as unknown as { db: Database }).db;
+    const query = 'zebra crossing museum';
+    const options = { locate: false } as const;
+    expect(internal.searchItemsDetailed(query, 20, undefined, undefined, options).rows.map((row) => row.sourceItem.localItemId)).toContain(localId('zebra'));
+    let updated = false;
+    const result = driveByHand(internal, query, options, (read) => {
+      if (updated || !/item_pk IN/.test(read.sql)) return;
+      updated = true;
+      // Same item, same pk, a new version: what the follow-up reads match is no longer what the row was read as.
+      db.query("UPDATE items SET source_version = 'v2' WHERE local_item_id = ?").run(localId('zebra'));
+    });
+    expect(updated).toBe(true);
+    expect(result.rows.map((row) => row.sourceItem.localItemId)).not.toContain(localId('zebra'));
+  });
+
   // The tier filter inside the search runs before later reads that now
   // yield (the chunk locate, the content and baseline searches). The ledger
   // can change in between, so the adapter checks every row again after its

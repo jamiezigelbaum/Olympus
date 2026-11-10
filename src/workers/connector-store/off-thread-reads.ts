@@ -37,9 +37,9 @@
 // when "close" fires). Until then it still counts against READ_POOL_SIZE, so
 // stuck statements can never add up to more than READ_POOL_SIZE threads.
 // While every place is taken, new queries wait and fail busy at their
-// deadline. Only single queries run on a thread that can be terminated: a
-// status snapshot's thread never takes a pool query, so terminating it never
-// cuts a snapshot short.
+// deadline. A snapshot and a pool query never share a thread: a snapshot's
+// thread takes no pool query, and a snapshot waits for a thread no pool query
+// runs on, so terminating a query's thread never cuts a snapshot short.
 
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 
@@ -306,10 +306,9 @@ export async function withOffThreadSnapshot<T>(
   dbPath: string,
   work: (read: (query: StoreRead) => Promise<unknown>) => Promise<T>,
 ): Promise<T> {
-  const reader = readerThread();
-  if (!reader) throw new Error('off-thread reads are unavailable');
+  if (!runtimeHasWorkers()) throw new Error('off-thread reads are unavailable');
+  const reader = await snapshotThread();
   const snapshot = nextId++;
-  reader.snapshots += 1;
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath });
     try {
@@ -320,6 +319,56 @@ export async function withOffThreadSnapshot<T>(
   } finally {
     reader.snapshots -= 1;
     dispatch();
+  }
+}
+
+// Snapshots waiting for a thread that no pool query is running on.
+const snapshotWaiters: Array<{ resolve: (reader: ReaderThread) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+
+/**
+ * A live thread with no pool query running on it, for a snapshot: the least
+ * busy, or a new one while the pool has room. A pool query's thread can be
+ * terminated when that query misses its deadline, and a snapshot on it would
+ * fail with it, so a snapshot never shares one.
+ */
+function snapshotThreadNow(): ReaderThread | undefined {
+  const best = live()
+    .filter((reader) => !reader.job)
+    .reduce<ReaderThread | undefined>((least, reader) => (!least || busy(reader) < busy(least) ? reader : least), undefined);
+  if (best && busy(best) === 0) return best;
+  return startThread() ?? best;
+}
+
+/** Reserves a thread for a snapshot, waiting while every thread runs a pool query. */
+function snapshotThread(): Promise<ReaderThread> {
+  const reader = snapshotThreadNow();
+  if (reader) {
+    reader.snapshots += 1;
+    return Promise.resolve(reader);
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        const at = snapshotWaiters.indexOf(waiter);
+        if (at >= 0) snapshotWaiters.splice(at, 1);
+        reject(new Error('off-thread reads are busy'));
+      }, OFF_THREAD_READ_TIMEOUT_MS),
+    };
+    snapshotWaiters.push(waiter);
+  });
+}
+
+function serveSnapshotWaiters(): void {
+  while (snapshotWaiters.length > 0) {
+    const reader = snapshotThreadNow();
+    if (!reader) return;
+    const waiter = snapshotWaiters.shift()!;
+    clearTimeout(waiter.timer);
+    // Reserved now, so no pool query is sent to it in between.
+    reader.snapshots += 1;
+    waiter.resolve(reader);
   }
 }
 
@@ -347,8 +396,17 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
   });
 }
 
-/** Closes every pool connection to `dbPath` (its store is closing). */
+/** Closes every pool connection to `dbPath` and drops its waiting queries (its store is closing). */
 export function releaseOffThreadReads(dbPath: string): void {
+  // Its waiting queries go too: sent after the release, one would open a
+  // connection that nothing releases again.
+  const waiting = queues.get(dbPath);
+  if (waiting) {
+    queues.delete(dbPath);
+    const turn = turns.indexOf(dbPath);
+    if (turn >= 0) turns.splice(turn, 1);
+    for (const job of waiting) settle(job, { error: new OffThreadReadBusyError() });
+  }
   for (const reader of live()) {
     try {
       reader.worker.postMessage({ op: 'release', path: dbPath });
@@ -360,6 +418,10 @@ export function releaseOffThreadReads(dbPath: string): void {
 
 /** Stops the pool: waiting queries fail busy, and every thread (with its connections) is terminated. */
 export function shutdownReadPool(): void {
+  for (const waiter of snapshotWaiters.splice(0)) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error('off-thread reads stopped'));
+  }
   for (const store of turns.splice(0)) {
     for (const job of queues.get(store) ?? []) settle(job, { error: new OffThreadReadBusyError() });
     queues.delete(store);
@@ -412,6 +474,7 @@ function nextJob(): PoolJob | undefined {
 }
 
 function dispatch(): void {
+  serveSnapshotWaiters();
   while (turns.length > 0) {
     const reader = freeThread();
     if (!reader) return;

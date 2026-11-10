@@ -6,7 +6,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import { offThreadReadsAvailable, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsAvailable, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -2890,7 +2890,9 @@ export class LocalConnectorStore {
       this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
-      // The read pool's connections to this file go with the store.
+      // The read pool's connections to this file go with the store, and so
+      // do its waiting queries.
+      this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     }
@@ -11929,6 +11931,9 @@ export class LocalConnectorStore {
     const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
     let step = steps.next();
     while (!step.done) {
+      // A store closed while its search was reading: the pool's connections
+      // to it are released, and no later read may open one again.
+      if (this.closedForPoolReads) throw new OffThreadReadBusyError();
       step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
     }
     return step.value;
@@ -11956,6 +11961,8 @@ export class LocalConnectorStore {
       (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
     );
   }
+
+  private closedForPoolReads = false;
 
   /** Drives a read generator on this store's own connection. */
   private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
@@ -12044,19 +12051,23 @@ export class LocalConnectorStore {
       const placeholders = pks.map(() => '?').join(', ');
       // On the read pool each read is its own transaction, so a pk the FTS
       // read returned may name another item by the time a follow-up read
-      // runs (ingestion writes in between). A hit counts only for the item
-      // the row was read as; on one connection they always agree.
-      const itemAt = new Map(rows.map((row) => [row.item_pk, row.local_item_id]));
-      const sameItem = (hit: { item_pk: number; local_item_id: string }) => itemAt.get(hit.item_pk) === hit.local_item_id;
+      // runs (ingestion writes in between), or the same item at a newer
+      // version. A hit counts only for the item and version the row was read
+      // as; on one connection they always agree.
+      const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
+      const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
+        const row = itemAt.get(hit.item_pk);
+        return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
+      };
       for (const [groupIndex, group] of groups.entries()) {
         const hits = ((yield { mode: 'all', sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
+          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
           FROM connector_store_fts
           JOIN items i ON i.item_pk = connector_store_fts.item_pk
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string }>)
+        `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
           .filter(sameItem);
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
@@ -12075,11 +12086,11 @@ export class LocalConnectorStore {
         ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
         : [];
       const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
-        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id
+        SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
         FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
         WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
           ${selectedFtsScope.sql}
-      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string }>)
+      `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
         .filter(sameItem)
         .map(row => row.item_pk));
       selected = rows.filter((row) => {
