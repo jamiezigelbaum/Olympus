@@ -189,10 +189,12 @@ export function openTierFixture(
     /** Where the three stores and the secret-locations index are, when not the fixture's own names in `dir`. */
     paths?: Record<SourceTrustDomain, string>;
     secretsPath?: string;
+    /** The ledger's clock (a shared test clock's `date`). */
+    now?: () => Date;
   } = {},
 ): TierFixture {
   const paths = options.paths ?? storePaths(dir);
-  const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
+  const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local), ...(options.now ? { now: options.now } : {}) });
   const secrets = new SecretLocationsIndex({ dbPath: options.secretsPath ?? join(dir, 'secret-locations.sqlite') });
   const stores: Partial<Record<SourceTrustDomain, LocalConnectorStore>> = {
     internal: openLegStore(paths, 'internal', ledger, options.family, options.exclusions),
@@ -250,6 +252,8 @@ export interface StoreSnapshot {
 /** Every byte a tier change could touch, for one store file, optionally limited to some items. */
 export function snapshotStore(dbPath: string, localItemIds?: readonly string[]): StoreSnapshot {
   const db = new Database(dbPath, { readonly: true });
+  // The real worker may be writing: wait for its lock like the stores do (#908).
+  db.exec('PRAGMA busy_timeout = 10000');
   const only = (rows: Array<Record<string, unknown>>) => localItemIds
     ? rows.filter((row) => localItemIds.includes(String(row['local_item_id'])))
     : rows;
