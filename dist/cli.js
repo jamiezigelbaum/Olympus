@@ -193808,12 +193808,13 @@ function childLane(scope) {
   const stores = scope.stores;
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
-function createTierVisibilityGate(scopes) {
+function createTierVisibilityGate(scopes, onHeldMatches) {
   return (hits) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
     const hidden = new Set;
+    const held = new Set;
     for (const scope of current2) {
       const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
       if (governed.length === 0)
@@ -193836,6 +193837,8 @@ function createTierVisibilityGate(scopes) {
         }
         const key2 = tierLedgerIdentityKey(hit.sourceItem);
         const itemCopies = copies.get(key2);
+        if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
+          held.add(hit);
         if (!itemCopies || itemCopies.length === 0) {
           if (routedWithoutCopies.has(key2))
             hidden.add(hit);
@@ -193855,8 +193858,31 @@ function createTierVisibilityGate(scopes) {
         }
       }
     }
+    if (onHeldMatches && held.size > 0) {
+      try {
+        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
+      } catch {}
+    }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
   };
+}
+function interleaveByCorpus(hits) {
+  const byCorpus = new Map;
+  for (const hit of hits) {
+    const lane = byCorpus.get(hit.corpusId);
+    if (lane)
+      lane.push(hit);
+    else
+      byCorpus.set(hit.corpusId, [hit]);
+  }
+  const lanes = [...byCorpus.values()];
+  const ordered = [];
+  for (let rank = 0;ordered.length < hits.length; rank += 1) {
+    for (const lane of lanes)
+      if (rank < lane.length)
+        ordered.push(lane[rank]);
+  }
+  return ordered;
 }
 function createReleaseTierCheck(scopes, secureDerivativeDefault) {
   return {
@@ -193926,6 +193952,71 @@ var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
+});
+
+// src/workers/classification/judge-boost.ts
+class JudgeBoosts {
+  entries = new Map;
+  now;
+  constructor(options = {}) {
+    this.now = options.now ?? (() => Date.now());
+  }
+  raise(identities) {
+    const expiresAt = this.now() + JUDGE_BOOST_TTL_MS;
+    const seen = new Set;
+    for (const identity2 of identities) {
+      if (seen.size >= JUDGE_BOOST_PER_QUESTION)
+        break;
+      const key2 = tierLedgerIdentityKey(identity2);
+      if (seen.has(key2))
+        continue;
+      seen.add(key2);
+      this.entries.delete(key2);
+      this.entries.set(key2, {
+        identity: {
+          provider: identity2.provider,
+          accountScope: identity2.accountScope,
+          providerItemId: identity2.providerItemId,
+          ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}
+        },
+        expiresAt
+      });
+    }
+    while (this.entries.size > JUDGE_BOOST_MAX_ITEMS)
+      this.entries.delete(this.entries.keys().next().value);
+  }
+  has(identity2) {
+    const entry = this.entries.get(tierLedgerIdentityKey(identity2));
+    if (!entry)
+      return false;
+    if (entry.expiresAt > this.now())
+      return true;
+    this.entries.delete(tierLedgerIdentityKey(identity2));
+    return false;
+  }
+  live() {
+    const now = this.now();
+    const live = [];
+    for (const [key2, entry] of this.entries) {
+      if (entry.expiresAt > now)
+        live.push(entry.identity);
+      else
+        this.entries.delete(key2);
+    }
+    return live;
+  }
+  drop(identity2) {
+    this.entries.delete(tierLedgerIdentityKey(identity2));
+  }
+  get size() {
+    return this.entries.size;
+  }
+}
+var JUDGE_BOOST_PER_QUESTION = 20, JUDGE_BOOST_MAX_ITEMS = 200, JUDGE_BOOST_TTL_MS, judgeBoosts;
+var init_judge_boost = __esm(() => {
+  init_tier_ledger();
+  JUDGE_BOOST_TTL_MS = 15 * 60000;
+  judgeBoosts = new JudgeBoosts;
 });
 
 // src/core/source-account-migration.ts
@@ -196853,8 +196944,11 @@ async function runSnifferPass(options) {
     return false;
   };
   const work = { metadata: [], content: [] };
+  const boosts = options.boosts ?? judgeBoosts;
+  const raised = boosts.live();
+  const raisedFound = new Set;
   for (const target of options.targets) {
-    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
+    const admit = (question) => {
       report.pendingSeen += 1;
       if (target.embeddingPrefilter?.retained(question))
         return false;
@@ -196865,7 +196959,21 @@ async function runSnifferPass(options) {
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
-    } });
+    };
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: admit });
+    if (raised.length > 0) {
+      const listed = new Set(questions.map((question) => `${question.pass}\x00${tierLedgerIdentityKey(question)}`));
+      for (const identity2 of raised) {
+        for (const pass of ["metadata", "content"]) {
+          const question = target.sniffer.questionFor(identity2, pass);
+          if (!question)
+            continue;
+          raisedFound.add(tierLedgerIdentityKey(identity2));
+          if (!listed.has(`${pass}\x00${tierLedgerIdentityKey(question)}`) && admit(question))
+            questions.push(question);
+        }
+      }
+    }
     for (const question of questions) {
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -196886,6 +196994,9 @@ async function runSnifferPass(options) {
         report.awaitingResync += 1;
     }
   }
+  for (const identity2 of raised)
+    if (!raisedFound.has(tierLedgerIdentityKey(identity2)))
+      boosts.drop(identity2);
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
     const stopped = await prepareSnifferModel(options);
@@ -196943,8 +197054,9 @@ async function runSnifferPass(options) {
       const turnStarted = monotonicNow();
       let turnCallMs = 0;
       try {
-        const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-        let next = options.lane.kind === "venice" ? pending[0] : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+        const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+        const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
+        let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
         if (next.question.pass === "content")
           next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
         pending.splice(pending.indexOf(next), 1);
@@ -197117,6 +197229,7 @@ var init_sniffer_resolver = __esm(() => {
   init_answer_activity();
   init_atomic_file();
   init_sniffer();
+  init_judge_boost();
   init_sniffer_lane();
   init_sniffer_store();
   init_tier_classifier();
@@ -221866,7 +221979,7 @@ async function main() {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes
@@ -225977,6 +226090,7 @@ var init_server5 = __esm(async () => {
   init_unreadable_locators();
   init_child_visibility();
   init_tier_visibility();
+  init_judge_boost();
   init_secret_locations();
   init_source_storage();
   init_provider_account_history();

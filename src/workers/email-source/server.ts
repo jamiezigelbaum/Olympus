@@ -338,6 +338,7 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
 import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   enableSourceRegistryAdoption,
@@ -3030,7 +3031,8 @@ export async function main(): Promise<void> {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  // A query's matches still waiting for their privacy judgment are judged next (#1062).
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
