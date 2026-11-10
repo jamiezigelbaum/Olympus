@@ -2981,6 +2981,7 @@ export function connectorStoreReadableNow(dbPath: string): boolean {
     const stat = lstatSync(dbPath);
     if (!stat.isFile() || stat.isSymbolicLink()) return false;
     db = new Database(dbPath, { readonly: true, create: false, strict: true });
+    db.exec('PRAGMA busy_timeout = 10000;');
     return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
   } catch {
     return false;
