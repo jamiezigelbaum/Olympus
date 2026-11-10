@@ -67,6 +67,8 @@ const verdictFor = (material: string) => /loan terms|bank letter/i.test(material
 let root: string;
 let env: Record<string, string>;
 let ownerWords: string | undefined;
+// A file renamed or moved at its source, by id: the next sync lists it this way.
+let renamed: Record<string, { name: string; path: string }> = {};
 const closers: Array<() => void> = [];
 
 beforeEach(() => {
@@ -78,6 +80,7 @@ beforeEach(() => {
     OLYMPUS_PRIVACY_PROFILE_PATH: join(root, 'olympus', 'privacy.json'),
   };
   ownerWords = undefined;
+  renamed = {};
 });
 
 afterEach(() => {
@@ -124,11 +127,13 @@ async function start(options: { extract: boolean }) {
     lane.internal.current()?.close();
     lane.public.current()?.close();
   });
-  const entries = FILES.map((file) => ({ tag: 'file' as const, id: file.id, name: file.name, pathDisplay: file.path, rev: 'r1' }));
+  const entries = () => FILES.map((file) => ({
+    tag: 'file' as const, id: file.id, name: renamed[file.id]?.name ?? file.name, pathDisplay: renamed[file.id]?.path ?? file.path, rev: 'r1',
+  }));
   const metadataClient: DropboxMetadataClient = {
     supportsNativeRecursive: true,
-    async listFolder(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c1', hasMore: false }; },
-    async listFolderContinue(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c2', hasMore: false }; },
+    async listFolder(): Promise<DropboxMetadataPage> { return { entries: entries(), cursor: 'c1', hasMore: false }; },
+    async listFolderContinue(): Promise<DropboxMetadataPage> { return { entries: entries(), cursor: 'c2', hasMore: false }; },
   };
   const broker = new StaticCredentialBroker([{
     handle: 'dropbox.personal', provider: 'dropbox', allowedCapabilities: ['dropbox.files.sync'], token: 'test-token', trustDomain: 'secure_local',
@@ -321,6 +326,32 @@ describe('one item, Private -> Personal -> Private', () => {
     // Nothing left to restore, and undo on an item nobody set says so.
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
     expect(ownerItems().set({ itemId, choice: 'judge', allowLower: true })).toMatchObject({ ok: false, code: 'not_owner_set' });
+  });
+
+  test('undo after the file was renamed while the owner\'s word stood: it stays Private and is asked about under its new name', async () => {
+    const install = await judged();
+    const [garden] = ownerItems().find({ query: 'orchard-plan' }).items;
+    expect(garden).toMatchObject({ tier: 'Personal' });
+    expect(ownerItems().set({ itemId: garden!.item_id, choice: 'private', allowLower: true })).toMatchObject({ ok: true, changed: 'set' });
+    await install.service.runOnce();
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+
+    // Renamed at the source while it is held Private: the judge's Personal was about the old name.
+    renamed = { 'id:garden': { name: 'orchard-plan-2027.pdf', path: '/Notes/orchard-plan-2027.pdf' } };
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    expect(ownerItems().set({ itemId: garden!.item_id, choice: 'judge', allowLower: true })).toMatchObject({ ok: true, changed: 'cleared' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 1 });
+    // Back to the judge, still Private, and the earlier verdict's receipts are not carried over.
+    const restored = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(restored).toMatchObject({ contentTier: 'secure' });
+    expect(restored.decidedBy).not.toBe('override');
+    expect(restored.reasons.some((reason) => reason.startsWith('content:names:'))).toBe(false);
+    // The judge's question is asked again with the new name; nothing lowers it on the old one.
+    for (let pass = 0; pass < 4; pass += 1) await install.service.runOnce();
+    const judgedAgain = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(judgedAgain).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(judgedAgain.decidedBy).not.toBe('override');
+    expect(judgedAgain.reasons.some((reason) => reason.startsWith('content:names:'))).toBe(true);
   });
 
   test('undo under an always-Private rule added while the owner\'s word stood: the rule holds, across a restart', async () => {

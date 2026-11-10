@@ -19613,6 +19613,7 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_parent_context();
   init_stored_names();
   init_tier_rejudge();
   init_tier_rules_sweep();

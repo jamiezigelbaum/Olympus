@@ -28,6 +28,7 @@
 import {
   classifyItemTiers,
   contentDigestReason,
+  contentNamesReason,
   heldUntilJudged,
   maxTier,
   ownerRuleMatches,
@@ -44,6 +45,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
+import { parentNamesContext } from './parent-context.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import { reopenLabelRuleSweep } from './tier-rules-sweep.ts';
@@ -139,6 +141,11 @@ export function applyOwnerOverrides(options: {
  * the owner set before anything else decided it stays as it is: its next
  * listing decides it.
  */
+/** The receipts that let a recorded content verdict be reused for this text under these names. */
+function isVerdictReceipt(reason: string): boolean {
+  return reason.startsWith('content:names:') || reason.startsWith('content:sha256:') || reason.startsWith('content:judge_verdict:');
+}
+
 function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const ledger = set.ledger;
   const identity = identityOf(record);
@@ -154,6 +161,12 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   // Names that cannot be read back from an item that has copies: the next pass tries again.
   if (!exported && copies.length > 0 && raising.length > 0) return false;
   const stored = exported ? storedSignals(exported) : {};
+  // The earlier verdict judged the names it records. Renamed or moved since (or
+  // names that cannot be read back): it no longer speaks for the item, which
+  // keeps the protection it has until its names are judged again.
+  const namesReceipt = before.reasons.find((reason) => reason.startsWith('content:names:'));
+  const namesChanged = namesReceipt !== undefined && (!exported
+    || namesReceipt !== contentNamesReason(stored, parentNamesContext(set, identity)));
   const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
   // Label rules for this item's source: whether the item carries the label is not known here,
   // so it keeps the protection it has now (up to the rule's tier) and the provider is asked again (below).
@@ -162,9 +175,12 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   const heldNow = maxTier(record.metadataTier, record.contentTier);
   let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
   for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
-  const metadataTier = maxTier(before.metadataTier, ruleTier);
-  const contentTier = maxTier(before.contentTier, metadataTier);
-  const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
+  // Renamed: no lower than it is held now, and without the earlier verdict's
+  // receipts, so the next re-judge reads the new names before anything lowers it.
+  const floor = namesChanged ? heldNow : 'public';
+  const metadataTier = maxTier(maxTier(before.metadataTier, ruleTier), floor);
+  const contentTier = maxTier(maxTier(before.contentTier, metadataTier), floor);
+  const byRule = tierRank(ruleTier) > tierRank(before.metadataTier);
   let ruleReasons: string[] = [];
   if (byRule) {
     // The rules' reason codes exactly as a listing states them.
@@ -184,12 +200,13 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     // A stored decider outside the classifier's own list (a landed move) is kept as recorded.
     decidedBy: byRule ? 'owner_rule' : before.decidedBy as TierDecision['decidedBy'],
     reasons: byRule
-      ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith('content:'))]
-      : [...before.reasons],
-    state: 'current',
+      ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith('content:') && (!namesChanged || !isVerdictReceipt(reason)))]
+      : before.reasons.filter((reason) => !namesChanged || !isVerdictReceipt(reason)),
+    // Renamed: held for its text question, which the judge asks again with the new names.
+    state: namesChanged ? 'pending' : 'current',
     contentRead: before.reasons.some((reason) => reason.startsWith('content:')),
     metadataPending: false,
-    contentPending: false,
+    contentPending: namesChanged,
     metadataForced: before.reasons.some((reason) => reason.startsWith('metadata:') && reason.endsWith(':force'))
       || (byRule && matched.some((rule) => rule.strength === 'force')),
     metadataFlagged: before.reasons.some((reason) => reason.startsWith('metadata:possibly_private:')),

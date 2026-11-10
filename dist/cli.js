@@ -65702,6 +65702,9 @@ function applyOwnerOverrides(options) {
   retireSecretRedactions(ledger);
   return report;
 }
+function isVerdictReceipt(reason) {
+  return reason.startsWith("content:names:") || reason.startsWith("content:sha256:") || reason.startsWith("content:judge_verdict:");
+}
 function restoreClearedOverride(set, record) {
   const ledger = set.ledger;
   const identity2 = identityOf4(record);
@@ -65718,15 +65721,18 @@ function restoreClearedOverride(set, record) {
   if (!exported && copies.length > 0 && raising.length > 0)
     return false;
   const stored = exported ? storedSignals(exported) : {};
+  const namesReceipt = before.reasons.find((reason) => reason.startsWith("content:names:"));
+  const namesChanged = namesReceipt !== undefined && (!exported || namesReceipt !== contentNamesReason(stored, parentNamesContext(set, identity2)));
   const matched = raising.filter((rule) => rule.match.kind !== "label" && ownerRuleMatches(rule, stored, record.provider));
   const labelRules = raising.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
   const heldNow = maxTier(record.metadataTier, record.contentTier);
   let ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
   for (const rule of labelRules)
     ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
-  const metadataTier = maxTier(before.metadataTier, ruleTier);
-  const contentTier = maxTier(before.contentTier, metadataTier);
-  const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
+  const floor = namesChanged ? heldNow : "public";
+  const metadataTier = maxTier(maxTier(before.metadataTier, ruleTier), floor);
+  const contentTier = maxTier(maxTier(before.contentTier, metadataTier), floor);
+  const byRule = tierRank(ruleTier) > tierRank(before.metadataTier);
   let ruleReasons = [];
   if (byRule) {
     const classified = classifyItemTiers({
@@ -65740,11 +65746,11 @@ function restoreClearedOverride(set, record) {
     metadataTier,
     contentTier,
     decidedBy: byRule ? "owner_rule" : before.decidedBy,
-    reasons: byRule ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith("content:"))] : [...before.reasons],
-    state: "current",
+    reasons: byRule ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith("content:") && (!namesChanged || !isVerdictReceipt(reason)))] : before.reasons.filter((reason) => !namesChanged || !isVerdictReceipt(reason)),
+    state: namesChanged ? "pending" : "current",
     contentRead: before.reasons.some((reason) => reason.startsWith("content:")),
     metadataPending: false,
-    contentPending: false,
+    contentPending: namesChanged,
     metadataForced: before.reasons.some((reason) => reason.startsWith("metadata:") && reason.endsWith(":force")) || byRule && matched.some((rule) => rule.strength === "force"),
     metadataFlagged: before.reasons.some((reason) => reason.startsWith("metadata:possibly_private:")),
     engineVersion: record.engineVersion,
@@ -65869,6 +65875,7 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_parent_context();
   init_stored_names();
   init_tier_rejudge();
   init_tier_rules_sweep();
