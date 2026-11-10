@@ -576,6 +576,11 @@ export interface ComputerDashboardMeta {
    */
   archiveSources?: ComputerArchiveSourceMeta[];
   /**
+   * Every export guide's step pages, by format id (Get my archive, #660), for
+   * Import another archive: present with `archives`, whatever sources run.
+   */
+  archiveGuideLinks?: Record<string, Array<string | null>>;
+  /**
    * Each import-only source's card (Reflect, Roam: a format no live connector
    * reads names its card in the format registry): the imports of its formats,
    * listed as the Archives row lists its own, with Remove. `sourceId` is the card.
@@ -591,6 +596,13 @@ export interface ComputerArchiveSourceMeta {
   label: string;
   /** The picker's opening sentence: the exports this source reads, and how to choose one. */
   intro: string;
+  /**
+   * The export guides (Get my archive, #660) this source's picker offers, by
+   * format id: each step's https page, or null for a step without one; absent:
+   * none. The pages travel here, not in the page's own words, so the page
+   * source names no outside origin.
+   */
+  guideLinks?: Record<string, Array<string | null>>;
 }
 
 /** The imports that joined one source, and the history that source's inputs cover. */

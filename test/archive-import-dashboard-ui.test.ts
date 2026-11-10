@@ -30,7 +30,8 @@ import {
   type ComputerSourceImportEntry,
   type ComputerSourceImportsMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { ARCHIVE_COMMON_FINDINGS } from '../src/core/archive-formats.ts';
+import { ARCHIVE_COMMON_FINDINGS, ARCHIVE_FORMATS, archiveExportGuideLinks, archiveExportGuides } from '../src/core/archive-formats.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY } from '../src/workers/archive-import/dashboard.ts';
@@ -1841,5 +1842,111 @@ describe('the preview states for imports that are inputs of a source', () => {
     expect(apart).toHaveLength(1);
     expect(apart[0]!.textContent).toContain('Other address mail.mbox');
     expect(Array.from(apart[0]!.querySelectorAll('button')).map((node) => node.textContent)).toContain(A.remove);
+  });
+});
+
+// #660: the quick path first, then a guide per app from the archive format
+// registry; a guide ends on "Come back when it's ready" and the drop zone.
+describe('Import an archive: the quick path and Get my archive (#660)', () => {
+  const guides = archiveExportGuides();
+  const get = A.pick.get;
+  const keyed = (page: Page, key: string) => page.doc.querySelector(`[data-key="${key}"]`) as HTMLButtonElement | null;
+
+  test('the drop zone comes first, then one guide per app in the registry', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])) });
+    page.button(A.importAction).click();
+    await waitFor(() => page.text().includes(get.title));
+    const text = page.text();
+    expect(text.indexOf(A.pick.have)).toBeGreaterThan(-1);
+    expect(text.indexOf(A.pick.have)).toBeLessThan(text.indexOf(A.pick.zone));
+    expect(text.indexOf(A.pick.zone)).toBeLessThan(text.indexOf(get.title));
+    const listed = Array.from(page.doc.querySelectorAll('[data-key^="picker:guide:"]')).map((node) => node.textContent);
+    expect(listed).toEqual(guides.map((entry) => entry.guide.title));
+    // Reflect's two export forms are one app: one guide.
+    expect(listed.filter((title) => title === 'Reflect')).toHaveLength(1);
+  });
+
+  test('a guide is one step per screen with the page to open, and ends on the drop zone', async () => {
+    const takeout = guides.find((entry) => entry.formatId === 'mbox')!.guide;
+    const result = dashboard('archives-none', meta([]));
+    // The step pages come from the computer meta's full list, not the page's words, with no source card that reads mail.
+    const computer = { ...result._meta[COMPUTER_META_KEY], archiveGuideLinks: archiveExportGuideLinks() };
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => ({ ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: computer } }),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await waitFor(() => keyed(page, 'picker:guide:mbox'));
+    keyed(page, 'picker:guide:mbox')!.click();
+    await waitFor(() => page.text().includes(takeout.steps[0]!.title));
+    const count = takeout.steps.length + 1;
+    expect(page.text()).toContain(fill(get.step, { n: '1', of: String(count) }));
+    // The step's controls are named in bold, never as raw asterisks.
+    expect(page.text()).not.toContain('**');
+    expect(page.doc.querySelector('ol.steps strong')?.textContent).toBe('Deselect all');
+    // The drop zone is not on a step that asks the app for the export.
+    expect(keyed(page, 'picker:drop:zone')).toBeNull();
+    page.button(fill(get.open, { provider: takeout.provider })).click();
+    await waitFor(() => page.sent.some((message) => message.method === 'ui/open-link'));
+    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([takeout.steps[0]!.link!.url]);
+    // The link itself is there too, for a browser that blocks the new tab.
+    expect((page.doc.querySelector(`a[href="${takeout.steps[0]!.link!.url}"]`) as HTMLAnchorElement | null)?.target).toBe('_blank');
+    for (let step = 1; step < count; step++) {
+      keyed(page, 'picker:guide:next')!.click();
+      await waitFor(() => page.text().includes(fill(get.step, { n: String(step + 1), of: String(count) })));
+    }
+    // The last screen: no check, what arrives, and the quick path.
+    expect(page.text()).toContain(get.ready);
+    expect(page.text()).toContain(takeout.ready);
+    expect(keyed(page, 'picker:guide:next')).toBeNull();
+    expect(keyed(page, 'picker:drop:zone')).not.toBeNull();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout.mbox', text: 'From mail' }]);
+    await waitFor(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: page.uploads()[0]!.upload_id } }]);
+  });
+
+  test('Back goes a step back, and from the first step to the two paths', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])) });
+    page.button(A.importAction).click();
+    await waitFor(() => keyed(page, 'picker:guide:telegram_json'));
+    keyed(page, 'picker:guide:telegram_json')!.click();
+    await waitFor(() => keyed(page, 'picker:guide:next'));
+    keyed(page, 'picker:guide:next')!.click();
+    await waitFor(() => page.text().includes(fill(get.step, { n: '2', of: '3' })));
+    keyed(page, 'picker:guide:back')!.click();
+    await waitFor(() => page.text().includes(fill(get.step, { n: '1', of: '3' })));
+    keyed(page, 'picker:guide:back')!.click();
+    await waitFor(() => keyed(page, 'picker:drop:zone') && page.text().includes(get.title));
+  });
+
+  test("a source's own picker offers only its own formats' guides, and none without them", async () => {
+    const telegram = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Drop a Telegram export.' };
+    const telegramLinks = guides.find((entry) => entry.formatId === 'telegram_json')!.guide.steps.map((step) => step.link?.url ?? null);
+    for (const [guideLinks, expected] of [[{ telegram_json: telegramLinks }, ['Telegram']], [undefined, []]] as const) {
+      const result = dashboard('archives-none', meta([]));
+      const computer = { ...result._meta[COMPUTER_META_KEY], archiveSources: [{ ...telegram, ...(guideLinks ? { guideLinks } : {}) }] };
+      const page = await mount({ [DASHBOARD_TOOL_NAME]: () => ({ ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: computer } }) });
+      const row = Array.from(page.doc.querySelectorAll('li.row.source')).find((node) => node.querySelector('.source-name')?.textContent === 'Telegram')!;
+      (Array.from(row.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+      await waitFor(() => page.text().includes(telegram.intro));
+      expect(Array.from(page.doc.querySelectorAll('[data-key^="picker:guide:"]')).map((node) => node.textContent)).toEqual([...expected]);
+      expect(page.text().includes(get.title)).toBe(expected.length > 0);
+    }
+  });
+
+  test('every guide comes from a registry entry, with https pages and steps to follow', () => {
+    for (const entry of guides) {
+      expect(ARCHIVE_FORMATS.some((format) => format.id === entry.formatId && format.exportGuide === entry.guide)).toBe(true);
+      expect(entry.guide.steps.length).toBeGreaterThan(0);
+      expect(entry.guide.ready.length).toBeGreaterThan(0);
+      for (const step of entry.guide.steps) {
+        expect(step.instructions.length).toBeGreaterThan(0);
+        if (step.link) expect(step.link.url.startsWith('https://')).toBe(true);
+      }
+    }
+    expect(A.pick.guides.map((guide) => guide.id)).toEqual(guides.map((entry) => entry.formatId));
+    // The page's own words name no page: those travel in the computer meta.
+    expect(JSON.stringify(A.pick.guides)).not.toContain('https:');
   });
 });

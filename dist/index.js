@@ -6145,6 +6145,9 @@ function isTelegramJsonHead(head) {
   const text2 = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
 }
+function archiveExportGuides(formats = ARCHIVE_FORMATS) {
+  return formats.flatMap((format) => format.exportGuide ? [{ formatId: format.id, guide: format.exportGuide }] : []);
+}
 function archiveSourceCards(formats = ARCHIVE_FORMATS) {
   const cards = new Map;
   for (const format of formats) {
@@ -6178,6 +6181,15 @@ var init_archive_formats = __esm(() => {
     provider: "mbox",
     chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
+    exportGuide: Object.freeze({
+      title: "Gmail, from Google Takeout",
+      provider: "Google",
+      steps: Object.freeze([
+        { title: "Choose your mail", instructions: ["Choose **Deselect all**.", "Scroll to **Mail** and tick it.", "Choose **Next step** at the bottom of the page."], link: { label: "Google Takeout", url: "https://takeout.google.com/" } },
+        { title: "Ask for the export", instructions: ["Keep **Send download link via email** and **Export once**.", "Keep **.zip** as the file type.", "Choose **Create export**."] }
+      ]),
+      ready: "Google emails you a download link when the export is ready. Download it, open the zip, and drop the .mbox file from its Mail folder."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
@@ -6202,6 +6214,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "WhatsApp",
     probeNames: Object.freeze(["*.txt", "*.zip"]),
     signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    exportGuide: Object.freeze({
+      title: "A WhatsApp chat",
+      provider: "WhatsApp",
+      steps: Object.freeze([
+        { title: "Open the chat", instructions: ["On your phone, open WhatsApp and the chat you want.", "Tap the chat's name at the top (on Android, tap **⋮** then **More**)."] },
+        { title: "Export it", instructions: ["Choose **Export chat**.", "Choose **Attach media** (on Android, **Include media**) to keep photos and voice notes, or **Without media** for a smaller file.", "Send the file to this computer, for example by AirDrop or to yourself by email."] }
+      ]),
+      ready: "WhatsApp makes the file straight away. Drop the .zip or the .txt file it sent."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
@@ -6231,6 +6252,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Reflect",
+      provider: "Reflect",
+      steps: Object.freeze([
+        { title: "Export your notes", instructions: ["In Reflect, open **Settings**.", "Find the export option and choose **JSON** (Markdown works too).", "Save the file in **Downloads**."], link: { label: "Reflect", url: "https://reflect.app/" } }
+      ]),
+      ready: "Drop the .json file, or the .zip Reflect saved."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
   REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
@@ -6263,6 +6292,14 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Roam",
     sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
+    exportGuide: Object.freeze({
+      title: "Roam",
+      provider: "Roam",
+      steps: Object.freeze([
+        { title: "Export your graph", instructions: ["Open your graph in Roam.", "Choose **⋯** at the top right, then **Export All**.", "Set the format to **JSON** and choose **Export All**."], link: { label: "Roam", url: "https://roamresearch.com/" } }
+      ]),
+      ready: "Drop the .zip Roam saved, or the .json file inside it."
+    }),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
   EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
@@ -6274,6 +6311,15 @@ var init_archive_formats = __esm(() => {
     citationLabel: "Evernote",
     sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
     probeNames: Object.freeze(["*.enex"]),
+    exportGuide: Object.freeze({
+      title: "Evernote",
+      provider: "Evernote",
+      steps: Object.freeze([
+        { title: "Open the Evernote app", instructions: ["Export works in the Evernote app on a computer, not on the web.", "Install it if you do not have it, and sign in."], link: { label: "Evernote", url: "https://evernote.com/download" } },
+        { title: "Export a notebook", instructions: ["In **Notebooks**, choose **⋯** beside a notebook.", "Choose **Export notebook…** and keep the **ENEX** format.", "Save the file. Repeat for each notebook you want."] }
+      ]),
+      ready: "Drop the .enex file, or a folder holding several."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
@@ -6316,6 +6362,15 @@ var init_archive_formats = __esm(() => {
         advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
       })
     ]),
+    exportGuide: Object.freeze({
+      title: "Telegram",
+      provider: "Telegram",
+      steps: Object.freeze([
+        { title: "Open Telegram Desktop", instructions: ["Export works in Telegram Desktop, not in the phone app.", "Install it if you do not have it, and sign in."], link: { label: "Telegram Desktop", url: "https://desktop.telegram.org/" } },
+        { title: "Ask for the export", instructions: ["Open **Settings**, then **Advanced**.", "Choose **Export Telegram data**.", "Tick the chats you want and set the format to **Machine-readable JSON**.", "Choose **Export**. Telegram may ask you to confirm on your phone and wait before it starts."] }
+      ]),
+      ready: "Drop the folder Telegram saved, or the result.json file in it."
+    }),
     detect(probe) {
       if (probe.chosen.kind === "file")
         return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
@@ -15400,7 +15455,23 @@ var init_vocabulary = __esm(() => {
       unreadable: "Olympus could not read what you dropped. Try again.",
       failed: "The upload stopped before it finished. Nothing was imported. Try again.",
       several: "{n} items",
-      chooseAnother: "Start over"
+      chooseAnother: "Start over",
+      have: "I already have my archive",
+      get: {
+        title: "Get my archive",
+        line: "Not exported yet? Choose the app and Olympus walks you through asking for it.",
+        step: "Step {n} of {of}",
+        open: "Open this page in {provider}",
+        next: "I've done this, next",
+        back: "Back",
+        ready: "Come back when it's ready",
+        wait: "Exports can take a few minutes, hours or days. When yours arrives, come back to this page."
+      },
+      guides: archiveExportGuides().map((entry) => ({
+        id: entry.formatId,
+        ...entry.guide,
+        steps: entry.guide.steps.map(({ link, ...step }) => link ? { ...step, link: { label: link.label } } : step)
+      }))
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
