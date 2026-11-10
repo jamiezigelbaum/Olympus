@@ -164399,7 +164399,7 @@ function renderBackupSection(input) {
   const restoreState = status.restore;
   const restoreNote = restoreState?.state === "done" ? `<p class="bkok" role="status" data-backup-restored>Restored ${escapeHtml2(backupWhen(restoreState.at, input.now))}.${restoreState.sign_in_again?.length ? ` Sign in again to: ${escapeHtml2(restoreState.sign_in_again.join(", "))}.` : ""} <a href="/dashboard?connect">Open Sources</a></p>` : restoreState?.state === "failed" ? `<p class="bkerr" role="alert">The restore didn't finish: ${escapeHtml2(restoreState.message ?? "")}</p>` : restoreState?.state === "restarting" ? '<p role="status">Olympus is restarting to restore…</p>' : "";
   const restore = `<h4 class="bkh">${escapeHtml2(C2.restore)}</h4><p>${escapeHtml2(C2.restoreLine)}</p>${restoreNote}` + (status.restoreAvailable ? `<button class="btn primaryline" type="button" data-backup-browse="restore">${escapeHtml2(C2.restoreButton)}</button>` : `<p class="pnote">On this install Olympus can't restart itself. Stop Olympus, then run <code>olympus data restore --input &lt;file&gt; --passphrase-stdin</code>.</p>`);
-  const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml2(status.passphraseSet ? "Change the passphrase" : C2.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml2(C2.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml2(C2.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
+  const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml2(status.passphraseSet ? "Change the passphrase" : C2.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml2(C2.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml2(C2.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div><p class="bkmore"><button class="btn" type="button" data-browser-more hidden>Show more</button></p>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
   return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}${lastRow}${where2}${when}${passphrase}${restore}${dialogs}` + `<script>${backupClientScript(input.csrfToken, status.folder ?? null)}</script></section>`;
 }
 function backupClientScript(csrfToken, folder) {
@@ -164432,11 +164432,40 @@ function backupClientScript(csrfToken, folder) {
   var browser = { mode: 'folder', stack: [], picked: null };
   function el(tag, cls, text) { var node = document.createElement(tag); if (cls) node.className = cls; if (text !== undefined) node.textContent = text; return node; }
   function size(bytes) { return bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + ' GB' : bytes >= 1e6 ? (bytes / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1e3)) + ' KB'; }
+  // One folder's button: opening it lists what is inside.
+  function folderButton(folder, key) {
+    var button = el('button', 'btn', '\uD83D\uDCC1 ' + folder.name + (folder.note ? ' — ' + folder.note : ''));
+    button.type = 'button'; button.disabled = !folder.selectable;
+    button.addEventListener('click', function () { browser.stack.push(key || ''); browser.current = folder.key; show(folder.key); });
+    return button;
+  }
+  // A level lists 100 folders a page; Show more appends the next page.
+  function setMore(dialog, cursor) {
+    browser.next = cursor || null;
+    var more = $('[data-browser-more]', dialog); more.hidden = !browser.next; more.disabled = false;
+  }
+  async function showMore() {
+    var dialog = $('#backup-browser');
+    var key = browser.shown, cursor = browser.next, seq = browser.seq;
+    if (!cursor) return;
+    $('[data-browser-more]', dialog).disabled = true;
+    say('#backup-browser [data-backup-dialog-msg]', 'Reading…');
+    var result = await post('browse', key ? { parent_key: key, cursor: cursor } : { cursor: cursor });
+    if (seq !== browser.seq) return;
+    if (!result.ok) { say('#backup-browser [data-backup-dialog-msg]', result.error && result.error.message, true); $('[data-browser-more]', dialog).disabled = false; return; }
+    say('#backup-browser [data-backup-dialog-msg]', '');
+    var folders = $('[data-browser-folders]', dialog);
+    (result.folders || []).forEach(function (folder) { folders.append(folderButton(folder, key)); });
+    setMore(dialog, result.next_cursor);
+  }
   async function show(key) {
     var dialog = $('#backup-browser');
     var folders = $('[data-browser-folders]', dialog); var files = $('[data-browser-files]', dialog);
+    var seq = browser.seq = (browser.seq || 0) + 1;
+    browser.shown = key; setMore(dialog, null);
     say('#backup-browser [data-backup-dialog-msg]', 'Reading…');
     var result = await post('browse', key ? { parent_key: key, files: browser.mode === 'restore' } : {});
+    if (seq !== browser.seq) return;
     folders.replaceChildren(); files.replaceChildren();
     if (!result.ok) { say('#backup-browser [data-backup-dialog-msg]', result.error && result.error.message, true); return; }
     say('#backup-browser [data-backup-dialog-msg]', result.note || '');
@@ -164458,16 +164487,12 @@ function backupClientScript(csrfToken, folder) {
       });
       files.append(button);
     });
-    (result.folders || []).forEach(function (folder) {
-      var button = el('button', 'btn', '\uD83D\uDCC1 ' + folder.name + (folder.note ? ' — ' + folder.note : ''));
-      button.type = 'button'; button.disabled = !folder.selectable;
-      button.addEventListener('click', function () { browser.stack.push(key || ''); browser.current = folder.key; show(folder.key); });
-      folders.append(button);
-    });
+    (result.folders || []).forEach(function (folder) { folders.append(folderButton(folder, key)); });
+    setMore(dialog, result.next_cursor);
   }
   function openBrowser(mode) {
     var dialog = $('#backup-browser');
-    browser = { mode: mode, stack: [], picked: null, current: '' };
+    browser = { mode: mode, stack: [], picked: null, current: '', seq: browser.seq };
     $('#backup-browser-title').textContent = mode === 'folder' ? 'Choose a folder for backups' : 'Choose a backup to restore';
     var form = $('[data-backup-restore]', dialog); form.hidden = true; form.reset();
     $('[data-browser-use]', dialog).textContent = 'Use this folder';
@@ -164479,6 +164504,7 @@ function backupClientScript(csrfToken, folder) {
     if (!target || !target.closest('[data-backup-section]')) return;
     var opener = target.closest('[data-backup-browse]');
     if (opener) { openBrowser(opener.getAttribute('data-backup-browse')); return; }
+    if (target.closest('[data-browser-more]')) { showMore(); return; }
     if (target.closest('[data-browser-up]')) { var up = browser.stack.pop() || ''; browser.current = up; show(up); return; }
     if (target.closest('[data-browser-use]')) {
       var use = target.closest('[data-browser-use]'); use.disabled = true;
@@ -164559,6 +164585,7 @@ var DASHBOARD_SETTINGS_BACKUP_ID = "backup", BACKUP_COPY, BACKUP_SECTION_CSS = `
 .linkbtn { background: none; border: 0; padding: 0; color: var(--link); text-decoration: underline; font: inherit; cursor: pointer; }
 .bklist { display: grid; gap: 6px; margin: 8px 0; max-height: 50vh; overflow-y: auto; }
 .bklist button { text-align: left; }
+.bkmore { margin: 0 0 8px; }
 .bklist .bkpick[aria-pressed="true"] { border-color: var(--link); outline: 2px solid var(--link); outline-offset: 1px; }
 `;
 var init_backup_section = __esm(() => {
@@ -169499,7 +169526,10 @@ async function handleDashboardBackupRoute(path, body, deps) {
       case "/dashboard/backup/browse": {
         const browser = deps.browser ?? createLocalFilesFolderScopeBrowser({ volumes });
         const parentKey2 = text4(body.parent_key);
-        const page2 = await browser.browse({ ...parentKey2 ? { parentKey: parentKey2 } : {} });
+        if (body.cursor !== undefined && typeof body.cursor !== "string")
+          throw new OperationError("invalid_params", "Folder browse cursor is invalid.");
+        const cursor = text4(body.cursor);
+        const page2 = await browser.browse({ ...parentKey2 ? { parentKey: parentKey2 } : {}, ...cursor ? { cursor } : {} });
         const folders = page2.nodes.map((node) => ({
           key: node.key,
           name: node.name,
@@ -169511,7 +169541,7 @@ async function handleDashboardBackupRoute(path, body, deps) {
         let files = [];
         if (parentKey2) {
           path2 = realPathOfScopePath(volumes, normalizeScopePath(parentKey2)) ?? null;
-          if (path2 && body.files === true) {
+          if (path2 && body.files === true && !cursor) {
             files = listBackups(path2).map((backup) => ({
               key: scopePathOfRealPath(volumes, backup.path),
               name: backup.name,
@@ -169521,7 +169551,7 @@ async function handleDashboardBackupRoute(path, body, deps) {
             }));
           }
         }
-        return { status: 200, body: { ok: true, path: path2, folders, files, ...page2.access && !page2.nodes.length ? { note: page2.access.message } : {} } };
+        return { status: 200, body: { ok: true, path: path2, folders, files, ...page2.nextCursor ? { next_cursor: page2.nextCursor } : {}, ...page2.access && !page2.nodes.length ? { note: page2.access.message } : {} } };
       }
       case "/dashboard/backup/restore": {
         const fileKey = text4(body.file_key);

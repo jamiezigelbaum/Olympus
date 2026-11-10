@@ -102,7 +102,12 @@ export async function handleDashboardBackupRoute(
       case '/dashboard/backup/browse': {
         const browser = deps.browser ?? createLocalFilesFolderScopeBrowser({ volumes });
         const parentKey = text(body.parent_key);
-        const page = await browser.browse({ ...(parentKey ? { parentKey } : {}) });
+        // The next page of a level with more than one page of folders: the
+        // opaque cursor the last page returned, which the listing checks is
+        // its own and bound to this same folder before reading past it.
+        if (body.cursor !== undefined && typeof body.cursor !== 'string') throw new OperationError('invalid_params', 'Folder browse cursor is invalid.');
+        const cursor = text(body.cursor);
+        const page = await browser.browse({ ...(parentKey ? { parentKey } : {}), ...(cursor ? { cursor } : {}) });
         const folders = page.nodes.map((node) => ({
           key: node.key,
           name: node.name,
@@ -114,7 +119,8 @@ export async function handleDashboardBackupRoute(
         let files: Array<Record<string, unknown>> = [];
         if (parentKey) {
           path = realPathOfScopePath(volumes, normalizeScopePath(parentKey)) ?? null;
-          if (path && body.files === true) {
+          // Backup files come with a level's first page only; a later page adds folders.
+          if (path && body.files === true && !cursor) {
             files = listBackups(path).map((backup) => ({
               key: scopePathOfRealPath(volumes, backup.path),
               name: backup.name,
@@ -124,7 +130,7 @@ export async function handleDashboardBackupRoute(
             }));
           }
         }
-        return { status: 200, body: { ok: true, path, folders, files, ...(page.access && !page.nodes.length ? { note: page.access.message } : {}) } };
+        return { status: 200, body: { ok: true, path, folders, files, ...(page.nextCursor ? { next_cursor: page.nextCursor } : {}), ...(page.access && !page.nodes.length ? { note: page.access.message } : {}) } };
       }
       case '/dashboard/backup/restore': {
         const fileKey = text(body.file_key);

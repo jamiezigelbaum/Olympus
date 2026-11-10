@@ -3,7 +3,7 @@
 // restart, and routes served only to the unlocked local dashboard session.
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -16,6 +16,9 @@ import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { renderDashboardSettingsPage } from '../src/workers/dashboard/pages/local.ts';
 import { DASHBOARD_BACKUP_PATHS } from '../src/workers/dashboard/backup-paths.ts';
+import { handleDashboardBackupRoute } from '../src/workers/dashboard/backup-routes.ts';
+import { scopePathOfRealPath } from '../src/workers/local-files/locations.ts';
+import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 
 const cleanup: Array<() => void> = [];
@@ -229,6 +232,50 @@ describe('backup routes', () => {
     expect(remote).toContain('Open dashboard controls on this computer to back up or restore.');
     // A remote page carries the section's words, not its controls.
     expect(remote).not.toContain('data-backup-run');
+  });
+
+  test('a folder with more than 100 subfolders: the picker pages on, and a folder past the first page can be chosen', async () => {
+    const dir = tempDir();
+    const parent = join(dir, 'Many');
+    const names = Array.from({ length: 130 }, (_, i) => `Folder ${String(i).padStart(3, '0')}`);
+    for (const name of names) mkdirSync(join(parent, name), { recursive: true });
+    const volumes = new VolumeResolver();
+    const saved: Array<{ folder?: string }> = [];
+    const backup = {
+      status: () => ({ schedule: 'manual' as const, passphraseSet: false, running: false, backups: [], restoreAvailable: true }),
+      saveSettings: (input: { folder?: string }) => { saved.push(input); return backup.status(); },
+      setPassphrase: () => backup.status(),
+      runNow: async () => backup.status(),
+      tick: async () => false,
+      restore: () => backup.status(),
+    };
+    const deps = { backup: backup as never, volumes };
+    const parentKey = scopePathOfRealPath(volumes, parent);
+    const first = await handleDashboardBackupRoute('/dashboard/backup/browse', { parent_key: parentKey }, deps);
+    expect(first.status).toBe(200);
+    const firstFolders = first.body.folders as Array<{ key: string; name: string; selectable: boolean }>;
+    expect(firstFolders).toHaveLength(100);
+    expect(typeof first.body.next_cursor).toBe('string');
+    const second = await handleDashboardBackupRoute('/dashboard/backup/browse', { parent_key: parentKey, cursor: first.body.next_cursor }, deps);
+    expect(second.status).toBe(200);
+    const secondFolders = second.body.folders as Array<{ key: string; name: string; selectable: boolean }>;
+    expect(secondFolders.map((f) => f.name)).toEqual(names.slice(100));
+    expect(second.body.next_cursor).toBeUndefined();
+    const last = secondFolders.at(-1)!;
+    expect(last.selectable).toBe(true);
+    const chosen = await handleDashboardBackupRoute('/dashboard/backup/settings', { folder_key: last.key }, deps);
+    expect(chosen.status).toBe(200);
+    expect(saved).toEqual([{ folder: realpathSync(join(parent, 'Folder 129')) }]);
+    // A cursor is the listing's own and bound to its folder: another folder's, a forged or a non-string one is refused.
+    for (const body of [{ parent_key: scopePathOfRealPath(volumes, dir), cursor: first.body.next_cursor }, { parent_key: parentKey, cursor: 'forged' }, { parent_key: parentKey, cursor: 100 }]) {
+      const refused = await handleDashboardBackupRoute('/dashboard/backup/browse', body, deps);
+      expect(refused.status).toBe(409);
+      expect((refused.body.error as { message: string }).message).toStartWith('Folder browse cursor is invalid');
+    }
+    // The page offers Show more for the next page.
+    const page = renderDashboardSettingsPage({ backup: backup.status(), outsideHelpLocalSession: true, controlSessionCsrfToken: 'csrf' });
+    expect(page).toContain('data-browser-more hidden>Show more</button>');
+    expect(page).toContain('cursor: cursor');
   });
 
   test('a scheduled backup that fails is reported, and nothing half-written is left', async () => {
