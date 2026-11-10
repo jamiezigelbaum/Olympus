@@ -34,8 +34,6 @@ export interface WorkerBearerAuthOptions {
    */
   sessionSecret?: string;
   requireOwnerSocket?: boolean;
-  /** This worker's own 127.0.0.1 origin for a `localhost` opening (workerOwnLoopbackOrigin). */
-  ownLoopbackOrigin?: (origin: string) => string | undefined;
 }
 
 /**
@@ -75,28 +73,6 @@ const DASHBOARD_CONTROL_COOKIE = 'olympus_dashboard_control';
 const DASHBOARD_CONTROL_SIGNATURE_CONTEXT = 'olympus-dashboard-control-session-v3';
 const DASHBOARD_CONTROL_CSRF_CONTEXT = 'olympus-dashboard-control-csrf-v2';
 const DASHBOARD_CONTROL_ORIGIN_CONTEXT = 'olympus-dashboard-control-origin-v2';
-
-/**
- * For a worker listening on `bindHost`:`port`, the 127.0.0.1 origin that is
- * this same listener when a request names `http://localhost:<port>`, or
- * undefined. Only an IPv4 loopback or all-IPv4 bind counts: then 127.0.0.1 on
- * that port is held by this worker, never by another program. A `localhost`
- * or IPv6 bind proves nothing about 127.0.0.1, so it gets no rewrite (#1186).
- */
-export function workerOwnLoopbackOrigin(bindHost: string, port: number): (origin: string) => string | undefined {
-  const ownsIpv4Loopback = bindHost === '127.0.0.1' || bindHost === '0.0.0.0';
-  return (origin) => {
-    if (!ownsIpv4Loopback) return undefined;
-    let url: URL;
-    try {
-      url = new URL(origin);
-    } catch {
-      return undefined;
-    }
-    if (url.protocol !== 'http:' || url.hostname !== 'localhost' || Number(url.port || '80') !== port) return undefined;
-    return `http://127.0.0.1:${port}`;
-  };
-}
 
 export function resolveWorkerBindHost(
   env: Record<string, string | undefined>,
@@ -182,13 +158,7 @@ export function withWorkerBearerAuth(
       const origin = sameRequestOrigin(request);
       if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
       const remote = new URL(request.url).searchParams.get('purpose') === DASHBOARD_LAUNCH_REMOTE_PURPOSE;
-      // A `localhost` opening is bound to 127.0.0.1 when this worker itself
-      // listens there (#1186): the approval page for connecting an app is
-      // always at 127.0.0.1, and a session on `localhost` never reaches it.
-      // Only this worker's own listener decides; the bearer still came over
-      // the configured address, and nothing is sent anywhere else.
-      const bound = (!requestFromOwnerSocket(request) && options.ownLoopbackOrigin?.(origin)) || origin;
-      return dashboardLaunchMintedResponse(launchTickets.mint(bound, { remote }), bound);
+      return dashboardLaunchMintedResponse(launchTickets.mint(origin, { remote }));
     }
     if (isDashboardLaunchRedeemRequest(request)) {
       // No bearer and no cookie: the proof is the ticket itself, bound to the
@@ -433,13 +403,11 @@ async function dashboardLaunchTicketFromBody(request: Request): Promise<string |
   }
 }
 
-function dashboardLaunchMintedResponse(ticket: string, origin: string): Response {
+function dashboardLaunchMintedResponse(ticket: string): Response {
   return new Response(JSON.stringify({
     ok: true,
     // The ticket and its lifetime, never the worker token and never a session.
     ticket,
-    // The origin the ticket is bound to: the link must open there.
-    origin,
     expires_in_seconds: DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
     policy: {
       single_use: true,

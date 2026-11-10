@@ -25245,18 +25245,6 @@ function olympusCommandHint(input = {}) {
   return OLYMPUS_PLUGIN_BIN_HINT;
 }
 var DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 1e4;
-function linkOrigin(base, bound) {
-  if (typeof bound !== "string" || bound === base)
-    return base;
-  try {
-    const configured = new URL(base);
-    const named = new URL(bound);
-    const samePort = (configured.port || "80") === (named.port || "80");
-    if (configured.protocol === "http:" && configured.hostname === "localhost" && named.protocol === "http:" && named.hostname === "127.0.0.1" && samePort && named.origin === bound)
-      return bound;
-  } catch {}
-  return base;
-}
 function workerRootBaseUrl(baseUrl) {
   let url;
   try {
@@ -25297,9 +25285,8 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
     throw new OperationError("email_unreachable", `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
   }
   let ticket;
-  let boundOrigin;
   try {
-    ({ ticket, origin: boundOrigin } = await response.json());
+    ticket = (await response.json()).ticket;
   } catch {
     ticket = undefined;
   }
@@ -25307,7 +25294,7 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
     throw new OperationError("email_unreachable", "The configured Olympus worker answered the opening request without a ticket.", "This worker predates the standalone opening handoff; upgrade it, then run this again.");
   }
   const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
-  return `${linkOrigin(base, boundOrigin)}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}` + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : "");
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}` + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : "");
 }
 
 // src/core/remote-open-tool.ts

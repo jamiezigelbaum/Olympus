@@ -1420,15 +1420,6 @@ Decision (2026-11-10): the approve POST also needs an owner proof.
   page's own consent cookie is scoped to `/dashboard/connect` to match. The
   page sends `Origin: null` under its `no-referrer` policy, so the engine
   checks the cookie's origin tag against the page's own loopback origin.
-  The bridge always sends the browser to `http://127.0.0.1:<port>`. When
-  the CLI is configured with `http://localhost:<port>`, the CLI still sends
-  the bearer only to that configured address; the worker binds the opening
-  ticket to `http://127.0.0.1:<port>` instead, and says so, only when it
-  itself listens on 127.0.0.1 or 0.0.0.0 at that port
-  (`workers/http.ts` `workerOwnLoopbackOrigin`), so the session lands where
-  the approval page is. A worker bound to `::1` or `localhost` keeps the
-  configured origin: neither the bearer nor a ticket is ever sent toward a
-  127.0.0.1 listener the worker does not hold.
 - **Without the session**, Connect does not approve: the page stays, says
   "Open the Olympus dashboard in this browser first, then click Connect
   again", links `olympus://open/dashboard` on a Mac, and spends nothing, so

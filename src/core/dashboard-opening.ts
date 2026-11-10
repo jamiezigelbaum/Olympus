@@ -64,27 +64,6 @@ export function olympusCommandHint(input: { env?: Record<string, string | undefi
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
 
-/**
- * Where the link opens: the origin the worker bound the ticket to, when that
- * is the one rewrite a worker makes (#1186: `http://localhost:<port>` to
- * `http://127.0.0.1:<port>`, only when the worker itself listens there,
- * workers/http.ts workerOwnLoopbackOrigin), else the configured origin. The
- * CLI never asks another address: the bearer goes only where it always went.
- */
-function linkOrigin(base: string, bound: unknown): string {
-  if (typeof bound !== 'string' || bound === base) return base;
-  try {
-    const configured = new URL(base);
-    const named = new URL(bound);
-    const samePort = (configured.port || '80') === (named.port || '80');
-    if (configured.protocol === 'http:' && configured.hostname === 'localhost' && named.protocol === 'http:'
-      && named.hostname === '127.0.0.1' && samePort && named.origin === bound) return bound;
-  } catch {
-    // Not a URL: the configured origin.
-  }
-  return base;
-}
-
 /** The worker ROOT: the configured base without its /v1 API suffix. */
 export function workerRootBaseUrl(baseUrl: string): string {
   let url: URL;
@@ -164,9 +143,8 @@ export async function mintDashboardOpeningUrl(
     );
   }
   let ticket: unknown;
-  let boundOrigin: unknown;
   try {
-    ({ ticket, origin: boundOrigin } = await response.json() as { ticket?: unknown; origin?: unknown });
+    ticket = (await response.json() as { ticket?: unknown }).ticket;
   } catch {
     ticket = undefined;
   }
@@ -178,6 +156,6 @@ export async function mintDashboardOpeningUrl(
     );
   }
   const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
-  return `${linkOrigin(base, boundOrigin)}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
     + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : '');
 }
