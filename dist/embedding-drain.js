@@ -11516,6 +11516,18 @@ function writeIntentFromRow(row) {
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
+function tierMovingDirectionClause(direction) {
+  if (!direction)
+    return "";
+  const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+  const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
+    OR ${rank("target_content_tier")} > ${rank("content_tier")}
+    OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+      AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+      AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+      AND c.superseded_by_generation = tier_items.generation + 1))`;
+  return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+}
 
 class TierLedger {
   dbPath;
@@ -11896,16 +11908,7 @@ class TierLedger {
       ${this.movingDirectionClause(direction)}`).get().n;
   }
   movingDirectionClause(direction) {
-    if (!direction)
-      return "";
-    const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
-    const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
-      OR ${rank("target_content_tier")} > ${rank("content_tier")}
-      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
-        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
-        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
-        AND c.superseded_by_generation = tier_items.generation + 1))`;
-    return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+    return tierMovingDirectionClause(direction);
   }
   listMoving(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
@@ -75118,6 +75121,71 @@ init_tier_classifier();
 init_tier_ledger();
 init_child_visibility();
 
+// src/workers/classification/judge-boost.ts
+init_tier_ledger();
+var JUDGE_BOOST_PER_QUESTION = 20;
+var JUDGE_BOOST_MAX_ITEMS = 200;
+var JUDGE_BOOST_TTL_MS = 15 * 60000;
+
+class JudgeBoosts {
+  entries = new Map;
+  now;
+  constructor(options = {}) {
+    this.now = options.now ?? (() => Date.now());
+  }
+  raise(identities) {
+    const expiresAt = this.now() + JUDGE_BOOST_TTL_MS;
+    const seen = new Set;
+    for (const identity of identities) {
+      if (seen.size >= JUDGE_BOOST_PER_QUESTION)
+        break;
+      const key2 = tierLedgerIdentityKey(identity);
+      if (seen.has(key2))
+        continue;
+      seen.add(key2);
+      this.entries.delete(key2);
+      this.entries.set(key2, {
+        identity: {
+          provider: identity.provider,
+          accountScope: identity.accountScope,
+          providerItemId: identity.providerItemId,
+          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+        },
+        expiresAt
+      });
+    }
+    while (this.entries.size > JUDGE_BOOST_MAX_ITEMS)
+      this.entries.delete(this.entries.keys().next().value);
+  }
+  has(identity) {
+    const entry = this.entries.get(tierLedgerIdentityKey(identity));
+    if (!entry)
+      return false;
+    if (entry.expiresAt > this.now())
+      return true;
+    this.entries.delete(tierLedgerIdentityKey(identity));
+    return false;
+  }
+  live() {
+    const now = this.now();
+    const live = [];
+    for (const [key2, entry] of this.entries) {
+      if (entry.expiresAt > now)
+        live.push(entry.identity);
+      else
+        this.entries.delete(key2);
+    }
+    return live;
+  }
+  drop(identity) {
+    this.entries.delete(tierLedgerIdentityKey(identity));
+  }
+  get size() {
+    return this.entries.size;
+  }
+}
+var judgeBoosts = new JudgeBoosts;
+
 // src/workers/email-source/server.ts
 init_secret_locations();
 init_source_storage();
@@ -76450,13 +76518,13 @@ import { Database as Database6 } from "bun:sqlite";
 init_answer_activity();
 init_atomic_file();
 init_sniffer();
+import { createHash as createHash32 } from "node:crypto";
+import { mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
+import { dirname as dirname39 } from "node:path";
 init_sniffer_lane();
 init_sniffer_store();
 init_tier_classifier();
 init_tier_ledger();
-import { createHash as createHash32 } from "node:crypto";
-import { mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
-import { dirname as dirname39 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 30000;
@@ -76746,8 +76814,11 @@ async function runSnifferPass(options) {
     return false;
   };
   const work = { metadata: [], content: [] };
+  const boosts = options.boosts ?? judgeBoosts;
+  const raised = boosts.live();
+  const raisedFound = new Set;
   for (const target of options.targets) {
-    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
+    const admit = (question) => {
       report.pendingSeen += 1;
       if (target.embeddingPrefilter?.retained(question))
         return false;
@@ -76758,7 +76829,21 @@ async function runSnifferPass(options) {
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
-    } });
+    };
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: admit });
+    if (raised.length > 0) {
+      const listed = new Set(questions.map((question) => `${question.pass}\x00${tierLedgerIdentityKey(question)}`));
+      for (const identity of raised) {
+        for (const pass of ["metadata", "content"]) {
+          const question = target.sniffer.questionFor(identity, pass);
+          if (!question)
+            continue;
+          raisedFound.add(tierLedgerIdentityKey(identity));
+          if (!listed.has(`${pass}\x00${tierLedgerIdentityKey(question)}`) && admit(question))
+            questions.push(question);
+        }
+      }
+    }
     for (const question of questions) {
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -76779,6 +76864,9 @@ async function runSnifferPass(options) {
         report.awaitingResync += 1;
     }
   }
+  for (const identity of raised)
+    if (!raisedFound.has(tierLedgerIdentityKey(identity)))
+      boosts.drop(identity);
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
     const stopped = await prepareSnifferModel(options);
@@ -76836,8 +76924,9 @@ async function runSnifferPass(options) {
       const turnStarted = monotonicNow();
       let turnCallMs = 0;
       try {
-        const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-        let next = options.lane.kind === "venice" ? pending[0] : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+        const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+        const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
+        let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
         if (next.question.pass === "content")
           next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
         pending.splice(pending.indexOf(next), 1);
@@ -77043,6 +77132,7 @@ var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
+var MOVES_SCAN_BOUND = 2000;
 var BACKLOG_EXACT_ROWS = 20000;
 var BACKLOG_REFRESH_MS = 60000;
 var BACKLOG_SLICE_ROWS = 5000;
@@ -77082,6 +77172,7 @@ class TierSnifferService {
   waitingReason;
   lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   backlogCache;
+  lowerMovesCache;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -77212,7 +77303,49 @@ class TierSnifferService {
   backlog() {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
-    return { ...backlog, summary: [backlog.summary, ...messages].join(" ") };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(" ") };
+  }
+  lowerMovesQueued(pendingItems) {
+    const now = this.clockMs();
+    const cached3 = this.lowerMovesCache;
+    if (cached3 && now - cached3.atMs < BACKLOG_REFRESH_MS && (cached3.count > 0 || pendingItems >= cached3.pendingItems))
+      return cached3.count;
+    const count = this.countLowerMovesQueued();
+    this.lowerMovesCache = { count, atMs: now, pendingItems };
+    return count;
+  }
+  forgetLowerMoves() {
+    this.lowerMovesCache = undefined;
+  }
+  countLowerMovesQueued() {
+    const autoMoves = this.options.autoMoves;
+    try {
+      if (!autoMoves || !autoMoves.localEmbeddingsOnly())
+        return 0;
+    } catch {
+      return 0;
+    }
+    let queued = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const set2 = tierSetForLedger(ledgerPath);
+        if (!set2 || !setEmbedsWithBuiltInOnly(set2))
+          continue;
+      } catch {
+        continue;
+      }
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
+          SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
+        ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return queued;
   }
   backlogCounts() {
     if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS))
@@ -77934,6 +78067,8 @@ class TierSnifferService {
       signal
     });
     phase("pass");
+    if (report.verdictsApplied > 0)
+      this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
@@ -78146,6 +78281,8 @@ class TierSnifferService {
       } catch {}
       try {
         const judged = applyMediaJudgments({ set: set2, autoMoves: this.autoMovesFor(set2) });
+        if (judged.movesQueued > 0)
+          this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
         }
@@ -78206,6 +78343,8 @@ class TierSnifferService {
           this.rejudgeCursors.delete(ledgerPath);
         for (const key2 of Object.keys(total))
           total[key2] += report[key2];
+        if (report.movesQueued > 0)
+          this.forgetLowerMoves();
       } catch {}
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
