@@ -125,6 +125,8 @@ test('a reopened writer prunes old FTS rows even when the saved visibility stamp
   await source.saveVisibilityInTurns();
   // Simulate the old build: the saved member is hidden, but FTS still holds it.
   const db = probe(source).db;
+  // The previous build has no durable reconciliation receipt.
+  db.exec('DROP TABLE tier_visibility_fts_state');
   db.exec(`INSERT INTO connector_store_fts (title, bounded_text, item_pk, chunk_pk)
     SELECT title, search_text, item_pk, NULL FROM items WHERE tombstoned = 0;
     INSERT OR IGNORE INTO connector_store_fts_rows (fts_rowid, item_pk, chunk_pk)
@@ -133,8 +135,92 @@ test('a reopened writer prunes old FTS rows even when the saved visibility stamp
   const reopened = new LocalConnectorStore({ dbPath: source.dbPath, corpusId: source.corpusId,
     family: source.family, trustDomain: source.trustDomain, tierLedger: f.ledger });
   cleanups.push(() => reopened.close());
+  const before = db.query('SELECT * FROM tier_visibility_state').all();
   await reopened.saveVisibilityInTurns();
   expect(ftsRows(reopened, ITEM.id)).toEqual({ indexed: 0, owned: 0 });
+  expect(db.query('SELECT * FROM tier_visibility_state').all()).toEqual(before);
+  expect(db.query('SELECT generation FROM tier_visibility_fts_state').get()).toEqual({
+    generation: (before[0] as { generation: number }).generation,
+  });
+});
+
+test('an unchanged publish after reopening writes no members and touches no FTS rows', async () => {
+  const { f, writer } = await fixtureWithEveryState();
+  await writer.saveVisibilityInTurns();
+  const db = probe(writer).db;
+  // Triggers count actual member writes, including a needless generation rewrite.
+  db.exec(`CREATE TABLE member_writes (n INTEGER);
+    CREATE TRIGGER count_member_insert AFTER INSERT ON tier_visibility_members BEGIN INSERT INTO member_writes VALUES (1); END;
+    CREATE TRIGGER count_member_delete AFTER DELETE ON tier_visibility_members BEGIN INSERT INTO member_writes VALUES (1); END;`);
+  const before = db.query('SELECT * FROM tier_visibility_state').all();
+  const reopened = secondWriter(f, createTestClock());
+  const target = reopened as unknown as { deleteFtsForItem(pk: number): number; refreshFtsForItem(pk: number): number };
+  const remove = spyOn(target, 'deleteFtsForItem');
+  const refresh = spyOn(target, 'refreshFtsForItem');
+  const scan = spyOn(reopened as unknown as { reconcileVisibilityFtsSteps(): Generator<void, void> }, 'reconcileVisibilityFtsSteps');
+  try {
+    await reopened.saveVisibilityInTurns();
+    expect(db.query('SELECT COUNT(*) AS n FROM member_writes').get()).toEqual({ n: 0 });
+    expect(remove).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(scan).not.toHaveBeenCalled();
+    expect(db.query('SELECT * FROM tier_visibility_state').all()).toEqual(before);
+  } finally { remove.mockRestore(); refresh.mockRestore(); scan.mockRestore(); }
+});
+
+test('a reconciled generation keeps incremental publication without another full FTS scan', async () => {
+  const { writer, ledgerDb } = await fixtureWithEveryState();
+  await writer.saveVisibilityInTurns();
+  const db = probe(writer).db;
+  const before = db.query('SELECT generation FROM tier_visibility_state').get();
+  const scan = spyOn(writer as unknown as { reconcileVisibilityFtsSteps(): Generator<void, void> }, 'reconcileVisibilityFtsSteps');
+  try {
+    ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?")
+      .run(CORPORA.internal);
+    await writer.saveVisibilityInTurns();
+    expect(ftsRows(writer, 'plain')).toEqual({ indexed: 0, owned: 0 });
+    expect(db.query('SELECT generation FROM tier_visibility_state').get()).toEqual(before);
+    expect(db.query('SELECT generation FROM tier_visibility_fts_state').get()).toEqual(before);
+    expect(scan).not.toHaveBeenCalled();
+  } finally { scan.mockRestore(); }
+});
+
+test('an interrupted equal-stamp reconcile leaves no receipt and retries on reopen', async () => {
+  const { f, writer, pk } = await fixtureWithEveryState();
+  await writer.saveVisibilityInTurns();
+  const db = probe(writer).db;
+  const before = db.query('SELECT * FROM tier_visibility_state').all();
+  db.exec('DELETE FROM tier_visibility_fts_state');
+  const target = writer as unknown as { deleteFtsForItem(pk: number): number };
+  target.deleteFtsForItem(pk('plain'));
+  const reopened = secondWriter(f, createTestClock());
+  const refresh = spyOn(reopened as unknown as { refreshFtsForItem(pk: number): number }, 'refreshFtsForItem')
+    .mockImplementation(() => { throw new Error('injected reconcile failure'); });
+  try {
+    await reopened.saveVisibilityInTurns();
+    expect(refresh).toHaveBeenCalled();
+    expect(db.query('SELECT * FROM tier_visibility_fts_state').all()).toEqual([]);
+    expect(db.query('SELECT * FROM tier_visibility_state').all()).toEqual(before);
+  } finally { refresh.mockRestore(); }
+  const retry = secondWriter(f, createTestClock());
+  await retry.saveVisibilityInTurns();
+  expect(ftsRows(retry, 'plain').owned).toBeGreaterThan(0);
+  expect(db.query('SELECT generation FROM tier_visibility_fts_state').get()).toEqual({
+    generation: (before[0] as { generation: number }).generation,
+  });
+});
+
+test('integrity excludes published superseded copies from FTS deficiencies only', async () => {
+  const { writer, pk } = await fixtureWithEveryState();
+  await writer.saveVisibilityInTurns();
+  const target = writer as unknown as { deleteFtsForItem(pk: number): number };
+  // Each of these must still be audited: current, held, metadata-only, moving.
+  for (const id of ['plain', 'held', 'names', 'staged']) target.deleteFtsForItem(pk(id));
+  const report = writer.verifyCorpusIntegrity({ embeddingModelId: 'unused-model', sampleLimit: 20 });
+  expect(report.counts.itemsWithFtsDeficiency).toBe(4);
+  expect(report.samples.ftsDeficientLocalItemIds.sort()).toEqual(['plain', 'held', 'names', 'staged'].map(localId).sort());
+  // Excluding FTS never suppresses chunk/hash/vector checks on hidden copies.
+  expect(report.counts.chunksWithoutCurrentEmbeddings).toBe(6);
 });
 
 test('unpublished generation flags neither suppress visible refreshes nor restore hidden copies', async () => {
