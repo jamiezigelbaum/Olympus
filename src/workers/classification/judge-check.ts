@@ -338,7 +338,7 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
       const item = options.get(itemId);
       // The owner answers about the text shown now. If the judge has judged the item again since
       // the round began (its text changed), agreement is measured against that newer verdict.
-      if (item && judged(item) && current.decided_at !== undefined && item.decided_at !== current.decided_at) {
+      if (item && judged(item) && current.decided_at !== undefined && item.decided_at && item.decided_at !== current.decided_at) {
         current.judge = item.tier;
         current.decided_at = item.decided_at;
       }

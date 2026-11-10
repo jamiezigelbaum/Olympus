@@ -104747,7 +104747,7 @@ function createJudgeCheck(options) {
       }
       current2.answer = answer;
       const item = options.get(itemId);
-      if (item && judged(item) && current2.decided_at !== undefined && item.decided_at !== current2.decided_at) {
+      if (item && judged(item) && current2.decided_at !== undefined && item.decided_at && item.decided_at !== current2.decided_at) {
         current2.judge = item.tier;
         current2.decided_at = item.decided_at;
       }

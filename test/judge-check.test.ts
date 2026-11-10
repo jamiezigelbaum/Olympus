@@ -357,7 +357,7 @@ describe('an item judged again during a round', () => {
     const id = view.current!.item_id;
     const index = items.findIndex((candidate) => candidate.item_id === id);
     const before = items[index]!.tier;
-    const after = before === 'Private' ? 'Personal' : 'Private';
+    const after: 'Personal' | 'Private' = before === 'Private' ? 'Personal' : 'Private';
     // The text changed and the judge decided again, with the other label.
     items[index] = { ...items[index]!, tier: after, decided_at: '2026-11-05T00:00:00.000Z' };
 
@@ -374,7 +374,7 @@ describe('an item judged again during a round', () => {
     let view = check.start();
     const id = view.current!.item_id;
     const index = items.findIndex((candidate) => candidate.item_id === id);
-    const before = items[index]!.tier!;
+    const before = items[index]!.tier as 'Personal' | 'Private';
     const other = before === 'Private' ? 'Personal' : 'Private';
     items[index] = { ...items[index]!, tier: other, owner_set: true, decided_by: 'override', decided_at: '2026-11-05T00:00:00.000Z' };
 
