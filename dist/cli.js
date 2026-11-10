@@ -21896,6 +21896,18 @@ function writeIntentFromRow(row) {
 function idParams(identity2) {
   return [identity2.provider, identity2.accountScope, tierLedgerConversationKey(identity2), identity2.providerItemId];
 }
+function tierMovingDirectionClause(direction) {
+  if (!direction)
+    return "";
+  const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+  const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
+    OR ${rank("target_content_tier")} > ${rank("content_tier")}
+    OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+      AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+      AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+      AND c.superseded_by_generation = tier_items.generation + 1))`;
+  return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+}
 
 class TierLedger {
   dbPath;
@@ -22276,16 +22288,7 @@ class TierLedger {
       ${this.movingDirectionClause(direction)}`).get().n;
   }
   movingDirectionClause(direction) {
-    if (!direction)
-      return "";
-    const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
-    const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
-      OR ${rank("target_content_tier")} > ${rank("content_tier")}
-      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
-        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
-        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
-        AND c.superseded_by_generation = tier_items.generation + 1))`;
-    return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+    return tierMovingDirectionClause(direction);
   }
   listMoving(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
@@ -103434,6 +103437,28 @@ var init_email_policy = __esm(() => {
   ]);
 });
 
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  const one = pendingItems === 1;
+  if (audience === "local") {
+    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
+  }
+  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+function withCoverageNote(answer, note) {
+  if (!note)
+    return answer;
+  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
+    return `${answer.replace(/\s+$/, "")}
+- ${note}`;
+  return `${answer.replace(/\s+$/, "")}
+
+Coverage notes:
+- ${note}`;
+}
+
 // src/core/email.ts
 class EmailClient {
   config;
@@ -104205,6 +104230,7 @@ function parseSourceIndexSearchResult(value, context2) {
     throw new OperationError("email_error", "source index locator policy requires at least one released locator.");
   }
   const secretLocations = parseSecretLocations(value.secret_locations);
+  const privacyNote = typeof audit.pending_privacy_items === "number" ? privacyBacklogCoverageNote(audit.pending_privacy_items, "local") : undefined;
   const searchedCorpora = Array.isArray(audit.searched_corpora) ? audit.searched_corpora.filter((corpus2) => typeof corpus2 === "string") : undefined;
   return {
     kind: "source_index_search",
@@ -104212,6 +104238,7 @@ function parseSourceIndexSearchResult(value, context2) {
     retrieval_source: "local_index",
     hits: value.hits,
     ...secretLocations ? { secret_locations: secretLocations } : {},
+    ...privacyNote ? { coverage_notes: [privacyNote] } : {},
     audit: {
       ...searchedCorpora ? { searched_corpora: searchedCorpora } : {},
       request_id: requiredString5(audit.request_id, "audit.request_id"),
@@ -141825,13 +141852,6 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
-// src/core/privacy-backlog-coverage.ts
-function privacyBacklogCoverageNote(pendingItems) {
-  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
-    return;
-  return `Olympus is still checking ${pendingItems} new item${pendingItems === 1 ? "" : "s"} for privacy before ${pendingItems === 1 ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
-}
-
 // src/core/remote-result.ts
 function providerSourceLabel(provider) {
   return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
@@ -171431,7 +171451,9 @@ function createEmailSourceWorker(options = {}) {
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
               }
-              const response = json({ ...result, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
+              const localNote = caller?.surface !== "remote" ? privacyBacklogCoverageNote(readPendingPrivacyItems(options), "local") : undefined;
+              const answered = localNote && typeof result.answer === "string" ? { ...result, answer: withCoverageNote(result.answer, localNote) } : result;
+              const response = json({ ...answered, ...releaseTicket ? { _release_ticket: releaseTicket } : {} });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,
@@ -173304,6 +173326,7 @@ function createEmailSourceWorker(options = {}) {
             const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
             const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run2) => run2.scope)) ?? [] : [];
             const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+            const pendingPrivacy = readPendingPrivacyItems(options);
             const safeResult = {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
@@ -173330,7 +173353,8 @@ function createEmailSourceWorker(options = {}) {
                 raw_source_exposed: false,
                 source_text_returned: false,
                 ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
-                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}
+                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {},
+                ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
               },
               policy: {
                 raw_source_exposed: false,
@@ -175907,6 +175931,13 @@ function isSourceIndexStatusResult(value2) {
 }
 function uniqueStrings2(values) {
   return [...new Set(values.map((value2) => value2.trim()).filter(Boolean))];
+}
+function readPendingPrivacyItems(options) {
+  try {
+    return options.pendingPrivacyItems?.();
+  } catch {
+    return;
+  }
 }
 function json(value2, status = 200) {
   return new Response(JSON.stringify(value2), {
@@ -194128,12 +194159,13 @@ function childLane(scope) {
   const stores = scope.stores;
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
-function createTierVisibilityGate(scopes) {
+function createTierVisibilityGate(scopes, onHeldMatches) {
   return (hits) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
     const hidden = new Set;
+    const held = new Set;
     for (const scope of current2) {
       const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
       if (governed.length === 0)
@@ -194156,6 +194188,8 @@ function createTierVisibilityGate(scopes) {
         }
         const key2 = tierLedgerIdentityKey(hit.sourceItem);
         const itemCopies = copies.get(key2);
+        if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
+          held.add(hit);
         if (!itemCopies || itemCopies.length === 0) {
           if (routedWithoutCopies.has(key2))
             hidden.add(hit);
@@ -194175,8 +194209,31 @@ function createTierVisibilityGate(scopes) {
         }
       }
     }
+    if (onHeldMatches && held.size > 0) {
+      try {
+        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
+      } catch {}
+    }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
   };
+}
+function interleaveByCorpus(hits) {
+  const byCorpus = new Map;
+  for (const hit of hits) {
+    const lane = byCorpus.get(hit.corpusId);
+    if (lane)
+      lane.push(hit);
+    else
+      byCorpus.set(hit.corpusId, [hit]);
+  }
+  const lanes = [...byCorpus.values()];
+  const ordered = [];
+  for (let rank = 0;ordered.length < hits.length; rank += 1) {
+    for (const lane of lanes)
+      if (rank < lane.length)
+        ordered.push(lane[rank]);
+  }
+  return ordered;
 }
 function createReleaseTierCheck(scopes, secureDerivativeDefault) {
   return {
@@ -194246,6 +194303,71 @@ var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
+});
+
+// src/workers/classification/judge-boost.ts
+class JudgeBoosts {
+  entries = new Map;
+  now;
+  constructor(options = {}) {
+    this.now = options.now ?? (() => Date.now());
+  }
+  raise(identities) {
+    const expiresAt = this.now() + JUDGE_BOOST_TTL_MS;
+    const seen = new Set;
+    for (const identity2 of identities) {
+      if (seen.size >= JUDGE_BOOST_PER_QUESTION)
+        break;
+      const key2 = tierLedgerIdentityKey(identity2);
+      if (seen.has(key2))
+        continue;
+      seen.add(key2);
+      this.entries.delete(key2);
+      this.entries.set(key2, {
+        identity: {
+          provider: identity2.provider,
+          accountScope: identity2.accountScope,
+          providerItemId: identity2.providerItemId,
+          ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}
+        },
+        expiresAt
+      });
+    }
+    while (this.entries.size > JUDGE_BOOST_MAX_ITEMS)
+      this.entries.delete(this.entries.keys().next().value);
+  }
+  has(identity2) {
+    const entry = this.entries.get(tierLedgerIdentityKey(identity2));
+    if (!entry)
+      return false;
+    if (entry.expiresAt > this.now())
+      return true;
+    this.entries.delete(tierLedgerIdentityKey(identity2));
+    return false;
+  }
+  live() {
+    const now = this.now();
+    const live = [];
+    for (const [key2, entry] of this.entries) {
+      if (entry.expiresAt > now)
+        live.push(entry.identity);
+      else
+        this.entries.delete(key2);
+    }
+    return live;
+  }
+  drop(identity2) {
+    this.entries.delete(tierLedgerIdentityKey(identity2));
+  }
+  get size() {
+    return this.entries.size;
+  }
+}
+var JUDGE_BOOST_PER_QUESTION = 20, JUDGE_BOOST_MAX_ITEMS = 200, JUDGE_BOOST_TTL_MS, judgeBoosts;
+var init_judge_boost = __esm(() => {
+  init_tier_ledger();
+  JUDGE_BOOST_TTL_MS = 15 * 60000;
+  judgeBoosts = new JudgeBoosts;
 });
 
 // src/core/source-account-migration.ts
@@ -197174,8 +197296,11 @@ async function runSnifferPass(options) {
     return false;
   };
   const work = { metadata: [], content: [] };
+  const boosts = options.boosts ?? judgeBoosts;
+  const raised = boosts.live();
+  const raisedFound = new Set;
   for (const target of options.targets) {
-    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
+    const admit = (question) => {
       report.pendingSeen += 1;
       if (target.embeddingPrefilter?.retained(question))
         return false;
@@ -197186,7 +197311,21 @@ async function runSnifferPass(options) {
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
-    } });
+    };
+    const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: admit });
+    if (raised.length > 0) {
+      const listed = new Set(questions.map((question) => `${question.pass}\x00${tierLedgerIdentityKey(question)}`));
+      for (const identity2 of raised) {
+        for (const pass of ["metadata", "content"]) {
+          const question = target.sniffer.questionFor(identity2, pass);
+          if (!question)
+            continue;
+          raisedFound.add(tierLedgerIdentityKey(identity2));
+          if (!listed.has(`${pass}\x00${tierLedgerIdentityKey(question)}`) && admit(question))
+            questions.push(question);
+        }
+      }
+    }
     for (const question of questions) {
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -197207,6 +197346,9 @@ async function runSnifferPass(options) {
         report.awaitingResync += 1;
     }
   }
+  for (const identity2 of raised)
+    if (!raisedFound.has(tierLedgerIdentityKey(identity2)))
+      boosts.drop(identity2);
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
     const stopped = await prepareSnifferModel(options);
@@ -197264,8 +197406,9 @@ async function runSnifferPass(options) {
       const turnStarted = monotonicNow();
       let turnCallMs = 0;
       try {
-        const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-        let next = options.lane.kind === "venice" ? pending[0] : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+        const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+        const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
+        let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
         if (next.question.pass === "content")
           next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
         pending.splice(pending.indexOf(next), 1);
@@ -197438,6 +197581,7 @@ var init_sniffer_resolver = __esm(() => {
   init_answer_activity();
   init_atomic_file();
   init_sniffer();
+  init_judge_boost();
   init_sniffer_lane();
   init_sniffer_store();
   init_tier_classifier();
@@ -197492,6 +197636,7 @@ class TierSnifferService {
   waitingReason;
   lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   backlogCache;
+  lowerMovesCache;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -197624,7 +197769,49 @@ class TierSnifferService {
   backlog() {
     const backlog = this.backlogFrom(this.backlogCounts());
     const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
-    return { ...backlog, summary: [backlog.summary, ...messages].join(" ") };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(" ") };
+  }
+  lowerMovesQueued(pendingItems) {
+    const now = this.clockMs();
+    const cached3 = this.lowerMovesCache;
+    if (cached3 && now - cached3.atMs < BACKLOG_REFRESH_MS && (cached3.count > 0 || pendingItems >= cached3.pendingItems))
+      return cached3.count;
+    const count = this.countLowerMovesQueued();
+    this.lowerMovesCache = { count, atMs: now, pendingItems };
+    return count;
+  }
+  forgetLowerMoves() {
+    this.lowerMovesCache = undefined;
+  }
+  countLowerMovesQueued() {
+    const autoMoves = this.options.autoMoves;
+    try {
+      if (!autoMoves || !autoMoves.localEmbeddingsOnly())
+        return 0;
+    } catch {
+      return 0;
+    }
+    let queued = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const set2 = tierSetForLedger(ledgerPath);
+        if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
+          continue;
+      } catch {
+        continue;
+      }
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
+          SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
+        ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return queued;
   }
   backlogCounts() {
     if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS))
@@ -198353,6 +198540,8 @@ class TierSnifferService {
       signal
     });
     phase("pass");
+    if (report.verdictsApplied > 0)
+      this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
@@ -198565,6 +198754,8 @@ class TierSnifferService {
       } catch {}
       try {
         const judged = applyMediaJudgments({ set: set2, autoMoves: this.autoMovesFor(set2) });
+        if (judged.movesQueued > 0)
+          this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
         }
@@ -198625,6 +198816,8 @@ class TierSnifferService {
           this.rejudgeCursors.delete(ledgerPath);
         for (const key2 of Object.keys(total))
           total[key2] += report[key2];
+        if (report.movesQueued > 0)
+          this.forgetLowerMoves();
       } catch {}
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
@@ -198897,7 +199090,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_embedding_prefilter();
   init_tier_move();
@@ -222160,7 +222353,7 @@ async function main() {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes
@@ -224403,6 +224596,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     archiveImportAgent: archiveImportDashboard.agent,
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
@@ -225031,7 +225225,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         sourceAnswerJobs
       }),
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       ...caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}
     })
   };
@@ -226278,6 +226475,7 @@ var init_server5 = __esm(async () => {
   init_unreadable_locators();
   init_child_visibility();
   init_tier_visibility();
+  init_judge_boost();
   init_secret_locations();
   init_source_storage();
   init_provider_account_history();

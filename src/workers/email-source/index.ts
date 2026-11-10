@@ -6,6 +6,7 @@ import { privateAnswerMode } from '../../core/first-run-privacy.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
+import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
@@ -444,6 +445,13 @@ export interface EmailSourceWorkerOptions {
   connector?: EmailSourceConnector;
   sourceAnswer?: SourceIndexAnswerHandler;
   sourceAnswerReleaseCheck?: ReleaseCheck;
+  /**
+   * How many items wait for their privacy judgment (the tier sniffer's
+   * pending count), read per request. A local caller's source answer and
+   * search carry the local note (core/privacy-backlog-coverage.ts); a remote
+   * caller's output gets the remote note at its own boundary instead.
+   */
+  pendingPrivacyItems?: () => number | undefined;
   /**
    * "Ask anonymously" (core/consult-ask.ts), bound by the composition root:
    * one typed question prepared at the chosen level and sent through zkAPI.
@@ -1160,7 +1168,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60_000, manifests: manifests.manifests });
                 while (releaseTickets.size > 256) releaseTickets.delete(releaseTickets.keys().next().value!);
               }
-              const response = json({ ...result, ...(releaseTicket ? { _release_ticket: releaseTicket } : {}) });
+              // A remote caller's output adds its own note (core/remote-result.ts, chatgpt/response-builder.ts).
+              const localNote = caller?.surface !== 'remote'
+                ? privacyBacklogCoverageNote(readPendingPrivacyItems(options), 'local')
+                : undefined;
+              const answered = localNote && typeof result.answer === 'string'
+                ? { ...result, answer: withCoverageNote(result.answer, localNote) }
+                : result;
+              const response = json({ ...answered, ...(releaseTicket ? { _release_ticket: releaseTicket } : {}) });
               await emitSourceAnswerLatencyRecords({
                 log: sourceAnswerLatencyLog,
                 trace,
@@ -3789,6 +3804,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const locatorsExposed = hits.some((hit) => (
               Object.prototype.hasOwnProperty.call(hit, 'locator')
             ));
+            const pendingPrivacy = readPendingPrivacyItems(options);
             const safeResult = {
               kind: 'source_index_search',
               corpus_id: connectorStore.corpusId,
@@ -3824,6 +3840,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 source_text_returned: false,
                 ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),
                 ...(privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}),
+                // A count only (local callers alone reach this route): the
+                // plugin turns it into the local privacy-backlog note.
+                ...(pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}),
               },
               policy: {
                 raw_source_exposed: false,
@@ -8030,6 +8049,15 @@ function isSourceIndexStatusResult(value: unknown): value is SourceIndexStatusRe
 
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+/** The privacy-backlog count, or undefined when it cannot be read: a status read never fails a search or an answer. */
+function readPendingPrivacyItems(options: Pick<EmailSourceWorkerOptions, 'pendingPrivacyItems'>): number | undefined {
+  try {
+    return options.pendingPrivacyItems?.();
+  } catch {
+    return undefined;
+  }
 }
 
 function json(value: unknown, status = 200): Response {
