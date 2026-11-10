@@ -10,7 +10,8 @@ import { describe, expect, test } from 'bun:test';
 import { exportOlympusData, lifecycleEnv } from '../src/data-lifecycle.ts';
 import { restoreOlympusData } from '../src/data-restore.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
-import { resolveTierRulesPath } from '../src/workers/classification/tier-rules.ts';
+import { loadOwnerTierRules, resolveTierRulesPath } from '../src/workers/classification/tier-rules.ts';
+import { PRIVACY_RULE_ID_PREFIX, readPrivacyProfile, writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 
 function seed(path: string, table: string, value: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -63,6 +64,40 @@ describe('data restore', () => {
       expect(readFileSync(join(backup, 'manifest.json'), 'utf8')).toContain('"secrets_excluded": true');
 
       expect(() => restoreOlympusData({ input: backup, homeDir: homeB })).toThrow('already holds Olympus data for x.bookmarks');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('brings the privacy profile back with its rules, so a later description-only save keeps every always-Private rule', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-restore-privacy-'));
+    const homeA = join(dir, 'a');
+    const homeB = join(dir, 'b');
+    const backup = join(dir, 'backup');
+    try {
+      seed(storeOf(homeA), 'rows', 'a bookmark');
+      const envA = lifecycleEnv({ homeDir: homeA });
+      writePrivacyProfile({
+        description: 'Health is private.',
+        rules: [
+          { kind: 'sender', source_id: 'gmail.email', value: '@clinic.example' },
+          { kind: 'folder', source_id: 'dropbox.files', key: '/health' },
+        ],
+      }, { env: envA });
+      const privacyIdsA = loadOwnerTierRules({ env: envA }).map((rule) => rule.id).filter((id) => id.startsWith(PRIVACY_RULE_ID_PREFIX)).sort();
+      expect(privacyIdsA).toHaveLength(2);
+
+      const exported = exportOlympusData({ destination: backup, homeDir: homeA });
+      expect(exported.artifacts.some((artifact) => artifact.role === 'owner_rules' && artifact.ownerFile === 'privacy_profile')).toBe(true);
+      restoreOlympusData({ input: backup, homeDir: homeB });
+
+      const envB = lifecycleEnv({ homeDir: homeB });
+      expect(readPrivacyProfile({ env: envB })?.rules).toHaveLength(2);
+      // The owner edits only their description on the new computer.
+      writePrivacyProfile({ description: 'Health and money are private.' }, { env: envB });
+      const privacyIdsB = loadOwnerTierRules({ env: envB }).map((rule) => rule.id).filter((id) => id.startsWith(PRIVACY_RULE_ID_PREFIX)).sort();
+      expect(privacyIdsB).toEqual(privacyIdsA);
+      expect(readPrivacyProfile({ env: envB })?.rules).toHaveLength(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

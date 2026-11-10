@@ -30,7 +30,9 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import {
+  countOwnerTierItems,
   createOwnerTierItems,
+  getOwnerTierItem,
   ownerTierItemId,
   parseOwnerTierItemId,
   type OwnerTierItem,
@@ -239,9 +241,52 @@ describe('finding an item', () => {
       expect(item).toMatchObject({ title: 'bank letter.pdf', tier: 'Private', owner_set: false });
       const recent = ownerItems().find({ recent: true }).items.map((found) => found.title).sort();
       expect(recent).toEqual(['bank letter.pdf', 'orchard-plan.pdf']);
+      // The dashboard's counts and filters read the same ledgers.
+      expect(countOwnerTierItems({ storePaths: storePaths() })).toEqual({ personal: 1, private: 1, changed: 0 });
+      expect(ownerItems().find({ recent: true, filter: 'private' }).items.map((found) => found.title)).toEqual(['bank letter.pdf']);
     } finally {
       resetStoreWriteGuardForTests();
     }
+  });
+
+  test('the dashboard reads the start of what the item says; an agent never does', async () => {
+    await judged();
+    expect(ownerItems().find({ query: 'bank letter', withPreview: true }).items[0]?.preview).toBe(FILES[1].text);
+    expect(ownerItems().find({ query: 'bank letter' }).items[0]).not.toHaveProperty('preview');
+    expect(ownerItems().find({ query: 'bank', withPreview: true, personalNamesOnly: true }).items[0]).not.toHaveProperty('preview');
+  });
+
+  test('the dashboard\'s filters and counts: by label, and the items the owner changed', async () => {
+    await judged();
+    const titles = (filter: 'personal' | 'private' | 'changed') => ownerItems().find({ recent: true, filter }).items.map((found) => found.title);
+    expect(countOwnerTierItems({ storePaths: storePaths() })).toEqual({ personal: 1, private: 1, changed: 0 });
+    expect(titles('private')).toEqual(['bank letter.pdf']);
+    expect(titles('personal')).toEqual(['orchard-plan.pdf']);
+    expect(titles('changed')).toEqual([]);
+    // Paging further back: only items decided before the given time.
+    const [newest, older] = ownerItems().find({ recent: true }).items;
+    expect(ownerItems().find({ recent: true, before: newest!.decided_at! }).items.map((found) => found.item_id))
+      .toEqual(older && older.decided_at! < newest!.decided_at! ? [older.item_id] : []);
+    // With the last item as well, a page resumes right after it, even when both were decided at the same moment.
+    const [first] = ownerItems().find({ recent: true, limit: 1 }).items;
+    expect(first?.item_id).toBe(newest!.item_id);
+    expect(ownerItems().find({ recent: true, limit: 1, before: first!.decided_at!, beforeItem: first!.item_id }).items.map((found) => found.item_id))
+      .toEqual([older!.item_id]);
+    expect(() => ownerItems().find({ recent: true, beforeItem: first!.item_id })).toThrow('beforeItem');
+    expect(() => ownerItems().find({ recent: true, before: 'not a time' })).toThrow('before');
+    expect(() => ownerItems().find({ query: 'bank', filter: 'private' })).toThrow('filter');
+    ownerItems().set({ itemId: bankItem().item_id, choice: 'personal', allowLower: true });
+    expect(titles('changed')).toEqual(['bank letter.pdf']);
+    expect(ownerItems().counts!()).toMatchObject({ changed: 1 });
+  });
+
+  test('one item by its id, with its preview; a Secret or unknown item is not returned', async () => {
+    await judged();
+    const itemId = bankItem().item_id;
+    expect(getOwnerTierItem(itemId, { storePaths: storePaths() }, { withPreview: true })).toMatchObject({ title: 'bank letter.pdf', tier: 'Private', preview: FILES[1].text });
+    expect(getOwnerTierItem(ownerTierItemId({ ...bankIdentity, providerItemId: 'id:none' }), { storePaths: storePaths() })).toBeUndefined();
+    await runTierCommand(['set', 'id:bank', 'secrets'], { storePaths: storePaths() });
+    expect(getOwnerTierItem(itemId, { storePaths: storePaths() })).toBeUndefined();
   });
 
   test('for an agent, an item whose names are Private is left out', async () => {

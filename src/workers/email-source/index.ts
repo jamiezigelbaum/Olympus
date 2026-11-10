@@ -67,6 +67,7 @@ import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
 import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
 import type { OwnerItemChoice, OwnerTierItems } from '../classification/tier-owner-items.ts';
+import { JudgeCheckError, type JudgeCheck } from '../classification/judge-check.ts';
 import { ArchiveUploadError } from '../archive-import/staging.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
@@ -306,6 +307,8 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type Da
 import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
+import { DASHBOARD_BACKUP_PATHS, handleDashboardBackupRoute } from '../dashboard/backup-routes.ts';
+import type { BackupService } from '../backup-service.ts';
 import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingAccountForCli, pairingPlacementForCli, settingsForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
@@ -491,6 +494,12 @@ export interface EmailSourceWorkerOptions {
    * (`/dashboard/privacy/items/*`). Absent: those routes answer 501.
    */
   ownerTierItems?: OwnerTierItems;
+  /**
+   * "Check how Olympus labelled your items" on Privacy › Your items (classification/judge-check.ts):
+   * a round of items the owner labels before seeing the judge's label. Local
+   * dashboard session only (`/dashboard/privacy/judge-check`). Absent: 501.
+   */
+  judgeCheck?: JudgeCheck;
   // Optional content-free latency ledger. When present, one JSON line per
   // answered source_answer request is appended (phase timings, corpus ids, skip
   // reasons, analyst backend/fallback, release decision — never query/content).
@@ -660,6 +669,8 @@ export interface EmailSourceWorkerOptions {
      * answers 501.
      */
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
+    /** Settings › Back up and restore (backup-service.ts); its routes take the local grade only. */
+    backup?: BackupService;
     /**
      * What AI apps received (workers/apps-received.ts): served only through
      * DASHBOARD_APPS_RECEIVED_ROUTE to a locally minted control session.
@@ -986,6 +997,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const consultAsk = options.consultAsk;
   const archiveImportAgent = options.archiveImportAgent;
   const ownerTierItems = options.ownerTierItems;
+  const judgeCheck = options.judgeCheck;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync
@@ -1705,6 +1717,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
                 ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
+                // The folder and the backups in it only for the unlocked session minted on this computer.
+                ...(sourceDashboard?.backup && controlSessionCsrfToken !== undefined && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local'
+                  ? { backup: sourceDashboard.backup.status() } : {}),
                 ...(settingsProposal ? { settingsProposal: { current: settingsProposal.current(), lastApplied: settingsProposal.lastApplied() } } : {}),
                 settings: {
                   models: dashboardModelsOnComputer({
@@ -1751,6 +1766,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ...(controlSessionCsrfToken !== undefined && localSession ? { destinations: sourceDashboard?.privateAnswers?.destinations() } : {}),
                   ...(waiting ? { waiting } : {}),
                 },
+              },
+            }));
+          }
+          if (page === 'privacy_items') {
+            // Privacy › Your items: the page reads its items through the
+            // dashboard's local routes, so it carries no item here; it only
+            // needs to know whether the session was minted on this computer.
+            return html(renderDashboardLocalPage('privacy_items', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
               },
             }));
           }
@@ -2429,6 +2456,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json(result.ok ? result : { ok: false, error: { code: 'model_choice_failed', message: result.message } }, result.ok ? 200 : 409);
         }
 
+        // Settings › Back up and restore (#1065): the unlocked dashboard on this computer only.
+        if (request.method === 'POST' && (DASHBOARD_BACKUP_PATHS as readonly string[]).includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Back up and restore only in an unlocked dashboard on this computer.' } }, 403);
+          }
+          if (!sourceDashboard?.backup) return json({ ok: false, error: { code: 'not_available', message: 'Backups are not available on this install.' } }, 501);
+          const outcome = await handleDashboardBackupRoute(url.pathname, await parseObjectBody(request), { backup: sourceDashboard.backup });
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+        }
         if (request.method === 'POST' && (url.pathname === DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH || url.pathname === DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH)) {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
             return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Apply proposed settings in an unlocked dashboard on this computer.' } }, 403);
@@ -3540,6 +3576,37 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
+        // "Check the judge" (judge-check.ts): the owner's answers stay on this
+        // computer, and only a session minted here reaches them.
+        if (request.method === 'POST' && url.pathname === '/dashboard/privacy/judge-check') {
+          if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            throw new EmailSourceWorkerError(403, 'mac_dashboard_only', 'Checking the judge happens only in the dashboard on this computer, in an unlocked browser.');
+          }
+          if (!judgeCheck) {
+            throw new EmailSourceWorkerError(501, 'judge_check_not_supported', 'Checking the judge is not set up in this engine.');
+          }
+          const record = await parseObjectBody(request);
+          const action = asOptionalString(record.action);
+          try {
+            if (action === 'status') return json({ ok: true, round: judgeCheck.status() });
+            if (action === 'start') return json({ ok: true, round: judgeCheck.start() });
+            if (action === 'put_away') return json({ ok: true, round: judgeCheck.putAway() });
+            if (action === 'resume') return json({ ok: true, round: judgeCheck.resume() });
+            if (action === 'answer') {
+              const itemId = asOptionalString(record.item_id);
+              const answer = asOptionalString(record.answer);
+              if (!itemId || (answer !== 'Personal' && answer !== 'Private' && answer !== 'not_sure')) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id and an answer (Personal, Private or not_sure) are required.');
+              }
+              return json({ ok: true, round: judgeCheck.answer(itemId, answer) });
+            }
+          } catch (error) {
+            if (error instanceof JudgeCheckError) throw new EmailSourceWorkerError(409, error.code, error.message);
+            throw error;
+          }
+          throw new EmailSourceWorkerError(400, 'invalid_request', 'action must be status, start, answer, put_away or resume.');
+        }
+
         // The owner's one-item privacy change on the dashboard's Privacy tab
         // (tier-owner-items.ts): find any item, and set it Personal or
         // Private, or back to the judge's label. Control routes held to a
@@ -3561,11 +3628,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const query = asOptionalString(record.query);
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, 'limit');
+            const filter = asOptionalString(record.filter);
+            if (filter !== undefined && filter !== 'personal' && filter !== 'private' && filter !== 'changed') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'filter must be "personal", "private" or "changed".');
+            }
             return json({ ok: true, ...ownerTierItems.find({
               ...(query !== undefined ? { query } : {}),
               ...(recent !== undefined ? { recent } : {}),
               ...(limit !== undefined ? { limit } : {}),
-            }) });
+              ...(filter !== undefined ? { filter } : {}),
+              // The owner reads what the item says before deciding, on this computer only.
+              withPreview: true,
+            }), ...(ownerTierItems.counts ? { counts: ownerTierItems.counts() } : {}) });
           }
           if (url.pathname === '/dashboard/privacy/items/set') {
             const itemId = asOptionalString(record.item_id);

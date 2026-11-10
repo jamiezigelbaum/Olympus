@@ -214,9 +214,10 @@ function updateNoticeProgram(config: {
   async function unlock(): Promise<boolean> {
     if (local && csrf) return false;
     // This computer's own session: the worker grants it only to a loopback
-    // browser presenting no bearer, so an agent never reaches Update now.
+    // browser presenting no bearer, with the page's session and its CSRF
+    // token (#1187), so an agent never reaches Update now.
     try {
-      const response = await fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' });
+      const response = await fetch(config.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'X-Olympus-CSRF': csrf } });
       const body = (response.ok ? await response.json() : undefined) as { csrf_token?: unknown } | undefined;
       if (body && typeof body.csrf_token === 'string' && body.csrf_token) { csrf = body.csrf_token; local = true; return true; }
     } catch { /* The start call then says why it was refused. */ }

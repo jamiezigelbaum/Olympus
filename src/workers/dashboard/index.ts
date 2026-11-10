@@ -3,7 +3,7 @@
  * 4, owner decision 2026-10-09: the ChatGPT panel is the only dashboard).
  *
  * - `/dashboard` is the computer's host page around the panel (host-page.ts).
- * - `?keys`, `?connect`, `?agents`, `?private-answers`, `?apps-received`, `?people` are the computer's
+ * - `?keys`, `?connect`, `?agents`, `?private-answers`, `?apps-received`, `?privacy-items`, `?people` are the computer's
  *   own pages, still rendered here (pages/local.ts, pages/private-answers.ts).
  *   `?connector`, once its own page, redirects to Sources with the Build a
  *   connector dialog open (#1087).
@@ -38,6 +38,7 @@ import {
 } from './pages/local.ts';
 import { DASHBOARD_SETTINGS_ZKAPI_ID, renderDashboardPrivateAnswersPage } from './pages/private-answers.ts';
 import { renderDashboardAppsReceivedPage } from './pages/apps-received.ts';
+import { renderDashboardPrivacyItemsPage } from './pages/privacy-items.ts';
 import { renderDashboardPeoplePage, type DashboardPeopleView } from './pages/people.ts';
 
 export { DASHBOARD_HTML_PATH };
@@ -48,7 +49,7 @@ export { DASHBOARD_HTML_PATH };
  */
 export const DASHBOARD_LEGACY_QUERY_PARAMS = ['source', 'background', 'sensitivity', 'setup', 'privacy', 'embedding-ledger'] as const;
 
-export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'connect' | 'agents' | 'private_answers' | 'apps_received' | 'outside_help_moved' | 'connector' | 'help' | 'settings' | 'people' | 'legacy';
+export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'connect' | 'agents' | 'private_answers' | 'apps_received' | 'privacy_items' | 'outside_help_moved' | 'connector' | 'help' | 'settings' | 'people' | 'legacy';
 
 export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
@@ -65,6 +66,7 @@ export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
   if (params.has(DASHBOARD_LOCAL_PAGES.agents)) return 'agents';
   if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers)) return 'private_answers';
   if (params.has(DASHBOARD_LOCAL_PAGES.appsReceived)) return 'apps_received';
+  if (params.has(DASHBOARD_LOCAL_PAGES.privacyItems)) return 'privacy_items';
   if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help_moved';
   if (params.has(DASHBOARD_LOCAL_PAGES.connector)) return 'connector';
   if (params.has(DASHBOARD_LOCAL_PAGES.settings)) return 'settings';
@@ -101,7 +103,7 @@ export function dashboardConnectorRedirect(url: URL): string {
 
 /** The computer's local pages. `view` is needed by Privacy settings (Keys), Connect a source and Private questions. */
 export function renderDashboardLocalPage(
-  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'apps_received' | 'help' | 'settings' | 'people',
+  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'apps_received' | 'privacy_items' | 'help' | 'settings' | 'people',
   input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions; people?: DashboardPeopleView; peopleLocalSession?: boolean },
 ): string {
   const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -120,6 +122,8 @@ export function renderDashboardLocalPage(
       return renderDashboardPrivateAnswersPage(options);
     case 'apps_received':
       return renderDashboardAppsReceivedPage(options);
+    case 'privacy_items':
+      return renderDashboardPrivacyItemsPage(options);
     case 'settings':
       return renderDashboardSettingsPage(options);
     case 'people':

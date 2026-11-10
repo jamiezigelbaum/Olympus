@@ -37,6 +37,8 @@ export type OwnerItemChoice = 'personal' | 'private' | 'judge';
 export const OWNER_ITEM_DEFAULT_LIMIT = 20;
 export const OWNER_ITEM_MAX_LIMIT = 50;
 const OWNER_ITEM_QUERY_MAX = 200;
+/** How much of an item's text its preview shows. */
+export const OWNER_ITEM_PREVIEW_MAX = 600;
 const ITEM_ID_PREFIX = 'oti_';
 
 export interface OwnerTierItem {
@@ -66,7 +68,14 @@ export interface OwnerTierItem {
   owner_choice?: string;
   /** The judge's stored reason code (its category and confidence), where the judge decided it. */
   judge_reason: string | null;
+  /** The item is waiting for the judge to read it (again): its label is a holding label, not a verdict. */
+  waiting_for_judge?: true;
   decided_at: string | null;
+  /**
+   * The start of what the item says, for the owner to read before deciding.
+   * Only when the dashboard on this computer asks (`withPreview`); never for an agent.
+   */
+  preview?: string | null;
 }
 
 export interface OwnerTierItemFindInput {
@@ -74,12 +83,39 @@ export interface OwnerTierItemFindInput {
   query?: string;
   /** List the items sorted most recently instead of searching. */
   recent?: boolean;
+  /**
+   * With `recent`: only items labelled Personal or Private, or only those the
+   * owner changed by hand (the dashboard's filters).
+   */
+  filter?: OwnerTierItemFilter;
+  /** With `recent`: only items decided before this time (an item's `decided_at`), to page further back. */
+  before?: string;
+  /**
+   * With `before`: the item the last page ended on (its `item_id`). Items
+   * decided at that same time but sorted after it are listed too, so no item
+   * sharing a time with a page's last one is skipped.
+   */
+  beforeItem?: string;
   limit?: number;
   /**
    * For an agent: leave out every item whose names are not Personal or less
    * (and every item with nothing recorded yet), so no Private name is shown.
    */
   personalNamesOnly?: boolean;
+  /**
+   * The dashboard on this computer: add the start of each item's stored text.
+   * Ignored with `personalNamesOnly`, so an agent never reads an item's text from here.
+   */
+  withPreview?: boolean;
+}
+
+export type OwnerTierItemFilter = 'personal' | 'private' | 'changed';
+
+/** How many items carry each label, and how many the owner changed by hand: the dashboard's filter counts. */
+export interface OwnerTierItemCounts {
+  personal: number;
+  private: number;
+  changed: number;
 }
 
 export interface OwnerTierItemSetInput {
@@ -97,12 +133,15 @@ export type OwnerTierItemSetResult =
 export interface OwnerTierItems {
   find(input: OwnerTierItemFindInput): { items: OwnerTierItem[] };
   set(input: OwnerTierItemSetInput): OwnerTierItemSetResult;
+  /** The dashboard's filter counts. Optional so a narrow engine can leave the counts off. */
+  counts?(): OwnerTierItemCounts;
 }
 
 export function createOwnerTierItems(context: TierCliContext = {}): OwnerTierItems {
   return {
     find: (input) => findOwnerTierItems(input, context),
     set: (input) => setOwnerTierItem(input, context),
+    counts: () => countOwnerTierItems(context),
   };
 }
 
@@ -169,7 +208,17 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
   if (query.length > OWNER_ITEM_QUERY_MAX) throw new OperationError('invalid_params', `query is at most ${OWNER_ITEM_QUERY_MAX} characters.`);
   if (!input.recent && !query) throw new OperationError('invalid_params', 'Give words to search for, or ask for the recently sorted items.');
   if (input.recent && query) throw new OperationError('invalid_params', 'Search, or list the recently sorted items, not both.');
-  const rows = input.recent ? recentRows(limit * 3, context) : searchRows(query, limit * 3, context);
+  if (input.filter !== undefined && (!input.recent || !['personal', 'private', 'changed'].includes(input.filter))) {
+    throw new OperationError('invalid_params', 'filter is personal, private or changed, with the recently sorted items.');
+  }
+  if (input.before !== undefined && (!input.recent || input.filter === 'changed' || Number.isNaN(Date.parse(input.before)))) {
+    throw new OperationError('invalid_params', 'before is a time, with the recently sorted items.');
+  }
+  if (input.beforeItem !== undefined && input.before === undefined) {
+    throw new OperationError('invalid_params', 'beforeItem goes with before.');
+  }
+  const beforeItem = input.beforeItem === undefined ? undefined : parseOwnerTierItemId(input.beforeItem);
+  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem) : searchRows(query, limit * 3, context);
   const items: OwnerTierItem[] = [];
   for (const row of rows) {
     if (items.length >= limit) break;
@@ -177,7 +226,9 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
     const state = readItemState(identity, context);
     if (state.secret) continue;
     if (input.personalNamesOnly && namesAbovePersonal(state)) continue;
-    items.push(view(row, state));
+    const item = view(row, state);
+    if (input.withPreview && !input.personalNamesOnly) item.preview = previewOf(identity, context);
+    items.push(item);
   }
   return { items };
 }
@@ -220,13 +271,16 @@ function searchRows(query: string, limit: number, context: TierCliContext): Stor
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
 
-/** The items the ledgers decided most recently, newest first, as their stores keep them. */
-function recentRows(limit: number, context: TierCliContext): StoredItemRow[] {
+/** The items the ledgers decided most recently, newest first, as their stores keep them; with a filter, only those. */
+function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string, beforeItem?: TierLedgerIdentity): StoredItemRow[] {
   const decided = new Map<string, TierLedgerRecord>();
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => opened.recentDecisions(limit), ledger.boundLedgerId, true);
+      records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
+        ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
+          .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
+        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId, true);
     } catch {
       // A ledger that cannot be read lists nothing.
     }
@@ -236,7 +290,8 @@ function recentRows(limit: number, context: TierCliContext): StoredItemRow[] {
       if (!seen || seen.decidedAt < record.decidedAt) decided.set(key, record);
     }
   }
-  const ordered = [...decided.values()].sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit);
+  // Newest first, then the ledger's own tie order, so paging by the last item resumes where a page ended.
+  const ordered = [...decided.values()].sort(recentOrder).slice(0, limit);
   const stores = knownStorePaths(context);
   const rows: StoredItemRow[] = [];
   for (const record of ordered) {
@@ -257,6 +312,40 @@ function recentRows(limit: number, context: TierCliContext): StoredItemRow[] {
   return rows;
 }
 
+/** The start of the item's stored text (its first chunk), from the first store that holds it; null when none does. */
+function previewOf(identity: TierLedgerIdentity, context: TierCliContext): string | null {
+  for (const dbPath of knownStorePaths(context)) {
+    const text = withStore<string | undefined>(dbPath, undefined, (db) => (db.query(`
+      SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
+        AND COALESCE(i.provider_conversation_id, '') = ?
+      ORDER BY c.chunk_index
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? '') as { text: string } | null)?.text);
+    const trimmed = text?.trim();
+    if (trimmed) return trimmed.length > OWNER_ITEM_PREVIEW_MAX ? `${trimmed.slice(0, OWNER_ITEM_PREVIEW_MAX).trimEnd()}…` : trimmed;
+  }
+  return null;
+}
+
+/** Every ledger's items by label, and the owner's own changes. Counts only: nothing about any item. */
+export function countOwnerTierItems(context: TierCliContext = {}): OwnerTierItemCounts {
+  const counts: OwnerTierItemCounts = { personal: 0, private: 0, changed: 0 };
+  for (const ledger of knownTierLedgers(context)) {
+    try {
+      withLedgerAt(ledger.path, context.now, (opened) => {
+        const byTier = opened.counts().byContentTier;
+        counts.personal += byTier.private;
+        counts.private += byTier.secure;
+        counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').length;
+      }, ledger.boundLedgerId, true);
+    } catch {
+      // A ledger that cannot be read counts nothing.
+    }
+  }
+  return counts;
+}
+
 function identityOfRow(row: StoredItemRow): TierLedgerIdentity {
   return {
     provider: row.provider,
@@ -264,6 +353,17 @@ function identityOfRow(row: StoredItemRow): TierLedgerIdentity {
     providerItemId: row.provider_item_id,
     ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
   };
+}
+
+/** The ledgers' recently-sorted order: newest first, then provider, account, chat and item (recentDecisions). */
+function recentOrder(left: TierLedgerRecord, right: TierLedgerRecord): number {
+  if (left.decidedAt !== right.decidedAt) return left.decidedAt < right.decidedAt ? 1 : -1;
+  const keys = (record: TierLedgerRecord) => [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
+  const [a, b] = [keys(left), keys(right)];
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return a[index]! < b[index]! ? -1 : 1;
+  }
+  return 0;
 }
 
 function identityOfRecord(record: TierLedgerRecord): TierLedgerIdentity {
@@ -333,8 +433,31 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     ...(state.ownerTier && (!record || (record.contentTier !== state.ownerTier && record.targetContentTier !== state.ownerTier))
       ? { owner_choice: tierDisplayName(state.ownerTier) } : {}),
     judge_reason: judgeReason(record),
+    ...(record?.state === 'pending' && (record.contentPending || record.metadataPending) ? { waiting_for_judge: true as const } : {}),
     decided_at: record?.decidedAt ?? null,
   };
+}
+
+/**
+ * One item by its id, as the dashboard on this computer shows it (with its
+ * preview when asked); undefined when Olympus no longer holds it or it is
+ * Secret. For the owner's own dashboard only (judge-check.ts): an agent finds
+ * items through `findOwnerTierItems` with `personalNamesOnly`.
+ */
+export function getOwnerTierItem(itemId: string, context: TierCliContext = {}, options: { withPreview?: boolean } = {}): OwnerTierItem | undefined {
+  const identity = parseOwnerTierItemId(itemId);
+  let located: LocatedItem[];
+  try {
+    located = locateTierItemByIdentity(identity, context);
+  } catch {
+    return undefined;
+  }
+  if (located.length === 0) return undefined;
+  const state = readLocatedState(located, context);
+  if (state.secret) return undefined;
+  const item = view(storedRowFor(identity, located, context), state);
+  if (options.withPreview) item.preview = previewOf(identity, context);
+  return item;
 }
 
 // --- Set -----------------------------------------------------------------------

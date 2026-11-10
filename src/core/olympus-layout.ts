@@ -81,6 +81,9 @@ export const SHARED_DATA_FILES = {
   // socket folder off Linux, and the status snapshot it publishes.
   'engine-run': 'engine-run',
   'engine-status': 'engine-background-status.json',
+  // Private, short-lived: an export being packed into a backup, or a backup
+  // being opened for a restore (data-backup.ts). Removed when each finishes.
+  'backup-staging': 'backup-staging',
   // One person across sources (#1076): Private, on this computer only.
   'people-index': 'people-index.sqlite',
   models: 'models',

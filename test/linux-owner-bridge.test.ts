@@ -179,15 +179,23 @@ test('real socket auth wrapper still requires CSRF after owner proof', async () 
   const socketFetch = async (r: Request) => handler(r, { requestIP: () => null });
   const f = fixture(socketFetch);
   // As the engine does (email-source/server.ts): the owner's proven page gets the bearer-opened control session too.
-  const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => (await socketFetch(new Request('http://127.0.0.1:18010/dashboard/control/session', {
-    method: 'POST', headers: { Authorization: 'Bearer test-worker', Origin: 'http://127.0.0.1:18010' } }))).headers.getSetCookie() });
+  // The page the bridge opens renders this session's CSRF token; its unlock sends it with the cookie (#1187).
+  let pageCsrf = '';
+  const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => {
+    const opened = await socketFetch(new Request('http://127.0.0.1:18010/dashboard/control/session', {
+      method: 'POST', headers: { Authorization: 'Bearer test-worker', Origin: 'http://127.0.0.1:18010' } }));
+    pageCsrf = (await opened.clone().json() as { csrf_token: string }).csrf_token;
+    return opened.headers.getSetCookie();
+  } });
   cleanup.push(() => bridge.close());
   const owner = await prove({ ...f, bridge, post: (path: string, body: object) => new Request(bridge.origin + path, { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify(body) }) });
   const cookies = owner.response.headers.getSetCookie().map(line => line.split(';')[0]!).join('; ');
   const request = (path: string, cookie: string) => new Request(bridge.origin + path, { method: 'POST', headers: { Host: new URL(bridge.origin).host, Origin: bridge.origin, Cookie: cookie, 'X-Olympus-Owner-Proof': owner.proof } });
   // The owner proof alone (no dashboard session) does not unlock: the socket hop is not the owner's browser (#1188).
   expect((await bridge.handle(request('/dashboard/control/session/local', owner.cookie))).status).toBe(401);
-  const response = await bridge.handle(request('/dashboard/control/session/local', cookies));
+  const unlock = request('/dashboard/control/session/local', cookies);
+  unlock.headers.set('X-Olympus-CSRF', pageCsrf);
+  const response = await bridge.handle(unlock);
   expect(response.status).toBe(200);
   const dashboardCookie = response.headers.get('set-cookie')!.split(';')[0]!;
   const denied = await bridge.handle(request('/dashboard/control/session/lock', owner.cookie + '; ' + dashboardCookie));

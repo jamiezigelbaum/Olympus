@@ -1,7 +1,8 @@
 import { createDashboardPeople } from './dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
-import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
+import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
+import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
@@ -365,7 +366,7 @@ import { recordedProviderAccount } from '../../core/provider-account-history.ts'
 import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigrationOptions, type AccountMigrationReport } from '../../core/source-account-migration.ts';
 import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../core/messaging-account-move.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
-import { deleteMarkedAccounts, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
+import { deleteMarkedAccounts, exportOlympusData, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
@@ -576,6 +577,7 @@ import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
  */
 const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
+import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
@@ -2542,6 +2544,9 @@ export async function main(): Promise<void> {
   replaceEmptyAccountsAtBoot(process.env);
   // With the switch on, existing accounts move into their folders; a move under way is finished or undone.
   await moveAccountsAtBoot(process.env);
+  // A restore the dashboard asked for runs now: under the owner lock, before
+  // any store opens (backup-service.ts, #1065).
+  applyPendingRestoreAtBoot(defaultBackupServicePaths(process.env), process.env);
   // From here on, a writable store open records its account in the registry
   // (core/source-storage.ts). Before any lane mounts.
   enableSourceRegistryAdoption();
@@ -2842,6 +2847,15 @@ export async function main(): Promise<void> {
   // open handles serving deleted rows (PR #455 review).
   let modelReloadInstalled = false;
   let modelReloadUnavailable = false;
+  // Settings › Back up and restore (#1065): this worker owns the data, so it
+  // writes the export a backup packs, as `olympus data export` does through it.
+  const backupService = createBackupService({
+    paths: defaultBackupServicePaths(process.env),
+    env: process.env,
+    exportInto: (destination) => exportOlympusData({ destination }),
+    canRestart: () => workerRestartsItself(workerLaunch, process.env),
+    requestRestart: () => modelReloadInstalled && requestModelReload(),
+  });
   const modelSetup = new ModelSetupService({
     config: sovereigntyEngine.config,
     credentialState: modelCredentialState,
@@ -6302,6 +6316,8 @@ export async function main(): Promise<void> {
     runningVersion: runningOlympusVersion(), platform: process.platform,
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
+  // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
+  const ownerTierItemsEngine = createOwnerTierItems();
   // Update now (#1063): only the standalone engine the installer put in place updates itself.
   const selfUpdater = createSelfUpdater({
     platform: process.platform, runningVersion: runningOlympusVersion(),
@@ -6341,7 +6357,9 @@ export async function main(): Promise<void> {
     archiveImportAgent: archiveImportDashboard.agent,
     // One item's privacy label (issue #1060): the same stores and ledgers
     // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
-    ownerTierItems: createOwnerTierItems(),
+    ownerTierItems: ownerTierItemsEngine,
+    // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -6413,6 +6431,7 @@ export async function main(): Promise<void> {
               logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
             }),
             modelChoices,
+            backup: backupService,
             goEasy: {
               on: () => localPacer.goEasy(),
               // In the split the background does the local work: it reads the saved choice again.
@@ -8014,6 +8033,8 @@ export async function main(): Promise<void> {
   // applied; then daily, so a long-running worker follows new releases too.
   void modelChoices.refreshStrongest().catch(() => false);
   setInterval(() => { void modelChoices.refreshStrongest().catch(() => false); }, 24 * 60 * 60 * 1000).unref();
+  // Nightly or weekly backups: checked every quarter hour, run when due (backup-service.ts).
+  setInterval(() => { void backupService.tick().catch(() => false); }, 15 * 60 * 1000).unref();
 
   if (listens) console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

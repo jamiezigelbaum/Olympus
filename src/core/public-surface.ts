@@ -209,6 +209,8 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'source extract-pdfs',
   'data export',
   'data verify',
+  'data backup',
+  'data restore',
   'data delete',
   'data restore',
   'tier set',
@@ -282,6 +284,13 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/models/first-run-privacy' },
   { method: 'POST', path: '/dashboard/models/judge' },
   { method: 'POST', path: '/dashboard/engine/computer-use' },
+  // Settings › Back up and restore (#1065): local-grade control session only.
+  { method: 'POST', path: '/dashboard/backup/status' },
+  { method: 'POST', path: '/dashboard/backup/settings' },
+  { method: 'POST', path: '/dashboard/backup/passphrase' },
+  { method: 'POST', path: '/dashboard/backup/run' },
+  { method: 'POST', path: '/dashboard/backup/browse' },
+  { method: 'POST', path: '/dashboard/backup/restore' },
   { method: 'POST', path: '/dashboard/engine/go-easy' },
   { method: 'POST', path: '/dashboard/engine/update' },
   { method: 'POST', path: '/dashboard/engine/update/status' },
@@ -321,6 +330,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // DASHBOARD_PRIVACY_ITEM_PATHS).
   { method: 'POST', path: '/dashboard/privacy/items/find' },
   { method: 'POST', path: '/dashboard/privacy/items/set' },
+  { method: 'POST', path: '/dashboard/privacy/judge-check' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as
   // every route above.
