@@ -237139,9 +237139,17 @@ async function runDashboardCommand(dependencies = {}) {
       throw new OperationError("email_unreachable", "Worker did not provide an owner-proven desktop route.");
     desktopUnavailable = true;
   }
-  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  let socketPath;
+  let socketError;
+  try {
+    socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  } catch (error2) {
+    socketError = error2;
+  }
   const mintBase = socketPath ? new URL(`http://127.0.0.1:${new URL(base).port || "80"}`).origin : base;
   const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint2() });
+  if (socketError !== undefined)
+    throw socketError;
   const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || "80"), socketPath, ...process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {} }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {
