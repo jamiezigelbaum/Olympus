@@ -73705,7 +73705,8 @@ class LocalWorkPacer {
       pending = false;
     }
     pending ||= this.nowMs() - this.localWorkAtMs < GO_EASY_LOCAL_WORK_RECENT_MS;
-    const hold = !this.stopped && pending && this.reading?.power === "ac" && this.reading.lidOpen !== false;
+    const mains = this.reading?.power === "ac" || this.reading?.power === "no_battery";
+    const hold = !this.stopped && pending && mains && this.reading?.lidOpen !== false;
     if (hold && !this.assertion) {
       try {
         const child = (this.options.spawnAssertion ?? spawnCaffeinate)();

@@ -170,6 +170,13 @@ test('a Mac on AC with its lid open holds a power assertion only while local wor
   expect(linux.pacer.holdingAssertion()).toBe(false);
 });
 
+test('a desktop Mac on mains power holds the power assertion while local work waits (#1126 review)', async () => {
+  const spawnAssertion = () => ({ kill() {}, once() { return undefined; } });
+  const { pacer } = await pacerAt(AFTERNOON, { idleSeconds: 1, power: 'no_battery' }, { platform: 'darwin', pendingLocalWork: () => true, spawnAssertion });
+  expect(pacer.holdingAssertion()).toBe(true);
+  pacer.stop();
+});
+
 test('embedding a backlog the queue does not list still holds the power assertion, until it goes quiet', async () => {
   // After a restart, missing vectors are found by the sweep, not the in-memory queue (#1126 review).
   let spawned = 0;

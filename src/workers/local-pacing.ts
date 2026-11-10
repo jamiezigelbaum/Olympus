@@ -330,7 +330,9 @@ export class LocalWorkPacer {
     let pending = false;
     try { pending = this.options.pendingLocalWork?.() === true; } catch { pending = false; }
     pending ||= this.nowMs() - this.localWorkAtMs < GO_EASY_LOCAL_WORK_RECENT_MS;
-    const hold = !this.stopped && pending && this.reading?.power === 'ac' && this.reading.lidOpen !== false;
+    // On mains power: a laptop on AC with its lid open, or a desktop (no battery).
+    const mains = this.reading?.power === 'ac' || this.reading?.power === 'no_battery';
+    const hold = !this.stopped && pending && mains && this.reading?.lidOpen !== false;
     if (hold && !this.assertion) {
       try {
         const child = (this.options.spawnAssertion ?? spawnCaffeinate)();
