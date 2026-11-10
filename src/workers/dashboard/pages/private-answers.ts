@@ -11,12 +11,15 @@ import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts'
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
+  DASHBOARD_PRIVACY_ITEMS_COPY,
   dashboardRelativeFromMs,
   PRIVATE_ANSWER_FAILURES,
   privateAnswerFailure,
 } from '../vocabulary.ts';
 import type { AskDestinationStates } from '../../email-source/venice-inbox-answer.ts';
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
+import { JUDGE_CHECK_CSS, JUDGE_CHECK_MOUNT, judgeCheckClientScript } from './judge-check.ts';
+import { SOURCE_LOGO_CSS } from '../source-logos.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
 export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous-setup';
@@ -128,19 +131,20 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     nav: dashboardTopNav({ active: 'privacy', unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...(readToken(basePath) ? { token: readToken(basePath)! } : {}) }),
     meta: '',
     body: dashboardPrivacyTabs('questions', readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS],
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS, SOURCE_LOGO_CSS, JUDGE_CHECK_CSS],
     // The local inbox carries its own small controller and visible-page poll.
   });
 }
 
-/** The tab bar the Privacy page's two halves share: Private questions first, then Privacy settings (?keys). */
-export function dashboardPrivacyTabs(active: 'questions' | 'settings', token?: string): string {
-  const tab = (id: 'questions' | 'settings', href: string, label: string) => id === active
+/** The Privacy page's tab bar: Private questions, Privacy rules (?keys), then Your items (?privacy-items). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings' | 'items', token?: string): string {
+  const tab = (id: 'questions' | 'settings' | 'items', href: string, label: string) => id === active
     ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
     : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
   return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
     + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
     + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
+    + tab('items', dashboardLocalPageHref('privacyItems', token), DASHBOARD_PRIVACY_ITEMS_COPY.tab)
     + '</nav>';
 }
 
@@ -198,7 +202,9 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
     ready = true;
-    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
+    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`
+      // "Check the judge" at the top of the Inbox (judge-check.ts): local session only, like the Inbox.
+      + `<script>${judgeCheckClientScript({ csrfToken, ...(readToken(options?.basePath) ? { token: readToken(options?.basePath)! } : {}) })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date()) : '';
   // zkAPI's own settings live on Settings › zkAPI and Privacy rules (#1047); this tab keeps only its card.
@@ -278,7 +284,7 @@ function renderFailureNotice(reason: unknown): string {
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
   // Delete all sits top right of the heading, as signed off (final-1, #1047).
   const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button>` : '';
-  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>${deleteAll}</div>`];
+  const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>${deleteAll}</div>${waiting ? JUDGE_CHECK_MOUNT : ''}`];
   if (!waiting) {
     parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(W.unavailable)}</p>`);
     return parts.join('') + '</section>';

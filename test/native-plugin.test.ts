@@ -681,6 +681,8 @@ describe('native OpenClaw plugin adapter', () => {
       'olympus_doctor',
       'ask_anonymously',
       'archive_import',
+      'privacy_item_find',
+      'privacy_item_set',
       'olympus_open_remote',
     ]);
   });

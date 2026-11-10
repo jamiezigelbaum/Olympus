@@ -72,6 +72,8 @@ export const DASHBOARD_LOCAL_PAGES = {
   connect: 'connect',
   agents: 'agents',
   privateAnswers: 'private-answers',
+  /** Privacy › Your items: one item's label (pages/privacy-items.ts). */
+  privacyItems: 'privacy-items',
   connector: 'connector',
   help: 'help',
   settings: 'settings',

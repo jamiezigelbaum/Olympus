@@ -621,6 +621,23 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
   '/dashboard/archive-import/stop',
 ];
 
+/**
+ * The owner's one-item privacy change on the Privacy tab
+ * (classification/tier-owner-items.ts): finding any item, with its names, and
+ * setting it Personal or Private or back to the judge. Lowering an item is
+ * the person's call at this computer, so these take the consult routes'
+ * grade too; an agent raises through its own route on the worker bearer.
+ */
+export const DASHBOARD_PRIVACY_ITEM_PATHS: readonly string[] = [
+  '/dashboard/privacy/items/find',
+  '/dashboard/privacy/items/set',
+  '/dashboard/privacy/judge-check',
+];
+
+function isDashboardPrivacyItemRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_PRIVACY_ITEM_PATHS.includes(new URL(request.url).pathname);
+}
+
 export const DASHBOARD_MESSAGING_PATHS: readonly string[] = [
   '/dashboard/messaging/start', '/dashboard/messaging/status', '/dashboard/messaging/respond',
   '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
@@ -639,6 +656,7 @@ function isDashboardLocalGradeRoute(request: Request): boolean {
   return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
     || (request.method === 'POST' && (DASHBOARD_BACKUP_PATHS as readonly string[]).includes(new URL(request.url).pathname))
     || isDashboardSelfUpdateRoute(request)
+    || isDashboardPrivacyItemRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/judge', '/dashboard/engine/computer-use', '/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save', '/dashboard/models/choice', '/dashboard/models/addable'].includes(new URL(request.url).pathname));
 }
 
@@ -654,14 +672,18 @@ function dashboardLocalGradeRefusal(request: Request): Response {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
     });
   }
-  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardPrivacyItemRoute(request)) {
+    return dashboardConsultMacOnlyResponse();
+  }
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
         ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
-        : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
+        : isDashboardPrivacyItemRoute(request)
+          ? 'One item\'s privacy label is changed only in the dashboard on this computer, in an unlocked browser.'
+          : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {
     status: 403,

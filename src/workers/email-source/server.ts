@@ -1,4 +1,6 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
+import { createJudgeCheck } from '../classification/judge-check.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
@@ -6104,6 +6106,8 @@ export async function main(): Promise<void> {
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available(),
   });
+  // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
+  const ownerTierItemsEngine = createOwnerTierItems();
   const worker = createEmailSourceWorker({
     updateAvailable: () => updateChecker.available(),
     ...(isStandaloneEngineProcess(process.env) ? { selfUpdate: selfUpdater } : {}),
@@ -6124,6 +6128,11 @@ export async function main(): Promise<void> {
     ),
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
+    // One item's privacy label (issue #1060): the same stores and ledgers
+    // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
+    ownerTierItems: ownerTierItemsEngine,
+    // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {

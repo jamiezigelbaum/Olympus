@@ -121,7 +121,7 @@ export async function runTierCommand(args: readonly string[], context: TierCliCo
 
 // --- Locators --------------------------------------------------------------------
 
-interface LocatedItem {
+export interface LocatedItem {
   /** The tier ledger that holds (or will hold) this item's decision. */
   ledgerPath: string;
   /** The id that ledger must have, when it is the set ledger a store is bound to: opened ledgers are checked against it. */
@@ -131,7 +131,7 @@ interface LocatedItem {
   localItemId?: string;
 }
 
-function knownStorePaths(context: TierCliContext): string[] {
+export function knownStorePaths(context: TierCliContext): string[] {
   const paths = context.storePaths
     ?? lifecycleStorePaths(context);
   return [...new Set(paths)].filter((path) => path !== ':memory:' && existsSync(path));
@@ -145,15 +145,30 @@ interface StoreMatch {
   ownLedgerPath: string;
 }
 
-function matchStore(dbPath: string, needle: string): StoreMatch[] {
+/** Which stored rows a locator names: its locator URI or provider item id, or one exact identity. */
+type StoreNeedle = { locator: string } | { identity: TierLedgerIdentity };
+
+function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
   const db = new Database(dbPath, { readonly: true });
   try {
     db.exec('PRAGMA busy_timeout = 10000;');
-    const rows = db.query(`
-      SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
-      WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
-      LIMIT 5
-    `).all(needle, needle) as Array<{
+    const rows = ('locator' in needle
+      ? db.query(`
+        SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
+        WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
+        LIMIT 5
+      `).all(needle.locator, needle.locator)
+      : db.query(`
+        SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
+        WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
+          AND COALESCE(provider_conversation_id, '') = ?
+        LIMIT 5
+      `).all(
+        needle.identity.provider,
+        needle.identity.accountScope,
+        needle.identity.providerItemId,
+        needle.identity.providerConversationId ?? '',
+      )) as Array<{
       provider: string;
       family: SourceFamily;
       account_scope: string;
@@ -162,38 +177,7 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
       local_item_id: string;
     }>;
     if (rows.length === 0) return [];
-    let bound: { path: string; id: string } | undefined;
-    let cursor: string | null | undefined;
-    try {
-      cursor = (db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
-        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null)?.cursor;
-    } catch {
-      // No sync_runs table: the store was never bound, and its own ledger is the candidate.
-    }
-    if (cursor) {
-      // A store bound to a set takes its decisions from that set's ledger and
-      // from no other. Where it is now is found by its id, since the recorded
-      // path is only where it was when the store was bound; when it cannot be
-      // found, the command stops rather than write into whatever else is
-      // there (the recorded path, the store's own ledger).
-      let record: { ledgerId?: unknown; ledgerPath?: unknown } | undefined;
-      try {
-        record = JSON.parse(cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
-      } catch {
-        record = undefined;
-      }
-      const found = typeof record?.ledgerId === 'string' && typeof record.ledgerPath === 'string'
-        ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath })
-        : undefined;
-      if (found === undefined || typeof record?.ledgerId !== 'string') {
-        throw new OperationError(
-          'source_index_error',
-          'The tier ledger this item\'s store is bound to cannot be found, so its tier cannot be read or changed.',
-          'Restore the set ledger (beside the source\'s secure_local store), then run the command again.',
-        );
-      }
-      bound = { path: found, id: record.ledgerId };
-    }
+    const bound = storeBoundLedger(db, dbPath);
     return rows.map((row) => ({
       identity: {
         provider: row.provider,
@@ -216,6 +200,46 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
 }
 
 /**
+ * The set ledger a store is bound to, found by its id (undefined: the store
+ * was never bound, and its own ledger is the candidate). A store whose bound
+ * ledger cannot be found is refused, never read against another ledger.
+ */
+function storeBoundLedger(db: Database, dbPath: string): { path: string; id: string } | undefined {
+  let cursor: string | null | undefined;
+  try {
+    cursor = (db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+      .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null)?.cursor;
+  } catch {
+    // No sync_runs table: the store was never bound, and its own ledger is the candidate.
+  }
+  if (cursor) {
+    // A store bound to a set takes its decisions from that set's ledger and
+    // from no other. Where it is now is found by its id, since the recorded
+    // path is only where it was when the store was bound; when it cannot be
+    // found, the command stops rather than write into whatever else is
+    // there (the recorded path, the store's own ledger).
+    let record: { ledgerId?: unknown; ledgerPath?: unknown } | undefined;
+    try {
+      record = JSON.parse(cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
+    } catch {
+      record = undefined;
+    }
+    const found = typeof record?.ledgerId === 'string' && typeof record.ledgerPath === 'string'
+      ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath })
+      : undefined;
+    if (found === undefined || typeof record?.ledgerId !== 'string') {
+      throw new OperationError(
+        'source_index_error',
+        'The tier ledger this item\'s store is bound to cannot be found, so its tier cannot be read or changed.',
+        'Restore the set ledger (beside the source\'s secure_local store), then run the command again.',
+      );
+    }
+    return { path: found, id: record.ledgerId };
+  }
+  return undefined;
+}
+
+/**
  * Find the item and the ledger(s) that decide it. The identity includes the
  * conversation (chat items). A tiered store set keeps ONE ledger for all its
  * stores, beside its secure_local store, so the item's decision may live in a
@@ -226,6 +250,15 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
 export function locateTierItem(locator: string, context: TierCliContext = {}): LocatedItem[] {
   const needle = locator.trim();
   if (!needle) throw new OperationError('invalid_params', 'A locator is required.');
+  return locateMatched({ locator: needle }, context);
+}
+
+/** `locateTierItem` for one exact identity (an item id the owner picked from a list, tier-owner-items.ts). */
+export function locateTierItemByIdentity(identity: TierLedgerIdentity, context: TierCliContext = {}): LocatedItem[] {
+  return locateMatched({ identity }, context);
+}
+
+function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedItem[] {
   const stores = knownStorePaths(context);
   const matches = stores.flatMap((dbPath) => matchStore(dbPath, needle));
   const identities = new Map(matches.map((match) => [identityKey(match.identity), match.identity]));
@@ -260,6 +293,32 @@ export function locateTierItem(locator: string, context: TierCliContext = {}): L
   return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
 }
 
+/**
+ * Every tier ledger behind the known stores: each store's own ledger when it
+ * exists, and the set ledger a store is bound to. With the id each bound one
+ * must have, so an open checks it (`withLedgerAt`).
+ */
+export function knownTierLedgers(context: TierCliContext = {}): Array<{ path: string; boundLedgerId?: string }> {
+  const ledgers = new Map<string, string | undefined>();
+  for (const dbPath of knownStorePaths(context)) {
+    const own = tierLedgerPathForStore(dbPath);
+    if (existsSync(own) && !ledgers.has(own)) ledgers.set(own, undefined);
+    let bound: { path: string; id: string } | undefined;
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 10000;');
+      bound = storeBoundLedger(db, dbPath);
+    } catch {
+      // A store that cannot be read, or whose bound ledger is gone, lists nothing.
+      bound = undefined;
+    } finally {
+      closeSqliteStore(db, { checkpoint: false });
+    }
+    if (bound && existsSync(bound.path)) ledgers.set(bound.path, bound.id);
+  }
+  return [...ledgers].map(([path, boundLedgerId]) => ({ path, ...(boundLedgerId ? { boundLedgerId } : {}) }));
+}
+
 function identityKey(identity: TierLedgerIdentity): string {
   return tierLedgerIdentityKey(identity);
 }
@@ -271,7 +330,7 @@ function identityKey(identity: TierLedgerIdentity): string {
  * been replaced in between. (A replacement has had its schema migrated by this
  * open before it is checked; that is accepted, since it is closed unused.)
  */
-function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string): T {
+export function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string): T {
   const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}) });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
@@ -317,7 +376,26 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     override = { kind: 'tier', tier };
   }
   const items = locateTierItem(locator, context);
-  const results = items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
+  return {
+    locator,
+    item: publicIdentity(items[0]!.identity),
+    stores: items.length,
+    results: applyTierSet(items, override, context),
+  };
+}
+
+/**
+ * Save (or clear) the owner's override on located items, in every ledger that
+ * decides them, and apply it as far as one ledger write can: the `tier set`
+ * command and the dashboard's one-item change (tier-owner-items.ts) both
+ * write through here.
+ */
+export function applyTierSet(
+  items: readonly LocatedItem[],
+  override: ItemTierOverride | 'clear',
+  context: TierCliContext = {},
+): Array<Record<string, unknown>> {
+  return items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
     if (override === 'clear') {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: 'The next sync re-decides this item without the override.' };
@@ -383,12 +461,6 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
       generation: record.generation,
     };
   }, item.boundLedgerId));
-  return {
-    locator,
-    item: publicIdentity(items[0]!.identity),
-    stores: items.length,
-    results,
-  };
 }
 
 export function runTierExplain(args: readonly string[], context: TierCliContext = {}): Record<string, unknown> {

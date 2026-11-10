@@ -185,12 +185,12 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
   "requested_on": "2026-10-13",
   "reason": "Linux anonymous-answer activation, unavailable wording, launcher installation recovery, and the corrected API-key step await owner acceptance. The missing-route Add zkAPI box now precedes the turn-on card and awaits owner acceptance.",
   "rendered_states_sha256": {
-    "available": "12980b20bc1295d20ce9d4ecd4995d4ba0a2ee92121dfc782fc1ca61787cb5f0",
-    "unavailable": "702848ef97f978835da3fa6f338c5dbe9f1195220014fdd29841e27d59bb6b08",
-    "missing": "702848ef97f978835da3fa6f338c5dbe9f1195220014fdd29841e27d59bb6b08",
-    "outdated": "702848ef97f978835da3fa6f338c5dbe9f1195220014fdd29841e27d59bb6b08",
-    "system": "702848ef97f978835da3fa6f338c5dbe9f1195220014fdd29841e27d59bb6b08",
-    "configured": "702848ef97f978835da3fa6f338c5dbe9f1195220014fdd29841e27d59bb6b08"
+    "available": "1dc68db07800cfbe30ef00a3bbaea2417aee6393561e4310ddf92cadc1db54e7",
+    "unavailable": "11fda48d2e28c209b5709e0bdf0ba49b577d2229580b92aef6fb873efdc0667b",
+    "missing": "11fda48d2e28c209b5709e0bdf0ba49b577d2229580b92aef6fb873efdc0667b",
+    "outdated": "11fda48d2e28c209b5709e0bdf0ba49b577d2229580b92aef6fb873efdc0667b",
+    "system": "11fda48d2e28c209b5709e0bdf0ba49b577d2229580b92aef6fb873efdc0667b",
+    "configured": "11fda48d2e28c209b5709e0bdf0ba49b577d2229580b92aef6fb873efdc0667b"
   }
 } ,
     content_free: true,
