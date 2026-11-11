@@ -26213,6 +26213,7 @@ function forgetExtractionJobs(dbPath, scope, options = {}) {
     return forgetSqliteRows(db, [
       ...jobs ? [{ table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params }] : [],
       ...filterFor("extraction_artifacts", [["corpus_id", scope.corpusIds]]),
+      ...filterFor("extraction_unroutable_items", [["corpus_id", scope.corpusIds]]),
       ...filterFor("extraction_jobs", [["corpus_id", scope.corpusIds]]),
       ...claimants.length > 0 && claimsTableExists(db) ? [{
         table: SECRET_ITEM_REDACTIONS_TABLE,
@@ -26247,6 +26248,7 @@ function forgetExtractionJobsOfAccountScopes(dbPath, corpusIds, accountScopes, o
       { table: "extraction_artifacts", where: jobIds, params },
       { table: SECRET_ITEM_REDACTION_CLAIMS_TABLE, where: byAccount, params: accountScopes },
       { table: SECRET_ITEM_REDACTIONS_TABLE, where: byAccount, params: accountScopes },
+      { table: "extraction_unroutable_items", where: ofScopes, params },
       { table: "extraction_jobs", where: ofScopes, params }
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
@@ -60606,7 +60608,7 @@ function clampPercent(percent) {
     return 0;
   return Math.max(0, Math.min(100, Math.round(percent * 10) / 10));
 }
-var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
+var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", UNSUPPORTED_KIND_COUNT_KEY = "extraction_items_unsupported_kind", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
 var init_answer_ready_coverage = __esm(() => {
   POLICY_NOT_READ_COUNT_KEYS = [
     METADATA_ONLY_EXPECTED_COUNT_KEY,
@@ -60966,6 +60968,7 @@ function dashboardWorkingSummary(source) {
   const read = Math.max(0, Math.min(inScope, source.coverage.content_ready_items));
   const readPercent = clampPercent(read / inScope * 100);
   const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
+  const unsupportedKind = Math.max(0, Math.min(inScope - read - unreadable, Math.trunc(source.coverage.unsupported_kind_items ?? 0)));
   const backlog = source.embedding_backlog;
   const parityShort = backlog !== undefined && (backlog.missing_chunks > 0 || backlog.refresh_needed) && backlog.chunks > 0;
   const searchablePercent = parityShort ? clampPercent(backlog.embedded_chunks / backlog.chunks * 100) : undefined;
@@ -60973,9 +60976,10 @@ function dashboardWorkingSummary(source) {
     in_scope_items: inScope,
     read_items: read,
     ...unreadable > 0 ? { unreadable_items: unreadable } : {},
+    ...unsupportedKind > 0 ? { unsupported_kind_items: unsupportedKind } : {},
     read_percent: readPercent,
     ...searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {},
-    fully_working: read + unreadable >= inScope && !parityShort
+    fully_working: read + unreadable + unsupportedKind >= inScope && !parityShort
   };
 }
 function dashboardCount(value) {
@@ -60991,10 +60995,11 @@ function freshLine(source, now) {
   if (source.connection.action.kind === "archive_import")
     return source.connection.label;
   const unreadable = dashboardUnreadablePhrase(source);
+  const unsupportedKind = dashboardUnsupportedKindPhrase(source);
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
-  const tail = [pass, unreadable, capture].filter((part) => !!part).join(" · ");
+  const tail = [pass, unreadable, unsupportedKind, capture].filter((part) => !!part).join(" · ");
   if (manual)
     return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
@@ -61042,6 +61047,10 @@ function itemsPhrase(source, count, adjective = "") {
 function dashboardUnreadablePhrase(source) {
   const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
   return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+function dashboardUnsupportedKindPhrase(source) {
+  const count = Math.max(0, Math.trunc(source.coverage.unsupported_kind_items ?? 0));
+  return count > 0 ? `${itemsPhrase(source, count)} of kinds Olympus can't read yet` : undefined;
 }
 function dashboardPhaseUnreadableWords(read, unreadable) {
   return `Done · ${dashboardCount(read)} read · ${dashboardCount(unreadable)} can't be read`;
@@ -91991,6 +92000,7 @@ class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+      createUnroutableItemsTable(this.db);
       this.unregisterPath = registerExtractionJobsDbPath(dbPath);
     }
   }
@@ -92001,10 +92011,38 @@ class LocalFileExtractionJobStore {
   invalidateUnsettledForCorpus(corpusId) {
     this.assertWritable("scope queue invalidation");
     const id = requireBoundedString(corpusId, "corpusId");
-    return this.db.query(`
-      DELETE FROM extraction_jobs
-      WHERE corpus_id = ? AND status IN ('queued', 'leased')
-    `).run(id).changes;
+    return this.db.transaction(() => {
+      this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ?").run(id);
+      return this.db.query(`
+        DELETE FROM extraction_jobs
+        WHERE corpus_id = ? AND status IN ('queued', 'leased')
+      `).run(id).changes;
+    }).immediate();
+  }
+  recordUnroutable(refs) {
+    this.assertWritable("record unroutable items");
+    const now = nowIso4();
+    const insert = this.db.query(`
+      INSERT INTO extraction_unroutable_items (
+        corpus_id, provider, account_scope, approved_scope_key, local_item_id,
+        provider_item_id, source_version, content_hash, mime_type, seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(corpus_id, local_item_id) DO UPDATE SET
+        provider = excluded.provider,
+        account_scope = excluded.account_scope,
+        approved_scope_key = excluded.approved_scope_key,
+        provider_item_id = excluded.provider_item_id,
+        source_version = excluded.source_version,
+        content_hash = excluded.content_hash,
+        mime_type = excluded.mime_type,
+        seen_at = excluded.seen_at
+    `);
+    this.db.transaction(() => {
+      for (const rawRef of refs) {
+        const ref = requireItemRef(rawRef);
+        insert.run(ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.localItemId, ref.providerItemId, ref.sourceVersion ?? null, ref.contentHash ?? null, ref.mimeType ?? null, now);
+      }
+    }).immediate();
   }
   enqueue(request) {
     this.assertWritable("enqueue");
@@ -92024,6 +92062,7 @@ class LocalFileExtractionJobStore {
     this.db.transaction(() => {
       for (const rawRef of request.refs) {
         const ref = requireItemRef(rawRef);
+        this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ? AND local_item_id = ?").run(ref.corpusId, ref.localItemId);
         const status = maxBytesPerFile !== undefined && ref.sizeBytes !== undefined && ref.sizeBytes > maxBytesPerFile ? "skipped_too_large" : "queued";
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
@@ -92615,11 +92654,22 @@ class LocalFileExtractionJobStore {
       SELECT * FROM extraction_jobs
       WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
     `);
+    const selectUnroutable = unroutableItemsTableExists(this.db) && this.db.query(`
+      SELECT u.* FROM extraction_unroutable_items u
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id)
+    `);
+    const unsupportedByItem = new Map;
     const byJobId = new Map;
     for (const lane of uniqueLanes.values()) {
       const rows2 = select.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey);
       for (const row of rows2)
         byJobId.set(row.job_id, row);
+      const unroutable = selectUnroutable ? selectUnroutable.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey) : [];
+      for (const row of unroutable) {
+        unsupportedByItem.set(JSON.stringify([row.corpus_id, row.local_item_id]), refFromRow(row));
+      }
       yield;
     }
     const allRows = [...byJobId.values()];
@@ -92639,6 +92689,14 @@ class LocalFileExtractionJobStore {
     } else if (options.currentItem) {
       const currentItem = options.currentItem;
       rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
+    const unsupportedRefs = [...unsupportedByItem.values()];
+    let unsupportedKindItems = 0;
+    for (let start = 0;start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+      const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+      const answers = options.currentItems ? options.currentItems(slice) : slice.map((ref) => options.currentItem?.(ref) ?? true);
+      unsupportedKindItems += slice.filter((_ref, index) => answers[index] === true).length;
+      yield;
     }
     const byItem = new Map;
     for (const row of rows) {
@@ -92690,6 +92748,7 @@ class LocalFileExtractionJobStore {
       failedTerminalJobs: count("failed_terminal"),
       failedActionableJobs,
       unreadableItems,
+      unsupportedKindItems,
       retryableDueJobs: retryableDueRows.length,
       ...oldestActionableAt ? { oldestActionableAt } : {},
       ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
@@ -92697,6 +92756,11 @@ class LocalFileExtractionJobStore {
   }
   corpusReadiness(corpusId, now = new Date, options = {}) {
     const corpus = requireKeyPart(corpusId, "corpusId");
+    const unsupported = unroutableItemsTableExists(this.db) ? this.db.query(`
+        SELECT COUNT(*) AS items FROM extraction_unroutable_items u
+        WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id)
+      `).get(corpus) : { items: 0 };
     const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
     const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
     const items = this.db.query(`
@@ -92806,6 +92870,7 @@ class LocalFileExtractionJobStore {
       failedTerminalJobs: jobCount("failed_terminal_jobs"),
       failedActionableJobs: jobCount("failed_actionable_jobs"),
       unreadableItems: unreadable.items.length,
+      unsupportedKindItems: unsupported.items,
       retryableDueJobs: jobCount("retryable_due_jobs"),
       ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
       ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
@@ -93145,6 +93210,28 @@ function fileExtractionJobMigrations() {
     }
   }];
 }
+function createUnroutableItemsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_unroutable_items (
+      corpus_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      approved_scope_key TEXT NOT NULL,
+      local_item_id TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL,
+      source_version TEXT,
+      content_hash TEXT,
+      mime_type TEXT,
+      seen_at TEXT NOT NULL,
+      PRIMARY KEY (corpus_id, local_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_extraction_unroutable_lane
+      ON extraction_unroutable_items(corpus_id, provider, account_scope, approved_scope_key);
+  `);
+}
+function unroutableItemsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_unroutable_items'`).get() !== null;
+}
 function nextRetryTimestamp(status, attempts, now) {
   if (status !== "failed_retryable")
     return null;
@@ -93163,7 +93250,7 @@ function refFromRow(row) {
     ...row.content_hash ? { contentHash: row.content_hash } : {},
     ...row.name ? { name: row.name } : {},
     ...row.mime_type ? { mimeType: row.mime_type } : {},
-    ...row.size_bytes === null ? {} : { sizeBytes: row.size_bytes }
+    ...row.size_bytes == null ? {} : { sizeBytes: row.size_bytes }
   };
 }
 function recordFromRow2(row) {
@@ -99938,6 +100025,7 @@ function createFileExtractionRunner(options) {
         approvedScopeKeys: [request.approvedScopeKey]
       });
       const byKind = new Map;
+      const unroutableRefs = [];
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
       const refused = new Map;
@@ -99957,6 +100045,8 @@ function createFileExtractionRunner(options) {
           extractor = registry.select(ref, request.extractorKind);
           if (!extractor) {
             jobsUnroutable += 1;
+            if (request.extractorKind === undefined)
+              unroutableRefs.push(ref);
             continue;
           }
           version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
@@ -99971,6 +100061,13 @@ function createFileExtractionRunner(options) {
           bucket.refs.push(ref);
         else
           byKind.set(key2, { kind: extractor.kind, version, refs: [ref] });
+      }
+      if (unroutableRefs.length > 0) {
+        try {
+          jobs.recordUnroutable(unroutableRefs);
+        } catch (error) {
+          logPlanRefusal(request.corpusId, "unrouted", PLAN_REFUSED_UNROUTABLE_RECORD, unroutableRefs.length, error);
+        }
       }
       let jobsQueued = 0;
       let jobsExisting = 0;
@@ -100723,7 +100820,7 @@ function withMediaTypeFromName(ref) {
   const named = fileMimeTypeFromName(ref.name);
   return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", PLAN_REFUSED_UNROUTABLE_RECORD = "unroutable_record_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_control_path_headroom();
   init_media_cache();
@@ -104200,6 +104297,9 @@ function createSourceIndexStatusHandler(options = {}) {
           return cached2.status;
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {}) : undefined;
         const status = store ? connectorStoreStatus(corpus, storeStatus(store, statusScope, snapshot.countsMaxAgeMs ?? 0), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
+        if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
+          status.counts[UNSUPPORTED_KIND_COUNT_KEY] = readiness.counts[UNSUPPORTED_KIND_COUNT_KEY];
+        }
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           const unreadable = options.unreadableCount(corpus.corpusId);
           if (unreadable !== undefined)
@@ -105771,6 +105871,10 @@ function aggregateCoverage(cards) {
     const value = card.coverage.unreadable_items;
     return value === undefined ? sum2 : (sum2 ?? 0) + value;
   }, undefined);
+  const unsupportedKind = cards.reduce((sum2, card) => {
+    const value = card.coverage.unsupported_kind_items;
+    return value === undefined ? sum2 : (sum2 ?? 0) + value;
+  }, undefined);
   const required3 = cards.filter((card) => card.embedding_required !== false);
   const exempt = cards.filter((card) => card.embedding_required === false);
   const measuring = required3.filter((card) => card.coverage.embedded_files !== undefined);
@@ -105799,6 +105903,7 @@ function aggregateCoverage(cards) {
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
     ...unreadable !== undefined ? { unreadable_items: unreadable } : {},
+    ...unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {},
     ...cards.some((card) => card.coverage.stored_items !== undefined) ? { stored_items: cards.reduce((sum2, card) => sum2 + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}
   });
 }
@@ -106490,6 +106595,7 @@ function coverageFromCounts(counts) {
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
+  const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
   return {
     indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
@@ -106500,6 +106606,7 @@ function coverageFromCounts(counts) {
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
     ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {},
+    ...unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {},
     ...counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }
   };
 }
@@ -156334,6 +156441,7 @@ function readinessSnapshot(readiness) {
       extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
       [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
+      [UNSUPPORTED_KIND_COUNT_KEY]: readiness.unsupportedKindItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs
     },
     contentExtractionThroughput: {
@@ -212756,6 +212864,7 @@ function scrubCard(definition, card) {
       ...finite(card.coverage.answer_ready_eligible_items) ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) } : {},
       ...finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {},
       ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {},
+      ...finite(card.coverage.unsupported_kind_items) ? { unsupported_kind_items: count(card.coverage.unsupported_kind_items) } : {},
       ...finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}
     },
     ingestion_health: {
