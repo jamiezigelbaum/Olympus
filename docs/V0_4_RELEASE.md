@@ -114,9 +114,15 @@ important Private item there. Three things came out of the measurement:
 - The 7 Nov judge prompt change (#995) costs important Private items on
   messages. With only the prompt changed, on the 5 Nov message set, Gemma goes
   from 2 to 7 of 16 important missed and DeepSeek from 0 to 1, while holding
-  fewer Personal items. The wording is being revised for 1.5 (#1244), with a
-  one-time re-check of items settled Personal under the #995 prompt; the
-  7 Nov rule that a prompt change alone re-judges nothing otherwise stands.
+  fewer Personal items. Three rewrites and the 5 Nov wording were then scored
+  on the built-in judge against three labelled sets (#1244, 2026-11-11).
+  None beat the current wording: on the fresh sample's test half it missed
+  no important Private item and had the best agreement (92.4%), and summed
+  over the three test halves it and each rewrite missed 2 important items
+  (the 5 Nov wording 3). The wording stays for 1.5. No one-time re-check
+  runs, and no judge needs approving again; the 7 Nov rule that a prompt
+  change alone re-judges nothing stands. Whether an approval should carry
+  over at the next wording change is #1286, to be decided then.
 
 No freeze date is set. 2026-11-10 16:00Z was the target for that day's push,
 not the scope freeze.
@@ -176,6 +182,22 @@ hung keyword search on real-size stores; it was reverted (#1292, tracked in
 #1293). Rule since then: a search performance change is probed on the copies
 of the owner's stores from its PR head before it merges, and the owner's
 install takes only a commit that passed that eval.
+
+That eval is necessary, not sufficient. The same night, main at `7c028be2`
+(engine split off), which scores on the copies, was installed on the owner's
+live engine and could not answer: in two Asks every lane of all 11 sources
+ended at its deadline, where 1.4.3 and 1.4.4 search all 11 and answer in
+about 90 to 100 seconds (#1305). The owner's install is back on 1.4.4.
+Working explanation, not yet confirmed by a before/after run: the lane
+deadline became real when searches moved to a read pool (#1146), and at this
+size a search of all sources takes well over the 10-second budget, so the
+earlier builds answered only because their deadline never fired. Until an
+Ask passes on a full-size install that is busy importing and judging, no
+build from main goes onto the owner's live install, the engine split's
+switch-on there is held, and the search fixes do not ship as 1.4.5. The fix
+has to keep three things true: an Ask never comes back empty because
+sources were slow, the budget is sized from measurement, and the default is
+never worse than 1.4.x.
 
 Found by the same measurement: on the owner's install, items under a Dropbox
 folder approved as names only show as "Private, decided by the judge" although
