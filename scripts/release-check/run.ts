@@ -1413,9 +1413,17 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
   if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+  if (Date.now() < deadline) await runRelayConsentCheck(run);
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
   await collectEvidence(run, options.outDir);
+}
+
+// Before the control exploration: it presses Turn off remote access (answering OK), and the approval page and its
+// registration answer only in relay mode (run 42918085215: registration 404 after the explore leg).
+// Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
+async function runRelayConsentCheck(run: Run): Promise<void> {
+  run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
 }
 
 // Last, because installing the anonymous-answer tools and, on Ubuntu, the administrator's AppArmor profile changes what
@@ -1424,8 +1432,6 @@ async function runConfinementCheck(run: Run): Promise<void> {
   run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
   // Mac only (a skip on Linux): a second account's local unlock is refused, the owner's still works (#1153).
   run.add(await run.phase('mac-owner-proof', () => checkMacOwnerProof(run.machine!)));
-  // Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
-  run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
   // Linux only (a skip on a Mac): the owner socket, which `olympus remote open` forwards, is not an owner proof by itself (#1188).
   run.add(await run.phase('forwarded-socket-owner-proof', () => checkForwardedSocketOwnerProof(run.machine!)));
 }
@@ -1485,6 +1491,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+        if (Date.now() < deadline) await runRelayConsentCheck(run);
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
         if (Date.now() < deadline) await run.inLeg('restore', () => runRestoreLeg(run, workDir, bundlePath, options.outDir)); else run.errors.push('the run exceeded its time budget before the restore leg');

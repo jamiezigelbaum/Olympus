@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { checkMacConsentOwnerProof, evaluateMacConsentOwnerProof, macConsentOwnerProofScript, MAC_CONSENT_PROOF_ACCOUNT } from '../scripts/release-check/mac-consent-owner-proof.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 
@@ -51,6 +52,17 @@ describe('release check: approving an app connection on a Mac needs the owner (#
     const script = macConsentOwnerProofScript();
     for (const step of ['account', 'pkce', 'register', 'approve', 'owner']) expect(script).toContain(`echo "step=${step}"`);
     expect(script).toContain('echo "register=$(/usr/bin/curl -sS -o "$jar/client.json" -w \'%{http_code}\'');
+  });
+
+  test('runs before the control exploration, which turns remote access off (run 42918085215)', () => {
+    const run = readFileSync(new URL('../scripts/release-check/run.ts', import.meta.url), 'utf8');
+    const explores = [...run.matchAll(/runExploreLeg\(run, options\.outDir\)\)?;/g)].map((m) => m.index!);
+    expect(explores.length).toBe(2);
+    for (const at of explores) {
+      const before = run.slice(Math.max(0, at - 400), at);
+      expect(before).toContain('await runRelayConsentCheck(run);');
+    }
+    expect(run.slice(run.indexOf('async function runConfinementCheck'), run.indexOf('async function runServerModeCheck'))).not.toContain('mac-consent-owner-proof');
   });
 
   test('skips Linux, and a run with no relay, without running anything', async () => {
