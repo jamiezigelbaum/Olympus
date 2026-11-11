@@ -29,11 +29,39 @@ interface State {
   embeddingLedger?: NonNullable<TierMoveOptions['embeddingLedger']>;
 }
 
-/** One bounded page at worker startup/maintenance; a failed item resumes first. */
+type SweepReport = { checked: number; purged: number; kept: number; failed: number; complete: boolean };
+
+/**
+ * Bounded pages at worker startup and on maintenance ticks; a failed item
+ * resumes first. With budgetMs, pages repeat until the budget is spent, the
+ * walk ends or an item fails, so a large ledger finishes in hours, not days.
+ */
 export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
   limit?: number;
+  budgetMs?: number;
+  now?: () => number;
   embeddingLedger?: TierMoveOptions['embeddingLedger'];
-} = {}): { checked: number; purged: number; kept: number; failed: number; complete: boolean } {
+} = {}): SweepReport {
+  const now = options.now ?? Date.now;
+  const started = now();
+  const total = sweepPage(set, options);
+  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+  let last = total.checked;
+  while ((options.budgetMs ?? 0) > 0 && !total.complete && total.failed === 0
+    && last === limit && now() - started < options.budgetMs!) {
+    const page = sweepPage(set, options);
+    total.checked += page.checked; total.purged += page.purged;
+    total.kept += page.kept; total.failed += page.failed;
+    total.complete = page.complete;
+    last = page.checked;
+  }
+  return total;
+}
+
+function sweepPage(set: TieredStoreSet, options: {
+  limit?: number;
+  embeddingLedger?: TierMoveOptions['embeddingLedger'];
+}): SweepReport {
   const ledger = set.ledger;
   const state: State = JSON.parse(ledger.readMeta(STATE) || '{}');
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -83,7 +111,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
       } else finishPending();
     }
     if (report.checked === limit) return report;
-    const rows = ledger.listItemWindow({ ...(state.after ? { after: state.after } : {}), limit: limit - report.checked });
+    const rows = ledger.listSupersededItemWindow({ ...(state.after ? { after: state.after } : {}), limit: limit - report.checked });
     for (const record of rows.slice(0, limit - report.checked)) {
       report.checked++;
       const identity: TierLedgerIdentity = { provider: record.provider, accountScope: record.accountScope,

@@ -23918,6 +23918,16 @@ class TierLedger {
       ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
+  listSupersededItemWindow(options) {
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
+    const rows = this.db.query(`SELECT * FROM tier_items i
+      WHERE ${after.length ? "(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND" : ""}
+        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          AND c.copy_state = 'superseded')
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+    return rows.map(recordFromRow);
+  }
   listLowerContentLeftovers(options) {
     const attached = [];
     try {
@@ -69118,6 +69128,23 @@ var init_tier_content_purge = __esm(() => {
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
 function sweepAutomaticSupersededCopies(set, options = {}) {
+  const now = options.now ?? Date.now;
+  const started = now();
+  const total = sweepPage(set, options);
+  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+  let last = total.checked;
+  while ((options.budgetMs ?? 0) > 0 && !total.complete && total.failed === 0 && last === limit && now() - started < options.budgetMs) {
+    const page2 = sweepPage(set, options);
+    total.checked += page2.checked;
+    total.purged += page2.purged;
+    total.kept += page2.kept;
+    total.failed += page2.failed;
+    total.complete = page2.complete;
+    last = page2.checked;
+  }
+  return total;
+}
+function sweepPage(set, options) {
   const ledger = set.ledger;
   const state = JSON.parse(ledger.readMeta(STATE) || "{}");
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -69170,7 +69197,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
     }
     if (report.checked === limit)
       return report;
-    const rows = ledger.listItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
+    const rows = ledger.listSupersededItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
     for (const record of rows.slice(0, limit - report.checked)) {
       report.checked++;
       const identity2 = {
@@ -72530,6 +72557,12 @@ class TieredStoreSet {
   repairLowerContent(options = {}) {
     if (this.lowerContentRepair)
       return this.lowerContentRepair;
+    try {
+      sweepAutomaticSupersededCopies(this, {
+        budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
+      });
+    } catch {}
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
       return Promise.resolve();
@@ -72542,9 +72575,6 @@ class TieredStoreSet {
           if (chunks > 0)
             console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         }
-      });
-      sweepAutomaticSupersededCopies(this, {
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
       });
       const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
         this.lowerContentRepair = undefined;
@@ -73651,7 +73681,7 @@ function handoffConnector(source, item) {
 function pathOf(path) {
   return typeof path === "string" && path ? path : undefined;
 }
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 250, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
   init_source_ingestion_exclusions();
