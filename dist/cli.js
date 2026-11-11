@@ -71237,7 +71237,7 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   }
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const mayLower = recheck !== undefined ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext) : retiredPrior || fromStoredNames;
+  const mayLower = retiredPrior || (recheck !== undefined ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext) : fromStoredNames);
   const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };

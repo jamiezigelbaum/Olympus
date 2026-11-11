@@ -513,9 +513,10 @@ function rejudgeMetadata(
   // Owner re-checks use the automatic pass's floor unless a receipt proves
   // these names include the original input. Old rows without receipts fail
   // safe. Provider facts are not stored, so their floors still apply.
-  const mayLower = recheck !== undefined
+  // A retired whole-source prior never floors names, owner re-check or not.
+  const mayLower = retiredPrior || (recheck !== undefined
     ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext)
-    : retiredPrior || fromStoredNames;
+    : fromStoredNames);
   const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);

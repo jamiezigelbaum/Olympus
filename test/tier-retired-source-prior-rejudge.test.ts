@@ -7,7 +7,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import type { SourceConnector } from '../src/core/contracts.ts';
-import { TIER_CLASSIFIER_VERSION, type TierSniffer, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
+import { NAMES_INPUT_REASON_PREFIX, TIER_CLASSIFIER_VERSION, type TierSniffer, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
@@ -133,6 +133,23 @@ for (const basis of ['source_config:trust_domain:secure_local', 'source_default:
     expect(f.ledger.rejudgeCandidatePage(key).records).toEqual([]);
   });
 }
+
+test('an owner re-check still drops a retired source prior on a row with no names-input receipt (#1114)', async () => {
+  const f = lane();
+  const basis = 'source_config:trust_domain:secure_local';
+  await f.set.sync(restingPrivate(fixtureConnector(() => [{ id: 'chat', name: 'Tiago', text: 'See you at the café at seven.' }]), basis),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const identity = identityOf('chat');
+  const before = f.ledger.getCurrent(identity)!;
+  // A legacy row: written before names-input receipts existed.
+  f.ledger.recordRoutedPlacement(identity, { ...before, reasons: before.reasons.filter(reason => !reason.startsWith(NAMES_INPUT_REASON_PREFIX)) },
+    f.set.placementFor(before));
+  expect(f.ledger.requestRecheck({ conversationKey: '' }).items).toBeGreaterThan(0);
+  expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report).toMatchObject({ failed: 0 });
+  const after = f.ledger.getCurrent(identity)!;
+  expect(after).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  expect(after.reasons.some(reason => reason.startsWith('metadata:prior:'))).toBe(false);
+});
 
 test('an item the user\'s own rule holds Private is not re-judged', async () => {
   const f = lane([{ id: 'owner.folder', match: { kind: 'pathPrefix', value: '/Files/' }, tier: 'secure', strength: 'prior' }]);
