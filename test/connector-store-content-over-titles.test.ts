@@ -722,6 +722,40 @@ describe('evidence byte budget', () => {
     // A pack that already fits is untouched.
     expect(fitPackToPromptBytes(pack, 1_000_000, corpusOf, options)).toBe(pack);
   });
+
+  test('fitting keeps the pack\'s first three seats, the reserved leader seats, before store turn', () => {
+    const candidate = (id: string): EvidenceCandidate => ({
+      provenance: {
+        sourceItem: { family: 'file', provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: id },
+        citation: { title: `Document ${id}`, uri: `/fixture/${id}.pdf`, authoredAt: '2026-09-01T00:00:00Z' },
+      },
+      trustTier: 'S4',
+      trustDomain: 'secure_local',
+      chunks: ['x'.repeat(1_666)],
+    });
+    // Seats 2 and 3 (#1350) come from the same store as seat 1, so store turn
+    // alone would put them behind every other store's first item.
+    const corpora = Array.from({ length: 8 }, (_, index) => `store-${index}`);
+    const ordered: Array<[EvidenceCandidate, string]> = [
+      [candidate('lead-0'), 'store-0'],
+      [candidate('lead-1'), 'store-0'],
+      [candidate('lead-2'), 'store-0'],
+      ...corpora.slice(1).flatMap((corpusId) => [0, 1].map((index) => [candidate(`${corpusId}-${index}`), corpusId] as [EvidenceCandidate, string])),
+    ];
+    const pack: EvidencePack = {
+      question: 'q',
+      candidates: ordered.map(([c]) => c),
+      coverage: { searchedCorpora: corpora, skippedCorpora: [], extractionGaps: [] },
+      builtAt: '2026-09-23T00:00:00Z',
+    };
+    const corpusOf = new Map<EvidenceCandidate, string>(ordered);
+    const options = { localOnly: true };
+    const fitted = fitPackToPromptBytes(pack, 9_000, corpusOf, options);
+    const ids = fitted.candidates.map((c) => c.provenance.sourceItem.providerItemId);
+    expect(ids.length).toBeLessThan(ordered.length);
+    expect(ids.slice(0, 3)).toEqual(['lead-0', 'lead-1', 'lead-2']);
+    expect(analystPromptBytes(fitted, options)).toBeLessThanOrEqual(9_000);
+  });
 });
 
 describe('local analyst leg budget', () => {

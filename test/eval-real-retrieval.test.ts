@@ -139,11 +139,9 @@ describe('the real eval report says where an expected value was lost (#1234)', (
       answerShape: 'partial',
       answerCitations: 0,
       answerUnanswered: 0,
-      answerCitedSeats: [],
-      answerCitationsOutsidePack: 0,
       expected: [
-        { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat], valueSeatCited: false },
-        { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [], valueSeatCited: false },
+        { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat] },
+        { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [] },
       ],
     });
     // The value was in the pack and in the prompt, and the Analyst missed it.
@@ -151,7 +149,7 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     const missed = evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.'), [prompt], ['local-model-a']);
     expect(missed.expected[0]).toEqual({
       inPack: true, inPackAsSubstring: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false,
-      packSeats: [kestrelSeat], promptCharOffset: prompt.indexOf('4182'), valueSeatCited: false,
+      packSeats: [kestrelSeat], promptCharOffset: prompt.indexOf('4182'),
     });
     expect(missed).toMatchObject({ answerShape: 'not_found', analystPromptChars: prompt.length, analystModelIds: ['local-model-a'] });
     // A value present only inside a longer token: the token's shape, never its text.
@@ -208,42 +206,6 @@ describe('the real eval report locates an expected item and value for a miss', (
     const audit = evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, cited, cited);
     expect(audit).toMatchObject({ answerShape: 'other_answer', answerCitations: 1, answerUnanswered: 0 });
     expect(evalAnswerStageAudit({ expectedAnswerContains: [] }, pack, cited, cited).answerShape).toBeUndefined();
-  });
-
-  test('which seats the answer cites, and whether one holds the value or the expected item', async () => {
-    const { stores, ledger } = await twoTierWorld();
-    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
-    const built = (await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 })).pack;
-    // A second seat: another document that does not hold the value.
-    const first = built.candidates[0]!;
-    const other = {
-      ...first,
-      provenance: { ...first.provenance, sourceItem: { ...first.provenance.sourceItem, localItemId: 'personal:other', providerItemId: 'other' } },
-      chunks: ['Marina fuel log for the spring.'],
-    };
-    const pack = { ...built, candidates: [first, other] } as typeof built;
-    const expectedId = pack.candidates[0]!.provenance.sourceItem.providerItemId;
-    const question = {
-      expectedAnswerContains: ['4182'],
-      expectedEvidence: [{ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, providerItemId: expectedId, hint: 'invoice' }],
-    } as never;
-    const citing = (...seats: number[]) => ({
-      answer: 'The total is 99 dollars.',
-      citations: seats.map((seat) => ({ provenance: pack.candidates[seat - 1]!.provenance, claim: 'total' })),
-      unanswered: [],
-    }) as unknown as AnalystResult;
-    // Cited the right document and still gave another value: a misreading.
-    expect(evalAnswerStageAudit(question, pack, citing(1), citing(1))).toMatchObject({
-      answerCitedSeats: [1], answerCitationsOutsidePack: 0, expectedSeatCited: true,
-      expected: [{ valueSeatCited: true }],
-    });
-    // Cited another seat only: the wrong document.
-    expect(evalAnswerStageAudit(question, pack, citing(2), citing(2))).toMatchObject({
-      answerCitedSeats: [2], expectedSeatCited: false, expected: [{ valueSeatCited: false }],
-    });
-    // A citation naming nothing in the pack is counted, not seated.
-    const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
-    expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });
   });
 });
 

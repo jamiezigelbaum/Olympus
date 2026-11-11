@@ -213,6 +213,69 @@ export function applyPerCorpusResultBudget<T extends { corpusId: string }>(
   };
 }
 
+// The pack keeps lane leaders across stores, as a store keeps them inside its
+// own order (#1230). The per-corpus budget seats stores in turn, so with more
+// stores than seats each store gets its first rank or two, and a store's
+// keyword leader that sat lower (a partial match behind vetted vector hits, or
+// a file with no text) never reached the Analyst (rerun 20, 2026-11-11). Two
+// seats are reserved whenever the pack has at least three: seat 2 for the
+// keyword leader with the largest share of the question's concepts across all
+// stores, seat 3 for the best names-only match (#1287). A leader below
+// RESERVED_LEADER_MIN_CONCEPT_SHARE (half the question's concepts) gets no
+// reserved seat, so a weak match does not take one on every question. Ties on
+// share go to the earlier candidate in fused order (store turn). A leader
+// already seated at or above its reserved seat keeps its place; one seated
+// lower moves up; one cut by the budget takes the seat, and the last seat not
+// held by a reserved leader leaves the pack.
+export const RESERVED_LEADER_MIN_CONCEPT_SHARE = 0.5;
+
+export function withReservedLeaderSeats<T extends { corpusId: string; keywordLeader?: { kinds: ReadonlyArray<'keyword_first' | 'name'>; conceptShare: number } }>(
+  budgeted: { hits: T[]; degradations: RetrievalDegradation[] },
+  pool: readonly T[],
+  budget: number,
+): { hits: T[]; degradations: RetrievalDegradation[] } {
+  if (budget < 3 || budgeted.hits.length < 1) return budgeted;
+  const best = (kind: 'keyword_first' | 'name', exclude: ReadonlySet<T>): T | undefined => {
+    let chosen: T | undefined;
+    for (const hit of pool) {
+      const signal = hit.keywordLeader;
+      if (!signal?.kinds.includes(kind) || exclude.has(hit) || signal.conceptShare < RESERVED_LEADER_MIN_CONCEPT_SHARE) continue;
+      if (!chosen || signal.conceptShare > chosen.keywordLeader!.conceptShare) chosen = hit;
+    }
+    return chosen;
+  };
+  const hits = [...budgeted.hits];
+  const reserved = new Set<T>();
+  for (const [kind, seat] of [['keyword_first', 1], ['name', 2]] as const) {
+    const leader = best(kind, reserved);
+    if (!leader) continue;
+    reserved.add(leader);
+    const at = hits.indexOf(leader);
+    if (at >= 0 && at <= seat) continue;
+    if (at > seat) hits.splice(at, 1);
+    else {
+      let drop = -1;
+      for (let index = hits.length - 1; index >= 0; index -= 1) {
+        if (!reserved.has(hits[index]!)) { drop = index; break; }
+      }
+      if (hits.length >= budget && drop >= 0) hits.splice(drop, 1);
+    }
+    hits.splice(Math.min(seat, hits.length), 0, leader);
+  }
+  if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index])) return budgeted;
+  const represented = new Set(hits.map((hit) => hit.corpusId));
+  const reported = new Set(budgeted.degradations.map((degradation) => degradation.laneName));
+  return {
+    hits,
+    degradations: [
+      ...budgeted.degradations,
+      ...[...new Set(budgeted.hits.map((hit) => hit.corpusId))]
+        .filter((corpusId) => !represented.has(corpusId) && !reported.has(corpusId))
+        .map((corpusId) => ({ laneName: corpusId, laneType: 'keyword' as const, reason: 'lane_budget_cut' as const, occurrences: 1 })),
+    ],
+  };
+}
+
 /**
  * Fold degradation markers from several retrieval runs into one list.
  *

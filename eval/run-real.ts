@@ -641,19 +641,7 @@ export interface EvalAnswerStageAudit {
     packSeats: Array<{ seat: number; charOffset: number; seatChars: number }>;
     /** The value's character offset in the prompt the Analyst model was sent, when it is there. */
     promptCharOffset?: number;
-    /** Whether the Analyst's answer cites a seat holding the value. */
-    valueSeatCited: boolean;
   }>;
-  /**
-   * The 1-based pack seats the Analyst's answer cites, in seat order. A wrong
-   * value cited from the seat holding the right one is a misreading of that
-   * document; one cited from another seat is the wrong document.
-   */
-  answerCitedSeats: number[];
-  /** Citations naming no pack candidate. */
-  answerCitationsOutsidePack: number;
-  /** Whether the answer cites a seat holding an expected evidence item; absent when the question names none. */
-  expectedSeatCited?: boolean;
   /**
    * The Analyst's own answer, by its structure: every expected value in it,
    * some, or none (with no citation: it said it found nothing; with
@@ -692,7 +680,7 @@ function valueTokenShape(value: string, text: string): string | undefined {
 }
 
 export function evalAnswerStageAudit(
-  question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
+  question: Pick<EvalQuestion, 'expectedAnswerContains'>,
   pack: EvidencePack,
   analystResult: AnalystResult | undefined,
   releasedResult: AnalystResult,
@@ -713,17 +701,6 @@ export function evalAnswerStageAudit(
   const packText = seatTexts.map((seat) => seat.all).join('\n');
   const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
   const analystOwn = analystResult ?? releasedResult;
-  // A citation names its seat by the candidate's own provenance, else by the item.
-  const citationSeats = analystOwn.citations.map((citation) => {
-    const exact = pack.candidates.findIndex((candidate) => candidate.provenance === citation.provenance);
-    const index = exact >= 0 ? exact : pack.candidates.findIndex((candidate) =>
-      candidate.provenance.sourceItem.localItemId === citation.provenance.sourceItem.localItemId);
-    return index + 1;
-  });
-  const citedSeats = [...new Set(citationSeats.filter((seat) => seat > 0))].sort((left, right) => left - right);
-  const expectedIds = (question.expectedEvidence ?? []).flatMap((want) => want.providerItemId !== undefined ? [want.providerItemId] : []);
-  const expectedSeats = pack.candidates.flatMap((candidate, index) =>
-    expectedIds.includes(candidate.provenance.sourceItem.providerItemId) ? [index + 1] : []);
   const values = question.expectedAnswerContains ?? [];
   const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
   const answerShape = values.length === 0
@@ -735,9 +712,6 @@ export function evalAnswerStageAudit(
     ...(answerShape ? { answerShape } : {}),
     answerCitations: analystOwn.citations.length,
     answerUnanswered: analystOwn.unanswered.length,
-    answerCitedSeats: citedSeats,
-    answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
-    ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
@@ -761,7 +735,6 @@ export function evalAnswerStageAudit(
         ...(answerToken !== undefined ? { answerTokenShape: answerToken } : {}),
         packSeats,
         ...(promptCharOffset >= 0 ? { promptCharOffset } : {}),
-        valueSeatCited: packSeats.some((seat) => citedSeats.includes(seat.seat)),
       };
     }),
   };

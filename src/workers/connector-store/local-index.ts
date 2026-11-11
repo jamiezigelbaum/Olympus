@@ -14556,13 +14556,13 @@ export function createConnectorStoreCorpusAdapter(
       const rows = keywordLane.rows;
       const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
-        const hits = rows.map((row) => connectorStoreHitFromRow(
+        const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
           row,
           -row.rank,
           options.resultProjector,
           filters?.locatorPathScope,
-        ));
+        )), keywordLane);
         return {
           hits,
           latencyMs: Date.now() - startedAt,
@@ -14588,7 +14588,7 @@ export function createConnectorStoreCorpusAdapter(
       });
       const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
         candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
-      const hits = withPinnedNewestChatHits({
+      const hits = withKeywordLeaderSignals(withPinnedNewestChatHits({
         store,
         recencyRows,
         hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, {
@@ -14604,7 +14604,7 @@ export function createConnectorStoreCorpusAdapter(
         limit: request.maxResults,
         ...(options.resultProjector ? { resultProjector: options.resultProjector } : {}),
         ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
-      });
+      }), keywordLane);
       return {
         hits,
         latencyMs: Date.now() - startedAt,
@@ -15007,7 +15007,7 @@ async function hybridConnectorStoreSearch(
   const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
     (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId))
     || keywordComplete(candidate);
-  const hits = withPinnedNewestChatHits({
+  const hits = withKeywordLeaderSignals(withPinnedNewestChatHits({
     store,
     recencyRows,
     hits: rankedCandidates(seated, maxResults, complete, contentPreference, {
@@ -15023,7 +15023,7 @@ async function hybridConnectorStoreSearch(
     limit: maxResults,
     ...(resultProjector ? { resultProjector } : {}),
     ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
-  });
+  }), keywordLane);
 
   return {
     hits,
@@ -15147,6 +15147,12 @@ type ConnectorStoreKeywordLane = {
   completeItemIds: ReadonlySet<string>;
   /** The plain search's bm25 leader when it is a partial, title-only match: it keeps the lead among partial matches. */
   nameLeaderItemId?: string;
+  /**
+   * Each row's share of the question's concepts (matched over the question's
+   * concept groups, in its name or text). One denominator in every store, so
+   * the router can compare stores' leaders (withReservedLeaderSeats).
+   */
+  conceptShare?: ReadonlyMap<string, number>;
   allRows: ConnectorStoreSearchRow[];
   /** The expansion-free search, when expansion changed this one. */
   baseline?: ConnectorStoreKeywordLane;
@@ -15170,8 +15176,12 @@ async function connectorStoreKeywordLaneRows(
   const contentRows = content.rows;
   // Rows that match every concept of the question, in their name or text.
   const complete = new Set<string>();
+  const conceptShare = new Map<string, number>();
   for (const concepts of [plain.concepts, content.concepts]) {
-    for (const [id, matched] of concepts.matched) if (!ftsOptions.relaxed && matched >= concepts.total) complete.add(id);
+    for (const [id, matched] of concepts.matched) {
+      if (!ftsOptions.relaxed && matched >= concepts.total) complete.add(id);
+      if (!ftsOptions.relaxed && concepts.total > 0) conceptShare.set(id, Math.max(conceptShare.get(id) ?? 0, matched / concepts.total));
+    }
   }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
@@ -15237,8 +15247,30 @@ async function connectorStoreKeywordLaneRows(
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
     ...((baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: (baseline?.nameLeaderItemId ?? nameLeader)! } : {}),
+    conceptShare: new Map([...(baseline?.conceptShare ?? []), ...conceptShare].map(([id, share]) =>
+      [id, Math.max(share, baseline?.conceptShare?.get(id) ?? 0)] as const)),
     ...(baseline ? { baseline } : {}),
   };
+}
+
+/**
+ * Marks a store's keyword leaders among its hits (the lane's rank-1 row and
+ * its best name match), with their share of the question's concepts, so the
+ * router can keep the best of them across stores in the pack
+ * (withReservedLeaderSeats). Internal: search routes never return it.
+ */
+function withKeywordLeaderSignals<H extends SourceIndexSearchHit>(hits: H[], lane: ConnectorStoreKeywordLane): H[] {
+  const first = lane.rows[0]?.sourceItem.localItemId;
+  const name = lane.nameLeaderItemId;
+  if ((first === undefined && name === undefined) || !lane.conceptShare) return hits;
+  return hits.map((hit) => {
+    const id = hit.sourceItem.localItemId;
+    const kinds: Array<'keyword_first' | 'name'> = [
+      ...(id === first ? ['keyword_first' as const] : []),
+      ...(id === name ? ['name' as const] : []),
+    ];
+    return kinds.length === 0 ? hit : { ...hit, keywordLeader: { kinds, conceptShare: lane.conceptShare!.get(id) ?? 0 } };
+  });
 }
 
 /** Whether keyword expansion changes the SQL a keyword search would run for this question. */
