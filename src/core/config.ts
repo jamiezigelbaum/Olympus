@@ -190,7 +190,7 @@ export interface OlympusConfig {
    */
   remote?: {
     enabled: boolean;
-    /** Show the dashboard in Claude custom connectors. On unless set to false (claudeAppEnabled below); restart the engine after changing. */
+    /** Show the dashboard in Claude custom connectors. Off unless set to true (claudeAppEnabled below); restart the engine after changing. */
     claudeAppEnabled?: boolean;
     relayHost?: string;
     publicBaseUrl?: string;
@@ -699,11 +699,11 @@ function applyOpenClawPluginRemote(config: OlympusConfig, env: Record<string, st
 
 /**
  * Whether Claude custom connectors get the dashboard and private panels (#1266).
- * On by default since 1.5, once the privacy proof passed on Claude web, desktop and
- * the iPhone app; only an explicit `false` turns it off.
+ * Off unless set to true: with it on, Claude gave no tools in 4 of 9 release-check
+ * chats (run 43006900498). It goes back on by default once the Claude leg shows no loss.
  */
 export function claudeAppEnabled(config: Pick<OlympusConfig, 'remote'>): boolean {
-  return config.remote?.claudeAppEnabled !== false;
+  return config.remote?.claudeAppEnabled === true;
 }
 
 /** The `remote` plugin-config section, kept to its known fields. */

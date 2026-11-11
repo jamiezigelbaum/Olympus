@@ -19217,6 +19217,13 @@ var init_tier_ledger = __esm(() => {
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
 });
 
+// src/workers/classification/tier-set-binding.ts
+var init_tier_set_binding = __esm(() => {
+  init_olympus_layout();
+  init_tier_ledger();
+  init_tier_ledger_path();
+});
+
 // src/workers/connector-store/main-thread-sql-trace.ts
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
@@ -19673,13 +19680,6 @@ var init_media_cache = __esm(() => {
   init_still_image_readiness();
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
-});
-
-// src/workers/classification/tier-set-binding.ts
-var init_tier_set_binding = __esm(() => {
-  init_olympus_layout();
-  init_tier_ledger();
-  init_tier_ledger_path();
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -20155,6 +20155,7 @@ var init_source_storage = __esm(() => {
   init_store_write_guard();
   init_secret_locations();
   init_sniffer_store();
+  init_tier_set_binding();
   init_tier_ledger();
   init_local_index();
   init_olympus_layout();

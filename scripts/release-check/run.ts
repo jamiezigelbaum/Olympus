@@ -370,13 +370,9 @@ export function stoppedByBudget(exec: { code: number; timedOut: boolean }, allow
   return allowedMs < requestedMs && (exec.timedOut || exec.code === 124);
 }
 
-export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, engineSplit = false): number {
-  const minutes = upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135);
-  // The engine-split switch-on leg stops at 75 minutes: past that it is stuck, and the report is wanted while the logs are fresh (L1, 2026-11-11).
-  return (engineSplit ? Math.min(minutes, ENGINE_SPLIT_BUDGET_MIN) : minutes) * 60_000;
+export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean): number {
+  return (upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135)) * 60_000;
 }
-
-export const ENGINE_SPLIT_BUDGET_MIN = 75;
 
 /**
  * How long one call to source_answer or source_answer_result may take on the machine. The engine holds a source_answer open for its
@@ -1534,7 +1530,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
   const upgrading = options.upgradeFromDir !== undefined;
-  const deadline = Date.now() + (options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true, options.engineSplit === true));
+  const deadline = Date.now() + (options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true));
   run.deadline = deadline;
   const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
   if (upgrading) {
