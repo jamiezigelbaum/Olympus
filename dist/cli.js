@@ -75313,6 +75313,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
+  const candidateExtractionGapIndexes = [];
   const extractionGaps = semanticLaneSkippedGaps(routed.degradations, input);
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
@@ -75417,6 +75418,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     const gap = extractionGapFor(hit, provider !== undefined, content);
+    candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap)
       extractionGaps.push(gap);
   }
@@ -75442,6 +75444,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   return {
     pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    candidateExtractionGapIndexes,
     ...routed.recencySeats ? { recencySeats: routed.recencySeats } : {},
     laneAudits,
     secureLaneAudits,
@@ -76177,6 +76180,10 @@ function createAnalystSourceIndexAnswerHandler(options) {
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
+        const candidateGaps = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
+          candidate.provenance,
+          analysisDetail.candidateExtractionGapIndexes?.[index] ?? []
+        ]));
         recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0);
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
         const guarded = (analyst) => ({
@@ -76186,8 +76193,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           }
         });
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, "local", seatOf, analystEvidenceFormat(analyst)),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf, analystEvidenceFormat(analyst)),
+          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, "local", seatOf, analystEvidenceFormat(analyst), candidateGaps),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf, analystEvidenceFormat(analyst), candidateGaps),
           trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
             const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
@@ -76466,21 +76473,37 @@ function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats, lane, seatOf, evidenceFormat) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats, lane, seatOf, evidenceFormat, candidateGaps) {
   return {
     analyze: (pack, analyzeOptions) => {
-      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat);
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, candidateGaps);
       recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
         const seat = seatOf.get(candidate.provenance);
         return seat === undefined ? [] : [seat];
       }));
-      return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions);
+      return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions).then((result) => withUnfittedCoverage(result, pack, fitted));
     }
   };
 }
-function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full") {
-  if (evidenceFormat === "compact") {
-    const selected = fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
+function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", candidateGaps) {
+  const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat);
+  if (!candidateGaps || selected.candidates.length === pack.candidates.length)
+    return selected;
+  const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
+  const gapOwners = new Map;
+  for (const [provenance, indexes] of candidateGaps) {
+    for (const index of indexes)
+      gapOwners.set(index, provenance);
+  }
+  if (![...gapOwners.values()].some((owner) => !kept.has(owner)))
+    return selected;
+  const seated = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus, gapOwners);
+  const minimumPack = restatePack(pack, [...selected.candidates], candidateCorpus, gapOwners);
+  return fitPackPassagesToPromptBytes(seated, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, minimumPack);
+}
+function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", minimumPack) {
+  if (evidenceFormat === "compact" && !minimumPack) {
+    const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
     const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
     pack = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus);
   }
@@ -76492,25 +76515,55 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
   ];
   let fallback;
-  for (let keep = order.length;keep >= 1; keep -= 1) {
+  const minimumShare = minimumPack ? Math.max(0, ...minimumPack.candidates.map((candidate) => candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0))) : 0;
+  for (let keep = order.length;keep >= (minimumPack ? order.length : 1); keep -= 1) {
     const kept = new Set(order.slice(0, keep));
     const base = pack.candidates.filter((candidate) => kept.has(candidate));
     const overhead = analystPromptBytes(restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus), analyzeOptions, evidenceFormat);
     if (overhead >= maxPromptBytes)
       continue;
-    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / keep));
     for (let attempt = 0;attempt < 6; attempt += 1) {
-      if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+      if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
         break;
       const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })), candidateCorpus);
       const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
       if (bytes <= maxPromptBytes)
         return fitted;
       fallback = fitted;
-      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+      share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
     }
   }
-  return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+  return minimumPack ?? fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+function keptSeatGaps(pack, kept, gapOwners) {
+  const sent = new Set(kept.map((candidate) => candidate.provenance));
+  const gaps = pack.coverage.extractionGaps.filter((_, index) => {
+    const owner = gapOwners.get(index);
+    return owner === undefined || sent.has(owner);
+  });
+  const dropped = pack.candidates.filter((candidate) => !sent.has(candidate.provenance));
+  const unread = new Set([...gapOwners.values()].filter((owner) => !sent.has(owner))).size;
+  if (unread > 0) {
+    gaps.push(`${dropped.length} more matching item${dropped.length === 1 ? " was" : "s were"} not sent; ${unread} of them could not be read in full.`);
+  }
+  return gaps;
+}
+function withUnfittedCoverage(result, pack, fitted) {
+  if (fitted === pack || fitted.coverage.extractionGaps === pack.coverage.extractionGaps)
+    return result;
+  const built = new Set(pack.coverage.extractionGaps.map((gap) => gap.trim()));
+  const promptOnly = new Set(fitted.coverage.extractionGaps.map((gap) => gap.trim()).filter((gap) => !built.has(gap)));
+  const unanswered = result.unanswered.filter((line) => !promptOnly.has(line.trim()));
+  const present = new Set(unanswered.map((line) => line.trim()));
+  for (const gap of pack.coverage.extractionGaps) {
+    const trimmed = gap.trim();
+    if (trimmed && !present.has(trimmed)) {
+      present.add(trimmed);
+      unanswered.push(trimmed);
+    }
+  }
+  return { ...result, unanswered };
 }
 function roundRobinCandidates(candidates, candidateCorpus) {
   const byCorpus = new Map;
@@ -76532,7 +76585,7 @@ function roundRobinCandidates(candidates, candidateCorpus) {
   }
   return order;
 }
-function restatePack(pack, candidates, candidateCorpus) {
+function restatePack(pack, candidates, candidateCorpus, gapOwners) {
   const originals = pack.candidates.filter((original) => candidates.some((candidate) => candidate.provenance === original.provenance));
   const inEvidence = new Map;
   for (const original of originals) {
@@ -76544,6 +76597,7 @@ function restatePack(pack, candidates, candidateCorpus) {
     candidates,
     coverage: {
       ...pack.coverage,
+      ...gapOwners ? { extractionGaps: keptSeatGaps(pack, originals, gapOwners) } : {},
       ...pack.coverage.matchCounts ? {
         matchCounts: pack.coverage.matchCounts.map((count) => ({
           ...count,
