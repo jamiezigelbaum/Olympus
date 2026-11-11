@@ -4222,7 +4222,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               corpus_id: connectorStore.corpusId,
               retrieval_source: 'local_index',
               // A hit's own tier is retrieval-internal (router.ts): not returned.
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, ...hit }) => (
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, ...hit }) => (
                 addSelectedItemToSearchHit(hitCorpusId, hit)
               )),
               ...(secretLocations.length > 0

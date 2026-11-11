@@ -10015,7 +10015,7 @@ export class LocalConnectorStore {
       metadataString(meta, 'locatorUri') ?? metadataString(meta, 'pathDisplay') ?? metadataString(meta, 'url');
     // sentAt is the chat-family idiom (WhatsApp live, message connectors);
     // without it every chat item lands with NULL authored_at, citations
-    // carry no time, and temporal evidence ordering has nothing to sort on
+    // carry no time, and the Analyst cannot tell the newest message
     // (2026-07-05 "did I just get..." acceptance miss).
     const authoredAt = metadataString(meta, 'authoredAt')
       ?? metadataString(meta, 'sentAt')
@@ -14855,8 +14855,7 @@ function connectorStoreHitFromRow(
 
 // Guarantee the newest chat messages a place in the final cut: evict the
 // lowest-scoring hits if needed. Pinned hits append at the tail (they earned
-// no relevance rank); temporal evidence ordering re-sorts when the question
-// asks about recency.
+// no relevance rank); each carries its date for the Analyst.
 function withPinnedNewestChatHits(input: {
   store: LocalConnectorStore;
   recencyRows: readonly ConnectorStoreSearchRow[];
@@ -14869,19 +14868,27 @@ function withPinnedNewestChatHits(input: {
   const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0) return input.hits;
   const result = [...input.hits];
-  const present = new Set(result.map((hit) => hit.sourceItem.localItemId));
   for (let index = 0; index < pinCount; index += 1) {
     const row = input.recencyRows[index]!;
-    if (present.has(row.sourceItem.localItemId)) continue;
+    // Each pinned message says it is one of the newest, so a recency
+    // question can seat it in the pack (withReservedRecencySeats).
+    const newestInStore = index + 1;
+    const at = result.findIndex((hit) => hit.sourceItem.localItemId === row.sourceItem.localItemId);
+    if (at >= 0) {
+      result[at] = { ...result[at]!, newestInStore };
+      continue;
+    }
     while (result.length >= limit) result.pop();
-    result.push(connectorStoreHitFromRow(
-      input.store,
-      row,
-      CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1),
-      input.resultProjector,
-      input.locatorPathScope,
-    ));
-    present.add(row.sourceItem.localItemId);
+    result.push({
+      ...connectorStoreHitFromRow(
+        input.store,
+        row,
+        CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1),
+        input.resultProjector,
+        input.locatorPathScope,
+      ),
+      newestInStore,
+    });
   }
   return result;
 }

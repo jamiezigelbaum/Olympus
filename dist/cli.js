@@ -33644,6 +33644,9 @@ function withReservedLeaderSeats(budgeted, pool, budget) {
     }
     hits.splice(Math.min(seat, hits.length), 0, leader);
   }
+  return withRestatedBudgetCuts(budgeted, hits);
+}
+function withRestatedBudgetCuts(budgeted, hits) {
   if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index]))
     return budgeted;
   const represented = new Set(hits.map((hit) => hit.corpusId));
@@ -33656,6 +33659,45 @@ function withReservedLeaderSeats(budgeted, pool, budget) {
       ...[...new Set(budgeted.hits.map((hit) => hit.corpusId))].filter((corpusId) => !represented.has(corpusId) && !reported.has(corpusId)).map((corpusId) => ({ laneName: corpusId, laneType: "keyword", reason: "lane_budget_cut", occurrences: 1 }))
     ]
   };
+}
+function withReservedRecencySeats(seated, pool, budget) {
+  const seats = Math.min(RESERVED_RECENCY_SEATS, Math.max(0, budget - RESERVED_HEAD_SEATS));
+  const time = (hit) => Date.parse(hit.provenance?.citation?.authoredAt ?? "") || 0;
+  const newest = pool.filter((hit) => hit.newestInStore !== undefined).map((hit, order) => ({ hit, order })).sort((left, right) => time(right.hit) - time(left.hit) || left.hit.newestInStore - right.hit.newestInStore || left.order - right.order).slice(0, seats).map(({ hit }) => hit);
+  if (newest.length === 0 || seated.hits.length < 1)
+    return { ...seated, recencySeats: 0 };
+  const hits = [...seated.hits];
+  const reserved = new Set(hits.slice(0, RESERVED_HEAD_SEATS));
+  const storeSeats = (corpusId) => hits.filter((hit) => hit.corpusId === corpusId).length;
+  let taken = 0;
+  for (const hit of newest) {
+    const seat = RESERVED_HEAD_SEATS + taken;
+    const at = hits.indexOf(hit);
+    if (at >= 0 && at <= seat) {
+      reserved.add(hit);
+      taken += 1;
+      continue;
+    }
+    if (at > seat)
+      hits.splice(at, 1);
+    else if (hits.length >= budget) {
+      let drop = -1;
+      for (let index = hits.length - 1;index >= RESERVED_HEAD_SEATS; index -= 1) {
+        const candidate = hits[index];
+        if (!reserved.has(candidate) && storeSeats(candidate.corpusId) > 1) {
+          drop = index;
+          break;
+        }
+      }
+      if (drop < 0)
+        break;
+      hits.splice(drop, 1);
+    }
+    hits.splice(Math.min(seat, hits.length), 0, hit);
+    reserved.add(hit);
+    taken += 1;
+  }
+  return { ...withRestatedBudgetCuts(seated, hits), recencySeats: taken };
 }
 function mergeRetrievalDegradations(...lists) {
   const merged = new Map;
@@ -33678,7 +33720,7 @@ function mergeRetrievalDegradations(...lists) {
     return (left.detail ?? "").localeCompare(right.detail ?? "");
   });
 }
-var DEFAULT_RRF_K = 60, RESERVED_LEADER_MIN_CONCEPT_SHARE = 0.5;
+var DEFAULT_RRF_K = 60, RESERVED_LEADER_MIN_CONCEPT_SHARE = 0.5, RESERVED_HEAD_SEATS = 3, RESERVED_RECENCY_SEATS = 2;
 
 // src/core/source-index/reactions.ts
 function normalizeSourceReactions(value) {
@@ -35887,15 +35929,20 @@ function withPinnedNewestChatHits(input) {
   if (pinCount === 0)
     return input.hits;
   const result = [...input.hits];
-  const present = new Set(result.map((hit) => hit.sourceItem.localItemId));
   for (let index = 0;index < pinCount; index += 1) {
     const row = input.recencyRows[index];
-    if (present.has(row.sourceItem.localItemId))
+    const newestInStore = index + 1;
+    const at = result.findIndex((hit) => hit.sourceItem.localItemId === row.sourceItem.localItemId);
+    if (at >= 0) {
+      result[at] = { ...result[at], newestInStore };
       continue;
+    }
     while (result.length >= limit)
       result.pop();
-    result.push(connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope));
-    present.add(row.sourceItem.localItemId);
+    result.push({
+      ...connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope),
+      newestInStore
+    });
   }
   return result;
 }
@@ -74734,7 +74781,10 @@ async function routePreparedSourceIndexSearch(options) {
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
   });
   const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
-  const { hits: fused, degradations: budgetDegradations } = withReservedLeaderSeats(budgeted, fusedAll.map((candidate) => candidate.item), request.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
+  const recency = request.temporalIntent ? withReservedRecencySeats(leadered, pool, request.maxResults) : { ...leadered, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
   const result = {
     hits: fused,
     searchedCorpora,
@@ -74746,6 +74796,7 @@ async function routePreparedSourceIndexSearch(options) {
     ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
     encounteredSecureLocal,
     secureLaneAudits,
+    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
@@ -75064,11 +75115,11 @@ async function buildEvidencePackDetailed(input) {
   return withKeywordRequestScope(() => buildPreparedEvidencePackDetailed(input));
 }
 async function buildPreparedEvidencePackDetailed(input) {
-  const reranker = input.reranker && !input.selectedItems?.length && !hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "") ? input.reranker : undefined;
+  const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? input.visibilityGate(routed.hits) : routed.hits;
-  const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
+  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
   const extractionGaps = semanticLaneSkippedGaps(routed.degradations, input);
@@ -75200,6 +75251,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   return {
     pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    ...routed.recencySeats ? { recencySeats: routed.recencySeats } : {},
     laneAudits,
     secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
@@ -75298,38 +75350,12 @@ function contentFreePolicyLaneAudits(audits) {
     rawExposed: audit.rawExposed
   }));
 }
-function orderHitsForTemporalIntent(hits, input) {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "")) {
-    return hits;
-  }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime)
-      return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore)
-      return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
-function hitCandidateId(hit) {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
+function questionHasTemporalIntent(input) {
+  return hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? "");
 }
 function hasTemporalIntent(value) {
   const normalized = value.toLowerCase();
   return /\b(recent|latest|newest|current|most\s+recent)\b/.test(normalized) || /\bjust\s+(got|get|received|receive|arrived|arrive|came|come|sent|send|landed|land)\b/.test(normalized) || /\bright\s+now\b/.test(normalized) || /\btoday\b/.test(normalized) || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
-}
-function hitCitationTime(hit) {
-  const citation = hit.provenance?.citation;
-  return safeTime(citation?.authoredAt) || safeTime(citation?.updatedAt);
-}
-function safeTime(value) {
-  if (!value)
-    return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 function selectedItemsToRoutedSlice(input) {
   const hits = [];
@@ -75417,7 +75443,9 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     limit: runs.reduce((total, run) => total + run.hits.length, 0),
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
   });
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const recency = questionHasTemporalIntent(input) ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
   return {
     hits: fused,
     searchedCorpora: literalRun.searchedCorpora,
@@ -75427,7 +75455,8 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
     corpusTimings: runs.flatMap((run) => [...run.corpusTimings ?? []]),
     ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {},
-    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal)
+    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
+    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}
   };
 }
 function mergeRoutedSkippedCorpora(runs) {
@@ -75450,7 +75479,8 @@ function runRoutedSearch(input, query, ordinal, maxResults) {
       query,
       maxResults,
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
-      context: input.searchContext
+      context: input.searchContext,
+      ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {}
     },
     ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
@@ -75963,8 +75993,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           }
         });
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats),
           trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
             const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
@@ -76243,16 +76273,19 @@ function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats) {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions), analyzeOptions)
+    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats), analyzeOptions)
   };
 }
-function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions) {
+function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
-  const head = pack.candidates.slice(0, RESERVED_PACK_HEAD_SEATS);
-  const order = [...head, ...roundRobinCandidates(pack.candidates.slice(RESERVED_PACK_HEAD_SEATS), candidateCorpus)];
+  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
+  const order = [
+    ...pack.candidates.slice(0, headSeats),
+    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
+  ];
   let fallback;
   for (let keep = order.length;keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
@@ -77709,7 +77742,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, RESERVED_PACK_HEAD_SEATS = 3, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
@@ -185849,7 +185882,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,

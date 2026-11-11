@@ -262,9 +262,17 @@ export function withReservedLeaderSeats<T extends { corpusId: string; keywordLea
     }
     hits.splice(Math.min(seat, hits.length), 0, leader);
   }
+  return withRestatedBudgetCuts(budgeted, hits);
+}
+
+// Budget cuts are restated for the final pack: a store a reserved seat
+// brought back is no longer cut, and a store that lost its only seat now is.
+// The same budgeted object comes back when the seats did not change.
+function withRestatedBudgetCuts<T extends { corpusId: string }>(
+  budgeted: { hits: T[]; degradations: RetrievalDegradation[] },
+  hits: T[],
+): { hits: T[]; degradations: RetrievalDegradation[] } {
   if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index])) return budgeted;
-  // Budget cuts are restated for the final pack: a store a leader brought
-  // back is no longer cut, and a store that lost its only seat now is.
   const represented = new Set(hits.map((hit) => hit.corpusId));
   const kept = budgeted.degradations.filter((degradation) => (
     degradation.reason !== 'lane_budget_cut' || !represented.has(degradation.laneName)
@@ -279,6 +287,72 @@ export function withReservedLeaderSeats<T extends { corpusId: string; keywordLea
         .map((corpusId) => ({ laneName: corpusId, laneType: 'keyword' as const, reason: 'lane_budget_cut' as const, occurrences: 1 })),
     ],
   };
+}
+
+// Seats ahead of store turn in every pack of three or more: seat 1 and the two
+// reserved leader seats. A prompt fit keeps them first (fitPackToPromptBytes).
+export const RESERVED_HEAD_SEATS = 3;
+
+// A question with temporal intent ("did I just get...", "latest") wants what
+// arrived last. Each chat store pins its newest messages into its own cut
+// (withPinnedNewestChatHits), but they sit at the store's tail: with several
+// stores the per-store budget cut them, and in a long single-store pack the
+// prompt fit did (2026-11-11 fixture; #1358). The pack used to re-sort its
+// whole pool newest-first instead, which also buried the best relevance hits.
+// Now the newest pinned messages across chat stores, by citation date, take
+// seats 4 and 5, after seat 1 and the leader seats; relevance keeps the rest.
+// A pinned message already seated at or above its seat keeps its place; one
+// seated lower moves up; one cut by the budget takes the seat, and the last
+// seat that is neither reserved nor its store's only seat leaves the pack.
+// When every such seat is a store's only one, the message takes no seat: a
+// recency seat never costs a reserved leader or a store its place. Packs of
+// three seats or fewer have none. Questions without temporal intent never
+// call this.
+export const RESERVED_RECENCY_SEATS = 2;
+
+export function withReservedRecencySeats<T extends {
+  corpusId: string;
+  newestInStore?: number;
+  provenance?: { citation?: { authoredAt?: string } };
+}>(
+  seated: { hits: T[]; degradations: RetrievalDegradation[] },
+  pool: readonly T[],
+  budget: number,
+): { hits: T[]; degradations: RetrievalDegradation[]; recencySeats: number } {
+  const seats = Math.min(RESERVED_RECENCY_SEATS, Math.max(0, budget - RESERVED_HEAD_SEATS));
+  const time = (hit: T) => Date.parse(hit.provenance?.citation?.authoredAt ?? '') || 0;
+  const newest = pool
+    .filter((hit) => hit.newestInStore !== undefined)
+    .map((hit, order) => ({ hit, order }))
+    .sort((left, right) => time(right.hit) - time(left.hit)
+      || left.hit.newestInStore! - right.hit.newestInStore!
+      || left.order - right.order)
+    .slice(0, seats)
+    .map(({ hit }) => hit);
+  if (newest.length === 0 || seated.hits.length < 1) return { ...seated, recencySeats: 0 };
+  const hits = [...seated.hits];
+  const reserved = new Set<T>(hits.slice(0, RESERVED_HEAD_SEATS));
+  const storeSeats = (corpusId: string) => hits.filter((hit) => hit.corpusId === corpusId).length;
+  let taken = 0;
+  for (const hit of newest) {
+    const seat = RESERVED_HEAD_SEATS + taken;
+    const at = hits.indexOf(hit);
+    if (at >= 0 && at <= seat) { reserved.add(hit); taken += 1; continue; }
+    if (at > seat) hits.splice(at, 1);
+    else if (hits.length >= budget) {
+      let drop = -1;
+      for (let index = hits.length - 1; index >= RESERVED_HEAD_SEATS; index -= 1) {
+        const candidate = hits[index]!;
+        if (!reserved.has(candidate) && storeSeats(candidate.corpusId) > 1) { drop = index; break; }
+      }
+      if (drop < 0) break;
+      hits.splice(drop, 1);
+    }
+    hits.splice(Math.min(seat, hits.length), 0, hit);
+    reserved.add(hit);
+    taken += 1;
+  }
+  return { ...withRestatedBudgetCuts(seated, hits), recencySeats: taken };
 }
 
 /**
