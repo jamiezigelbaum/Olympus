@@ -18186,6 +18186,51 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/file-extraction/unreadable-files.ts
+function unreadableFileReason(errorKind) {
+  const kind = (errorKind ?? "").toLowerCase();
+  if (!kind)
+    return "other";
+  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND)
+    return "privacy_check_missing";
+  if (kind.includes("encrypted") || kind.includes("password"))
+    return "password";
+  if (kind.includes("too_large"))
+    return "too_large";
+  if (kind.includes("timeout"))
+    return "timed_out";
+  if (kind.includes("not_found") || kind.includes("content_unavailable") || kind.includes("missing_bytes"))
+    return "missing";
+  if (kind.includes("permission") || kind.includes("auth"))
+    return "no_access";
+  if (kind.includes("unsupported") || kind === "extractor_kind_unknown" || kind === "no_extractor")
+    return "unsupported";
+  if (kind.includes("empty"))
+    return "no_text";
+  if (kind.includes("invalid") || kind.includes("undecodable") || kind.includes("corrupt") || kind.includes("damaged"))
+    return "damaged";
+  return "other";
+}
+function unreadHoldDisposition(outcome, contentAllowed = true) {
+  if (!contentAllowed)
+    return { kind: "by_choice" };
+  if (!outcome || outcome.status === "indexed")
+    return { kind: "waiting" };
+  if (outcome.status === "blocked_policy" || outcome.status === "metadata_only" && (outcome.policyDecision === "metadata_only" || outcome.lastErrorKind === "store_item_metadata_only")) {
+    return { kind: "by_choice" };
+  }
+  const specific = (kind) => !["other", "no_text"].includes(unreadableFileReason(kind));
+  const errorKind = [outcome.lastErrorKind, ...outcome.warnings, outcome.status].find((kind) => kind !== undefined && specific(kind)) ?? outcome.lastErrorKind ?? outcome.warnings[0] ?? outcome.status;
+  return { kind: "cannot_read", errorKind, reason: unreadableFileReason(errorKind) };
+}
+var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  init_archive_formats();
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
 // src/core/child-item-id.ts
 function childProviderItemId(parentProviderItemId, key2) {
   if (!parentProviderItemId)
@@ -23197,6 +23242,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
 `, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_store_write_guard();
+  init_unreadable_files();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -30106,11 +30152,11 @@ var init_local_index = __esm(() => {
       const key2 = JSON.stringify(scope ?? null);
       if (!this.settledUnreadableCountMemo?.has(key2)) {
         try {
-          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
           const memos = this.settledUnreadableCountMemo ??= new Map;
           if (memos.size > 32)
             memos.clear();
-          memos.set(key2, { at: Date.now(), count });
+          memos.set(key2, { at: Date.now(), ...counts });
         } catch {}
       }
     }
@@ -30121,13 +30167,13 @@ var init_local_index = __esm(() => {
       if (maxAgeMs > 0 && memo) {
         if (Date.now() - memo.at >= maxAgeMs)
           this.refreshSettledUnreadableCountInTurns(key2, scope);
-        return memo.count;
+        return memo;
       }
-      const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
+      const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       if (memos.size > 32)
         memos.clear();
-      memos.set(key2, { at: Date.now(), count });
-      return count;
+      memos.set(key2, { at: Date.now(), ...counts });
+      return counts;
     }
     settledUnreadableCountRefresh;
     refreshSettledUnreadableCountInTurns(key2, scope) {
@@ -30137,21 +30183,28 @@ var init_local_index = __esm(() => {
       running.add(key2);
       (async () => {
         try {
-          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
           const memos = this.settledUnreadableCountMemo ??= new Map;
           if (memos.size > 32)
             memos.clear();
-          memos.set(key2, { at: Date.now(), count });
+          memos.set(key2, { at: Date.now(), ...counts });
         } catch {} finally {
           running.delete(key2);
         }
       })();
     }
     settledUnreadableCountMemo;
-    extractionEnded;
-    setExtractionEndedProbe(probe) {
-      this.extractionEnded = probe;
+    extractionOutcome;
+    setExtractionOutcomeProbe(probe) {
+      this.extractionOutcome = probe;
       this.settledUnreadableCountMemo = undefined;
+    }
+    unreadHoldCounts(rows) {
+      return {
+        count: rows.filter((item) => item.disposition.kind === "cannot_read").length,
+        waitingPks: rows.filter((item) => item.disposition.kind === "waiting").map((item) => item.row.item_pk),
+        policyPks: rows.filter((item) => item.disposition.kind === "by_choice").map((item) => item.row.item_pk)
+      };
     }
     *settledUnreadableRowsSteps(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
@@ -30162,12 +30215,22 @@ var init_local_index = __esm(() => {
       const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
-      const ended = this.extractionEnded;
+      const outcome = this.extractionOutcome;
       const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? "", {
         sql: `${this.childItemColumnsPresent ? "AND COALESCE(i.bytes_available, 1) <> 0" : ""} ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
       });
-      return rows.map((row) => ({ identity: identities[row.idx], row })).filter(({ identity }) => !ended || ended(identity));
+      const matched = [];
+      for (let index = 0;index < rows.length; index += 1) {
+        if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0)
+          yield;
+        const row = rows[index];
+        const identity = identities[row.idx];
+        const disposition = unreadHoldDisposition(outcome?.(identity));
+        if (options.includeUnsettled || disposition.kind === "cannot_read")
+          matched.push({ identity, row, disposition });
+      }
+      return matched;
     }
     *itemRowsForIdentitiesSteps(identities, conversationOf, extra = { sql: "", params: [] }) {
       const out = [];
@@ -30204,7 +30267,9 @@ var init_local_index = __esm(() => {
       for (let index = 0;index < matched.length; index += 1) {
         if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0)
           yield;
-        const { identity, row } = matched[index];
+        const { identity, row, disposition } = matched[index];
+        if (disposition.kind !== "cannot_read")
+          continue;
         const override = ledger.getOverride(identity);
         if (override?.kind === "tier" && override.tier === "secrets")
           continue;
@@ -30223,7 +30288,7 @@ var init_local_index = __esm(() => {
             ...row.source_version ? { sourceVersion: row.source_version } : {}
           },
           failedAt: record.decidedAt,
-          errorKind: "privacy_check_missing"
+          errorKind: disposition.errorKind
         });
       }
       return out;
@@ -30280,9 +30345,12 @@ var init_local_index = __esm(() => {
       ${namesOnlyNotIn}`;
       const parityWhere = `${contentWhere}
       ${heldNotIn}`;
+      const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+      const policyHolds = new Set(unreadHolds.policyPks);
       const unread = new Set(tier.metadataLayerContentUnread);
       const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
-      const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const fileNamesOnlyPks = [...new Set([...keptNamesOnlyPks, ...policyHolds])];
+      const fileNamesOnlyNotIn = fileNamesOnlyPks.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const fileScopeWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${contentFilters.sql}
@@ -30301,9 +30369,9 @@ var init_local_index = __esm(() => {
         ...accountScope ? [accountScope] : [],
         ...contentFilters.params,
         ...jsonList(tier.hidden),
-        ...jsonList(keptNamesOnlyPks)
+        ...jsonList(fileNamesOnlyPks)
       ];
-      const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key2, value]) => key2 === "contentNotBefore" || value === undefined));
+      const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key2, value]) => key2 === "contentNotBefore" || value === undefined));
       const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -30429,14 +30497,14 @@ var init_local_index = __esm(() => {
         ...contentParams
       ], mode: "all" };
       const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
-        pendingClassificationItems: tier.held.length,
+        pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
         supersededChunks: tier.hidden.length > 0 ? (yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `, params: [JSON.stringify(tier.hidden)], mode: "get" }).n : 0,
         tierMoveInProgress: tier.moving,
         ...namesOnlyKeptCount(namesOnlyWithText.length > 0 ? (yield { sql: NAMES_ONLY_KEPT_SQL, params: [JSON.stringify(namesOnlyWithText)], mode: "get" }).n : 0)
       } : undefined;
-      const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+      const settledUnreadableItems = unreadHolds.count;
       const last = this.lastSyncRun();
       return {
         corpusId: this.corpusId,
@@ -33025,14 +33093,14 @@ var init_vocabulary = __esm(() => {
     missing: "the file is no longer where it was",
     no_access: "Olympus isn't allowed to open it",
     unsupported: "a format Olympus can't read",
-    privacy_check_missing: "kept Private before it was read",
+    privacy_check_missing: "kept Private because Olympus couldn't read it",
     other: "Olympus couldn't read it"
   };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     privacy_check_missing: {
-      one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
-      other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
+      one: "{count} item kept Private because Olympus couldn't read it. The reason is shown with the file below.",
+      other: "{count} items kept Private because Olympus couldn't read them. The reasons are shown with the files below."
     },
     damaged_or_unsupported: {
       one: "{count} file Olympus can't read at all",
@@ -47538,15 +47606,6 @@ var init_remote_open = __esm(() => {
   init_open_targets();
 });
 
-// src/workers/file-extraction/unreadable-files.ts
-var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
-var init_unreadable_files = __esm(() => {
-  init_archive_formats();
-  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
-  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
-  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
-});
-
 // src/workers/dashboard/session-marker.ts
 var init_session_marker = () => {};
 
@@ -49191,7 +49250,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (stall.length)
       add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
     if (lines.length) {
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.reasons.some((reason) => reason.code === "privacy_check_missing") ? "" : unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     }
     return box;
   }
@@ -72814,6 +72873,7 @@ init_operation_error();
 init_tier_cli();
 init_tier_classifier();
 init_tier_ledger();
+init_unreadable_files();
 init_tier_rules();
 
 // src/workers/engine/server.ts

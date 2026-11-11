@@ -146,6 +146,16 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
 
 // --- Request and result shapes --------------------------------------------
 
+/**
+ * The settled job's own explanation, looked up by item identity across tier copies.
+ */
+export interface ItemExtractionOutcome {
+  status: ExtractionTerminalStatus;
+  lastErrorKind?: string;
+  warnings: readonly string[];
+  policyDecision: ExtractionPolicyDecision;
+}
+
 export interface FileExtractionJobStoreOptions {
   readonly?: boolean;
   busyTimeoutMs?: number;
@@ -1471,6 +1481,36 @@ export class LocalFileExtractionJobStore {
     const statuses = new Set(rows.map((row) => row.status));
     if (statuses.has('indexed')) return 'settled';
     return statuses.has('queued') || statuses.has('leased') || statuses.has('failed_retryable') ? 'active' : 'settled';
+  }
+
+  /**
+   * Terminal outcome at the same identity scope and with the same precedence
+   * as itemExtractionState: a successful read wins; otherwise any active job
+   * means text is still owed. Among terminal attempts use the newest outcome,
+   * with only that job's warnings (never an older failed attempt's).
+   */
+  itemExtractionOutcome(item: { provider: string; accountScope: string; providerItemId: string }): ItemExtractionOutcome | undefined {
+    const rows = this.db.query(`
+      SELECT job_id, status, last_error_kind, policy_decision FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      ORDER BY updated_at DESC, job_id DESC
+    `).all(item.provider, item.accountScope, item.providerItemId) as Array<{
+      job_id: string; status: ExtractionJobStatus; last_error_kind: string | null; policy_decision: ExtractionPolicyDecision;
+    }>;
+    const indexed = rows.find(row => row.status === 'indexed');
+    if (!indexed && rows.some(row => row.status === 'queued' || row.status === 'leased' || row.status === 'failed_retryable')) return undefined;
+    const row = indexed ?? rows[0];
+    if (!row) return undefined;
+    const warnings = this.db.query(`
+      SELECT DISTINCT w.value AS warning FROM extraction_artifacts a, json_each(a.warnings_json) w
+      WHERE a.job_id = ? AND a.warnings_json IS NOT NULL ORDER BY w.value
+    `).all(row.job_id) as Array<{ warning: string }>;
+    return {
+      status: row.status as ExtractionTerminalStatus,
+      ...(row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {}),
+      warnings: warnings.map(row => row.warning),
+      policyDecision: row.policy_decision,
+    };
   }
 
   private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {

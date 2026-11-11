@@ -1,7 +1,7 @@
 import { createDashboardPeople } from '../email-source/dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
-import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
+import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
@@ -4373,10 +4373,10 @@ export async function main(): Promise<void> {
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env)),
   });
   // A file store counts an item unreadable only once its extraction has ended
-  // (LocalConnectorStore.setExtractionEndedProbe); a tier store opened later gets it in registerTierLegStore.
+  // (LocalConnectorStore.setExtractionOutcomeProbe); a tier store opened later gets it in registerTierLegStore.
   const probeExtractionEnded = (store: LocalConnectorStore): void => {
     if (store.family !== 'file' || !fileExtractionRuntime) return;
-    store.setExtractionEndedProbe((identity) => fileExtractionRuntime.jobs.itemExtractionState(identity) === 'settled');
+    store.setExtractionOutcomeProbe((identity) => fileExtractionRuntime.jobs.itemExtractionOutcome(identity));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
@@ -4481,7 +4481,7 @@ export async function main(): Promise<void> {
     if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
-    if (!readScope.filters && !readScope.contentFilters) return undefined;
+    if (readScope.contentAllowed && !readScope.filters && !readScope.contentFilters) return undefined;
     return {
       ...(readScope.filters?.sourceScopeRevision
         ? { scopeRevision: readScope.filters.sourceScopeRevision }
@@ -5308,7 +5308,7 @@ export async function main(): Promise<void> {
       void (async () => {
         try {
           const items: ExtractionUnreadableItem[] = [];
-          // A file store leaves out files still waiting for extraction (setExtractionEndedProbe).
+          // A file store leaves out files still waiting for extraction (setExtractionOutcomeProbe).
           for (const { store, scope } of scoped) {
             items.push(...await store.settledUnreadableItemsInTurns(scope));
           }
@@ -6450,7 +6450,20 @@ export async function main(): Promise<void> {
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
-  const ownerTierItemsEngine = createOwnerTierItems();
+  const ownerTierItemsContext: OwnerTierItemsContext = {
+    extractionOutcome: identity => fileExtractionRuntime?.jobs.itemExtractionOutcome(identity),
+    contentAllowed: (identity, localItemId, locator) => {
+      for (const store of connectorStores) {
+        if (!store.itemPresence(identity).active) continue;
+        if (store.metadataOnlyRuleForLocator(locator ?? undefined) !== undefined) return false;
+        const scope = connectorStoreStatusScope(store);
+        if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return false;
+        if (localItemId && !store.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.contentFilters)) return false;
+      }
+      return true;
+    },
+  };
+  const ownerTierItemsEngine = createOwnerTierItems(ownerTierItemsContext);
   // Update now (#1063): only the standalone engine the installer put in place updates itself.
   const selfUpdater = createSelfUpdater({
     platform: process.platform, runningVersion: runningOlympusVersion(),
@@ -6492,7 +6505,7 @@ export async function main(): Promise<void> {
     // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
     ownerTierItems: ownerTierItemsEngine,
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
-    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {

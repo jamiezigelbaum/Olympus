@@ -154,6 +154,29 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
+  test('terminal outcomes use the identity index, latest job warnings, and read/active precedence', () => {
+    const { store, dbPath } = newStore();
+    const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'outcome' };
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    const job = enqueueOne(store, 'outcome');
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    store.lease({ ...LANE, workerId: 'worker' });
+    store.record({ jobId: job, status: 'metadata_only', errorKind: 'extractor_empty_output',
+      derivations: [{ artifactKind: 'page', chars: 0, warnings: ['pdf_password_required'] }] });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'metadata_only', policyDecision: 'index_allowed',
+      lastErrorKind: 'extractor_empty_output', warnings: ['pdf_password_required'] });
+    expect(store.itemExtractionOutcome({ ...item, accountScope: 'other' })).toBeUndefined();
+    expect(store.itemExtractionOutcome({ ...item, provider: 'other' })).toBeUndefined();
+    const newer = enqueueOne(store, 'outcome', { version: 'v2' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'failed_terminal', last_error_kind: 'pdf_damaged', updated_at: '2099-01-01T00:00:00Z' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    backdate(dbPath, job, { status: 'indexed', last_error_kind: null });
+    backdate(dbPath, newer, { status: 'queued' });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    expect(store.itemExtractionState(item)).toBe('settled');
+  });
+
   test('an item text is owed until a job reads it or settles without it', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };
@@ -1072,7 +1095,10 @@ describe('extraction job store: corpus readiness', () => {
   test('a scoped snapshot taken in turns matches the one taken in one go, and gives the thread back between slices', async () => {
     const { store } = newStore();
     settle(store, 'damaged', 'failed_terminal');
-    for (let i = 0; i < 4_500; i += 1) enqueueOne(store, `item-${i}`);
+    // Seed the same population in one transaction: this test measures sliced
+    // reads, not 4,500 durable single-job commits on the runner's filesystem.
+    store.enqueue({ refs: Array.from({ length: 4_500 }, (_, i) => ref(`item-${i}`)),
+      extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
     const checked: number[] = [];
     const currentItems = (refs: readonly unknown[]) => { checked.push(refs.length); return refs.map(() => true); };
     let turns = 0;
