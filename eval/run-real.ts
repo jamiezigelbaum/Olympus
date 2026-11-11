@@ -966,8 +966,9 @@ function seatSupportTokens(text: string): Set<string> {
       tokens.add(part);
       const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(part);
       if (date) tokens.add(date[1]!);
-      // A file name without its extension is still the name.
-      const stem = /^(.+)\.[\p{L}\p{N}]{1,5}$/u.exec(part);
+      // A file name without its extension is still the name. The extension
+      // holds a letter, so a decimal ("4182.99") never supports its integer part.
+      const stem = /^(.+)\.(?=\p{N}*\p{L})[\p{L}\p{N}]{1,5}$/u.exec(part);
       if (stem) tokens.add(stem[1]!);
     }
   }

@@ -302,6 +302,10 @@ describe('the real eval report locates an expected item and value for a miss', (
       // The file name without its extension is the name too.
       answerValueTokens: 4, answerValueTokensInCitedSeats: 4, answerValueTokensUnmatchedShapes: [],
     });
+    // A decimal is not a file name: '4182.99' in a seat does not support '4182'.
+    const decimal = { ...pack, candidates: [{ ...first, chunks: ['The invoice total is 4182.99 dollars.'] }, other] } as typeof pack;
+    const misread = { answer: 'The total is 4182 dollars.', citations: [{ provenance: decimal.candidates[0]!.provenance, claim: 'total' }], unanswered: [] } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, decimal, misread, misread)).toMatchObject({ answerValueTokensInCitedSeats: 0, answerValueTokensUnmatchedShapes: ['9999'] });
     // Only the cited seat's citation counts: the same answer citing seat 2 is unmatched.
     const otherSeat = { ...fromCitation, citations: [{ provenance: dated.candidates[1]!.provenance, claim: 'total' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, dated, otherSeat, otherSeat).answerValueTokensInCitedSeats).toBe(0);
