@@ -258,3 +258,10 @@ test('multibyte passages each keep their relevant region within the byte share',
   }
   expect(analystPromptBytes(fitted, options)).toBeLessThanOrEqual(13_500);
 });
+
+test('a seat whose passages already fit its share is kept whole', () => {
+  const short = [`zephyr reading ${'a'.repeat(450)} total 73.25`, 'see note'];
+  const { pack, corpusOf } = fixture((index) => index === 0 ? short : [`${'x'.repeat(1_500)} ${value} ${'y'.repeat(2_000)}`]);
+  const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
+  expect(fitted.candidates[0]!.chunks).toEqual(short);
+});

@@ -1102,6 +1102,9 @@ function clipQuestionChunksToUtf8Bytes(
   if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
     return clipChunksToUtf8Bytes(chunks, maxBytes);
   }
+  // Passages that already fit are kept as they are; only a seat that must be
+  // clipped has its windows chosen.
+  if (chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) <= maxBytes) return [...chunks];
   // The selector budgets characters and shares them across passages. Start
   // at the byte share and shrink by the observed bytes-per-character until
   // every window fits, so multibyte text never lets an early window take a

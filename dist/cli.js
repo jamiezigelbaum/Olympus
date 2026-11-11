@@ -76351,6 +76351,8 @@ function clipQuestionChunksToUtf8Bytes(chunks, maxBytes, termGroups) {
   if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
     return clipChunksToUtf8Bytes(chunks, maxBytes);
   }
+  if (chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) <= maxBytes)
+    return [...chunks];
   let windows = [];
   let chars = maxBytes;
   for (let attempt = 0;attempt < 6 && chars > 0; attempt += 1) {
