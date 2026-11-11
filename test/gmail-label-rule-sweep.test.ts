@@ -43,6 +43,7 @@ import type {
   GmailMessage,
 } from '../src/workers/google-connectors/gmail.ts';
 
+import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 const ACCOUNT = 'personal';
 const OFFLINE_BROKER = { async issueSession() { throw new Error('Unexpected credential request in offline Gmail fixture'); } } as unknown as CredentialBroker;
 const NOW = new Date('2026-10-13T12:00:00.000Z');
@@ -160,7 +161,8 @@ function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } =
     setId: 'gmail.label-sweep-test',
     internalStore,
     secureStore,
-    tierClassification: { ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
+    // The judge has cleared this mail as Personal: these tests are about the label rule, not judging.
+    tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
   });
   const handler = createGmailConnectorStoreSyncHandler({
     internalStore,
