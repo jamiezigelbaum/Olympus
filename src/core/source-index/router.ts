@@ -292,7 +292,7 @@ export interface RouteSourceIndexSearchOptions {
   // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
   // (e.g. a multi-GB keyword index under write contention) can no longer hold
   // the whole source_answer hostage — total fan-out time is bounded by this
-  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 10s when
+  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 710s when
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
@@ -319,35 +319,21 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
 // How long one search may wait, before its lane deadlines start, for a local
 // embedding model that is still starting (#1172). A third of the 45 s
 // source-answer hand-off (SOURCE_ANSWER_HANDOFF_DEFAULT_MS in
-// core/source-answer-jobs.ts): this wait plus the 10 s lane deadline below
-// leaves the remaining 20 s for evidence reading and the Analyst, so a cold
-// first question still answers before the hand-off instead of becoming a job.
+// core/source-answer-jobs.ts). Longer searches continue through the existing
+// background-job hand-off while the request thread remains responsive.
 // A warm model never waits: preparation returns as soon as the query embeds.
 // A model still not started by then leaves the semantic lane skipped, and the
 // EvidencePack's coverage says so.
 export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
-// Default per-lane retrieval deadline (ms).
-//
-// 10s is not a round number picked for feel — it is the SQLite busy_timeout
-// every store in this repo opens with (`PRAGMA busy_timeout = 10000`). That
-// makes it a floor, not a preference: a lane whose only problem is waiting
-// behind the single writer resolves within busy_timeout, so any deadline
-// SHORTER than busy_timeout would drop lanes that were about to succeed and
-// report contention as loss. Lower this only in lockstep with that pragma.
-//
-// Headroom against measured healthy latency, re-checked 2026-07-28:
-//   keyword FTS       tens of ms on every live corpus
-//   semantic (vector) ~1.3s on the largest live corpus (170,721 vectors) after
-//                     the decodeEmbedding boxing fix; it was ~17.5s before,
-//                     which is why hybrid answers used to lose this race
-// so a healthy fan-out finishes with roughly 7x headroom, and the deadline
-// binds only on genuine contention or a wedge.
-//
-// Exact-vector adapters receive a cooperative deadline just inside this
-// authoritative timer. That lets CPU-bound scans yield or stop before they can
-// monopolize the event loop and prevent the timer itself from firing.
-const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 10_000;
+// Exact-vector adapters receive a cooperative deadline just inside the
+// authoritative timer, so a scan can yield before holding the event loop.
+// #1305, scripts/result.md: a313bb90~1 returned all 33 lanes in 505.486 s
+// without a writer and 701.681 s with one. Round the measured worst serial
+// fan-out up to 710 s rather than assuming a
+// parallel speedup. Store-affine readers normally finish much earlier; this
+// finite fallback budget preserves all 33 lanes in the measured baseline.
+const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 710_000;
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
 // A deadline timer this late means the thread was held past it (see
 // runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,

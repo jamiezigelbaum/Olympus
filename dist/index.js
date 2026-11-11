@@ -19638,9 +19638,11 @@ var init_control_path_headroom = __esm(() => {
 });
 
 // src/workers/connector-store/off-thread-reads.ts
-var queues, releases;
+var startedStores, storeOpens, queues, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
+  startedStores = new Set;
+  storeOpens = new Map;
   queues = new Map;
   releases = new Map;
 });

@@ -29351,22 +29351,37 @@ function busy(reader) {
 function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
-function startThread() {
-  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
+function startThread(store) {
+  if (threads.filter((reader) => reader.store === store).length >= READ_POOL_SIZE || !runtimeHasWorkers())
     return;
   try {
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
-    const started = { worker, pending: new Map, snapshots: 0 };
+    counters.starts += 1;
+    if (startedStores.has(store))
+      counters.restarts += 1;
+    startedStores.add(store);
+    const started = { store, worker, pending: new Map, snapshots: 0 };
     worker.onmessage = (event) => {
       const message2 = event.data;
+      const diagnostic = message2;
+      if (diagnostic.diagnostic === "open") {
+        counters.opens += 1;
+        counters.openMs += diagnostic.ms;
+        const held = storeOpens.get(diagnostic.path) ?? { opens: 0, openMs: 0 };
+        held.opens += 1;
+        held.openMs += diagnostic.ms;
+        storeOpens.set(diagnostic.path, held);
+        return;
+      }
+      started.executingStore = undefined;
       const waiting = started.pending.get(message2.id);
       if (!waiting)
         return;
       started.pending.delete(message2.id);
       if (waiting.timer !== undefined)
-        clearTimeout(waiting.timer);
+        clock2.clearTimeout(waiting.timer);
       if (message2.ok)
         waiting.resolve(message2.rows ?? null);
       else
@@ -29393,9 +29408,10 @@ function retire(stopped, error) {
   if (stopped.retired)
     return;
   stopped.retired = true;
+  counters.terminations += 1;
   for (const waiting of stopped.pending.values()) {
     if (waiting.timer !== undefined)
-      clearTimeout(waiting.timer);
+      clock2.clearTimeout(waiting.timer);
     waiting.reject(error);
   }
   stopped.pending.clear();
@@ -29411,7 +29427,7 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve10, reject) => {
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+    const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
       retire(reader, new Error("off-thread read timed out"));
     }, timeoutMs);
     reader.pending.set(id, { resolve: resolve10, reject, ...timer !== undefined ? { timer } : {} });
@@ -29420,7 +29436,7 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
     } catch (error) {
       reader.pending.delete(id);
       if (timer !== undefined)
-        clearTimeout(timer);
+        clock2.clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
@@ -29450,14 +29466,11 @@ async function withOffThreadSnapshot(dbPath, work) {
     dispatch();
   }
 }
-function snapshotThreadNow() {
-  const best = live().filter((reader) => !reader.job).reduce((least, reader) => !least || busy(reader) < busy(least) ? reader : least, undefined);
-  if (best && busy(best) === 0)
-    return best;
-  return startThread() ?? best;
+function snapshotThreadNow(store) {
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job) ?? startThread(store);
 }
 function snapshotThread(store) {
-  const reader = snapshotThreadNow();
+  const reader = snapshotThreadNow(store);
   if (reader) {
     reader.snapshots += 1;
     return Promise.resolve(reader);
@@ -29478,11 +29491,11 @@ function snapshotThread(store) {
   });
 }
 function serveSnapshotWaiters() {
-  while (snapshotWaiters.length > 0) {
-    const reader = snapshotThreadNow();
+  for (const waiter of [...snapshotWaiters]) {
+    const reader = snapshotThreadNow(waiter.store);
     if (!reader)
-      return;
-    const waiter = snapshotWaiters.shift();
+      continue;
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
     clearTimeout(waiter.timer);
     reader.snapshots += 1;
     waiter.resolve(reader);
@@ -29523,11 +29536,12 @@ function releaseOffThreadReads(dbPath) {
     for (const job of waiting)
       settle(job, { error: new OffThreadReadBusyError });
   }
-  for (const reader of live()) {
-    try {
-      reader.worker.postMessage({ op: "release", path: dbPath });
-    } catch {}
+  for (const reader of live().filter((reader2) => reader2.store === dbPath)) {
+    reader.releaseWhenIdle = true;
+    if (reader.job)
+      settle(reader.job, { error: new OffThreadReadBusyError });
   }
+  dispatch();
 }
 function settle(job, outcome) {
   if (job.settled)
@@ -29562,7 +29576,6 @@ function missedDeadline(job) {
     return;
   settle(job, { error: new OffThreadReadBusyError });
   if (job.thread) {
-    retire(job.thread, new OffThreadReadBusyError);
     return;
   }
   const waiting = queues.get(job.store);
@@ -29570,55 +29583,57 @@ function missedDeadline(job) {
   if (waiting && at >= 0)
     waiting.splice(at, 1);
 }
-function freeThread() {
-  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
+function freeThread(store) {
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && busy(reader) === 0) ?? startThread(store);
 }
-function nextJob() {
-  while (turns.length > 0) {
+function dispatch() {
+  for (const reader of live()) {
+    if (reader.releaseWhenIdle && busy(reader) === 0)
+      retire(reader, new OffThreadReadBusyError);
+  }
+  serveSnapshotWaiters();
+  for (let remaining = turns.length;remaining > 0; remaining -= 1) {
     const store = turns.shift();
     const waiting = queues.get(store);
-    let job = waiting?.shift();
-    while (job && clock2.now() >= job.deadlineAtMs) {
-      settle(job, { error: new OffThreadReadBusyError });
-      job = waiting?.shift();
+    while (waiting.length && clock2.now() >= waiting[0].deadlineAtMs) {
+      settle(waiting.shift(), { error: new OffThreadReadBusyError });
     }
-    if (waiting && waiting.length > 0)
+    if (!waiting.length) {
+      queues.delete(store);
+      continue;
+    }
+    const reader = freeThread(store);
+    if (!reader) {
+      turns.push(store);
+      continue;
+    }
+    const job = waiting.shift();
+    if (waiting.length)
       turns.push(store);
     else
       queues.delete(store);
-    if (job)
-      return job;
-  }
-  return;
-}
-function dispatch() {
-  serveSnapshotWaiters();
-  while (turns.length > 0) {
-    const reader = freeThread();
-    if (!reader)
-      return;
-    const job = nextJob();
-    if (!job)
-      return;
     job.thread = reader;
     job.sentAtMs = clock2.now();
     reader.job = job;
+    reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
     });
   }
 }
-var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
 const open = (path) => {
+  const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
 const connection = (path) => {
@@ -29663,7 +29678,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 };
-`, threads, nextId = 1, queues, turns, snapshotWaiters, releases;
+`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
@@ -29680,6 +29695,9 @@ var init_off_thread_reads = __esm(() => {
   };
   clock2 = REAL_CLOCK;
   threads = [];
+  counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+  startedStores = new Set;
+  storeOpens = new Map;
   queues = new Map;
   turns = [];
   snapshotWaiters = [];
@@ -74857,7 +74875,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key2) {
   return key2.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 710000, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
   init_keyword_context();
   init_types();
@@ -104165,12 +104183,12 @@ class SqliteSourceDashboardHistory {
     return Object.keys(movement).length > 0 ? movement : undefined;
   }
   noteMovement(sample) {
-    const counters = [
+    const counters2 = [
       ["indexed_items", sample.indexed_items],
       ["content_ready_items", sample.content_ready_items],
       ["embedded_files", sample.embedded_files]
     ];
-    for (const [counter, value] of counters) {
+    for (const [counter, value] of counters2) {
       if (value === undefined || !Number.isFinite(value))
         continue;
       const parity = phaseAtParity(sample, counter, value);
