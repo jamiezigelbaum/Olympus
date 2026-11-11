@@ -231,6 +231,19 @@ test("a large store's language profile is reused across writes for a while, not 
   db.close();
 });
 
+// Codex review on #1329: evenly spaced rowids on 4,096 chunks alternating English and Spanish picked only every fourth
+// rowid, all Spanish, and English was left out of the profile.
+test("a large store's sample does not miss a language its chunks alternate with", () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const english = 'The deed will be signed before the notary and the related costs will be paid by the buyer, under the agreed conditions.';
+  const spanish = 'La escritura pública se firmará ante el notario y los gastos correspondientes serán abonados por el comprador, conforme a las condiciones pactadas.';
+  const insert = db.query('INSERT INTO chunks VALUES(1, ?, ?)');
+  db.transaction(() => { for (let n = 1; n <= 4096; n++) insert.run(n % 2 === 0 ? spanish : english, `h${n}`); })();
+  expect([...storeKeywordLanguages(db)].sort()).toEqual(['eng', 'spa']);
+  db.close();
+});
+
 test('a language sample can be read elsewhere, one sample at a time, and a current profile needs no read (#1305)', async () => {
   const db = new Database(':memory:');
   db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');

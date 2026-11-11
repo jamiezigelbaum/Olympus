@@ -78,8 +78,11 @@ function* profileSteps(db: Database): Generator<KeywordLanguageRead, readonly st
   if (!large) {
     rows = (yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: 'all' }) as {pk: number; hash: string}[];
   } else {
+    // One rowid per stride, at a fixed but irregular point within it (the golden-ratio sequence): the same rowids on
+    // every sample, so the signature below still holds, but never the same position in each stride, which on a store
+    // whose chunks repeat in a regular pattern (one language, then another) could miss a language altogether.
     const step = maxRowid / SAMPLE_TARGET;
-    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + ((k * 0.6180339887) % 1) * step) + 1)));
     rows = [];
     for (let at = 0; at < ids.length; at += READ_BATCH) {
       const batch = ids.slice(at, at + READ_BATCH);
