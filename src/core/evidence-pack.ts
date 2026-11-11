@@ -844,7 +844,7 @@ async function runRoutedSearches(
     : undefined;
 
   const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs());
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
   if (!pendingPlan) return literalRun;
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -868,7 +868,7 @@ async function runRoutedSearches(
       recordSourceAnswerQueryPlannerDisposition('search_budget_spent');
       break;
     }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
   }
   if (runs.length === 1) return literalRun;
 
@@ -944,6 +944,8 @@ const MIN_EXPANSION_BUDGET_MS = 1_000;
 function searchBudget(input: BuildEvidencePackInput): {
   firstLaneTimeoutMs(): number;
   laneTimeoutMs(): number | undefined;
+  // When the whole search ends, for the router to cut its lanes to after preparation; undefined when unbounded.
+  deadlineAtMs: number | undefined;
 } {
   const lane = resolveLaneTimeoutMs(input.laneTimeoutMs);
   const total = resolveAskSearchBudgetMs(input.searchBudgetMs);
@@ -952,6 +954,7 @@ function searchBudget(input: BuildEvidencePackInput): {
   const left = () => Math.max(1, total - (Date.now() - startedAt));
   const unbounded = !Number.isFinite(total) || total <= 0;
   return {
+    deadlineAtMs: unbounded ? undefined : startedAt + total,
     firstLaneTimeoutMs: () => (unbounded ? lane : cut(left())),
     laneTimeoutMs() {
       if (unbounded) return lane;
@@ -967,6 +970,7 @@ function runRoutedSearch(
   ordinal: number,
   maxResults: number,
   laneTimeoutMs: number,
+  searchDeadlineAtMs?: number,
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
@@ -980,6 +984,7 @@ function runRoutedSearch(
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
       },
       laneTimeoutMs,
+      ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));
 }
