@@ -164,6 +164,12 @@ export interface RetrievalLaneAudit {
   suppressedBelowBar?: number;
   /** Wall time this lane took inside its corpus search, in ms (counts only). */
   elapsedMs?: number;
+  /** Keyword lane on a large store: words of the question left out of the match as common. */
+  wordsLeftOut?: number;
+  /** Keyword lane on a large store: FTS rows the match ranks, estimated, with those words left out. */
+  rowsRankedEstimate?: number;
+  /** Keyword lane on a large store: the same estimate had every word been matched. */
+  rowsRankedEveryWordEstimate?: number;
   modelId?: string;
   backend?: string;
   localOnly: boolean;

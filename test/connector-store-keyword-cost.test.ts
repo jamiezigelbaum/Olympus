@@ -16,6 +16,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { traceKeywordSearch } from '../eval/store-probe.ts';
+import { keywordCountWindows } from '../src/workers/connector-store/local-index.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
 
 // The store's bm25 title weight (local-index.ts).
@@ -245,4 +246,61 @@ test('a question of rare words matches as before', async () => {
   const store = await largeCommonStore();
   const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel boatyard harbour', 10); });
   for (const match of matches) for (const word of ['kestrel', 'boatyard', 'harbour']) expect(match).toContain(`"${word}"`);
+}, 60_000);
+
+// Counting how often a word appears read its whole doclist: on a 1M-row store
+// cold, up to 9 s for one question (2026-11-11, #1423). A count over a few
+// rowid windows estimates the share for a fraction of that.
+test('a large store estimates a word\'s share from a few bounded rowid windows', () => {
+  expect(keywordCountWindows(5_200)).toEqual([[1, 5_200]]);
+  const windows = keywordCountWindows(1_000_000);
+  expect(windows.length).toBeGreaterThan(1);
+  expect(windows.reduce((sum, [from, to]) => sum + to - from + 1, 0)).toBeLessThanOrEqual(20_000);
+  expect(windows[0]![0]).toBe(1);
+  expect(windows.at(-1)![1]).toBeLessThanOrEqual(1_000_000);
+  expect(windows.at(-1)![0]).toBeGreaterThan(500_000);
+  for (let index = 1; index < windows.length; index += 1) expect(windows[index]![0]).toBeGreaterThan(windows[index - 1]![1]);
+});
+
+test('word shares are counted over rowid windows, never by reading a word\'s whole doclist', async () => {
+  const store = await largeCommonStore();
+  const db = (store as unknown as { db: { query: (sql: string) => unknown } }).db;
+  const query = db.query;
+  const counts: string[] = [];
+  db.query = function (sql: string) {
+    if (/^\s*SELECT COUNT\(\*\)/.test(sql) && sql.includes('connector_store_fts MATCH ?')) counts.push(sql);
+    return query.call(db, sql);
+  };
+  try { store.searchItemsDetailed('notes about tomatoes and bread', 10); } finally { db.query = query; }
+  expect(counts.length).toBeGreaterThan(0);
+  for (const sql of counts) expect(sql).toContain('rowid BETWEEN ? AND ?');
+}, 60_000);
+
+// The eval report reads these from the lane audit (#1423): how many words a
+// store left out and the rows its match ranks, so a timing run can be read
+// per store.
+test('the keyword lane audit says how many words it left out and the rows ranked, estimated', async () => {
+  const store = await largeCommonStore();
+  const adapter = createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' });
+  const search = (query: string) => adapter({
+    query,
+    maxResults: 5,
+    corpus: defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain }),
+    context: { allowedTrustDomains: [store.trustDomain] },
+  });
+  const keywordAudit = async (query: string) => (await search(query)).laneAudits?.find((lane) => lane.laneType === 'keyword');
+  const dropped = await keywordAudit('kestrel boatyard notes');
+  expect(dropped?.wordsLeftOut).toBe(1);
+  expect(dropped!.rowsRankedEstimate!).toBeLessThan(dropped!.rowsRankedEveryWordEstimate!);
+  const kept = await keywordAudit('kestrel boatyard harbour');
+  expect(kept?.wordsLeftOut).toBe(0);
+  expect(kept?.rowsRankedEstimate).toBe(kept?.rowsRankedEveryWordEstimate);
+  const small = await openStoreWith(COMMON_ITEMS.slice(0, 81));
+  const smallAudit = (await createConnectorStoreCorpusAdapter({ store: small, retrievalMode: 'keyword' })({
+    query: 'kestrel boatyard notes',
+    maxResults: 5,
+    corpus: defineConnectorCorpus({ corpusId: small.corpusId, family: small.family, trustDomain: small.trustDomain }),
+    context: { allowedTrustDomains: [small.trustDomain] },
+  })).laneAudits?.find((lane) => lane.laneType === 'keyword');
+  expect(smallAudit?.wordsLeftOut).toBeUndefined();
 }, 60_000);

@@ -244,6 +244,22 @@ const KEYWORD_COMMON_ROW_SHARE = 0.2;
 // small store nearly every word of a question is "common" (a few files on one
 // topic), so leaving words out would only lose matches.
 const KEYWORD_COMMON_MIN_ROWS = 5_000;
+// A word's share of a store's FTS rows is counted over this many rowid
+// windows of this many rows, spread over the store; a store with no more
+// rows than the windows hold is counted whole. Counting a word's matches
+// store-wide read its whole doclist: cold, up to 9 s for one question on a
+// 1M-row store, against 0.1 to 0.5 s for the windows (2026-11-11, #1423).
+const KEYWORD_COMMON_WINDOWS = 4;
+const KEYWORD_COMMON_WINDOW_ROWS = 5_000;
+
+/** The rowid windows a word's share of `rows` FTS rows is counted over. */
+export function keywordCountWindows(rows: number): Array<[number, number]> {
+  if (rows <= KEYWORD_COMMON_WINDOWS * KEYWORD_COMMON_WINDOW_ROWS) return [[1, rows]];
+  return Array.from({ length: KEYWORD_COMMON_WINDOWS }, (_, index) => {
+    const from = Math.floor((index * rows) / KEYWORD_COMMON_WINDOWS) + 1;
+    return [from, Math.min(rows, from + KEYWORD_COMMON_WINDOW_ROWS - 1)];
+  });
+}
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
 // against the live corpus (gemini-embedding-2, 2026-07-25: off-domain
@@ -2129,6 +2145,20 @@ export interface ConnectorStoreKeywordSearch {
   rows: ConnectorStoreSearchRow[];
   saturated: boolean;
   concepts: ConnectorStoreConceptCoverage;
+  /** Present when the store is large enough to leave common words out (counts only). */
+  commonWords?: ConnectorStoreCommonWords;
+}
+
+/**
+ * What leaving a question's common words out of a store's keyword match
+ * did: how many words it left out, and the FTS rows the match ranks with and
+ * without them, estimated from the sampled word shares as the sum over the
+ * matched concepts (the match is an OR, so this is an upper bound).
+ */
+export interface ConnectorStoreCommonWords {
+  wordsLeftOut: number;
+  rowsRankedEstimate: number;
+  rowsRankedEveryWordEstimate: number;
 }
 
 export interface ConnectorStoreConceptCoverage {
@@ -13091,11 +13121,13 @@ export class LocalConnectorStore {
     const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
-    const commonTerms = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact, ftsOptions.prefix !== false);
+    const common = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact, ftsOptions.prefix !== false);
+    const commonTerms = common?.excluded;
+    const commonWords = common?.audit;
     const terms = ftsOptions.relaxed
       ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query))
       : sourceIndexFtsQuery(query, { ...(ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}), ...(commonTerms ? { excludedTerms: commonTerms } : {}) });
-    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
+    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() }, ...(commonWords ? { commonWords } : {}) };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
@@ -13311,6 +13343,7 @@ export class LocalConnectorStore {
           minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
         ])),
       },
+      ...(commonWords ? { commonWords } : {}),
     };
   }
 
@@ -13396,8 +13429,9 @@ export class LocalConnectorStore {
    * largest stores, 2026-11-11, olympus-ops#151, 8.4 to 2.1 s on the Private
    * Dropbox store with most of the top 10 kept). A concept still counts toward
    * each candidate's matched concepts. When every concept is common, the
-   * rarest is kept. A term a kept concept also holds stays. Each count stops
-   * at the threshold and is remembered like the concept weights. Stores
+   * rarest is kept. A term a kept concept also holds stays. The share is
+   * counted over a few rowid windows (keywordCountWindows), exactly in a
+   * store the windows cover, and remembered like the concept weights. Stores
    * under KEYWORD_COMMON_MIN_ROWS rows match every word, as before.
    */
   private *commonConceptTermsSteps(
@@ -13405,7 +13439,7 @@ export class LocalConnectorStore {
     exact: ReadonlyMap<string, unknown>,
     // Counted as the match will run: an exact search counts exact words.
     prefix: boolean,
-  ): Generator<StoreRead, ReadonlySet<string> | undefined, unknown> {
+  ): Generator<StoreRead, { excluded?: ReadonlySet<string>; audit: ConnectorStoreCommonWords } | undefined, unknown> {
     if (groups.length < 2) return undefined;
     const memo = this.conceptCountMemo ??= new Map();
     const remembered = (key: string): number | undefined => {
@@ -13425,35 +13459,40 @@ export class LocalConnectorStore {
       remember(ROWS, rows);
     }
     if (rows < KEYWORD_COMMON_MIN_ROWS) return undefined;
-    const threshold = Math.floor(rows * KEYWORD_COMMON_ROW_SHARE);
-    const countAll = function* (limit: number): Generator<StoreRead, number[], unknown> {
-      const counts: number[] = [];
-      for (const group of groups) {
-        const groupQuery = sourceIndexFtsGroupQuery(group, exact, prefix);
-        const key = `\u0001common:${limit}:${groupQuery}`;
-        let count = remembered(key);
-        if (count === undefined) {
-          count = ((yield {
+    const windows = keywordCountWindows(rows);
+    const sampled = windows.reduce((sum, [from, to]) => sum + to - from + 1, 0);
+    const shares: number[] = [];
+    for (const group of groups) {
+      const groupQuery = sourceIndexFtsGroupQuery(group, exact, prefix);
+      const key = `\u0001common:${rows}:${groupQuery}`;
+      let count = remembered(key);
+      if (count === undefined) {
+        count = 0;
+        for (const [from, to] of windows) {
+          count += ((yield {
             mode: 'get',
-            sql: 'SELECT COUNT(*) AS count FROM (SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?)',
-            params: [groupQuery, limit],
+            sql: 'SELECT COUNT(*) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?',
+            params: [groupQuery, from, to],
           }) as { count: number }).count;
-          remember(key, count);
         }
-        counts.push(count);
+        remember(key, count);
       }
-      return counts;
-    };
-    const common = (yield* countAll(threshold + 1)).map((count) => count > threshold);
-    if (!common.some(Boolean)) return undefined;
-    if (common.every(Boolean)) {
-      // Every bounded count stopped at the threshold, so only full counts
-      // tell which concept is rarest.
-      const counts = yield* countAll(rows + 1);
-      common[counts.indexOf(Math.min(...counts))] = false;
+      shares.push(count / sampled);
     }
+    const common = shares.map((share) => share > KEYWORD_COMMON_ROW_SHARE);
+    if (common.every(Boolean)) common[shares.indexOf(Math.min(...shares))] = false;
     const kept = new Set(groups.filter((_, index) => !common[index]).flat());
-    return new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
+    const excluded = new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
+    const estimate = (keep: (index: number) => boolean) =>
+      Math.round(Math.min(rows, shares.reduce((sum, share, index) => sum + (keep(index) ? share * rows : 0), 0)));
+    return {
+      ...(excluded.size > 0 ? { excluded } : {}),
+      audit: {
+        wordsLeftOut: excluded.size,
+        rowsRankedEstimate: estimate((index) => !common[index]),
+        rowsRankedEveryWordEstimate: estimate(() => true),
+      },
+    };
   }
 
   private *conceptWeightsSteps(
@@ -14759,6 +14798,7 @@ export function createConnectorStoreCorpusAdapter(
           latencyMs: Date.now() - startedAt,
           laneAudits: [{
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits.length),
+            ...(keywordLane.commonWords ?? {}),
             ...(semanticSkippedReason
               ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
               : {}),
@@ -14802,6 +14842,7 @@ export function createConnectorStoreCorpusAdapter(
         laneAudits: [
           {
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, rows.length),
+            ...(keywordLane.commonWords ?? {}),
             ...(semanticSkippedReason
               ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
               : {}),
@@ -15230,7 +15271,11 @@ async function hybridConnectorStoreSearch(
     // same audit fields the Dropbox retrieval audit records
     // (keyword_candidates / vector_candidates / fused_candidates).
     laneAudits: [
-      { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
+      {
+        ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length),
+        elapsedMs: keywordElapsedMs,
+        ...(keywordLane.commonWords ?? {}),
+      },
       {
         laneName: `${store.corpusId}:connector_store_vector`,
         laneType: 'semantic',
@@ -15354,6 +15399,8 @@ type ConnectorStoreKeywordLane = {
   allRows: ConnectorStoreSearchRow[];
   /** The expansion-free search, when expansion changed this one. */
   baseline?: ConnectorStoreKeywordLane;
+  /** The plain search's common-word audit, when the store is large enough to have one. */
+  commonWords?: ConnectorStoreCommonWords;
 };
 
 async function connectorStoreKeywordLaneRows(
@@ -15449,6 +15496,7 @@ async function connectorStoreKeywordLaneRows(
     conceptShare: new Map([...(baseline?.conceptShare ?? []), ...conceptShare].map(([id, share]) =>
       [id, Math.max(share, baseline?.conceptShare?.get(id) ?? 0)] as const)),
     ...(baseline ? { baseline } : {}),
+    ...(plain.commonWords ? { commonWords: plain.commonWords } : {}),
   };
 }
 
@@ -15498,6 +15546,7 @@ function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreK
       saturated: lane.matchCount.saturated,
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
     },
+    ...(lane.commonWords ? { commonWords: lane.commonWords } : {}),
   };
 }
 

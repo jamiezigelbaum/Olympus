@@ -192,7 +192,7 @@ export function keywordStatementKind(sql: string): string {
   if (sql.includes('MIN(tied.rank)')) return 'ranked_match_page_tied';
   if (sql.includes('MIN(connector_store_fts.rank)')) return 'ranked_match_page';
   if (/COUNT\(DISTINCT (?:r\.)?item_pk\)/.test(sql)) return 'concept_weight_count';
-  if (sql.includes('MAX(rowid)') || (sql.includes('SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?'))) return 'common_concept_count';
+  if (sql.includes('MAX(rowid)') || sql.includes('connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?')) return 'common_concept_count';
   if (sql.includes('connector_store_fts.item_pk IN (')
     || (sql.includes('FROM connector_store_fts_rows r') && sql.includes('r.item_pk IN ('))) return 'concept_hits_for_candidates';
   if (/FROM items WHERE tombstoned = 0/.test(sql) && sql.includes('COUNT(*)')) return 'item_population_count';

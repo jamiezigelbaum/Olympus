@@ -749,3 +749,16 @@ describe('evalPromptLayout', () => {
     expect(layout.seats[0]!.passageBytes).toBeGreaterThan(Buffer.byteLength(JSON.stringify(['lease ends 31 May 2027', 'renewal "notice" due'])));
   });
 });
+
+describe('the eval report carries each store\'s keyword word audit (#1423)', () => {
+  test('words left out and rows ranked, estimated, pass through per lane', () => {
+    const lane = {
+      laneName: 'store:connector_store_fts', laneType: 'keyword', candidateCount: 3, returnedCount: 3,
+      wordsLeftOut: 2, rowsRankedEstimate: 1_200, rowsRankedEveryWordEstimate: 90_000, localOnly: true, rawExposed: false,
+    };
+    const audit = evalRetrievalAudit({
+      pack: { candidates: [] }, candidateCorpusIds: [], laneAudits: [lane], skippedCorpora: [], degradations: [],
+    } as never);
+    expect(audit.lanes[0]).toMatchObject({ wordsLeftOut: 2, rowsRankedEstimate: 1_200, rowsRankedEveryWordEstimate: 90_000 });
+  });
+});
