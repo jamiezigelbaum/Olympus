@@ -344,3 +344,82 @@ The six missing-fact cases may retrieve explicit absence evidence and are
 therefore graded for gap honesty. The unchanged-or-lower read budget applies
 to the historical off-topic negatives. Keep historical questions, stores and
 model output local; only aggregate replay counts belong in the PR.
+
+## Passage retrieval eval (schema 2)
+
+`eval:passages` scores retrieval without constructing an Analyst or a query
+planner. The answer eval above remains the release gate. Work on a complete
+copy of an install's data folder, including each tier set's ledger:
+
+```sh
+bun run eval:passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data eval/private/passage-questions.json \
+  --max-results 12 --output eval/private/passages.open.json
+bun run eval:passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data eval/private/passage-questions.json \
+  --split sealed --max-results 12 --output eval/private/passages.sealed.json
+```
+
+The opener discovers connector databases throughout the copy, including
+extension stores identified by their saved corpus and family. Empty stores at
+standard account and legacy placements are recognized too. Empty extension
+stores use `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`; its recorded paths must
+name the copied files inside `--data-root`, or preflight refuses them. Stores and ledgers
+are query-only and never migrated. Incompatible schemas are skipped and
+reported by store ordinal and reason. An external store or sidecar link fails
+preflight. A binding's original absolute ledger hint is ignored when the
+co-located copy has the bound identity; without that copy, an external hint
+fails preflight. Nothing follows a recorded path out of the copy.
+
+Linux descriptor checks run as stores mount and at completion, checking the
+live default data folder and each repeatable `--forbid-root`. Platforms without
+`/proc/self/fd` require explicit `--allow-no-fd-check`. Keep model assets outside
+forbidden data folders, or point the existing model settings at copied assets.
+The existing built-in embedding selection, `OLYMPUS_SOURCE_RERANKER*` settings,
+`OLYMPUS_EVAL_MAX_RESULTS`, and `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` apply.
+`--max-chars-per-candidate` overrides the last setting. The local Analyst lane's
+prompt budget applies by default (`--prompt-bytes` overrides it);
+`--analyst-provider venice` selects that lane's unfitted pack without calling it.
+
+Each answerable question needs precise `expectedEvidence` with a verbatim
+`quote` of 6–40 normalized words. Optional `alternates` name other
+`{corpusId, providerItemId}` items holding the quote. A question may set
+`split: "open" | "sealed"`; absent means open. At each cutoff (1, 3, 5, 10,
+and pack size), a question hits when at least one expected item or alternate
+is seated; a passage hit additionally needs its fitted seat body to match the
+quote. Multiple expected items are alternatives for this question-level metric,
+not an assertion that a synthesis question has all its evidence. The matcher
+`ordered-word-coverage-0.8-window-v1` normalizes Unicode/accents and punctuation,
+rejoins line-break hyphenation, and requires an ordered subsequence covering
+80% of the quote in a window of `n + max(4, ceil(n/2))` passage words.
+
+Receipts contain ranks, hit counts, recall, MRR, negative seat counts, store row
+counts, timings, rule and git SHA. They contain no questions, quotes, titles,
+answers or passages. Summaries group by shape, expected source family and tier;
+negatives without a source use `unknown`. Sealed receipts contain summaries
+only, with no question rows. `--compare /path/to/baseline.json` prints the keep
+verdict: at least two more passage hits at pack size overall, with no shape or
+family losing more than one. Comparison requires the same split, question-id
+set, matcher version and pack size. Inspect skipped-store counts before
+comparing runs.
+
+On **Sparta**, draft a private set through the local OpenAI-compatible model:
+
+```sh
+bun run eval:draft-passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --count 60 --seed 42 \
+  --base-url http://127.0.0.1:28090/v1 --model local-model \
+  --output eval/private/passage-questions.draft.json
+```
+
+The endpoint settings default to the eval's local Analyst profile/lane. Only
+loopback/private addresses (or `localhost`/`sparta` resolving entirely to them)
+are accepted, with redirects refused. Requests run sequentially. Sampling uses
+seeded reservoirs balanced across family/tier strata and only active, judged,
+unheld items with served text. Half the requests ask for a paraphrase with no
+quote content words. Invalid quotes and paraphrases are discarded; rare-word
+FTS phrase candidates are checked with the same passage rule for alternates.
+One third of the resulting questions are deterministically sealed. The private
+output file contains the drafts; stdout contains counts only. Review the drafts
+and verify the 5–10 proposed negative questions are actually unanswerable before
+using the set. Do not tune on sealed questions.
