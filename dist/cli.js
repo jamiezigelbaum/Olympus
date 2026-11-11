@@ -77733,8 +77733,7 @@ async function searchPrivateEvidence(input) {
     };
     const translation = { missing: false };
     let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
-    if (matches.length === 0 && !secretMatch && translation.missing)
-      matches = await build(lanes.adapters);
+    const lowered = [];
     const selectedItems = [];
     for (const item of input.originalMatches ?? []) {
       const provenance = item.provenance;
@@ -77765,8 +77764,11 @@ async function searchPrivateEvidence(input) {
         evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET
       }));
       assertEvidencePackModelEligible(detail.pack);
-      matches.push(...detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => (candidate.trustDomain === "internal" || candidate.trustDomain === "public_safe") && candidate.corpusId !== "" && candidate.chunks.length > 0));
+      lowered.push(...detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => (candidate.trustDomain === "internal" || candidate.trustDomain === "public_safe") && candidate.corpusId !== "" && candidate.chunks.length > 0));
     }
+    if (matches.length === 0 && lowered.length === 0 && !secretMatch && translation.missing)
+      matches = await build(lanes.adapters);
+    matches.push(...lowered);
     if (matches.length === 0)
       return { matched: secretMatch ? 1 : 0, candidates: [], ...secretMatch ? { secretMatch: true } : {} };
     const neighbours = matches.some((candidate) => candidate.trustDomain === "secure_local") ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches)) : [];
