@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   connectorStoreLaneHandle,
   selectedSourceCredentialHandle,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/source-lanes.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 
 const handles: ConnectedCredentialHandle[] = [

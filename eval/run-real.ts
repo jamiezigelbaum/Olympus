@@ -78,7 +78,7 @@ import { createParentLabelResolver } from '../src/workers/connector-store/parent
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
-import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
+import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import {
   BuiltInSourceEmbeddingProvider,
   loadedBuiltInEmbedding,
@@ -523,7 +523,7 @@ export function openEvalDropboxStores(
 
 /**
  * The answer lanes over the eval's stores, built by the same factory live
- * answers use (email-source/source-answer-lanes.ts) in its on-this-computer
+ * answers use (engine/runtime/source-answer-lanes.ts) in its on-this-computer
  * mode: a store's vector lane runs only with the built-in model this process
  * holds loaded, and otherwise searches by keyword.
  */
@@ -1348,7 +1348,7 @@ async function configuredEvalEmbedding(
   env: Record<string, string | undefined>,
 ): Promise<Parameters<typeof prepareEvalEmbedding>[0]['configured']> {
   try {
-    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/engine/server.ts');
+    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/engine/runtime/embedding-providers.ts');
     const engine = loadSourceWorkerSovereignty(config, env);
     const configured: Partial<Record<SourceTrustDomain, SourceEmbeddingProvider>> = {};
     for (const domain of ['public_safe', 'internal', 'secure_local'] as const) {

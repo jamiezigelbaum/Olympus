@@ -27,6 +27,7 @@
 //   from a fixed vocabulary, and the confidence.
 
 import { createHash } from 'node:crypto';
+import { snifferLaneUsesUnion } from './sniffer-lane.ts';
 import { canonicalizeScreeningText } from '../../core/secret-patterns.ts';
 import { BUILT_IN_REASONING_MODELS, QWEN35_4B } from '../source-index/built-in-reasoning/manifest.ts';
 import { SNIFFER_DECISION_PRIVATE_BAR } from './sniffer-decision-mass.ts';
@@ -92,6 +93,8 @@ export type SnifferLaneKind = 'local' | 'venice';
 
 export interface SnifferLaneIdentity {
   kind: SnifferLaneKind;
+  /** Provider distinguishes the bundled judge from the same weights served elsewhere. */
+  profile?: { provider: string };
   /** Effective native mode, set by the content-free capability probe. */
   snifferMode?: 'pending' | 'decision' | 'full';
   /** False after a transient auto probe failure: bulk re-judging must wait. */
@@ -240,6 +243,7 @@ function recordRequiresPrivate(verdict: Partial<Pick<SnifferVerdict, 'ownRecord'
  * was never sent). Content-free by construction.
  */
 export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category' | 'confidence' | 'failSafe'>): string {
+  if (verdict.category === SNIFFER_UNION_CATEGORY) return verdict.failSafe ? 'union:decision:failed' : `union:decision:${verdict.confidence.toFixed(2)}`;
   if (verdict.failSafe) return verdict.category === SNIFFER_INJECTION_CATEGORY ? 'injection:classifier_instruction:0.00' : 'unresolved:0.00';
   if (verdict.category === SNIFFER_DECISION_CATEGORY) return `decision:${verdict.confidence.toFixed(2)}`;
   const category = (SNIFFER_CATEGORIES as readonly string[]).includes(verdict.category) ? verdict.category : 'other';
@@ -255,6 +259,25 @@ export const SNIFFER_DECISION_CATEGORY = 'decision';
  * A bar is not part of it: verdicts store P(Private), and `snifferId` names a
  * non-default bar, so a bar change re-applies cached verdicts without asking. */
 export const SNIFFER_DECISION_VERSION = 'decision-v2';
+/** Built-in 4B full verdict plus the native veto, at the fixed union bar. */
+export const SNIFFER_UNION_VERSION = `union-v1:${SNIFFER_DECISION_VERSION}:bar-0.5`;
+export const SNIFFER_UNION_CATEGORY = 'union_decision';
+
+/** Recognize this upgrade in existing ledger receipts without a migration or source rule. */
+export function isSnifferUnionUpgrade(reasons: readonly string[], currentId: string): boolean {
+  return [QWEN35_4B.modelId, `${QWEN35_4B.modelId}:${QWEN35_4B.revision}:${QWEN35_4B.file.sha256}`].some(weights => {
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 16);
+    return currentId.endsWith(`.m${digest(`${weights}:${SNIFFER_UNION_VERSION}`)}`)
+      && reasons.some(reason => (reason.includes(`.m${digest(weights)}:`) || reason.endsWith(`.m${digest(weights)}`)));
+  });
+}
+
+/** Called only after full mode would release Personal. Never lowers that verdict. */
+export function snifferUnionVeto(chance: number | null | undefined): Omit<StoredSnifferVerdict, 'decidedAt'> | undefined {
+  const valid = typeof chance === 'number' && isUnitConfidence(chance);
+  if (valid && chance < SNIFFER_DECISION_PRIVATE_BAR) return undefined;
+  return { tier: 'private', category: SNIFFER_UNION_CATEGORY, confidence: valid ? chance : 0, failSafe: !valid };
+}
 
 /**
  * A cached verdict that still answers its question. The injection screen
@@ -393,6 +416,7 @@ export function snifferMaterialLooksLikeInjection(material: string): boolean {
 
 export function snifferCacheModelId(lane: SnifferLaneIdentity): string {
   const weights = lane.cacheModelId ?? lane.modelId;
+  if (snifferLaneUsesUnion(lane)) return `${weights}:${SNIFFER_UNION_VERSION}`;
   if (lane.snifferMode === 'pending') return `${weights}:pending`;
   return lane.snifferMode === 'decision' ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }

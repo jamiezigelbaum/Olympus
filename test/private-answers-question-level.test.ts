@@ -12,7 +12,7 @@ import { DEFAULT_CONSULT_SETTINGS, type ConsultSettings, type ConsultSettingsRea
 import type { ConsultLevel } from '../src/core/consult-gate.ts';
 import { DASHBOARD_PREVIEW_NOW, previewOutsideHelp } from '../scripts/dashboard-preview.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
-import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
 
 const TYPED = 'When will Jo at Heron Lettings return my deposit?';
 const GENERAL = 'How long do landlords usually take to return a deposit?';

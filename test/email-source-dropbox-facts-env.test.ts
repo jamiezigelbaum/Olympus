@@ -7,7 +7,7 @@ import {
   createFileExtractionRuntime,
   fileExtractionCorporaRoster,
   parseFileExtractionCorporaEnv,
-} from '../src/workers/email-source/file-extraction-runtime.ts';
+} from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../src/workers/dropbox-files/connector-store.ts';
 import {

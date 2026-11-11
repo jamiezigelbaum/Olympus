@@ -375,7 +375,7 @@ describe('engine host without OpenClaw', () => {
     const readyPath = join(root, 'ready');
     writeFileSync(workerScript, `
 import { readFileSync, writeFileSync } from 'node:fs';
-import { createDashboardConsultAdapter } from ${JSON.stringify(join(src, 'workers/email-source/dashboard-consult.ts'))};
+import { createDashboardConsultAdapter } from ${JSON.stringify(join(src, 'workers/engine/dashboard/dashboard-consult.ts'))};
 import { createModelKeyReload, workerRestartsItself } from ${JSON.stringify(join(src, 'core/model-key-reload.ts'))};
 import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from ${JSON.stringify(join(src, 'core/zkapi-consult-settings.ts'))};
 const env = process.env;

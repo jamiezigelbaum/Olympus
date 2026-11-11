@@ -11,7 +11,7 @@ import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
 import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { ZKAPI_RISK_ACKNOWLEDGEMENTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION } from '../src/core/zkapi-consult-settings.ts';
 import { setZkapiFundingDate, zkapiFundingDateRefresher } from '../src/core/zkapi-funding-date.ts';
-import { createDashboardConsultAdapter } from '../src/workers/email-source/dashboard-consult.ts';
+import { createDashboardConsultAdapter } from '../src/workers/engine/dashboard/dashboard-consult.ts';
 
 const ALL_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
 const homes: string[] = [];

@@ -27,74 +27,74 @@ import { existsSync } from 'node:fs';
 import {
   createEnvCredentialBroker,
   type CredentialBroker,
-} from '../credential-broker/index.ts';
+} from '../../credential-broker/index.ts';
 import {
   buildSourceSensitivity,
   type SourceTrustTier,
-} from '../../core/source-index/types.ts';
+} from '../../../core/source-index/types.ts';
 import {
   FileExtractionSourceError,
   type ExtractionCandidateReader,
-} from '../../core/file-extraction-source.ts';
-import type { RawItem } from '../../core/contracts.ts';
-import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
-import { extractionSpoolRoot } from '../../core/olympus-layout.ts';
-import { extractionSpoolPlacementForCorpus, whatsappMovedPathMapper } from '../../core/source-placement.ts';
-import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../file-extraction/spool.ts';
-import type { LocalConnectorStore } from '../connector-store/index.ts';
-import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
+} from '../../../core/file-extraction-source.ts';
+import type { RawItem } from '../../../core/contracts.ts';
+import { mediaCacheDir, sweepMediaCache } from '../../../core/media-cache.ts';
+import { extractionSpoolRoot } from '../../../core/olympus-layout.ts';
+import { extractionSpoolPlacementForCorpus, whatsappMovedPathMapper } from '../../../core/source-placement.ts';
+import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../../file-extraction/spool.ts';
+import type { LocalConnectorStore } from '../../connector-store/index.ts';
+import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../../dropbox-files/connector-store.ts';
 import {
   DropboxExtractionSource,
   type DropboxExtractionLocalRootConfig,
-} from '../dropbox-files/extraction-source.ts';
-import { parseDropboxLocalFileRootsFromEnv } from '../dropbox-files/local-file-resolver.ts';
-import { LOCAL_FILES_ACCOUNT_SCOPE, LOCAL_FILES_PROVIDER } from '../local-files/scope.ts';
-import { LOCAL_FILES_CORPUS_ID } from '../local-files/store.ts';
+} from '../../dropbox-files/extraction-source.ts';
+import { parseDropboxLocalFileRootsFromEnv } from '../../dropbox-files/local-file-resolver.ts';
+import { LOCAL_FILES_ACCOUNT_SCOPE, LOCAL_FILES_PROVIDER } from '../../local-files/scope.ts';
+import { LOCAL_FILES_CORPUS_ID } from '../../local-files/store.ts';
 import {
   createGoogleDriveDailyRequestBudget,
   createRestGoogleDriveApiClient,
   GOOGLE_DRIVE_PROVIDER,
-} from '../google-connectors/drive.ts';
+} from '../../google-connectors/drive.ts';
 import {
   GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY,
   GoogleDriveExtractionSource,
-} from '../google-connectors/drive-extraction-source.ts';
-import type { GoogleDailyRequestBudget } from '../google-connectors/request-budget.ts';
-import { whatsAppExtractionSourceFactory } from '../whatsapp/extraction-factory.ts';
+} from '../../google-connectors/drive-extraction-source.ts';
+import type { GoogleDailyRequestBudget } from '../../google-connectors/request-budget.ts';
+import { whatsAppExtractionSourceFactory } from '../../whatsapp/extraction-factory.ts';
 import {
   WHATSAPP_EXTRACTION_SCOPE_KEY,
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
   WHATSAPP_PRODUCT_CONNECTOR_ID,
   defaultWhatsAppMediaRoots,
-} from '../whatsapp/store-sync.ts';
+} from '../../whatsapp/store-sync.ts';
 import {
   LocalFileExtractionJobStore,
   defaultFileExtractionJobsDbPath,
   type ExtractionLaneKey,
   type ExtractionTerminalRetryPath,
-} from '../file-extraction/job-store.ts';
+} from '../../file-extraction/job-store.ts';
 import {
   createDefaultExtractorRegistry,
   defaultTerminalReclassificationRules,
   extractorHealthProbes,
   terminalRetryPaths,
-} from '../file-extraction/registry.ts';
+} from '../../file-extraction/registry.ts';
 import {
   createFileExtractionRunner,
   type ExtractionRunnerCorpus,
   type FileExtractionRunner,
-} from '../file-extraction/runner.ts';
-import { createConnectorStoreExtractionSink } from '../file-extraction/store-sink.ts';
-import { createTieredStoreExtractionSink } from '../file-extraction/tiered-store-sink.ts';
-import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
-import { tieredExtractionView, type TieredExtractionView } from '../connector-store/tiered-extraction.ts';
-import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+} from '../../file-extraction/runner.ts';
+import { createConnectorStoreExtractionSink } from '../../file-extraction/store-sink.ts';
+import { createTieredStoreExtractionSink } from '../../file-extraction/tiered-store-sink.ts';
+import { connectorStoreExtractionCandidateReader } from '../../connector-store/extraction-candidate-reader.ts';
+import { tieredExtractionView, type TieredExtractionView } from '../../connector-store/tiered-extraction.ts';
+import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../../connector-store/tiered-store-set.ts';
 import type {
   ExtractionItemRef,
   ExtractorRegistryConfig,
   FileExtractionSource,
-} from '../file-extraction/types.ts';
+} from '../../file-extraction/types.ts';
 
 export { connectorStoreExtractionCandidateReader };
 
@@ -118,7 +118,7 @@ export interface FileExtractionCorpusConfig {
   /** Live scope list for a connected account whose approval may change without restart. */
   resolveScopes?: () => readonly string[];
   /** Live trusted store filters applied before candidate pagination. */
-  resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
+  resolveCandidateFilters?: () => import('../../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
   credentialHandle?: string;
   /**
    * Resolves the credential handle at RUN time, from whatever the connected
@@ -575,13 +575,13 @@ export function fileExtractionCorporaRoster(input: {
   dropbox?: {
     extractionScopes: readonly string[];
     resolveExtractionScopes?: () => readonly string[];
-    resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
+    resolveCandidateFilters?: () => import('../../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
     resolveCredentialHandle: () => string | undefined;
   };
   /** Present when the local files connector store exists. */
   localFiles?: {
     resolveExtractionScopes: () => readonly string[];
-    resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
+    resolveCandidateFilters?: () => import('../../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
   };
   /** True when the WhatsApp connector store exists. */
   whatsapp?: boolean;

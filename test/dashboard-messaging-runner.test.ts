@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { runDashboardPairingCommand } from '../src/workers/email-source/dashboard-messaging-runner.ts';
+import { runDashboardPairingCommand } from '../src/workers/engine/dashboard/dashboard-messaging-runner.ts';
 
 test('pairing runner sends replies only on the private input pipe', async () => {
   const controller = new AbortController();

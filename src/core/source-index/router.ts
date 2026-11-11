@@ -30,6 +30,7 @@ import {
 } from './retrieval.ts';
 import {
   recordSourceAnswerCorpusTiming,
+  recordSourceAnswerQueryStages,
   runInSourceAnswerLane,
   sourceAnswerTraceErrorClass,
 } from '../../workers/source-index/answer-latency-trace.ts';
@@ -303,9 +304,21 @@ export interface SourceIndexRoutedCorpusTiming {
  * snapshot of their tier ledger, so an item whose copy moved between two
  * stores mid-query is never returned from both. Returns the hits to keep.
  */
-export type SourceIndexVisibilityGate = (
+export type SourceIndexVisibilityGate = ((
   hits: readonly SourceIndexRoutedSearchHit[],
-) => readonly SourceIndexRoutedSearchHit[];
+) => readonly SourceIndexRoutedSearchHit[]) & {
+  // The same judgment with its reads off the request thread, for a caller
+  // that can wait (#1305).
+  offThread?: (hits: readonly SourceIndexRoutedSearchHit[]) => Promise<readonly SourceIndexRoutedSearchHit[]>;
+};
+
+// Applies the gate off the request thread where it can be.
+export function applySourceIndexVisibilityGate(
+  gate: SourceIndexVisibilityGate,
+  hits: readonly SourceIndexRoutedSearchHit[],
+): Promise<readonly SourceIndexRoutedSearchHit[]> {
+  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+}
 
 export interface RouteSourceIndexSearchOptions {
   registry: SourceIndexCorpusRegistry;
@@ -317,7 +330,7 @@ export interface RouteSourceIndexSearchOptions {
   // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
   // (e.g. a multi-GB keyword index under write contention) can no longer hold
   // the whole source_answer hostage — total fan-out time is bounded by this
-  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 10s when
+  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 60s when
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
@@ -344,35 +357,32 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
 // How long one search may wait, before its lane deadlines start, for a local
 // embedding model that is still starting (#1172). A third of the 45 s
 // source-answer hand-off (SOURCE_ANSWER_HANDOFF_DEFAULT_MS in
-// core/source-answer-jobs.ts): this wait plus the 10 s lane deadline below
-// leaves the remaining 20 s for evidence reading and the Analyst, so a cold
-// first question still answers before the hand-off instead of becoming a job.
+// core/source-answer-jobs.ts). Longer searches continue through the existing
+// background-job hand-off while the request thread remains responsive.
 // A warm model never waits: preparation returns as soon as the query embeds.
 // A model still not started by then leaves the semantic lane skipped, and the
 // EvidencePack's coverage says so.
 export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
-// Default per-lane retrieval deadline (ms).
+// Default per-lane retrieval deadline (ms), and the whole-Ask search budget.
 //
-// 10s is not a round number picked for feel — it is the SQLite busy_timeout
-// every store in this repo opens with (`PRAGMA busy_timeout = 10000`). That
-// makes it a floor, not a preference: a lane whose only problem is waiting
-// behind the single writer resolves within busy_timeout, so any deadline
-// SHORTER than busy_timeout would drop lanes that were about to succeed and
-// report contention as loss. Lower this only in lockstep with that pragma.
+// Since #1305 each store reads on its own warm worker, so a lane's time is its
+// own store's statement, not a queue behind other stores. The lane deadline
+// covers one healthy store at Sparta size with margin; the Ask budget is about
+// what a 1.4.x Ask takes on Sparta (roughly 100 s), across the literal query
+// and its expansions, which run one after another. A lane that misses either
+// is reported as still being searched (#1317's wording), and its statement
+// finishes on its worker, so the store is warm for the next Ask. Neither
+// binds on a small install, whose lanes return in milliseconds.
 //
-// Headroom against measured healthy latency, re-checked 2026-07-28:
-//   keyword FTS       tens of ms on every live corpus
-//   semantic (vector) ~1.3s on the largest live corpus (170,721 vectors) after
-//                     the decodeEmbedding boxing fix; it was ~17.5s before,
-//                     which is why hybrid answers used to lose this race
-// so a healthy fan-out finishes with roughly 7x headroom, and the deadline
-// binds only on genuine contention or a wedge.
+// Never below the stores' SQLite busy_timeout (10 s): a lane waiting out the
+// single writer resolves within it.
 //
-// Exact-vector adapters receive a cooperative deadline just inside this
-// authoritative timer. That lets CPU-bound scans yield or stop before they can
-// monopolize the event loop and prevent the timer itself from firing.
-const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 10_000;
+// Provisional until the #1305 testbed copy's live pool fields set them.
+const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60_000;
+const DEFAULT_ASK_SEARCH_BUDGET_MS = 100_000;
+// Exact-vector adapters receive a cooperative deadline just inside the
+// authoritative timer, so a scan can yield before holding the event loop.
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
 // A deadline timer this late means the thread was held past it (see
 // runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
@@ -479,20 +489,33 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  // Keyword translation and the query embedding are independent, so each
+  // corpus prepares both at once: one after the other, every lane waited for
+  // the sum of the two model waits (#1305).
+  let prepareKeywordsMaxMs = 0;
+  let prepareSemanticMaxMs = 0;
+  const timed = async (run: () => Promise<void> | undefined): Promise<number> => {
+    const started = Date.now();
+    try { await run(); } catch { /* the original query remains usable, and a lane reports its own skip */ }
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
-    try { await adapter.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
     // A metadata-only search (the Private-match probe) has its own short
     // budget and reports an incomplete lane as unknown; it never waits here.
-    if (
-      adapter.prepareSemantic
+    const semantic = adapter.prepareSemantic
       && semanticPrepareBudgetMs > 0
       && request.context.metadataOnly !== true
-      && retrievalStates.get(corpus.corpusId)!.hybridServable
-    ) {
-      try { await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs); } catch { /* the lane reports its own skip */ }
-    }
+      && retrievalStates.get(corpus.corpusId)!.hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed(() => adapter.prepareKeywords?.(request.query)),
+      semantic ? timed(() => adapter.prepareSemantic!(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0),
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
+  const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
@@ -580,9 +603,10 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     });
   }
 
+  const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     // One call for every lane's hits: one snapshot decides them all.
-    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
     for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
   }
 
@@ -636,6 +660,13 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     rawExposed: false,
   };
   assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt,
+  });
   return result;
 }
 
@@ -936,7 +967,7 @@ async function runCorpusLaneWithDeadline(
   }
 }
 
-function resolveLaneTimeoutMs(explicit: number | undefined): number {
+export function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (explicit !== undefined) return explicit;
   const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
@@ -944,6 +975,14 @@ function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (!Number.isFinite(parsed)) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   // parsed <= 0 is honored as "disable the deadline" by runCorpusLaneWithDeadline.
   return parsed;
+}
+
+// The whole-Ask search budget (BuildEvidencePackInput.searchBudgetMs).
+export function resolveAskSearchBudgetMs(explicit: number | undefined): number {
+  if (explicit !== undefined) return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
 }
 
 function cooperativeLaneDeadlineAtMs(timeoutMs: number): number | undefined {

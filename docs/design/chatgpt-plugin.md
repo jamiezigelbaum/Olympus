@@ -1041,7 +1041,7 @@ owner rulings of §10: automatic by default (no approval step; strict mode is
 C6), enabled only from the Mac, fence recovery a button and never automatic,
 the six risk acknowledgements (version 6), one "send" in total including the fee
 buffer. The code is `src/core/consult-settings-writer.ts` (the writer),
-`src/workers/email-source/dashboard-consult.ts` (the Mac dashboard adapter,
+`src/workers/engine/dashboard/dashboard-consult.ts` (the Mac dashboard adapter,
 the writer's one caller), `src/workers/dashboard/outside-help.ts` and
 `pages/outside-help.ts` (the card), and the five routes in
 `src/workers/engine/index.ts`.

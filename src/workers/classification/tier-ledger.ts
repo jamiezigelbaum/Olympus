@@ -145,6 +145,101 @@ function idParams(identity: TierLedgerIdentity): [string, string, string, string
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
 
+const IDENTITY_BATCH = 200;
+
+function uniqueIdentities(identities: readonly TierLedgerIdentity[]): TierLedgerIdentity[] {
+  const unique = new Map<string, TierLedgerIdentity>();
+  for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
+  return [...unique.values()];
+}
+
+function identityValues(batch: readonly TierLedgerIdentity[]): { values: string; params: string[] } {
+  return { values: batch.map(() => '(?, ?, ?, ?)').join(', '), params: batch.flatMap((identity) => [...idParams(identity)]) };
+}
+
+/** `copiesForMany`'s reads: each item's copies, a batch at a time, every copy superseded while a deletion or Secret is under way. */
+function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Map<string, TierCopy[]>, unknown> {
+  const result = new Map<string, TierCopy[]>();
+  for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = (yield {
+      sql: `SELECT * FROM tier_copies
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        ORDER BY corpus_id`,
+      params, mode: 'all',
+    }) as TierCopyRow[];
+    for (const row of rows) {
+      const key = tierLedgerIdentityKey(identityFromRow(row));
+      const existing = result.get(key);
+      if (existing) existing.push(copyFromRow(row));
+      else result.set(key, [copyFromRow(row)]);
+    }
+    // An item whose deletion or Secret is under way (an intent not yet cleared) is hidden at once: a read in
+    // the same snapshot sees every copy as superseded, whichever legs have been written so far.
+    const pending = (yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+        WHERE kind IN ('deletion', 'secret')
+          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+      params, mode: 'all',
+    }) as Array<{ provider: string; account_scope: string; conversation_key: string; provider_item_id: string }>;
+    for (const row of pending) {
+      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row as never)));
+      if (hidden) for (const copy of hidden) if (copy.state !== 'superseded') copy.state = 'superseded';
+    }
+  }
+  return result;
+}
+
+/**
+ * Of these items, those recorded Personal-first before #1316 that still wait
+ * for their content verdict (listPersonalFirstWindow's rule, without the
+ * window): their text has no held copy, but they are withheld all the same.
+ */
+function* personalFirstWaitingSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Set<string>, unknown> {
+  const result = new Set<string>();
+  for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = (yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          AND content_pending = 1
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`,
+      params: [...params, PERSONAL_FIRST_REASON], mode: 'all',
+    }) as Array<Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>>;
+    for (const row of rows) result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
+
+/** `routedWithoutCopies`'s reads: of these items, those routed that hold no copy. */
+function* routedWithoutCopiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Set<string>, unknown> {
+  const result = new Set<string>();
+  for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = (yield {
+      sql: `SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+        WHERE i.routed = 1
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${values})
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies c
+            WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+              AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          )`,
+      params, mode: 'all',
+    }) as Array<Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>>;
+    for (const row of rows) result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
+
+/** What the search's visibility gate reads from one ledger (`visibilityReadSteps`). */
+export interface TierVisibilityReads {
+  copies: Map<string, TierCopy[]>;
+  routedWithoutCopies: Set<string>;
+  /** Items still waiting Personal-first (#1316); read only when asked for. */
+  personalFirstWaiting: Set<string>;
+}
+
 export interface TierLedgerStoredPlacement {
   trustDomain: SourceTrustDomain;
   trustTier: SourceTrustTier;
@@ -2353,39 +2448,48 @@ export class TierLedger {
    * `tierLedgerIdentityKey`. Items with no rows are absent from the map.
    */
   copiesForMany(identities: readonly TierLedgerIdentity[]): Map<string, TierCopy[]> {
-    const result = new Map<string, TierCopy[]>();
-    if (identities.length === 0) return result;
-    const unique = new Map<string, TierLedgerIdentity>();
-    for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0; offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
-          ORDER BY corpus_id
-        `).all(...batch.flatMap((identity) => [...idParams(identity)])) as TierCopyRow[];
-        for (const row of rows) {
-          const key = tierLedgerIdentityKey(identityFromRow(row));
-          const existing = result.get(key);
-          if (existing) existing.push(copyFromRow(row));
-          else result.set(key, [copyFromRow(row)]);
-        }
-        // An item whose deletion or Secret is under way (an intent not yet cleared) is hidden at once: a read in
-        // the same snapshot sees every copy as superseded, whichever legs have been written so far.
-        const pending = this.db.query(`
-          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-          WHERE kind IN ('deletion', 'secret')
-            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
-        `).all(...batch.flatMap((identity) => [...idParams(identity)])) as Array<{ provider: string; account_scope: string; conversation_key: string; provider_item_id: string }>;
-        for (const row of pending) {
-          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row as never)));
-          if (hidden) for (const copy of hidden) if (copy.state !== 'superseded') copy.state = 'superseded';
-        }
+    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+  }
+
+  /**
+   * What the search's visibility gate reads, as reads a caller can make on
+   * another connection in one snapshot (#1305): each item's copies
+   * (`copiesForMany`) and, of the items with none, those routed without a
+   * copy (`routedWithoutCopies`), and with `personalFirst`, of the items with
+   * no held copy, those still waiting Personal-first (#1316), for the judge's
+   * order. `readSteps` makes them here.
+   */
+  *visibilityReadSteps(
+    identities: readonly TierLedgerIdentity[],
+    options: { personalFirst?: boolean } = {},
+  ): Generator<LedgerRead, TierVisibilityReads, unknown> {
+    const list = uniqueIdentities(identities);
+    const copies = yield* copiesSteps(list);
+    const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
+    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    if (!options.personalFirst) return { copies, routedWithoutCopies, personalFirstWaiting: new Set() };
+    const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === 'current' && copy.embedHold));
+    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
+  }
+
+  /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
+  onClose(listener: () => void): void {
+    (this.closeListeners ??= []).push(listener);
+  }
+
+  private closeListeners: Array<() => void> | undefined;
+
+  /** Runs a read generator on this connection, in one transaction. */
+  readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params as never[];
+        next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
       }
+      return next.value;
     })();
-    return result;
   }
 
   /**
@@ -2684,28 +2788,7 @@ export class TierLedger {
    * item is never legacy: a visibility check must hide it, not pass it.
    */
   routedWithoutCopies(identities: readonly TierLedgerIdentity[]): Set<string> {
-    const result = new Set<string>();
-    if (identities.length === 0) return result;
-    const unique = new Map<string, TierLedgerIdentity>();
-    for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0; offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
-          WHERE i.routed = 1
-            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies c
-              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-            )
-        `).all(...batch.flatMap((identity) => [...idParams(identity)])) as Array<Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>>;
-        for (const row of rows) result.add(tierLedgerIdentityKey(identityOfRow(row)));
-      }
-    })();
-    return result;
+    return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
 
   /**
@@ -3971,6 +4054,19 @@ export class TierLedger {
    * can outlive their item during an account removal, so they still check
    * for it; moving items come from tier_items_state.
    */
+  /**
+   * The corpus's current copies held from embedding: one count on the
+   * tier_copies_corpus index. An Ask reads this for every corpus it searched;
+   * corpusCopyCounts' superseded and moving joins cost Sparta's ledger about
+   * 10 s of one Ask on the request thread (#1305).
+   */
+  corpusHeldCopyCount(corpusId: string): number {
+    return (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
+    `).get(corpusId) as { n: number }).n;
+  }
+
   corpusCopyCounts(corpusId: string): { current: number; superseded: number; staged: number; held: number; moving: number } {
     const rows = this.db.query(`
       SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies
@@ -4046,26 +4142,6 @@ export class TierLedger {
       mode: 'get',
     }) as { items: number; awaiting: number };
     return { items: row.items, awaitingJudgment: row.awaiting };
-  }
-
-  /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
-  onClose(listener: () => void): void {
-    (this.closeListeners ??= []).push(listener);
-  }
-
-  private closeListeners: Array<() => void> | undefined;
-
-  /** Runs a read generator on this connection, in one transaction. */
-  readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {
-    return this.db.transaction(() => {
-      let next = steps.next();
-      while (!next.done) {
-        const statement = this.db.query(next.value.sql);
-        const params = next.value.params as never[];
-        next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
-      }
-      return next.value;
-    })();
   }
 
   /**

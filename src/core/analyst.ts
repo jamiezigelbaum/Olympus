@@ -32,6 +32,7 @@ import {
 } from './source-index/chunk-selection.ts';
 import { assertEvidencePackModelEligible } from './source-model-policy.ts';
 import { isSecureSensitivity } from './source-index/types.ts';
+import { laneTimeoutGap, timedOutCorpora } from './source-index/partial-search.ts';
 import { OperationError } from './operation-error.ts';
 import { evidenceVersionIndex, evidenceVersionsDated, type VersionedEvidenceText } from './evidence-versions.ts';
 
@@ -303,9 +304,19 @@ export const NO_EVIDENCE_ANSWER = 'I have no matching evidence for this question
 
 export function noEvidenceAnalystResult(pack: EvidencePack): AnalystResult {
   const searched = new Set(pack.coverage.searchedCorpora);
-  const stillSearching = [...new Set(pack.coverage.skippedCorpora
-    .filter((skip) => skip.reason === 'lane_timeout' && !searched.has(skip.corpusId))
-    .map((skip) => skip.corpusId))].sort();
+  // A source searched by keyword only, its search by meaning cut for time,
+  // may still hold the answer too.
+  const { stillSearching, partlySearched } = timedOutCorpora(pack.coverage);
+  if (stillSearching.length === 0 && partlySearched.length > 0) {
+    const sources = partlySearched.length === 1 ? '1 source' : `${partlySearched.length} sources`;
+    return {
+      answer: `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources} by meaning and checked only their keyword matches, so the answer may still be there. Ask again in a moment.`,
+      citations: [],
+      unanswered: foldCoverageGaps(pack, [
+        `No matching evidence found in the searched corpora for: ${pack.question}`,
+      ]),
+    };
+  }
   if (stillSearching.length > 0) {
     const sources = stillSearching.length === 1 ? '1 source' : `${stillSearching.length} sources`;
     return {
@@ -314,7 +325,6 @@ export function noEvidenceAnalystResult(pack: EvidencePack): AnalystResult {
         : `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources}, so the answer may still be there. Ask again in a moment.`,
       citations: [],
       unanswered: foldCoverageGaps(pack, [
-        `Ran out of time searching: ${stillSearching.join(', ')}`,
         ...(searched.size > 0 ? [`No matching evidence found in the searched corpora for: ${pack.question}`] : []),
       ]),
     };
@@ -1351,7 +1361,9 @@ function countAnswerSentences(answer: string): number {
 // assistant cannot silently drop a source.
 function foldCoverageGaps(pack: EvidencePack, modelUnanswered: readonly string[]): string[] {
   const gaps = [...modelUnanswered];
-  for (const skip of pack.coverage.skippedCorpora) gaps.push(`Skipped ${skip.corpusId}: ${skip.reason}`);
+  for (const skip of pack.coverage.skippedCorpora) {
+    gaps.push(skip.reason === 'lane_timeout' ? laneTimeoutGap(skip.corpusId) : `Skipped ${skip.corpusId}: ${skip.reason}`);
+  }
   for (const gap of pack.coverage.extractionGaps) gaps.push(gap);
   const seen = new Set<string>();
   const out: string[] = [];

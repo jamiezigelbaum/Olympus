@@ -28,7 +28,7 @@ import {
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import type { ArchiveImportDashboard } from '../src/workers/archive-import/dashboard.ts';
 import { renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
-import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS,

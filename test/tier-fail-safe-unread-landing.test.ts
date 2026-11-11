@@ -17,7 +17,7 @@ import type { TierSniffer } from '../src/workers/classification/tier-classifier.
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createTieredLaneSet, onDemandTierStore, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
-import { createFileExtractionRuntime } from '../src/workers/email-source/file-extraction-runtime.ts';
+import { createFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { SECRET_RESTORED_REREADS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import { EXTRACTION_SINK_SKIPPED_METADATA_ONLY } from '../src/workers/file-extraction/store-sink.ts';

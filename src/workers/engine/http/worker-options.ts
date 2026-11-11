@@ -1,5 +1,5 @@
 import type { JudgeChoice } from '../../classification/judge-spending.ts';
-import type { DashboardPeopleBackend } from '../../email-source/dashboard-people.ts';
+import type { DashboardPeopleBackend } from '../dashboard/dashboard-people.ts';
 import type {
   LocalModelDiscoveryResult,
   LocalModelSelection,
@@ -40,10 +40,10 @@ import type { SourceEmbeddingProvider } from '../../source-index/embeddings.ts';
 import type { SourceScheduler, SourceSchedulerSource } from '../../source-scheduler.ts';
 import type { SovereigntyEngine, SovereigntyPresetName } from '../../../core/sovereignty.ts';
 import type { LocalSourceWatchStore } from '../../../core/source-watch.ts';
-import type { DashboardPanelTools } from '../../email-source/dashboard-panel-tools.ts';
+import type { DashboardPanelTools } from '../dashboard/dashboard-panel-tools.ts';
 import type { SystemSupportFacts } from '../../dashboard/source-failure.ts';
-import type { DashboardConsultBackend } from '../../email-source/dashboard-consult.ts';
-import type { LocalPrivateAnswers } from '../../email-source/local-private-answers.ts';
+import type { DashboardConsultBackend } from '../dashboard/dashboard-consult.ts';
+import type { LocalPrivateAnswers } from '../runtime/local-private-answers.ts';
 import type {
   OlympusFolderScopeSourceId,
   OlympusFolderScopeBrowseResult,
@@ -254,7 +254,7 @@ export interface EmailSourceWorkerOptions {
       save: (choice: JudgeChoice, capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
     /** The model pickers on Privacy rules (model-choices-backend.ts). */
-    modelChoices?: import('../../email-source/model-choices-backend.ts').ModelChoicesBackend;
+    modelChoices?: import('../runtime/model-choices-backend.ts').ModelChoicesBackend;
     /** Go easy on this computer (#922, local-pacing.ts): shown under the judge choice. */
     goEasy?: { on: () => boolean; save: (on: boolean) => { ok: true; status_message: string } };
     modelSetup?: () => ModelSetupView;

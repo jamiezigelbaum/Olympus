@@ -43,7 +43,7 @@ import { CAPTURE_CLAIM_RECLAIM_AGE_MS, SourceStorageUnavailableError, __sourceSt
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { WhatsAppExtractionSource } from '../src/workers/whatsapp/extraction-source.ts';
-import { moveAccountsAtBoot } from '../src/workers/engine/server.ts';
+import { moveAccountsAtBoot } from '../src/workers/engine/runtime/boot-storage.ts';
 
 type Env = Record<string, string>;
 
