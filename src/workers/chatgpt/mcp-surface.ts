@@ -465,19 +465,29 @@ export async function callChatGptTool(
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record(withVisibleJobId(PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+  return record(forClaude(name, PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
 }
 
 /**
- * A handed-off answer names its job in the text too when the host's model
- * never sees `structuredContent` (Claude, #1327), so the model can call
- * source_answer_result. The id answers only the connection that asked
- * (source-answer-jobs.ts), and a Private answer still reaches only the panel.
+ * Lines only Claude's model gets, because Claude differs from ChatGPT in two ways:
+ * - its model never sees `structuredContent`, so a handed-off answer names its job
+ *   in the text (#1327). The id answers only the connection that asked
+ *   (source-answer-jobs.ts), and a Private answer still reaches only the panel;
+ * - its iPhone app runs the tools but shows no MCP App panel (#1303, 2026-11-11), and
+ *   the server can't tell the phone from web or desktop. So a result whose point is a
+ *   panel also says what to do when none appears, and never leaves a dead end.
  */
-function withVisibleJobId(result: ChatGptToolResult, client: McpAppClient | undefined): ChatGptToolResult {
+export const CLAUDE_NO_DASHBOARD_PANEL = 'If no dashboard panel appears (Claude\'s phone apps don\'t show panels yet), give the user this status in words; the full dashboard opens in Claude on the web or desktop, and in Olympus on their computer.';
+export const CLAUDE_NO_QUESTION_PANEL = 'If no panel appears (Claude\'s phone apps don\'t show panels yet), tell the user to open this chat in Claude on the web or desktop and type the question in the panel there.';
+
+function forClaude(name: string, result: ChatGptToolResult, client: McpAppClient | undefined): ChatGptToolResult {
+  if (client?.host !== 'claude' || result.isError) return result;
   const structured = result.structuredContent as { status?: unknown; job_id?: unknown } | undefined;
-  if (client?.host !== 'claude' || structured?.status !== 'working' || typeof structured.job_id !== 'string') return result;
-  return { ...result, content: [...result.content, { type: 'text', text: `job_id: ${structured.job_id}` }] };
+  const line = structured?.status === 'working' && typeof structured.job_id === 'string' ? `job_id: ${structured.job_id}`
+    : name === DASHBOARD_TOOL_NAME ? CLAUDE_NO_DASHBOARD_PANEL
+      : name === OPEN_PRIVATE_QUESTION_TOOL.name && structured?.status === 'opened' ? CLAUDE_NO_QUESTION_PANEL
+        : undefined;
+  return line ? { ...result, content: [...result.content, { type: 'text', text: line }] } : result;
 }
 
 /** Records a search or source answer as it leaves for ChatGPT; anything else (and an error) records nothing. */

@@ -116,7 +116,8 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
   };
   let dashboard: Awaited<ReturnType<typeof openFreshDashboard>> | undefined;
   try {
-    dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 300, pollMs: 1 });
+    // Each wait ends as soon as its condition holds; 300 ms was too short for the unlock round trip on a busy CI runner (#1373).
+    dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 2_000, pollMs: 1 });
     expect(events.indexOf('bridge.start')).toBeLessThan(events.indexOf('navigate'));
     if (mode === 'refused') {
       await expect(dashboard.privacyChoice()).rejects.toThrow(/^first-run privacy choice was not saved: the dashboard said "[^"]+"$/);

@@ -18,7 +18,7 @@
  * a browser expects; on macOS the engine itself listens on that loopback port.
  */
 import { sourceCard, sourceConnected } from './source-cards.ts';
-import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
+import { archiveStateSiblingPath, olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { isPendingPrivacyPolicy, readComputerUseState } from '../../src/core/first-run-privacy.ts';
 import { validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
@@ -33,6 +33,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
 import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
+import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
+import { engineStatusSnapshotPath } from '../../src/workers/engine-split/runtime.ts';
 import { tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
 import { desktopSandboxOrigin, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
 import { privateNoteKindIn } from './private-note.ts';
@@ -1888,11 +1890,24 @@ function collectLogs(outDir: string): never {
   written.push('engine-status.json');
   writeFileSync(join(outDir, 'doctor.json'), olympus(['doctor']).stdout);
   written.push('doctor.json');
+  // The engine split's state, as the front last read it, and the archive import's own records (L1, 2026-11-11). Absent files are left out.
+  for (const path of engineStatePaths(process.env)) {
+    if (!existsSync(path)) continue;
+    const name = path.split('/').pop()!;
+    writeFileSync(join(outDir, name), readFileSync(path));
+    written.push(name);
+  }
   const fakeLog = join(WORKDIR, 'fake-readwise.log');
   if (existsSync(fakeLog)) { writeFileSync(join(outDir, 'fake-readwise.log'), readFileSync(fakeLog)); written.push('fake-readwise.log'); }
   writeFileSync(join(outDir, 'tier-decisions.json'), JSON.stringify(tierDecisions(), null, 1));
   written.push('tier-decisions.json');
   emit({ ok: true, files: written });
+}
+
+/** The engine-status snapshot the front reads, and the archive import state and request files. */
+export function engineStatePaths(env: Record<string, string | undefined>): string[] {
+  const archiveState = defaultArchiveImportStatePath(env);
+  return [engineStatusSnapshotPath(env), archiveState, archiveStateSiblingPath(archiveState, 'archive-import-requests.json')];
 }
 
 /** The tier ledger and sniffer tables whose rows are content-free (tiers, flags, reason codes, digests, verdicts); the sniffer's queued material is left out. */

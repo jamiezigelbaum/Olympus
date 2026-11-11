@@ -7,11 +7,12 @@ import mainDashboard from '../connect-relay/server/generated/chatgpt-dashboard.j
 import mainAnswer from '../connect-relay/server/generated/chatgpt-private-answer.json';
 import mainQuestion from '../connect-relay/server/generated/chatgpt-private-question.json';
 import { claudeAppDomain } from '../connect-relay/shared/mcp-app-client.ts';
-import { configFromPluginConfig, defaultConfig, loadConfig, NATIVE_REMOTE_CONFIG_ENV, parseRemoteConfig } from '../src/core/config.ts';
+import { claudeAppEnabled, configFromPluginConfig, defaultConfig, loadConfig, NATIVE_REMOTE_CONFIG_ENV, parseRemoteConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { parseRemotePublicBaseUrl, remoteMcpResource, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { grantMcpSurface, isChatGptGrant, CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID, CURSOR_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CLAUDE_NO_DASHBOARD_PANEL, CLAUDE_NO_QUESTION_PANEL } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { PrivateQuestionJobs } from '../src/workers/chatgpt/private-question-jobs.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-contract.ts';
@@ -97,9 +98,10 @@ async function listing(token: string): Promise<{ tools: any[]; resources?: any[]
 }
 
 describe('Claude MCP App opt-in', () => {
-  test('setting defaults off and follows plugin, standalone and native remote configuration', () => {
-    expect(defaultConfig().remote?.claudeAppEnabled === true).toBe(false);
-    expect(parseRemoteConfig({ enabled: true }).claudeAppEnabled === true).toBe(false);
+  test('setting defaults on, turns off only when set to false, and follows plugin, standalone and native remote configuration', () => {
+    expect(claudeAppEnabled(defaultConfig())).toBe(true);
+    expect(claudeAppEnabled({ remote: parseRemoteConfig({ enabled: true }) })).toBe(true);
+    expect(claudeAppEnabled({ remote: parseRemoteConfig({ claudeAppEnabled: false }) })).toBe(false);
     for (const value of [false, 'true', 1, null]) expect(parseRemoteConfig({ claudeAppEnabled: value }).claudeAppEnabled).toBe(false);
     expect(configFromPluginConfig({ remote: { claudeAppEnabled: true } }).remote?.claudeAppEnabled).toBe(true);
     mkdirSync(join(dir, '.olympus'));
@@ -152,6 +154,8 @@ describe('Claude MCP App opt-in', () => {
     }
     const dashboardResult = await request(token, 'tools/call', { name: 'olympus_dashboard', arguments: {} });
     expect(dashboardResult.body.result.structuredContent.v).toBe(1);
+    // Claude's iPhone app shows no panel (#1303): the text says what to do without one.
+    expect(dashboardResult.body.result.content.at(-1).text).toBe(CLAUDE_NO_DASHBOARD_PANEL);
     const search = (await request(token, 'tools/call', { name: 'olympus_search', arguments: { question: 'test' } })).body.result;
     expect(search._meta[PRIVATE_ANSWER_META_KEY].jobId).toMatch(/^oly2p\./);
     expect(JSON.stringify([search.content, search.structuredContent])).not.toContain(search._meta[PRIVATE_ANSWER_META_KEY].jobId);
@@ -159,6 +163,7 @@ describe('Claude MCP App opt-in', () => {
     expect(JSON.stringify(search)).not.toContain('PRIVATE_ANSWER_SENTINEL');
     const question = (await request(token, 'tools/call', { name: 'open_private_question', arguments: {} })).body.result;
     expect(JSON.stringify(question)).not.toContain('connect ChatGPT');
+    expect(question.content.at(-1).text).toBe(question.structuredContent.status === 'opened' ? CLAUDE_NO_QUESTION_PANEL : question.content.at(-1).text);
     expect(question._meta[PRIVATE_QUESTION_META_KEY].jobId).toMatch(/^oly2p\./);
     expect(JSON.stringify([question.content, question.structuredContent])).not.toContain(question._meta[PRIVATE_QUESTION_META_KEY].jobId);
     expect((await request(token, 'tools/list')).response.headers.get('x-olympus-surface')).toBe('claude-app');
@@ -181,6 +186,9 @@ describe('Claude MCP App opt-in', () => {
 
   test('ChatGPT tools/list and all resources/read are byte-identical to the committed main assets with either setting', async () => {
     const token = grant(CHATGPT_CLIENT_ID);
+    enabled = true;
+    const chatgptDashboard = (await request(token, 'tools/call', { name: 'olympus_dashboard', arguments: {} })).body.result;
+    expect(JSON.stringify(chatgptDashboard.content)).not.toContain(CLAUDE_NO_DASHBOARD_PANEL);
     for (const setting of [false, true]) {
       enabled = setting;
       expect(JSON.stringify(await listing(token))).toBe(JSON.stringify(mainSurface));
