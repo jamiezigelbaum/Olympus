@@ -701,9 +701,13 @@ export interface EvalAnswerStageAudit {
   analystModelIds?: readonly string[];
 }
 
-/** The text's distinct whitespace tokens, lowercased, with edge punctuation trimmed. */
+/**
+ * The text's distinct tokens, lowercased, with edge punctuation trimmed. Splits
+ * on whitespace and on JSON quotes and brackets too, so a value inside a
+ * serialized table or citation field is its own token.
+ */
 function textTokens(text: string): Set<string> {
-  return new Set(text.toLowerCase().split(/\s+/u)
+  return new Set(text.toLowerCase().split(/[\s"[\]{}]+/u)
     .map((token) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
     .filter((token) => token.length > 0));
 }

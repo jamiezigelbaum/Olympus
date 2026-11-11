@@ -252,6 +252,10 @@ describe('the real eval report locates an expected item and value for a miss', (
     // Whole tokens only: '41' is not supported by a seat that says '4182'.
     const part = { ...citing(1), answer: 'The total is 41 dollars.' } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, part, part)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 0 });
+    // A value held only in a cited table is still whole-token supported.
+    const tabled = { ...pack, candidates: [pack.candidates[0]!, { ...other, tables: [{ columns: ['total'], rows: [['5120']] }] }] } as typeof pack;
+    const fromTable = { ...citing(2), answer: 'The fuel total is 5120 dollars.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, tabled, fromTable, fromTable)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
     // A citation naming nothing in the pack is counted, not seated.
     const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });
