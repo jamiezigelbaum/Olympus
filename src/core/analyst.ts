@@ -567,8 +567,10 @@ function formatCompactCandidate(
   if (authored && updated && updated !== authored) details.push(`updated: ${updated}`);
   const source = citation?.sourceLabel?.trim();
   if (source && source !== title) details.push(`source: ${compactSourceText(source)}`);
-  const place = compactLocator(citation?.uri?.trim(), title);
-  if (place) details.push(`in: ${place}`);
+  // The whole locator, never split into folder and name: a "where is it"
+  // answer quotes the path or link as one string (eval rerun 39).
+  const locator = citation?.uri?.trim();
+  if (locator && locator !== title) details.push(`at: ${locator}`);
   const author = citation?.authorLabel?.trim();
   if (author) details.push(`from: ${compactSourceText(author)}`);
   const conversation = citation?.conversationLabel?.trim();
@@ -589,13 +591,6 @@ function formatCompactCandidate(
   const tables = (candidate.tables ?? []).map(formatTable);
   if (tables.length > 0) lines.push(`tables: ${JSON.stringify(tables)}`);
   return lines.join('\n');
-}
-
-// Where the item lives, without repeating its name: the folder of a path that ends in it, else the locator.
-function compactLocator(uri: string | undefined, title: string): string | undefined {
-  if (!uri || uri === title) return undefined;
-  if (uri.endsWith(`/${title}`)) return uri.slice(0, -(title.length + 1)) || undefined;
-  return uri;
 }
 
 /**
