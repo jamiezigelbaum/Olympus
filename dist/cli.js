@@ -74309,7 +74309,9 @@ function amountReadings(amount) {
     return [grouped];
   return last.length === 3 ? [grouped, decimal] : [decimal];
 }
-function amountsMissingFrom(answer, evidence) {
+function amountsMissingFrom(rawAnswer, rawEvidence) {
+  const answer = rawAnswer.replace(/[\u00a0\u2009\u202f]/gu, " ");
+  const evidence = rawEvidence.replace(/[\u00a0\u2009\u202f]/gu, " ");
   const seen = new Set;
   for (const match of evidence.matchAll(/\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
     for (const reading of amountReadings(match[0]))

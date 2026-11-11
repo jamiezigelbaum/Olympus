@@ -658,7 +658,10 @@ function amountReadings(amount: string): string[] {
  * whole-number chunks also count as evidence numbers, so "2024 100" still
  * shows 2024. Written number shapes only: no question semantics.
  */
-export function amountsMissingFrom(answer: string, evidence: string): string[] {
+export function amountsMissingFrom(rawAnswer: string, rawEvidence: string): string[] {
+  // A no-break or thin space groups digits like a plain space.
+  const answer = rawAnswer.replace(/[\u00a0\u2009\u202f]/gu, ' ');
+  const evidence = rawEvidence.replace(/[\u00a0\u2009\u202f]/gu, ' ');
   const seen = new Set<string>();
   // Grouping (a space, comma, point or apostrophe before exactly three
   // digits) comes before one optional fraction; nothing groups after it, so

@@ -88,3 +88,9 @@ test('a count after a decimal amount is not grouped into it', async () => {
   expect(amountsMissingFrom('Shipped 100 units', 'Paid €12.50 100 units shipped')).toEqual([]);
   expect(amountsMissingFrom('Paid €12,500.75', 'Paid €12.50 100 units shipped')).toEqual(['€12,500.75']);
 });
+
+test('a no-break or thin space groups digits like a plain space', async () => {
+  const { amountsMissingFrom } = await import('../src/core/analyst.ts');
+  expect(amountsMissingFrom('Paid €1\u202f240,50', 'Paid 1240.50 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Paid €1\u00a0240,50', 'Paid 1\u2009240.50 EUR')).toEqual([]);
+});
