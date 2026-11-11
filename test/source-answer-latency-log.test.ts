@@ -24,7 +24,9 @@ import {
   observeSourceAnswerRetrievalAttempt,
   observeSourceAnswerRoutedQuery,
   recordSourceAnswerCorpusTiming,
+  recordSourceAnswerAnalystFit,
   recordSourceAnswerHydration,
+  recordSourceAnswerPackSeats,
   recordSourceAnswerQueryPlanner,
   recordSourceAnswerQueryPlannerDisposition,
   recordSourceAnswerRoute,
@@ -283,6 +285,46 @@ describe('source_answer v2 trace allowlist', () => {
     expect(record.analyst_legs).toHaveLength(1);
     expect(record.analyst_legs[0]?.outcome).toBe('success');
     expect(record.residual_analyst_orphan_count).toBe(0);
+  });
+});
+
+describe('source_answer latency trace seat order (#1354)', () => {
+  test('carries the pack\'s store per seat and the seats each fit kept, ids and counts only', async () => {
+    const trace = createSourceAnswerTrace(() => new Date('2026-07-23T12:00:00.000Z'));
+    await runWithSourceAnswerTrace(trace, async () => {
+      recordSourceAnswerPackSeats(['internal.telegram.messages', 'public_safe.docs', 'internal.telegram.messages'], 1);
+      recordSourceAnswerAnalystFit('local', [1, 3]);
+      recordSourceAnswerAnalystFit('cloud', [1, 2, 3]);
+    });
+
+    const record = buildSourceAnswerLatencyTraceRecord({
+      trace: snapshotSourceAnswerTrace(trace),
+      outcome: 'success',
+      now: () => new Date('2026-07-23T12:00:00.125Z'),
+    });
+    expect(record.evidence_seats).toEqual({
+      pack_corpora: ['internal.telegram.messages', 'public_safe.docs', 'internal.telegram.messages'],
+      recency_seats: 1,
+      fits: [
+        { lane: 'local', kept_seats: [1, 3] },
+        { lane: 'cloud', kept_seats: [1, 2, 3] },
+      ],
+    });
+    expect(contentBearingKeys(record)).toEqual([]);
+  });
+
+  test('a later pack replaces the earlier one with its own fits, and no pack means no field', async () => {
+    const trace = createSourceAnswerTrace(() => new Date('2026-07-23T12:00:00.000Z'));
+    const empty = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
+    expect(empty.evidence_seats).toBeUndefined();
+    await runWithSourceAnswerTrace(trace, async () => {
+      recordSourceAnswerPackSeats(['a.store', 'b.store'], 0);
+      recordSourceAnswerAnalystFit('local', [1]);
+      recordSourceAnswerPackSeats(['b.store'], 0);
+      recordSourceAnswerAnalystFit('local', [1]);
+    });
+    const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
+    expect(record.evidence_seats).toEqual({ pack_corpora: ['b.store'], recency_seats: 0, fits: [{ lane: 'local', kept_seats: [1] }] });
   });
 });
 

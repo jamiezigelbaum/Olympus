@@ -2670,6 +2670,10 @@ describe('createConnectorStoreCorpusAdapter', () => {
     // (temporal evidence ordering depends on it).
     const freshHit = response.hits.find((hit) => hit.sourceItem.providerItemId === 'fresh')!;
     expect(freshHit.provenance?.citation?.authoredAt).toBe('2026-07-05T22:08:31.000Z');
+    // The pinned newest messages say so, newest first, so a recency question
+    // can seat them in the pack (withReservedRecencySeats).
+    expect(freshHit.newestInStore).toBe(1);
+    expect(response.hits.flatMap((hit) => hit.newestInStore ?? []).sort()).toEqual([1, 2]);
     // recentItems returns newest-first, skips chunk-less items, and is capped.
     const recent = store.recentItems(3);
     expect(recent[0]!.sourceItem.providerItemId).toBe('fresh');

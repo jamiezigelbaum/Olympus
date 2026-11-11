@@ -132,6 +132,20 @@ const SLOW_MAIN_THREAD_SQL_KEPT = 20;
 const SITE_TALLY_MS = 25;
 const SITE_TALLY_KEPT = 10;
 
+// The evidence pack's seat order (#1354): the store id at each seat, how many
+// seats were recency seats, and, per prompt fit an Analyst leg made, the seat
+// numbers (1-based) it kept. Store ids and counts only.
+export interface SourceAnswerTraceEvidenceSeats {
+  packCorpora: string[];
+  recencySeats: number;
+  fits: SourceAnswerTraceAnalystFit[];
+}
+
+export interface SourceAnswerTraceAnalystFit {
+  lane: 'local' | 'cloud';
+  keptSeats: number[];
+}
+
 export interface SourceAnswerTraceSnapshot {
   correlationId: string;
   receivedAt: string;
@@ -158,6 +172,7 @@ export interface SourceAnswerTraceSnapshot {
   appendMs: number;
   releaseDecision?: string;
   mainThreadSql: SourceAnswerTraceMainThreadSql;
+  evidenceSeats?: SourceAnswerTraceEvidenceSeats;
 }
 
 interface MutableTrace extends SourceAnswerTraceSnapshot {
@@ -517,6 +532,24 @@ export function recordSourceAnswerSkippedAnalystLeg(
   });
 }
 
+// A rebuilt pack (the private-outage fallback) replaces the earlier one and
+// starts its own list of fits.
+export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recencySeats = 0): void {
+  const trace = currentSourceAnswerTrace();
+  if (!trace) return;
+  trace.evidenceSeats = {
+    packCorpora: [...corpusIds],
+    recencySeats: nonNegativeCount(recencySeats),
+    fits: [],
+  };
+}
+
+export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[]): void {
+  const seats = currentSourceAnswerTrace()?.evidenceSeats;
+  if (!seats) return;
+  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+}
+
 export function recordSourceAnswerResidualAnalystOrphan(): void {
   const trace = currentSourceAnswerTrace();
   if (trace) trace.residualAnalystOrphanCount += 1;
@@ -575,6 +608,15 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
         .slice(0, SITE_TALLY_KEPT)
         .map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) })),
     },
+    ...(trace.evidenceSeats
+      ? {
+        evidenceSeats: {
+          packCorpora: [...trace.evidenceSeats.packCorpora],
+          recencySeats: trace.evidenceSeats.recencySeats,
+          fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] })),
+        },
+      }
+      : {}),
   };
 }
 
@@ -617,6 +659,10 @@ function sanitizeErrorClass(value: string): string {
 
 function unroundedMs(value: number): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function nonNegativeCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }
 
 function nonNegativeMs(value: number): number {

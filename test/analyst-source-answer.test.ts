@@ -51,6 +51,11 @@ import {
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 import { answerToolResult, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import {
+  createSourceAnswerTrace,
+  runWithSourceAnswerTrace,
+  snapshotSourceAnswerTrace,
+} from '../src/workers/source-index/answer-latency-trace.ts';
 
 const INTERNAL = 'internal.notes.docs';
 const SECURE = 'secure_local.dropbox.files';
@@ -1793,6 +1798,35 @@ describe('analyst-backed source_answer handler', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.pack.candidates.map((candidate) => candidate.trustDomain)).toEqual(['internal']);
     expectStrictHold(result);
+  });
+
+  test('the answer trace records the pack\'s seat order by store and the seats the local fit kept (#1354)', async () => {
+    const { analyst, calls } = scriptedAnalyst(citeInternal);
+    const trace = createSourceAnswerTrace();
+    await runWithSourceAnswerTrace(trace, () => createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    }).answer({ question: 'Latest labs?', include_secure_local: true }));
+
+    const seats = snapshotSourceAnswerTrace(trace).evidenceSeats;
+    expect(seats?.packCorpora).toHaveLength(2);
+    expect([...seats!.packCorpora].sort()).toEqual([INTERNAL, SECURE].sort());
+    expect(seats?.recencySeats).toBe(0);
+    expect(calls).toHaveLength(1);
+    const internalSeat = seats!.packCorpora.indexOf(INTERNAL) + 1;
+    expect(seats?.fits).toEqual([{ lane: 'local', keptSeats: [internalSeat] }]);
+  });
+
+  test('the answer trace records every seat as kept when the pack fits the local prompt whole', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const trace = createSourceAnswerTrace();
+    await runWithSourceAnswerTrace(trace, () => createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+    }).answer({ question: 'Latest labs?', include_secure_local: true }));
+
+    expect(snapshotSourceAnswerTrace(trace).evidenceSeats?.fits).toEqual([{ lane: 'local', keptSeats: [1, 2] }]);
   });
 
   test('default mode records the uncited secure context even when fitting dropped every Private candidate', async () => {

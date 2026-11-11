@@ -26194,6 +26194,22 @@ function recordSourceAnswerSkippedAnalystLeg(input) {
     error_class: sanitizeErrorClass(input.errorClass)
   });
 }
+function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.evidenceSeats = {
+    packCorpora: [...corpusIds],
+    recencySeats: nonNegativeCount(recencySeats),
+    fits: []
+  };
+}
+function recordSourceAnswerAnalystFit(lane, keptSeats) {
+  const seats = currentSourceAnswerTrace()?.evidenceSeats;
+  if (!seats)
+    return;
+  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+}
 function recordSourceAnswerResidualAnalystOrphan() {
   const trace = currentSourceAnswerTrace();
   if (trace)
@@ -26248,7 +26264,14 @@ function snapshotSourceAnswerTrace(trace) {
       max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
       slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
       by_site: [...trace.mainThreadSql.by_site].sort((left, right) => right.ms - left.ms).slice(0, SITE_TALLY_KEPT).map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) }))
-    }
+    },
+    ...trace.evidenceSeats ? {
+      evidenceSeats: {
+        packCorpora: [...trace.evidenceSeats.packCorpora],
+        recencySeats: trace.evidenceSeats.recencySeats,
+        fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] }))
+      }
+    } : {}
   };
 }
 function sourceAnswerTraceErrorClass(error) {
@@ -26283,6 +26306,9 @@ function sanitizeErrorClass(value) {
 }
 function unroundedMs(value) {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function nonNegativeCount(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
@@ -33904,6 +33930,9 @@ function withReservedLeaderSeats(budgeted, pool, budget) {
     }
     hits.splice(Math.min(seat, hits.length), 0, leader);
   }
+  return withRestatedBudgetCuts(budgeted, hits);
+}
+function withRestatedBudgetCuts(budgeted, hits) {
   if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index]))
     return budgeted;
   const represented = new Set(hits.map((hit) => hit.corpusId));
@@ -33916,6 +33945,45 @@ function withReservedLeaderSeats(budgeted, pool, budget) {
       ...[...new Set(budgeted.hits.map((hit) => hit.corpusId))].filter((corpusId) => !represented.has(corpusId) && !reported.has(corpusId)).map((corpusId) => ({ laneName: corpusId, laneType: "keyword", reason: "lane_budget_cut", occurrences: 1 }))
     ]
   };
+}
+function withReservedRecencySeats(seated, pool, budget) {
+  const seats = Math.min(RESERVED_RECENCY_SEATS, Math.max(0, budget - RESERVED_HEAD_SEATS));
+  const time = (hit) => Date.parse(hit.provenance?.citation?.authoredAt ?? "") || 0;
+  const newest = pool.filter((hit) => hit.newestInStore !== undefined).map((hit, order) => ({ hit, order })).sort((left, right) => time(right.hit) - time(left.hit) || left.hit.newestInStore - right.hit.newestInStore || left.order - right.order).slice(0, seats).map(({ hit }) => hit);
+  if (newest.length === 0 || seated.hits.length < 1)
+    return { ...seated, recencySeats: 0 };
+  const hits = [...seated.hits];
+  const reserved = new Set(hits.slice(0, RESERVED_HEAD_SEATS));
+  const storeSeats = (corpusId) => hits.filter((hit) => hit.corpusId === corpusId).length;
+  let taken = 0;
+  for (const hit of newest) {
+    const seat = RESERVED_HEAD_SEATS + taken;
+    const at = hits.indexOf(hit);
+    if (at >= 0 && at <= seat) {
+      reserved.add(hit);
+      taken += 1;
+      continue;
+    }
+    if (at > seat)
+      hits.splice(at, 1);
+    else if (hits.length >= budget) {
+      let drop = -1;
+      for (let index = hits.length - 1;index >= RESERVED_HEAD_SEATS; index -= 1) {
+        const candidate = hits[index];
+        if (!reserved.has(candidate) && storeSeats(candidate.corpusId) > 1) {
+          drop = index;
+          break;
+        }
+      }
+      if (drop < 0)
+        break;
+      hits.splice(drop, 1);
+    }
+    hits.splice(Math.min(seat, hits.length), 0, hit);
+    reserved.add(hit);
+    taken += 1;
+  }
+  return { ...withRestatedBudgetCuts(seated, hits), recencySeats: taken };
 }
 function mergeRetrievalDegradations(...lists) {
   const merged = new Map;
@@ -33938,7 +34006,7 @@ function mergeRetrievalDegradations(...lists) {
     return (left.detail ?? "").localeCompare(right.detail ?? "");
   });
 }
-var DEFAULT_RRF_K = 60, RESERVED_LEADER_MIN_CONCEPT_SHARE = 0.5;
+var DEFAULT_RRF_K = 60, RESERVED_LEADER_MIN_CONCEPT_SHARE = 0.5, RESERVED_HEAD_SEATS = 3, RESERVED_RECENCY_SEATS = 2;
 
 // src/core/source-index/reactions.ts
 function normalizeSourceReactions(value) {
@@ -36229,15 +36297,20 @@ function withPinnedNewestChatHits(input) {
   if (pinCount === 0)
     return input.hits;
   const result = [...input.hits];
-  const present = new Set(result.map((hit) => hit.sourceItem.localItemId));
   for (let index = 0;index < pinCount; index += 1) {
     const row = input.recencyRows[index];
-    if (present.has(row.sourceItem.localItemId))
+    const newestInStore = index + 1;
+    const at = result.findIndex((hit) => hit.sourceItem.localItemId === row.sourceItem.localItemId);
+    if (at >= 0) {
+      result[at] = { ...result[at], newestInStore };
       continue;
+    }
     while (result.length >= limit)
       result.pop();
-    result.push(connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope));
-    present.add(row.sourceItem.localItemId);
+    result.push({
+      ...connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope),
+      newestInStore
+    });
   }
   return result;
 }
@@ -60434,7 +60507,7 @@ function dropboxContentExtractionStallHours(env = process.env) {
   return value;
 }
 function assessContentExtractionThroughput(signal, options = {}) {
-  const actionable = nonNegativeCount(signal.actionable_queued) + nonNegativeCount(signal.actionable_retryable_due);
+  const actionable = nonNegativeCount2(signal.actionable_queued) + nonNegativeCount2(signal.actionable_retryable_due);
   const thresholdHours = options.thresholdHours ?? DEFAULT_DROPBOX_CONTENT_EXTRACTION_STALL_HOURS;
   if (!Number.isFinite(thresholdHours) || thresholdHours <= 0) {
     throw new Error("Content extraction stall threshold must be greater than zero.");
@@ -60464,7 +60537,7 @@ function validDateMs(value) {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
-function nonNegativeCount(value) {
+function nonNegativeCount2(value) {
   return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 function round1(value) {
@@ -75140,7 +75213,10 @@ async function routePreparedSourceIndexSearch(options) {
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
   });
   const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
-  const { hits: fused, degradations: budgetDegradations } = withReservedLeaderSeats(budgeted, fusedAll.map((candidate) => candidate.item), request.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
+  const recency = request.temporalIntent ? withReservedRecencySeats(leadered, pool, request.maxResults) : { ...leadered, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
   const result = {
     hits: fused,
     searchedCorpora,
@@ -75152,6 +75228,7 @@ async function routePreparedSourceIndexSearch(options) {
     ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
     encounteredSecureLocal,
     secureLaneAudits,
+    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
@@ -75484,11 +75561,11 @@ async function buildEvidencePackDetailed(input) {
   return withKeywordRequestScope(() => buildPreparedEvidencePackDetailed(input));
 }
 async function buildPreparedEvidencePackDetailed(input) {
-  const reranker = input.reranker && !input.selectedItems?.length && !hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "") ? input.reranker : undefined;
+  const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
-  const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
+  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
   const extractionGaps = semanticLaneSkippedGaps(routed.degradations, input);
@@ -75620,6 +75697,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   return {
     pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    ...routed.recencySeats ? { recencySeats: routed.recencySeats } : {},
     laneAudits,
     secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
@@ -75718,38 +75796,12 @@ function contentFreePolicyLaneAudits(audits) {
     rawExposed: audit.rawExposed
   }));
 }
-function orderHitsForTemporalIntent(hits, input) {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "")) {
-    return hits;
-  }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime)
-      return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore)
-      return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
-function hitCandidateId(hit) {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
+function questionHasTemporalIntent(input) {
+  return hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? "");
 }
 function hasTemporalIntent(value) {
   const normalized = value.toLowerCase();
   return /\b(recent|latest|newest|current|most\s+recent)\b/.test(normalized) || /\bjust\s+(got|get|received|receive|arrived|arrive|came|come|sent|send|landed|land)\b/.test(normalized) || /\bright\s+now\b/.test(normalized) || /\btoday\b/.test(normalized) || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
-}
-function hitCitationTime(hit) {
-  const citation = hit.provenance?.citation;
-  return safeTime(citation?.authoredAt) || safeTime(citation?.updatedAt);
-}
-function safeTime(value) {
-  if (!value)
-    return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 function selectedItemsToRoutedSlice(input) {
   const hits = [];
@@ -75845,7 +75897,9 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     limit: runs.reduce((total, run) => total + run.hits.length, 0),
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
   });
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const recency = questionHasTemporalIntent(input) ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
   return {
     hits: fused,
     searchedCorpora: literalRun.searchedCorpora,
@@ -75855,7 +75909,8 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
     corpusTimings: runs.flatMap((run) => [...run.corpusTimings ?? []]),
     ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {},
-    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal)
+    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
+    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}
   };
 }
 function mergeRoutedSkippedCorpora(runs) {
@@ -75894,7 +75949,8 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
       query,
       maxResults,
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
-      context: input.searchContext
+      context: input.searchContext,
+      ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {}
     },
     laneTimeoutMs,
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
@@ -76403,6 +76459,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
+        recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0);
+        const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
         const guarded = (analyst) => ({
           analyze: (dispatchPack, analyzeOptions) => {
             assertDispatchAllowed(analysisDetail);
@@ -76410,8 +76468,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           }
         });
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, "local", seatOf),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf),
           trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
             const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
@@ -76690,16 +76748,26 @@ function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats, lane, seatOf) {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions), analyzeOptions)
+    analyze: (pack, analyzeOptions) => {
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats);
+      recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
+        const seat = seatOf.get(candidate.provenance);
+        return seat === undefined ? [] : [seat];
+      }));
+      return analyst.analyze(fitted, analyzeOptions);
+    }
   };
 }
-function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions) {
+function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
-  const head = pack.candidates.slice(0, RESERVED_PACK_HEAD_SEATS);
-  const order = [...head, ...roundRobinCandidates(pack.candidates.slice(RESERVED_PACK_HEAD_SEATS), candidateCorpus)];
+  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
+  const order = [
+    ...pack.candidates.slice(0, headSeats),
+    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
+  ];
   let fallback;
   for (let keep = order.length;keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
@@ -78156,7 +78224,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, RESERVED_PACK_HEAD_SEATS = 3, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
@@ -78687,10 +78755,10 @@ function xBookmarksReconcileEvidenceCounts(evidence) {
   const counts = {
     coverage_scope_recency_window: Number(evidence.coverage_scope === "recency_window"),
     window_boundary_verified: Number(evidence.window_boundary_verified),
-    traversal_cardinality: nonNegativeCount2(evidence.traversal_cardinality),
-    verification_cardinality: nonNegativeCount2(evidence.verification_cardinality),
-    absence_items_tombstoned: nonNegativeCount2(evidence.absence_items_tombstoned),
-    out_of_scope_removals: nonNegativeCount2(evidence.out_of_scope_removals)
+    traversal_cardinality: nonNegativeCount3(evidence.traversal_cardinality),
+    verification_cardinality: nonNegativeCount3(evidence.verification_cardinality),
+    absence_items_tombstoned: nonNegativeCount3(evidence.absence_items_tombstoned),
+    out_of_scope_removals: nonNegativeCount3(evidence.out_of_scope_removals)
   };
   for (let index = 0;index < 8; index += 1) {
     counts[`traversal_digest_word_${index}`] = Number.parseInt(traversalDigest.slice(index * 8, index * 8 + 8), 16);
@@ -78810,7 +78878,7 @@ class LocalXBookmarksApiUsageStore {
     }
     const traversalDigestSha256 = normalizeSha256(proof.traversalDigestSha256, "X reconciliation traversal digest");
     const verificationDigestSha256 = normalizeSha256(proof.verificationDigestSha256, "X reconciliation verification digest");
-    if (coverageScope === "recency_window" && (proof.windowBoundaryVerified !== true || traversalDigestSha256 !== verificationDigestSha256 || nonNegativeCount2(counts.traversalCardinality) !== nonNegativeCount2(counts.verificationCardinality))) {
+    if (coverageScope === "recency_window" && (proof.windowBoundaryVerified !== true || traversalDigestSha256 !== verificationDigestSha256 || nonNegativeCount3(counts.traversalCardinality) !== nonNegativeCount3(counts.verificationCardinality))) {
       throw new Error("X recency-window watermark requires matching verified boundary evidence.");
     }
     this.db.query(`
@@ -78858,7 +78926,7 @@ class LocalXBookmarksApiUsageStore {
         updated_at = excluded.updated_at
       WHERE x_bookmarks_live_state.reconcile_completed_at IS NULL
         OR excluded.reconcile_completed_at >= x_bookmarks_live_state.reconcile_completed_at
-    `).run(requireAccount4(account), now, nonNegativeCount2(counts.itemsSeen), nonNegativeCount2(counts.foldersSeen), nonNegativeCount2(counts.folderMembershipsSeen), Number(proof.globalTraversalExhausted === true), Number(proof.globalVerificationMatched === true), Number(proof.removalAuthoritative === true), coverageScope, Number(proof.windowBoundaryVerified === true), traversalDigestSha256, nonNegativeCount2(counts.traversalCardinality), verificationDigestSha256, nonNegativeCount2(counts.verificationCardinality), nonNegativeCount2(counts.absenceItemsTombstoned), nonNegativeCount2(counts.outOfScopeRemovals), Number(proof.folderInventoryAuthoritative === true), nonNegativeCount2(counts.folderInventoryCoverageGaps), nonNegativeCount2(counts.foldersCarriedForward), nonNegativeCount2(counts.folderMembershipCoverageGaps), Number(proof.folderProviderOutage === true || counts.folderProviderOutage === true), Number(proof.stagedRecoveryCompleted === true), now);
+    `).run(requireAccount4(account), now, nonNegativeCount3(counts.itemsSeen), nonNegativeCount3(counts.foldersSeen), nonNegativeCount3(counts.folderMembershipsSeen), Number(proof.globalTraversalExhausted === true), Number(proof.globalVerificationMatched === true), Number(proof.removalAuthoritative === true), coverageScope, Number(proof.windowBoundaryVerified === true), traversalDigestSha256, nonNegativeCount3(counts.traversalCardinality), verificationDigestSha256, nonNegativeCount3(counts.verificationCardinality), nonNegativeCount3(counts.absenceItemsTombstoned), nonNegativeCount3(counts.outOfScopeRemovals), Number(proof.folderInventoryAuthoritative === true), nonNegativeCount3(counts.folderInventoryCoverageGaps), nonNegativeCount3(counts.foldersCarriedForward), nonNegativeCount3(counts.folderMembershipCoverageGaps), Number(proof.folderProviderOutage === true || counts.folderProviderOutage === true), Number(proof.stagedRecoveryCompleted === true), now);
   }
   reserveRequest(input) {
     const account = requireAccount4(input.account);
@@ -79221,11 +79289,11 @@ function xBookmarksReconcileWatermarkFromRow(row) {
     coverage_scope: coverageScope,
     window_boundary_verified: row.reconcile_window_boundary_verified === 1,
     traversal_digest_sha256: normalizeSha256(row.reconcile_traversal_digest_sha256, "X reconciliation traversal digest"),
-    traversal_cardinality: nonNegativeCount2(row.reconcile_traversal_cardinality),
+    traversal_cardinality: nonNegativeCount3(row.reconcile_traversal_cardinality),
     verification_digest_sha256: normalizeSha256(row.reconcile_verification_digest_sha256, "X reconciliation verification digest"),
-    verification_cardinality: nonNegativeCount2(row.reconcile_verification_cardinality),
-    absence_items_tombstoned: nonNegativeCount2(row.reconcile_absence_items_tombstoned),
-    out_of_scope_removals: nonNegativeCount2(row.reconcile_out_of_scope_removals),
+    verification_cardinality: nonNegativeCount3(row.reconcile_verification_cardinality),
+    absence_items_tombstoned: nonNegativeCount3(row.reconcile_absence_items_tombstoned),
+    out_of_scope_removals: nonNegativeCount3(row.reconcile_out_of_scope_removals),
     folder_inventory_authoritative: row.reconcile_folder_inventory_authoritative === 1,
     folder_inventory_coverage_gaps: row.reconcile_folder_inventory_coverage_gaps,
     folders_carried_forward: row.reconcile_folders_carried_forward,
@@ -79479,7 +79547,7 @@ function cadenceSteppedHeadReserve(reserve, cadenceMs, now) {
   const remainingSlots = Math.ceil(remainingMs / cadenceMs);
   return Math.ceil(reserve * remainingSlots / slotsPerDay);
 }
-function nonNegativeCount2(value) {
+function nonNegativeCount3(value) {
   const count = value ?? 0;
   if (!Number.isSafeInteger(count) || count < 0)
     throw new TypeError("X reconciliation counts must be non-negative integers.");
@@ -173603,6 +173671,16 @@ function buildSourceAnswerLatencyTraceRecord(input) {
     })),
     residual_analyst_orphan_count: Math.max(0, Math.floor(input.trace.residualAnalystOrphanCount)),
     ...input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {},
+    ...input.trace.evidenceSeats ? {
+      evidence_seats: {
+        pack_corpora: input.trace.evidenceSeats.packCorpora.map(String),
+        recency_seats: Math.max(0, Math.floor(input.trace.evidenceSeats.recencySeats)),
+        fits: input.trace.evidenceSeats.fits.map((fit) => ({
+          lane: fit.lane,
+          kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat)))
+        }))
+      }
+    } : {},
     ...input.caller ? { caller: copyCaller(input.caller) } : {},
     ...input.trace.mainThreadSql ? {
       main_thread_sql: {
@@ -186315,7 +186393,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,

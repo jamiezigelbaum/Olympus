@@ -19,6 +19,7 @@ import type {
 import {
   applyPerCorpusResultBudget,
   withReservedLeaderSeats,
+  withReservedRecencySeats,
   assessSourceIndexRetrievalState,
   fuseRankedCandidateLanes,
   mergeRetrievalDegradations,
@@ -58,6 +59,10 @@ export interface SourceIndexSearchRequest {
   context: SourceIndexSearchContext;
   corpusIds?: readonly string[];
   families?: readonly SourceFamily[];
+  // The question asks for what is new ("did I just get...", "latest"):
+  // chat stores' pinned newest messages take the recency seats
+  // (withReservedRecencySeats). Decided by the caller's existing heuristic.
+  temporalIntent?: boolean;
 }
 
 export interface SourceIndexCorpusSearchRequest {
@@ -91,6 +96,10 @@ export interface SourceIndexSearchHit {
   // question's concepts. The router keeps the best leaders across stores in
   // the pack (withReservedLeaderSeats). Search routes never return it.
   keywordLeader?: SourceIndexKeywordLeaderSignal;
+  // Internal: the hit is one of its chat store's newest messages, pinned into
+  // the store's cut (1 = newest). A question with temporal intent seats them
+  // in the pack (withReservedRecencySeats). Search routes never return it.
+  newestInStore?: number;
   rawExposed: false;
 }
 
@@ -274,6 +283,10 @@ export interface SourceIndexRoutedSearchResponse {
   // describe secure-inclusive matches, so an answer analyzed on an ordinary
   // route leaves them out of what it returns. Internal.
   secureLaneAudits: readonly RetrievalLaneAudit[];
+  // How many recency seats (seat 4 on) the pack's newest chat messages took
+  // (withReservedRecencySeats). A prompt fit reads them right after seats 1 to
+  // 3. Internal.
+  recencySeats?: number;
   latencyMs: number;
   rawExposed: false;
 }
@@ -624,11 +637,12 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
   });
   const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
-  const { hits: fused, degradations: budgetDegradations } = withReservedLeaderSeats(
-    budgeted,
-    fusedAll.map((candidate) => candidate.item),
-    request.maxResults,
-  );
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
+  const recency = request.temporalIntent
+    ? withReservedRecencySeats(leadered, pool, request.maxResults)
+    : { ...leadered, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
 
   const result: SourceIndexRoutedSearchResponse = {
     hits: fused,
@@ -641,6 +655,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     ...(incompleteCorpora.length > 0 ? { incompleteCorpora } : {}),
     encounteredSecureLocal,
     secureLaneAudits,
+    ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };

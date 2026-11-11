@@ -151,8 +151,14 @@ async function main(): Promise<void> {
       'OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES',
     )
     : undefined;
+  // Extra Analyst answers to each question's frozen pack, for the questions
+  // named (all when none are): tells a steady misreading from a coin flip.
+  const analystRepeats = parsePositiveIntegerEnv(process.env.OLYMPUS_EVAL_ANALYST_REPEATS, 1, 'OLYMPUS_EVAL_ANALYST_REPEATS');
+  const analystRepeatQuestions = (process.env.OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS ?? '')
+    .split(',').map((id) => id.trim()).filter((id) => id.length > 0);
   const reportConfig = {
     analystProvider,
+    ...(analystRepeats > 1 ? { analystRepeats, ...(analystRepeatQuestions.length > 0 ? { analystRepeatQuestions } : {}) } : {}),
     questionTimeoutMs,
     queryPlannerEnabled,
     maxResults,
@@ -237,6 +243,27 @@ async function main(): Promise<void> {
     analystPromptByteBudget,
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
     (pack, seats) => analystSeatsByPack.set(pack, seats),
+    (pack) => detailsByPack.get(pack)?.recencySeats,
+  );
+  const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
+  const repeatThisQuestion = analystRepeatQuestions.length === 0 || analystRepeatQuestions.includes(dataset.questions[0]!.id);
+  // How many prompts and model ids the graded (first) answer recorded.
+  let firstAnswer: { prompts: number; modelIds: number } | undefined;
+  const repeatingAnalyst = repeatedEvalAnalyst(
+    {
+      async analyze(pack, analyzeOptions) {
+        const result = await fittedAnalyst.analyze(pack, analyzeOptions);
+        firstAnswer ??= { prompts: analystPrompts.length, modelIds: analystModelIds.length };
+        return result;
+      },
+    },
+    repeatThisQuestion ? analystRepeats - 1 : 0,
+    (pack, results, failures) => {
+      repeatsByPack.set(pack, { results, failures });
+      // The audit's prompt and model fields describe the graded answer only.
+      analystPrompts.splice(firstAnswer?.prompts ?? 0);
+      analystModelIds.splice(firstAnswer?.modelIds ?? 0);
+    },
   );
   const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
   const evaluated = await runEval(dataset, {
@@ -257,7 +284,7 @@ async function main(): Promise<void> {
       detailsByPack.set(detail.pack, detail);
       return detail.pack;
     },
-    analyst: fittedAnalyst,
+    analyst: repeatingAnalyst,
     releaseFor(pack, result) {
       rawResultsByPack.set(pack, result);
       const detail = detailsByPack.get(pack);
@@ -274,7 +301,15 @@ async function main(): Promise<void> {
           ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
         }),
         ...(detail ? { retrieval: evalRetrievalAudit(detail, question, storeSearches) } : {}),
-        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
+        answerStage: {
+          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
+          ...(repeatsByPack.has(pack)
+            ? {
+              answerRepeats: repeatsByPack.get(pack)!.results.map((repeat) => evalAnswerRepeat(question, pack, repeat)),
+              ...(repeatsByPack.get(pack)!.failures > 0 ? { answerRepeatFailures: repeatsByPack.get(pack)!.failures } : {}),
+            }
+            : {}),
+        },
       });
     },
     onProgress(event) {
@@ -694,6 +729,13 @@ export interface EvalAnswerStageAudit {
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
+   * Further Analyst answers to the same frozen pack (OLYMPUS_EVAL_ANALYST_REPEATS),
+   * by shape and flags only. The graded answer is the first one.
+   */
+  answerRepeats?: EvalAnswerRepeat[];
+  /** Repeats whose Analyst call failed: diagnostics only, never the grade. */
+  answerRepeatFailures?: number;
+  /**
    * The Analyst's own answer, by its structure: every expected value in it,
    * some, or none (with no citation: it said it found nothing; with
    * citations: it answered from other evidence). Absent with no expected values.
@@ -705,6 +747,63 @@ export interface EvalAnswerStageAudit {
   analystPromptChars?: number;
   /** The model id each Analyst model call reported, in call order. */
   analystModelIds?: readonly string[];
+}
+
+export interface EvalAnswerRepeat {
+  answerShape?: EvalAnswerStageAudit['answerShape'];
+  answerCitedSeats: number[];
+  /** Per expected value, in order: is it in this answer. */
+  valuesInAnswer: boolean[];
+  answerValueTokens: number;
+  answerValueTokensInCitedSeats: number;
+  answerValueTokensUnmatchedShapes: string[];
+}
+
+/** One repeat answer to a frozen pack, by the answer-stage audit's own measures. */
+export function evalAnswerRepeat(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
+  pack: EvidencePack,
+  result: AnalystResult,
+): EvalAnswerRepeat {
+  const audit = evalAnswerStageAudit(question, pack, result, result);
+  return {
+    ...(audit.answerShape ? { answerShape: audit.answerShape } : {}),
+    answerCitedSeats: audit.answerCitedSeats,
+    valuesInAnswer: audit.expected.map((value) => value.inAnalystAnswer),
+    answerValueTokens: audit.answerValueTokens,
+    answerValueTokensInCitedSeats: audit.answerValueTokensInCitedSeats,
+    answerValueTokensUnmatchedShapes: audit.answerValueTokensUnmatchedShapes,
+  };
+}
+
+/**
+ * The Analyst, run extraRuns more times on the same pack after its first
+ * answer, so a run can tell a steady misreading from a coin flip on one
+ * frozen pack. The first answer is the one graded and released; a repeat
+ * that fails is counted, never allowed to fail the question.
+ */
+export function repeatedEvalAnalyst(
+  analyst: Analyst,
+  extraRuns: number,
+  onRepeats: (pack: EvidencePack, results: AnalystResult[], failures: number) => void,
+): Analyst {
+  if (extraRuns <= 0) return analyst;
+  return {
+    async analyze(pack, analyzeOptions) {
+      const first = await analyst.analyze(pack, analyzeOptions);
+      const extra: AnalystResult[] = [];
+      let failures = 0;
+      for (let run = 0; run < extraRuns; run += 1) {
+        try {
+          extra.push(await analyst.analyze(pack, analyzeOptions));
+        } catch {
+          failures += 1;
+        }
+      }
+      onRepeats(pack, extra, failures);
+      return first;
+    },
+  };
 }
 
 /**
@@ -887,6 +986,7 @@ export function promptFittedEvalAnalyst(
   promptByteBudget: number | undefined,
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
   onSeats: (pack: EvidencePack, seats: number[]) => void,
+  recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
 ): Analyst {
   return {
     analyze(pack, analyzeOptions) {
@@ -898,6 +998,7 @@ export function promptFittedEvalAnalyst(
           promptByteBudget,
           new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index] ?? ''] as const)),
           analyzeOptions,
+          recencySeats(pack),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
         pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
