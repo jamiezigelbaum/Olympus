@@ -44791,12 +44791,16 @@ var init_local_index = __esm(() => {
     async searchItemsDetailedOffThread(query, maxResults, accountScope, filters, ftsOptions = {}, pool = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
+      const openedFile = this.openedFile;
       const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
       let step = steps.next();
       while (!step.done) {
-        if (this.closedForPoolReads)
+        if (this.closedForPoolReads || this.openedFile !== openedFile)
           throw new OffThreadReadBusyError;
-        step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
+        const rows = await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
+        if (this.closedForPoolReads || this.openedFile !== openedFile)
+          throw new OffThreadReadBusyError;
+        step = steps.next(rows);
       }
       return step.value;
     }
@@ -45256,6 +45260,42 @@ var init_local_index = __esm(() => {
         return false;
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
+    }
+    reopenReadOnlyIfReplaced() {
+      if (!this.readOnly || !this.fileReplacedOrRemoved() || !connectorStoreReadableNow(this.dbPath))
+        return false;
+      if (this.tierHiddenCountsRefresh || this.visibilityRefreshing || this.settledUnreadableCountRefresh?.size)
+        return false;
+      if (!this.closedForPoolReads)
+        this.close();
+      const replacement = new LocalConnectorStore({
+        dbPath: this.dbPath,
+        corpusId: this.corpusId,
+        family: this.family,
+        trustDomain: this.trustDomain,
+        readOnly: true,
+        tierLedger: null
+      });
+      this.db = replacement.db;
+      this.openedFile = replacement.openedFile;
+      this.reactionsColumnPresent = replacement.reactionsColumnPresent;
+      this.childItemColumnsPresent = replacement.childItemColumnsPresent;
+      this.chunkMediaColumnsPresent = replacement.chunkMediaColumnsPresent;
+      this.imageMediaReadsPresent = replacement.imageMediaReadsPresent;
+      this.itemTextVersionsPresent = replacement.itemTextVersionsPresent;
+      this.mediaJudgmentsPresent = replacement.mediaJudgmentsPresent;
+      this.visibilityFeedPresent = replacement.visibilityFeedPresent;
+      this.tierLedgerOwned = false;
+      this.tierLedgerHiddenMemo = undefined;
+      this.tierHiddenCountsMemo = undefined;
+      this.visibilitySqlMemo = undefined;
+      this.settledUnreadableCountMemo = undefined;
+      this.vectorLaneMemo = undefined;
+      delete this.conceptCountMemo;
+      this.trustReconciliationReadyCursors = undefined;
+      this.closedForPoolReads = false;
+      this.visibilityClosed = false;
+      return true;
     }
     async prepareStatusCounts(scope) {
       if (!this.tierHiddenCountsMemo)
@@ -203073,7 +203113,7 @@ function createArchiveImportDashboard(options) {
     }
   };
   const sweepStaging = () => {
-    if (closed)
+    if (closed || options.ownsUploads === false)
       return;
     try {
       uploads.sweep(stagingNeeded);
@@ -203338,8 +203378,13 @@ function createArchiveImportDashboard(options) {
   const counts = (record8) => {
     try {
       const lane = options.runtime.lane(record8.family);
-      const tally = lane.ledger.accountScopeCounts(record8.provider, record8.archive_id);
-      return { items: tally.items, held: tally.awaitingJudgment };
+      const ledger = new TierLedger({ dbPath: lane.ledger.dbPath, readOnly: true });
+      try {
+        const tally = ledger.accountScopeCounts(record8.provider, record8.archive_id);
+        return { items: tally.items, held: tally.awaitingJudgment };
+      } finally {
+        ledger.close();
+      }
     } catch {
       return;
     }
@@ -203809,6 +203854,7 @@ var init_dashboard2 = __esm(() => {
   init_scope_safe_fs();
   init_source_storage();
   init_vocabulary();
+  init_tier_ledger();
   init_agent();
   init_source_scheduler();
   init_manifest3();
@@ -211932,25 +211978,6 @@ function frontUnreadableFiles(local, snapshot2) {
     recheck: (corpusId) => current2(snapshot2)?.snapshot.unreadable?.[corpusId]
   };
 }
-function frontArchiveViews(local, snapshot2, changedAt = () => {
-  return;
-}) {
-  const archive = () => {
-    const read = current2(snapshot2);
-    if (!read)
-      return;
-    const changed = changedAt();
-    if (changed !== undefined && Date.parse(read.snapshot.written_at) < changed)
-      return;
-    return read.snapshot.archive;
-  };
-  return {
-    view: () => archive()?.view ?? local.view(),
-    cardViews: () => archive()?.cards ?? local.cardViews(),
-    sourceImports: () => archive()?.source_imports ?? local.sourceImports(),
-    archiveSources: () => archive()?.sources ?? local.archiveSources()
-  };
-}
 function frontDataExport(client) {
   return async (destination) => {
     const receipt = await client.send({ kind: "export_data", destination }, { timeoutMs: DATA_EXPORT_WAIT_MS });
@@ -212128,6 +212155,7 @@ function createFrontScheduler(options) {
       }
     },
     updateSources() {
+      options.sourcesChanged?.();
       post2({ kind: "reload", target: "sources" }).catch(() => {
         return;
       });
@@ -235832,7 +235860,7 @@ async function main() {
     sourceLaneGeneration += 1;
     earlySourceStores.push(stores);
   };
-  const sourceHasStores = (sourceId) => ["internal", "secure_local", "public_safe"].some((domain) => {
+  const sourceHasStores = (sourceId) => accountStoreNames(sourceId).some((domain) => {
     const path = resolvedStorePath(sourceId, domain, process.env);
     return existsSync117(path) || existsSync117(tieredStoreSetLedgerPath(path)) || existsSync117(secretLocationsPathForStore(path));
   });
@@ -236470,19 +236498,12 @@ ${key2}`;
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
-  let frontLanesWaiting = false;
   const storeAt = (sourceId, domain) => resolvedStorePath(sourceId, domain, process.env);
-  const frontCanMount = (paths) => {
-    if (paths.every(connectorStoreReadableNow))
-      return true;
-    frontLanesWaiting = true;
-    return false;
-  };
+  const frontCanMount = (paths) => paths.every(connectorStoreReadableNow);
   const mountSourceLanes = (handles) => {
     if (sourceRuntimeClosed)
       return;
     const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    frontLanesWaiting = false;
     const wanted = (sourceId, connectedNow, paths) => {
       if (!sourceHasStores(sourceId) && !connectedNow)
         return false;
@@ -237911,7 +237932,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);
   const schedulerSources = schedulerAssembly.sources;
-  const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
+  const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status(), sourcesChanged: () => refreshFrontMounts() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
     config: olympusConfig,
     sources: schedulerSources,
     ...!(sourceIndexStatus && sourceIngestionLedger) ? {
@@ -237931,13 +237952,34 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {}
   }) : undefined;
-  let archiveChangedAt;
+  const refreshFrontMounts = () => {
+    const reads = [
+      () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
+      () => {
+        if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
+          archiveImports.existingLanes();
+      },
+      openTierStoresThatExist,
+      ...connectorStores.map((store) => () => {
+        if (store.reopenReadOnlyIfReplaced())
+          sourceLaneGeneration += 1;
+      })
+    ];
+    for (const read of reads) {
+      try {
+        read();
+      } catch (error2) {
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    }
+  };
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
+    ownsUploads: engineRole !== "background",
     refreshScheduler: () => {
       if (engineFront) {
-        archiveChangedAt = Date.now();
+        refreshFrontMounts();
         engineFront.client.post({ kind: "archive_changed" }).catch(() => {
           return;
         });
@@ -237946,7 +237988,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     },
     ...engineFront ? { checksElsewhere: () => {
-      archiveChangedAt = Date.now();
+      refreshFrontMounts();
       engineFront.client.post({ kind: "archive_changed" }).catch(() => {
         return;
       });
@@ -237956,7 +237998,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   if (!engineFront)
     archiveImportDashboard.resume();
-  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront.status(), () => archiveChangedAt) : archiveImportDashboard;
+  const archiveViews = archiveImportDashboard;
   wireBuiltInTranscriptionAtBoot({
     env: process.env,
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
@@ -239526,15 +239568,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  const frontMountRetry = engineFront ? setInterval(() => {
-    try {
-      if (frontLanesWaiting)
-        mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env));
-      openTierStoresThatExist();
-    } catch (error2) {
-      console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
-    }
-  }, 2000) : undefined;
+  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (engineFront) {
     const judge3 = frontJudgeState(() => engineFront.status());
@@ -239694,12 +239728,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return counted ? [[definition.corpusId, counted]] : [];
           }))
         } : {},
-        archive: {
-          view: archiveImportDashboard.view(),
-          cards: archiveImportDashboard.cardViews(),
-          source_imports: archiveImportDashboard.sourceImports(),
-          sources: archiveImportDashboard.archiveSources()
-        },
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts()
       })
@@ -240517,6 +240545,7 @@ var init_server5 = __esm(async () => {
   init_dashboard2();
   init_lane();
   init_store();
+  init_olympus_layout();
   init_state();
   init_extraction_runtime();
   init_scheduler_source2();

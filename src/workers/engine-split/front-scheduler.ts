@@ -23,6 +23,8 @@ import type { EngineStatusRead } from './snapshot.ts';
 export interface FrontSchedulerOptions {
   client: Pick<EngineCommandClient, 'post'>;
   snapshot: () => EngineStatusRead | undefined;
+  /** Adopt stores on a source change before notifying the background. */
+  sourcesChanged?: () => void;
   now?: () => Date;
   log?: (line: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -89,6 +91,7 @@ export function createFrontScheduler(options: FrontSchedulerOptions): FrontSched
       }
     },
     updateSources() {
+      options.sourcesChanged?.();
       void post({ kind: 'reload', target: 'sources' }).catch(() => undefined);
     },
     wakeTasksOfKind(kind) {

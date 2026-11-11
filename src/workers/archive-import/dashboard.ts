@@ -34,6 +34,7 @@ import type {
 import { SourceStorageUnavailableError } from '../../core/source-storage.ts';
 import type { ArchivePathResolver } from '../local-files/scope-browser.ts';
 import { archivePickIntro } from '../dashboard/vocabulary.ts';
+import { TierLedger } from '../classification/tier-ledger.ts';
 import type { ArchiveSourceTarget } from './source-targets.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
@@ -214,6 +215,10 @@ export interface ArchiveImportDashboardOptions {
    * record), and the disk headroom they leave.
    */
   uploads?: ArchiveUploads;
+  /**
+   * Only the front (or single worker) owns the upload sessions and may sweep staging.
+   */
+  ownsUploads?: boolean;
   /**
    * Hands the scheduler the current archive tasks (its updateSources).
    */
@@ -432,7 +437,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // Staging copies nothing reads any more are deleted: an upload walked away from, an approval that imported nothing,
   // an import that was removed.
   const sweepStaging = (): void => {
-    if (closed) return;
+    if (closed || options.ownsUploads === false) return;
     try {
       uploads.sweep(stagingNeeded);
     } catch (error) {
@@ -749,8 +754,15 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const counts = (record: ArchiveImportRecord): { items: number; held: number } | undefined => {
     try {
       const lane = options.runtime.lane(record.family);
-      const tally = lane.ledger.accountScopeCounts(record.provider, record.archive_id);
-      return { items: tally.items, held: tally.awaitingJudgment };
+      // Read the current ledger file, including a replacement by the writer.
+      // The same read path serves a single worker and the split's front.
+      const ledger = new TierLedger({ dbPath: lane.ledger.dbPath, readOnly: true });
+      try {
+        const tally = ledger.accountScopeCounts(record.provider, record.archive_id);
+        return { items: tally.items, held: tally.awaitingJudgment };
+      } finally {
+        ledger.close();
+      }
     } catch {
       return undefined;
     }

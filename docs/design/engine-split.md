@@ -342,9 +342,11 @@ though privacy would not change. On one shared local model this still matters (#
 scheduler status (11 call sites), sniffer backlog and pending
 classification count (`server.ts:2562`, `:6860`), judge spending and
 runtime, capture statuses (`server.ts:2591`), unreadable-file state
-(`server.ts:4995`, `:5023`), the archive dashboard view, and manual-sync
-runs. The tier visibility gate (`tier-visibility.ts:48`) already reads the
-ledger per query and works read-only; the store memos are replaced by
+(`server.ts:4995`, `:5023`), and manual-sync runs. Archive rows, requests
+and counts use the shared dashboard read path directly over the state files
+and read-only tier ledgers; only the front (or single worker), which owns
+upload sessions, sweeps staging. The background publishes no archive view.
+The tier visibility gate (`tier-visibility.ts:48`) already reads the ledger per query and works read-only; the store memos are replaced by
 part 1.
 
 Not yet verified: the full remote MCP and OpenAPI operation registry

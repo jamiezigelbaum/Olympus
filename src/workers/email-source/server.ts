@@ -272,6 +272,7 @@ import {
 } from '../archive-import/dashboard.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
+import { accountStoreNames } from '../../core/olympus-layout.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -564,7 +565,7 @@ import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/en
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, engineStatusSnapshotPath, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import { readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rss-restart.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
@@ -3030,7 +3031,7 @@ export async function main(): Promise<void> {
     sourceLaneGeneration += 1;
     earlySourceStores.push(stores);
   };
-  const sourceHasStores = (sourceId: string): boolean => (['internal', 'secure_local', 'public_safe'] as const)
+  const sourceHasStores = (sourceId: string): boolean => accountStoreNames(sourceId)
     .some((domain) => {
       const path = resolvedStorePath(sourceId, domain, process.env);
       return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path)) || existsSync(secretLocationsPathForStore(path));
@@ -3899,19 +3900,13 @@ export async function main(): Promise<void> {
   // created its stores, or while it is still writing their schema, waits here
   // unmounted and reads as connected with nothing synced yet; frontMountRetry
   // mounts it once every store the lane opens is readable.
-  let frontLanesWaiting = false;
   const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
     resolvedStorePath(sourceId, domain, process.env);
-  const frontCanMount = (paths: readonly string[]): boolean => {
-    if (paths.every(connectorStoreReadableNow)) return true;
-    frontLanesWaiting = true;
-    return false;
-  };
+  const frontCanMount = (paths: readonly string[]): boolean => paths.every(connectorStoreReadableNow);
   const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[]): void => {
     if (sourceRuntimeClosed) return;
     const connected = (provider: ConnectedCredentialHandle['provider'], capability: string): boolean =>
       activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    frontLanesWaiting = false;
     // `paths`: the stores the lane's mount opens. The background (or a worker
     // without the split) creates them; the front mounts only readable ones.
     const wanted = (sourceId: string, connectedNow: boolean, paths: readonly string[]): boolean => {
@@ -5948,7 +5943,7 @@ export async function main(): Promise<void> {
   // The split's front runs no scheduler: a stand-in answers from the
   // background's snapshot and turns each wake into a command.
   const sourceScheduler = engineFront
-    ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront!.status() }) as unknown as SourceScheduler
+    ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront!.status(), sourcesChanged: () => refreshFrontMounts() }) as unknown as SourceScheduler
     : olympusConfig.worker.scheduler.enabled
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
@@ -5982,20 +5977,37 @@ export async function main(): Promise<void> {
   // dashboard's own routes approve, and every started or removed import is
   // handed to the scheduler at once. How the private model stands is read off the
   // sniffer, bound once it runs further down.
-  // When the front last changed an archive request or state file: a snapshot older than that is not shown.
-  let archiveChangedAt: number | undefined;
+  // Re-read disk even with no credential change: an archive can create a source's
+  // first stores in the background after this front started.
+  const refreshFrontMounts = (): void => {
+    const reads = [
+      () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
+      () => { if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes(); },
+      openTierStoresThatExist,
+      ...connectorStores.map((store) => () => { if (store.reopenReadOnlyIfReplaced()) sourceLaneGeneration += 1; }),
+    ];
+    for (const read of reads) {
+      try { read(); }
+      catch (error) {
+        // A partial schema is ordinary while the background creates a lane.
+        // It must not stop an archive/source change from reaching that writer.
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
+    ownsUploads: engineRole !== 'background',
     refreshScheduler: () => {
       // The split's front writes the request and state files only; the
       // background resumes checks and runs imports.
-      if (engineFront) { archiveChangedAt = Date.now(); void engineFront.client.post({ kind: 'archive_changed' }).catch(() => undefined); return; }
+      if (engineFront) { refreshFrontMounts(); void engineFront.client.post({ kind: 'archive_changed' }).catch(() => undefined); return; }
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
         activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
       ).sources);
     },
-    ...(engineFront ? { checksElsewhere: () => { archiveChangedAt = Date.now(); void engineFront!.client.post({ kind: 'archive_changed' }).catch(() => undefined); } } : {}),
+    ...(engineFront ? { checksElsewhere: () => { refreshFrontMounts(); void engineFront!.client.post({ kind: 'archive_changed' }).catch(() => undefined); } } : {}),
     privateModel: () => archivePrivateModelState(),
     // Without the scheduler, or with a source list that leaves archives out,
     // nothing runs an import or a removal: approving one is refused, and one
@@ -6003,8 +6015,8 @@ export async function main(): Promise<void> {
     scheduling: () => (sourceScheduler ? archiveImportScheduling(olympusConfig.worker.scheduler) : 'disabled'),
   });
   if (!engineFront) archiveImportDashboard.resume();
-  // The split's front shows the archives as the background, which runs the imports, last published them.
-  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront!.status(), () => archiveChangedAt) : archiveImportDashboard;
+  // Both roles read archive records, requests and ledger counts directly.
+  const archiveViews = archiveImportDashboard;
   // Built-in transcription installs only when the chosen sources contain
   // audio (each approved extraction lane checks at scheduler start, and each
   // plan pass after a sync), and once ready wakes every extraction task so
@@ -7875,17 +7887,10 @@ export async function main(): Promise<void> {
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
   // A source connected before the background created its stores: mounted here
-  // as soon as they exist (mountSourceLanes, frontLanesWaiting).
+  // as soon as they exist, including sources with no handle or stores at boot.
   // A tier store the background creates later (a lane's Private or Public
   // store, on its first item) is opened here too.
-  const frontMountRetry = engineFront ? setInterval(() => {
-    try {
-      if (frontLanesWaiting) mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env));
-      openTierStoresThatExist();
-    } catch (error) {
-      console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, 2_000) : undefined;
+  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2_000) : undefined;
   frontMountRetry?.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
@@ -8055,12 +8060,6 @@ export async function main(): Promise<void> {
             return counted ? [[definition.corpusId, counted]] : [];
           })),
         } : {}),
-        archive: {
-          view: archiveImportDashboard.view(),
-          cards: archiveImportDashboard.cardViews(),
-          source_imports: archiveImportDashboard.sourceImports(),
-          sources: archiveImportDashboard.archiveSources(),
-        },
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
       }),
