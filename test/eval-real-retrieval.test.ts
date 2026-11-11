@@ -289,12 +289,13 @@ describe('the real eval report locates an expected item and value for a miss', (
       }, other],
     } as typeof pack;
     const fromCitation = {
-      answer: 'The 2026-03-01_kestrel-invoice.pdf of 2026-03-01 says 4182 dollars [1].',
+      answer: 'The 2026-03-01_kestrel-invoice.pdf of 2026-03-01 says 4182 dollars [1], see 2026-03-01_kestrel-invoice.',
       citations: [{ provenance: dated.candidates[0]!.provenance, claim: 'total' }],
       unanswered: [],
     } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, dated, fromCitation, fromCitation)).toMatchObject({
-      answerValueTokens: 3, answerValueTokensInCitedSeats: 3, answerValueTokensUnmatchedShapes: [],
+      // The file name without its extension is the name too.
+      answerValueTokens: 4, answerValueTokensInCitedSeats: 4, answerValueTokensUnmatchedShapes: [],
     });
     // Only the cited seat's citation counts: the same answer citing seat 2 is unmatched.
     const otherSeat = { ...fromCitation, citations: [{ provenance: dated.candidates[1]!.provenance, claim: 'total' }] } as unknown as AnalystResult;
@@ -348,6 +349,35 @@ describe('the Analyst on the expected seat alone', () => {
     expect(audit).toMatchObject({ seats: [2], answerShape: 'contains_all', answerCitedSeats: [1], valuesInAnswer: [true] });
     expect(JSON.stringify(audit)).not.toContain('4182');
     expect(expectedSeatOnlyAudit({ expectedAnswerContains: ['4182'] }, { seats: [2], alone, result: undefined })).toEqual({ seats: [2], failed: true });
+  });
+
+  test('the seat-alone pack states its own coverage: each store\'s items in evidence are the seats it holds', async () => {
+    const counted = {
+      ...pack,
+      coverage: {
+        searchedCorpora: ['store.a', 'store.b'], skippedCorpora: [], extractionGaps: [],
+        matchCounts: [
+          { corpusId: 'store.a', family: 'file', trustDomain: 'internal', trustTier: 'S2', matchedItems: 9, inEvidence: 2 },
+          { corpusId: 'store.b', family: 'file', trustDomain: 'internal', trustTier: 'S2', matchedItems: 4, inEvidence: 1 },
+        ],
+      },
+    } as never as EvidencePack;
+    const sent: EvidencePack[] = [];
+    const inner = { analyze: async (packSent: EvidencePack) => { sent.push(packSent); return { answer: 'x', citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    await expectedSeatOnlyEvalAnalyst(inner, () => [2], () => {}, () => ['store.a', 'store.b', 'store.a']).analyze(counted, {} as never);
+    expect(sent[1]!.coverage.matchCounts!.map((count) => [count.corpusId, count.matchedItems, count.inEvidence]))
+      .toEqual([['store.a', 9, 0], ['store.b', 4, 1]]);
+  });
+
+  test('each seat-alone prompt is reported by its length and a short hash, never its text', () => {
+    const alone = { ...pack, candidates: [pack.candidates[1]!] } as EvidencePack;
+    const right = { answer: 'x', citations: [], unanswered: [] } as unknown as AnalystResult;
+    const audit = expectedSeatOnlyAudit({ expectedAnswerContains: ['4182'] }, { seats: [2], alone, result: right, prompts: ['secret prompt one', 'secret prompt one', 'other'] });
+    expect(audit.prompts?.map((prompt) => prompt.chars)).toEqual([17, 17, 5]);
+    expect(audit.prompts![0]!.sha256).toMatch(/^[0-9a-f]{12}$/);
+    expect(audit.prompts![0]!.sha256).toBe(audit.prompts![1]!.sha256);
+    expect(audit.prompts![0]!.sha256).not.toBe(audit.prompts![2]!.sha256);
+    expect(JSON.stringify(audit)).not.toContain('secret');
   });
 
   test('no expected seat in the pack means no second call; a failed call is reported, never the grade', async () => {
