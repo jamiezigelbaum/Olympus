@@ -2933,6 +2933,9 @@ export interface ConnectorStoreOwnedSearchFacetRefreshSummary {
   refreshedLocalItemIds: string[];
 }
 
+/** Off-thread people reads taken before a store whose visibility keeps moving is left for the next refresh. */
+const PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
+
 /** A people read's row: one sender in one conversation at one tier. */
 interface PeopleObservationRow {
   provider: string;
@@ -6239,17 +6242,24 @@ export class LocalConnectorStore {
    * and held copies are taken here, on this thread, against the current
    * ledger, and travel with the query, since the pool's connection cannot see
    * this connection's temp tables. A store the pool cannot read is read here.
-   * An item written and held between taking that set and the pool's read can
-   * be counted in this one read; the write moves the store's visibility
-   * marker, so the next change check reads the store again.
+   * Unlike a read on this thread, writes can land between taking that set and
+   * the pool's read, and an item written and held in that gap would name its
+   * sender: the read counts only when the store's visibility marker did not
+   * move across it, and is taken again otherwise. A store that keeps moving
+   * fails this read (its senders drop out until the next refresh), never
+   * serving a held name.
    */
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
-    const tierHidden = await this.tierHiddenItemPksInTurns();
-    const steps = this.peopleObservationSteps(tierHidden);
-    let step = steps.next();
-    while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-    return this.peopleObservationsFromRows(step.value);
+    for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      const marker = this.peopleVisibilityMarker();
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      const steps = this.peopleObservationSteps(tierHidden);
+      let step = steps.next();
+      while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
+      if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+    }
+    throw new Error('people read: the store\'s visibility changed during every attempt');
   }
 
   private *peopleObservationSteps(tierHidden: { hidden: readonly number[]; held: readonly number[] }): Generator<StoreRead, PeopleObservationRow[], unknown> {

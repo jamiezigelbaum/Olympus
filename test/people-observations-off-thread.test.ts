@@ -181,6 +181,30 @@ describe('people observations off the main thread (#1305)', () => {
     expect((await store.peopleObservationsOffThread()).sort(bySenderKey)).toEqual(expected);
   }, 60_000);
 
+  test('an item held while the pool reads names no one: the read is taken again', async () => {
+    const { fixture, store } = await senderFixture();
+    const db = storeDb(store);
+    const ledgerDb = (fixture.ledger as unknown as { db: Database }).db;
+    // One visible item gets a sender of its own.
+    const visible = (store as unknown as { tierHiddenItemPks(): { hidden: number[]; held: number[] } }).tierHiddenItemPks();
+    const excluded = new Set([...visible.hidden, ...visible.held]);
+    const candidates = db.query(`SELECT item_pk, provider_item_id FROM items WHERE tombstoned = 0 ORDER BY item_pk`).all() as Array<{ item_pk: number; provider_item_id: string }>;
+    const target = candidates.find((row) => !excluded.has(row.item_pk))!;
+    db.query(`UPDATE items SET sender_id = 'zed@example.com', sender_label = 'Zed Marlow' WHERE item_pk = ?`).run(target.item_pk);
+    expect((await store.peopleObservationsOffThread()).some((o) => o.senderId === 'zed@example.com')).toBe(true);
+
+    // The item is held for classification after the hidden set was taken and before the pool reads.
+    let reads = 0;
+    setReadPoolObserverForTests(() => {
+      reads += 1;
+      if (reads === 1) ledgerDb.query(`UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = ? AND copy_state = 'current'`).run(target.provider_item_id);
+    });
+    const after = await store.peopleObservationsOffThread();
+    expect(after.some((o) => o.senderId === 'zed@example.com')).toBe(false);
+    expect(reads).toBeGreaterThan(1);
+    expect(after.sort(bySenderKey)).toEqual(oracle(store).sort(bySenderKey));
+  }, 60_000);
+
   test('the people query reads a covering index', async () => {
     const { store } = await senderFixture();
     const db = storeDb(store);
