@@ -93,7 +93,8 @@ describe('Claude MCP App canary', () => {
   test('accounts validate an optional boolean without changing existing accounts', () => {
     const raw = { clients: ['claude'], questions: 'questions.json' };
     const parse = (extra: object) => parseCanaryAccounts({ ...raw, ...extra }, () => [privateQ]);
-    expect(parse({})).not.toHaveProperty('claude_app');
+    // The switch is on by default (#1266), so a file that leaves it out expects the dashboard checks.
+    expect(parse({}).claude_app).toBe(true);
     expect(parse({ claude_app: true }).claude_app).toBe(true);
     expect(parse({ claude_app: false }).claude_app).toBe(false);
     for (const value of ['on', 'false', 1, null, {}]) expect(() => parse({ claude_app: value })).toThrow('claude_app must be true or false');
