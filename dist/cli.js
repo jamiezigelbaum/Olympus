@@ -76437,10 +76437,7 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
   const questionTerms = sourceIndexChunkQueryTerms(pack.question);
-  const anchorTerms = (candidate) => {
-    const unnamed = withoutNameTerms(questionTerms, candidate.provenance.citation?.title);
-    return unnamed.length > 0 ? unnamed : questionTerms;
-  };
+  const anchorTerms = (candidate) => promptFitAnchorTerms(questionTerms, candidate.provenance.citation?.title);
   const headSeats = RESERVED_HEAD_SEATS + recencySeats;
   const order = [
     ...pack.candidates.slice(0, headSeats),
@@ -76466,6 +76463,10 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     }
   }
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+function promptFitAnchorTerms(questionTerms, title) {
+  const unnamed = withoutNameTerms(questionTerms, title);
+  return unnamed.length > 0 ? unnamed : questionTerms;
 }
 function clipQuestionChunksToUtf8Bytes(chunks, maxBytes, termGroups) {
   if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {

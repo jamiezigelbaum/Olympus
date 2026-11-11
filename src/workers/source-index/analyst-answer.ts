@@ -1044,13 +1044,8 @@ export function fitPackToPromptBytes(
   recencySeats = 0,
 ): EvidencePack {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
-  // The pack excerpt's term set: the question's terms minus each seat's name
-  // terms, or all of them when its name carries every one.
   const questionTerms = sourceIndexChunkQueryTerms(pack.question);
-  const anchorTerms = (candidate: EvidenceCandidate) => {
-    const unnamed = withoutNameTerms(questionTerms, candidate.provenance.citation?.title);
-    return unnamed.length > 0 ? unnamed : questionTerms;
-  };
+  const anchorTerms = (candidate: EvidenceCandidate) => promptFitAnchorTerms(questionTerms, candidate.provenance.citation?.title);
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
@@ -1090,6 +1085,19 @@ export function fitPackToPromptBytes(
   // Nothing fits even one candidate's labels: send the smallest pack rather
   // than none, and let the transport's own ceiling report it.
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+
+/**
+ * The terms a seat's clip anchors on: the pack excerpt's term set (the
+ * question's terms minus the seat's name terms), or every question term when
+ * the name carries them all. Exported for the eval's clip report.
+ */
+export function promptFitAnchorTerms(
+  questionTerms: ReadonlyArray<readonly string[]>,
+  title: string | null | undefined,
+): ReadonlyArray<readonly string[]> {
+  const unnamed = withoutNameTerms(questionTerms, title);
+  return unnamed.length > 0 ? unnamed : questionTerms;
 }
 
 function clipQuestionChunksToUtf8Bytes(

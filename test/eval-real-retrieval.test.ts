@@ -11,7 +11,7 @@ import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
-import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { fitPackToPromptBytes, type AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
 import {
   buildEvalPack,
   createEvalDropboxLanes,
@@ -666,5 +666,36 @@ describe('the dataset shape the runner reads', () => {
     const dataset = await Bun.file(new URL('../eval/questions/held-out.json', import.meta.url)).json() as import('../eval/types.ts').EvalDataset;
     const withNotes = dataset.questions.filter((question) => typeof question.notes === 'string' && question.notes.length > 0);
     expect(withNotes.length).toBe(dataset.questions.length);
+  });
+});
+
+describe('the real eval report places the clip around an expected value', () => {
+  test('passage starts, anchor-term offsets and the replayed fit windows, as offsets only', () => {
+    const first = `${'intro words here. '.repeat(60)}zephyr cobalt reading 4182 units. ${'later text. '.repeat(200)}`;
+    const second = 'closing note';
+    const candidate = (id: string, chunks: string[]) => ({
+      provenance: { sourceItem: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: id }, citation: { title: `Item ${id}` } },
+      trustTier: 'S2', trustDomain: 'internal', chunks,
+    });
+    const candidates = [candidate('a', [first, second]), ...Array.from({ length: 20 }, (_, index) => candidate(`f${index}`, ['filler '.repeat(400)]))];
+    const pack = {
+      question: 'What is the zephyr cobalt reading?',
+      candidates,
+      coverage: { searchedCorpora: ['c'], skippedCorpora: [], extractionGaps: [] },
+      builtAt: '2026-11-11T00:00:00Z',
+    } as unknown as EvidencePack;
+    const answer = { answer: 'none', citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult;
+    const sent = fitPackToPromptBytes(pack, 13_500, new Map(pack.candidates.map((entry) => [entry, 'c'] as const)), { localOnly: true });
+    const audit = evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, answer, answer, undefined, undefined, undefined, sent);
+    const seat = audit.expected[0]!.packSeats[0]!;
+    expect(seat.seat).toBe(1);
+    expect(seat.clip!.passageStarts).toEqual([0, first.length + 1]);
+    const termOffsets = seat.clip!.anchorTermOffsets.flat();
+    expect(termOffsets).toContain(first.indexOf('zephyr'));
+    expect(termOffsets).toContain(first.indexOf('cobalt'));
+    const windows = seat.clip!.fittedWindows!;
+    expect(windows.length).toBeGreaterThan(0);
+    expect(windows.some(([start, end]) => start <= seat.charOffset && seat.charOffset + 4 <= end)).toBe(true);
+    expect(JSON.stringify(seat.clip)).not.toContain('zephyr');
   });
 });

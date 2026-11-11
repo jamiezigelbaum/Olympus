@@ -47,6 +47,7 @@ import {
   type OlympusConfig,
 } from '../src/core/config.ts';
 import { DelphiClient } from '../src/core/delphi.ts';
+import { sourceIndexChunkQueryTerms } from '../src/core/source-index/chunk-selection.ts';
 import {
   buildEvidencePackDetailed,
   type EvidencePackBuildDetail,
@@ -63,6 +64,7 @@ import {
   DEFAULT_MAX_CHARS_PER_CANDIDATE as PRODUCT_MAX_CHARS_PER_CANDIDATE,
   DEFAULT_MAX_RESULTS as PRODUCT_MAX_RESULTS,
   fitPackToPromptBytes,
+  promptFitAnchorTerms,
   releaseAnalystAnswer,
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
@@ -243,11 +245,16 @@ async function main(): Promise<void> {
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
   // The pack seats (1-based) the Analyst was actually sent, per pack.
   const analystSeatsByPack = new WeakMap<object, number[]>();
+  // The pack each first Analyst call was sent, for the clip report.
+  const analystSentByPack = new WeakMap<object, EvidencePack>();
   const fittedAnalyst = promptFittedEvalAnalyst(
     analyst,
     analystPromptByteBudget,
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
-    (pack, seats) => analystSeatsByPack.set(pack, seats),
+    (pack, seats, sent) => {
+      analystSeatsByPack.set(pack, seats);
+      analystSentByPack.set(pack, sent);
+    },
     (pack) => detailsByPack.get(pack)?.recencySeats,
   );
   const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
@@ -330,7 +337,7 @@ async function main(): Promise<void> {
         }),
         ...(detail ? { retrieval: evalRetrievalAudit(detail, question, storeSearches) } : {}),
         answerStage: {
-          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
+          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack), analystSentByPack.get(pack)),
           ...(repeatsByPack.has(pack)
             ? {
               answerRepeats: repeatsByPack.get(pack)!.results.map((repeat) => evalAnswerRepeat(question, pack, repeat)),
@@ -725,7 +732,7 @@ export interface EvalAnswerStageAudit {
      * value's character offset in the seat's excerpt (-1 when it is only in the
      * seat's citation, facts or tables) and the excerpt's length.
      */
-    packSeats: Array<{ seat: number; charOffset: number; seatChars: number }>;
+    packSeats: Array<{ seat: number; charOffset: number; seatChars: number; clip?: EvalSeatClip }>;
     /** The value's character offset in the prompt the Analyst model was sent, when it is there. */
     promptCharOffset?: number;
     /** Whether the Analyst's answer cites a seat holding the value. */
@@ -1010,6 +1017,7 @@ export function evalAnswerStageAudit(
   analystPrompts?: readonly string[],
   analystModelIds?: readonly string[],
   analystSeats?: readonly number[],
+  sentPack?: EvidencePack,
 ): EvalAnswerStageAudit {
   // Every evidence field the Analyst can be shown: citation metadata
   // (title, locator, dates), chunk text, extracted facts and tables.
@@ -1077,7 +1085,10 @@ export function evalAnswerStageAudit(
       const answerToken = !entry.inAnalystAnswer ? valueTokenShape(value, analystAnswer) : undefined;
       const packSeats = seatTexts.flatMap((seat, index) => valueOffset(value, seat.all) < 0
         ? []
-        : [{ seat: index + 1, charOffset: valueOffset(value, seat.excerpt), seatChars: seat.excerpt.length }]);
+        : [{
+          seat: index + 1, charOffset: valueOffset(value, seat.excerpt), seatChars: seat.excerpt.length,
+          ...(sentPack ? { clip: evalSeatClip(pack, index, sentPack) } : {}),
+        }]);
       const promptCharOffset = promptText !== undefined ? valueOffset(value, promptText) : -1;
       return {
         ...entry,
@@ -1089,6 +1100,48 @@ export function evalAnswerStageAudit(
       };
     }),
   };
+}
+
+/**
+ * Where a seat's prompt-fit clip falls, in character offsets of the seat's
+ * excerpt (its passages joined by newlines), never text: where each passage
+ * starts, where each of the clip's anchor term groups occurs (up to 8 per
+ * group), and the windows of it the Analyst was sent (absent when the fit
+ * dropped the seat; -1 for a window that is not a plain substring).
+ */
+export interface EvalSeatClip {
+  passageStarts: number[];
+  anchorTermOffsets: number[][];
+  fittedWindows?: Array<[number, number]>;
+}
+
+function evalSeatClip(
+  pack: EvidencePack,
+  seatIndex: number,
+  sent: EvidencePack,
+): EvalSeatClip {
+  const candidate = pack.candidates[seatIndex]!;
+  const excerpt = candidate.chunks.join('\n');
+  const lower = excerpt.toLowerCase();
+  const passageStarts: number[] = [];
+  let at = 0;
+  for (const chunk of candidate.chunks) {
+    passageStarts.push(at);
+    at += chunk.length + 1;
+  }
+  const groups = promptFitAnchorTerms(sourceIndexChunkQueryTerms(pack.question), candidate.provenance.citation?.title);
+  const anchorTermOffsets = groups.map((group) => [...new Set(group.flatMap((term) => {
+    const offsets: number[] = [];
+    for (let from = lower.indexOf(term.toLowerCase()); from >= 0 && offsets.length < 8; from = lower.indexOf(term.toLowerCase(), from + 1)) offsets.push(from);
+    return offsets;
+  }))].sort((left, right) => left - right).slice(0, 8));
+  const kept = sent.candidates.find((entry) => entry.provenance === candidate.provenance
+    || entry.provenance.sourceItem.localItemId === candidate.provenance.sourceItem.localItemId);
+  const fittedWindows = kept?.chunks.map((chunk): [number, number] => {
+    const start = excerpt.indexOf(chunk);
+    return [start, start < 0 ? chunk.length : start + chunk.length];
+  });
+  return { passageStarts, anchorTermOffsets, ...(fittedWindows ? { fittedWindows } : {}) };
 }
 
 /**
@@ -1137,7 +1190,7 @@ export function promptFittedEvalAnalyst(
   analyst: Analyst,
   promptByteBudget: number | undefined,
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
-  onSeats: (pack: EvidencePack, seats: number[]) => void,
+  onSeats: (pack: EvidencePack, seats: number[], sent: EvidencePack) => void,
   recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
 ): Analyst {
   return {
@@ -1153,7 +1206,7 @@ export function promptFittedEvalAnalyst(
           recencySeats(pack),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
-        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
+        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent);
       return analyst.analyze(sent, analyzeOptions);
     },
   };
