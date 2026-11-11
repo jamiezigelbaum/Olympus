@@ -18,7 +18,8 @@ Five moves:
    serves the dashboard and answers (#1064). It is built behind a switch and
    proven on the owner's large install first. If it is not proven by the scope
    freeze, 1.5 ships the two targeted fixes instead (#858 option 1 and #929)
-   and the split moves to 1.6.
+   and the split moves to 1.6. That fallback was taken on 2026-11-11 (see
+   Decisions): 1.5 does not wait for the split.
 2. **Findable in minutes**: judge the items a question matched first (#1062),
    shorten the wait for captured messages (#609, #866), show the judging
    choices with time and cost at setup (#891, #922), and say "still checking
@@ -183,28 +184,81 @@ hung keyword search on real-size stores; it was reverted (#1292, tracked in
 of the owner's stores from its PR head before it merges, and the owner's
 install takes only a commit that passed that eval.
 
+State on 2026-11-11 (counts on #707): 4 of 7 on main at `39a63985`. A fix
+for the question whose answer is a file known only by its name scored 5 of 7
+at its PR head, then merged with one more ordering change made after that
+run, and the question failed again on main (#1343). So an eval result counts
+only for the head it ran on: a change to retrieval or ordering after the run
+gets a new run before the merge. The two retrieval failures are one family:
+a store's best keyword match loses its place to semantic hits when stores
+are merged (#1350, open; its first head seats one of the two expected
+items). The other failure is the answer model: the value is in the cited
+passage and the answer gives a different one. Heavy questions still spend 7
+to 8 seconds per store in the keyword lane on a quiet machine (#1347), so on
+a busy one they reach the 10-second lane budget and a store drops out; that
+rides on the lane budgets in #1329. The eval report now records where a
+question was lost: each store's rank for the expected item, the seat and
+offset of each value, what the answer cited, and the answer's shape (#1348).
+
 That eval is necessary, not sufficient. The same night, main at `7c028be2`
 (engine split off), which scores on the copies, was installed on the owner's
 live engine and could not answer: in two Asks every lane of all 11 sources
 ended at its deadline, where 1.4.3 and 1.4.4 search all 11 and answer in
 about 90 to 100 seconds (#1305). The owner's install is back on 1.4.4.
-Working explanation, not yet confirmed by a before/after run: the lane
-deadline became real when searches moved to a read pool (#1146), and at this
-size a search of all sources takes well over the 10-second budget, so the
-earlier builds answered only because their deadline never fired. Until an
-Ask passes on a full-size install that is busy importing and judging, no
-build from main goes onto the owner's live install, the engine split's
-switch-on there is held, and the search fixes do not ship as 1.4.5. The fix
-has to keep three things true: an Ask never comes back empty because
+Until an Ask passes on a full-size install that is busy importing and
+judging, no build from main goes onto the owner's live install, the engine
+split's switch-on there is held, and the search fixes do not ship as 1.4.5.
+The fix has to keep three things true: an Ask never comes back empty because
 sources were slow, the budget is sized from measurement, and the default is
 never worse than 1.4.x.
+
+Cause, confirmed on 2026-11-11 by a synthetic gate and by runs on an
+isolated copy of the owner's data (#1305, fix in #1329, still a draft). The
+lane deadline became real when searches moved to a two-worker read pool
+(#1146): a search of all sources needs well over the 10-second budget, and a
+worker stopped at the deadline keeps its slot until its statement ends, so
+every lane timed out. A timed-out Ask now says so instead of "no evidence"
+(#1317). 1.4.4 on the same copy answers only because its deadline never
+fires, and it drops more than half of its lanes each time, so its answers
+are quick and incomplete. The first pool fix (one warm worker per store)
+removed the timeouts and exposed a second cause: about two minutes per Ask
+of synchronous SQLite on the worker's main thread after the pool returned
+(five separate scans), then searches queueing behind a store's own vector
+scan. With those moved onto the pool or bounded, the draft answers the same
+three Asks in about the time 1.4.4 takes and keeps every lane in two of
+them; the two largest stores still reach the provisional 60-second lane
+budget in the other. The two budgets are set only when a rerun shows the
+default no worse than 1.4.4. Every Ask's latency record now carries its
+main-thread SQL time with call sites. The measurements are on the private
+operations issue (olympus-ops#151).
+
+The busy gate changed with it. Its first version passed in a cloud container
+(worst freeze 303 ms) on a seed that lacked what made the real reads slow.
+The gate now seeds vectors at real count, a tier ledger with items and
+copies, sync-run history, held copies and language profiles, and it fails an
+Ask whose main-thread SQL totals more than 2,000 ms or has a statement over
+250 ms. Unpruned run history on the owner's install is #1349.
 
 Found by the same measurement: on the owner's install, items under a Dropbox
 folder approved as names only show as "Private, decided by the judge" although
 nothing read them. The folder approval reaches the connector but not the
 store's names-only rule. The Privacy accuracy lane fixes the label and the
 missing verdict (#1295); unsupported file kinds and an honest "in scope, not
-read yet" count are #1298 and #1299.
+read yet" count are #1298 and #1299. The label and the missing verdict are
+fixed for Dropbox (#1314) and Google Drive (#1340). #1314 also closed a hole
+present from 1.0.0 to 1.4.4: the first text read after a names-only folder
+or rule was lifted could be released before it was judged; it is now held.
+
+Waiting on the owner (#1316, asked 2026-11-11): a brand-new, unjudged file's
+text can reach a cloud answer on sources that use the owner-approved
+"Personal-first" rule of 2026-10-13
+(`docs/design/per-item-four-tier-classification.md`, section 9); only
+archive import, Evernote, Gmail and live WhatsApp hold text until it is
+judged. The proposal is one shared rule that holds every source's new text
+until judged, also when no judge is set up (#1318, a draft that stays
+unmerged until the owner answers). Cost: with the built-in judge on a
+laptop, about 80 minutes before 1,000 new items can be cited by a cloud
+answer; a Private answer route can read them meanwhile.
 
 Claude dashboard (owner decision 2026-11-10, #1266): Claude connectors may
 show the Olympus dashboard as an MCP App, not only the four remote tools, on
@@ -741,6 +795,27 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-11-11 — Every source holds new text until a judge has checked it.**
+  Owner decision (#1316, "Yes, hold on every source", 10:26Z): new text from
+  any source stays out of cloud answers (ChatGPT, Claude, Grok) until the
+  privacy judge has read it, also when no judge is set up. This retires the
+  2026-10-13 Personal-first rule, under which a new Dropbox file with no
+  record-like signs was usable as Personal before it was judged. Names stay
+  searchable, Private answers can read held text at once, and items a
+  question matched are judged first. Cost: on a large first sync, new items
+  wait for the judge (about 80 minutes for 15,000 items at the Delphi 35B
+  judge's ~188 a minute). Built in #1318; ships in 1.5.
+- **2026-11-11 — 1.5 does not wait for the engine split.** Taken by the
+  release plan's own fallback rule (move 1 of 1.5), and the owner was told.
+  With the switch on, the release check failed 31 checks (#1324); 19 of
+  them were later traced to an unrelated open-link bug (#1336), and the
+  rest are not yet explained. The split stays in the tree behind its
+  switch, off by default, and is the first item of 1.6. It comes back into
+  1.5 only if the switch-on release check is fully green and the split has
+  then run 48 hours on the owner's install before the release candidate.
+  1.5 ships #929 (merged in #941) and the fix for Ask on large installs
+  (#1305) instead. #858 option 1 is on hold: measured on main, the worst
+  freeze during a heavy import was 645 ms, so it has no case to fix yet.
 - **2026-11-10 — Claude may get the dashboard, behind a switch.** Owner
   decision ("Yes, if the privacy proof passes", #1266): Claude connectors may
   show the Olympus dashboard as an MCP App on relayed `/mcp`. This changes the

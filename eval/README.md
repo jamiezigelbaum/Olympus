@@ -153,9 +153,40 @@ local Dropbox index and a reachable Argus lane:
    By default, the real eval uses literal-query retrieval so the gate stays
    usable. Set `OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true` only for a targeted
    recall experiment; it adds a local-model planning call before each question.
-   The default evidence budget is 5 candidates at 1,500 chars each; override
-   with `OLYMPUS_EVAL_MAX_RESULTS` and
-   `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` for targeted diagnosis.
+   The gate's evidence budget is 5 candidates at Ask's per-candidate budget
+   (3,000 chars); override with `OLYMPUS_EVAL_MAX_RESULTS` and
+   `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` for targeted diagnosis. A local
+   Analyst is sent the pack Ask's local leg would send: fitted to 13,500 prompt
+   bytes, or to `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES` when set (the
+   same override Ask reads). After the gate, the same questions run again at
+   Ask's own pack size (24) as a second, informational score in the report's
+   `informational` section; it never decides pass or fail. Set
+   `OLYMPUS_EVAL_INFORMATIONAL_MAX_RESULTS` to another size, or 0 to skip it.
+   For ordering runs that must not depend on machine load, lift the per-store
+   lane deadline with `OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS=120000` (0 turns
+   it off) and report deadline losses at the product cap separately.
+   To tell a steady Analyst misreading from a coin flip, set
+   `OLYMPUS_EVAL_ANALYST_REPEATS=3` (and optionally
+   `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS=value-2,secure-summary-1`): the
+   Analyst answers each named question's frozen pack that many times. The
+   first answer is graded; the others are listed in `answerRepeats` by shape,
+   cited seats and value flags only. Raise the question timeout to match.
+   To tell distraction from misreading, set
+   `OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY=1`: after the graded answer, the
+   Analyst answers once more on a pack holding only the seats with the
+   question's expected items, read whole. `expectedSeatOnly` reports those
+   seats and that answer by shape and flags (or `failed`), with each model
+   prompt's length and a 12-character SHA-256, so two runs can tell identical
+   prompts from different ones. The seat-alone pack's coverage counts only
+   the seats it holds, as Ask's own fit does. Right alone but
+   wrong in the full pack means the other seats distract it; wrong alone means
+   it misreads that document as extracted. It follows
+   `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   The value-token flag counts an answer token as held by a cited seat when
+   it is in that seat's text, facts, tables or citation fields, including the
+   date of a citation timestamp, each segment of its locator path and a file
+   name without its extension, since
+   the Analyst sees those in the seat's citation line.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 

@@ -295,9 +295,31 @@ export function analystSchemaGapChars(maxOutputChars: number): number {
 
 const MAX_SCHEMA_CLAIM_CHARS = 80;
 
+// A search that ran out of time is not an empty one (#1305): when lanes timed
+// out, the no-evidence answer says how many sources were still being
+// searched, and when none finished it says it cannot tell, never "no evidence".
+export const NO_EVIDENCE_ANSWER = 'I have no matching evidence for this question.';
+
 export function noEvidenceAnalystResult(pack: EvidencePack): AnalystResult {
+  const searched = new Set(pack.coverage.searchedCorpora);
+  const stillSearching = [...new Set(pack.coverage.skippedCorpora
+    .filter((skip) => skip.reason === 'lane_timeout' && !searched.has(skip.corpusId))
+    .map((skip) => skip.corpusId))].sort();
+  if (stillSearching.length > 0) {
+    const sources = stillSearching.length === 1 ? '1 source' : `${stillSearching.length} sources`;
+    return {
+      answer: searched.size === 0
+        ? `Olympus ran out of time searching your sources (${sources}), so it cannot say whether the answer is there. Ask again in a moment.`
+        : `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources}, so the answer may still be there. Ask again in a moment.`,
+      citations: [],
+      unanswered: foldCoverageGaps(pack, [
+        `Ran out of time searching: ${stillSearching.join(', ')}`,
+        ...(searched.size > 0 ? [`No matching evidence found in the searched corpora for: ${pack.question}`] : []),
+      ]),
+    };
+  }
   return {
-    answer: 'I have no matching evidence for this question.',
+    answer: NO_EVIDENCE_ANSWER,
     citations: [],
     // Same coverage vocabulary as the release surface's mechanical notes
     // ("searched corpora"): honesty graders match gap text against

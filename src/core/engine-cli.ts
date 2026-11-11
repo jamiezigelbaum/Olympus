@@ -21,6 +21,7 @@ import {
   waitForEngineHealthy,
   inspectEngine,
   installEngineVerified,
+  installedEngineBuild,
   installedEngineHelper,
   installedProgram,
   readEngineConfig,
@@ -84,6 +85,12 @@ export interface EngineCliDeps {
 }
 
 const DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstallOpenHandler };
+
+/** The build a start or restart must prove is running: the installed Linux generation, or the Mac agent's own plist. */
+function runningBuildExpected(service: Parameters<typeof engineServicePaths>[0] & { platform?: string }): string | null {
+  if ((service.platform ?? process.platform) === 'linux') return linuxInstalledBuild(service);
+  return installedEngineBuild(engineServicePaths(service).plistPath);
+}
 
 export async function runEngineCommand(args: string[], deps: EngineCliDeps = {}): Promise<unknown> {
   const [command, ...rest] = args;
@@ -176,8 +183,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   if (command === 'restart') {
     const since = Date.now();
     const result = restartEngine({ ...service, ...parseNowArg('restart', rest) });
-    if ((deps.platform ?? process.platform) !== 'linux') return result;
-    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), since }, { ...deps.health, exec: deps.exec });
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: runningBuildExpected(service), since }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
   if (command === 'stop') {
@@ -187,8 +193,10 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     expectNoArgs('start', rest);
     const since = Date.now();
     const result = startEngine(service);
-    if ((deps.platform ?? process.platform) !== 'linux') return result;
-    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), ...(result.action === 'already_running' ? {} : { since }) }, { ...deps.health, exec: deps.exec });
+    // On every platform the command returns once the worker answers: a Mac
+    // agent that launchd has only been asked to start cannot mint an opening
+    // link yet (#1338).
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: runningBuildExpected(service), ...(result.action === 'already_running' ? {} : { since }) }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
   if (command === 'rollback') {

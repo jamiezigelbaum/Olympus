@@ -61,7 +61,7 @@ describe('web clients: capture and Inbox regressions (#987)', () => {
       const machine: Machine = { os, handle: 'test', label: 'test', driver: 'fake',
         upgrade: async () => {}, put: async () => {}, get: async () => {}, exec: async (script: string) => {
         events.push(script.includes('owner-bridge --port') ? 'bridge' : script.startsWith('kill ') ? 'stop' : 'mint');
-        return { code: 0, stdout: script.includes('owner-bridge --port') ? '123\n/home/test/rc/web-bridge.test\n' : 'http://127.0.0.1:8010/private', stderr: '', timedOut: false, ms: 0 };
+        return { code: 0, stdout: script.includes('owner-bridge --port') ? '123\n/home/test/rc/web-bridge.test\n' : JSON.stringify({ url: 'http://127.0.0.1:8010/private' }), stderr: '', timedOut: false, ms: 0 };
       } };
       const browser = { on: () => {}, close: () => {}, send: async (method: string) => {
         if (method === 'Target.createTarget') return { targetId: 't' };
@@ -107,7 +107,7 @@ describe('web clients: capture and Inbox regressions (#987)', () => {
       upgrade: async () => {}, put: async () => {}, get: async () => {},
       tunnel: async () => ({ port: server.port!, close: () => {} }), exec: async (script: string) => {
       let stdout = '{}';
-      if (script.includes('dashboard --no-open')) { opens++; stdout = 'http://127.0.0.1:8010/private'; }
+      if (script.includes('dashboard --no-open')) { opens++; stdout = JSON.stringify({ url: 'http://127.0.0.1:8010/private' }); }
       if (script.includes('owner-bridge --port 8010')) { events.push('bridge'); stdout = '123\n/home/test/rc/web-bridge.test\n'; }
       if (script.startsWith('kill 123')) events.push('stop');
       return { code: 0, stdout, stderr: '', timedOut: false, ms: 0 };
@@ -468,7 +468,7 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
         scripts.push(script);
         if (/owner-bridge --port/.test(script)) return { ...ok, stdout: '123\n/home/test/rc/web-bridge.test\n' };
         // The app's connection shows a newer use at each reading, as if each question called Olympus.
-        if (/dashboard --no-open --target private/.test(script)) return { ...ok, stdout: `Open: http://127.0.0.1:${server.port}/inbox?token=one-time\n` };
+        if (/dashboard --no-open --target private/.test(script)) return { ...ok, stdout: JSON.stringify({ url: `http://127.0.0.1:${server.port}/inbox?token=one-time`, opened: false }, null, 2) };
         if (/connections list/.test(script)) return { ...ok, stdout: JSON.stringify({ kind: 'remote_connections', connections: [{ id: 'a1', name: 'ChatGPT', status: 'active', last_used_at: new Date(Date.UTC(2026, 9, 28, 10, ++reads)).toISOString() }] }) };
         return ok;
       },

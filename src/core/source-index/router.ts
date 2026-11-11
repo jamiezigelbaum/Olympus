@@ -18,6 +18,8 @@ import type {
 } from './corpus.ts';
 import {
   applyPerCorpusResultBudget,
+  withReservedLeaderSeats,
+  withReservedRecencySeats,
   assessSourceIndexRetrievalState,
   fuseRankedCandidateLanes,
   mergeRetrievalDegradations,
@@ -56,6 +58,10 @@ export interface SourceIndexSearchRequest {
   context: SourceIndexSearchContext;
   corpusIds?: readonly string[];
   families?: readonly SourceFamily[];
+  // The question asks for what is new ("did I just get...", "latest"):
+  // chat stores' pinned newest messages take the recency seats
+  // (withReservedRecencySeats). Decided by the caller's existing heuristic.
+  temporalIntent?: boolean;
 }
 
 export interface SourceIndexCorpusSearchRequest {
@@ -84,7 +90,22 @@ export interface SourceIndexSearchHit {
   // encounteredSecureLocal, and the evidence build uses it when no content
   // provider answers for the item. Search routes never return it.
   trustTier?: SourceTrustTier;
+  // Internal: the hit is one of its store's keyword leaders (the lane's
+  // rank-1 row, its best name match, or both), with its share of the
+  // question's concepts. The router keeps the best leaders across stores in
+  // the pack (withReservedLeaderSeats). Search routes never return it.
+  keywordLeader?: SourceIndexKeywordLeaderSignal;
+  // Internal: the hit is one of its chat store's newest messages, pinned into
+  // the store's cut (1 = newest). A question with temporal intent seats them
+  // in the pack (withReservedRecencySeats). Search routes never return it.
+  newestInStore?: number;
   rawExposed: false;
+}
+
+export interface SourceIndexKeywordLeaderSignal {
+  kinds: ReadonlyArray<'keyword_first' | 'name'>;
+  // Concepts matched over the question's concept groups, 0 to 1.
+  conceptShare: number;
 }
 
 export interface SourceIndexInternalContent {
@@ -261,6 +282,10 @@ export interface SourceIndexRoutedSearchResponse {
   // describe secure-inclusive matches, so an answer analyzed on an ordinary
   // route leaves them out of what it returns. Internal.
   secureLaneAudits: readonly RetrievalLaneAudit[];
+  // How many recency seats (seat 4 on) the pack's newest chat messages took
+  // (withReservedRecencySeats). A prompt fit reads them right after seats 1 to
+  // 3. Internal.
+  recencySeats?: number;
   latencyMs: number;
   rawExposed: false;
 }
@@ -566,30 +591,34 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // one ordering available here that is neither adapter-scale-derived nor
   // spelling-derived, so it is what the tie-break falls back on.
   const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index] as const));
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(
-    fuseRankedCandidateLanes({
-      lanes,
-      getId: routedHitCandidateId,
-      // Fuse everything and let the per-corpus budget below make the cut. A
-      // slice at maxResults hands the entire cross-corpus decision to the
-      // tie-break, which is how one comparator could erase whole corpora.
-      limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
-      // Scale-free, and load-bearing here in a way it is nowhere else. The
-      // candidate id is corpus-scoped, so no candidate is ever in two lanes and
-      // every candidate carries exactly one lane's 1/(k+rank): each rank tier is
-      // a full tie across corpora, and the tie-break IS the cross-corpus ranking
-      // function. Adapter `score` carries no scale contract — a negated bm25 rank
-      // in one corpus (~8), a sub-lane RRF sum in another (~0.016) — so comparing
-      // it ordered corpora by scoring convention, sinking a whole family below
-      // every bm25 hit in every tier. With maxResults 3 against the mounted
-      // corpora that cut the family out of the analyst's evidence entirely, with
-      // nothing in coverage to record the loss. Ordering the tie by corpus id
-      // instead only re-keyed the same loss to spelling: 'i' < 's', so every
-      // secure_local corpus lost to every internal one on every query forever.
-      tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
-    }),
-    request.maxResults,
-  );
+  const fusedAll = fuseRankedCandidateLanes({
+    lanes,
+    getId: routedHitCandidateId,
+    // Fuse everything and let the per-corpus budget below make the cut. A
+    // slice at maxResults hands the entire cross-corpus decision to the
+    // tie-break, which is how one comparator could erase whole corpora.
+    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
+    // Scale-free, and load-bearing here in a way it is nowhere else. The
+    // candidate id is corpus-scoped, so no candidate is ever in two lanes and
+    // every candidate carries exactly one lane's 1/(k+rank): each rank tier is
+    // a full tie across corpora, and the tie-break IS the cross-corpus ranking
+    // function. Adapter `score` carries no scale contract — a negated bm25 rank
+    // in one corpus (~8), a sub-lane RRF sum in another (~0.016) — so comparing
+    // it ordered corpora by scoring convention, sinking a whole family below
+    // every bm25 hit in every tier. With maxResults 3 against the mounted
+    // corpora that cut the family out of the analyst's evidence entirely, with
+    // nothing in coverage to record the loss. Ordering the tie by corpus id
+    // instead only re-keyed the same loss to spelling: 'i' < 's', so every
+    // secure_local corpus lost to every internal one on every query forever.
+    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
+  });
+  const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
+  const recency = request.temporalIntent
+    ? withReservedRecencySeats(leadered, pool, request.maxResults)
+    : { ...leadered, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
 
   const result: SourceIndexRoutedSearchResponse = {
     hits: fused,
@@ -602,6 +631,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     ...(incompleteCorpora.length > 0 ? { incompleteCorpora } : {}),
     encounteredSecureLocal,
     secureLaneAudits,
+    ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };

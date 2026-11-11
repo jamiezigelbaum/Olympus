@@ -44,6 +44,7 @@ import {
   applyPerCorpusResultBudget,
   fuseRankedCandidateLanes,
   mergeRetrievalDegradations,
+  withReservedRecencySeats,
 } from './source-index/retrieval.ts';
 import {
   routeSourceIndexSearch,
@@ -250,6 +251,9 @@ export interface SelectedEvidenceItem {
 export interface EvidencePackBuildDetail {
   pack: EvidencePack;
   candidateCorpusIds: readonly string[];
+  // Recency seats the router took (seat 4 on; withReservedRecencySeats), so a
+  // prompt fit can keep them. Absent when none were taken.
+  recencySeats?: number;
   laneAudits: readonly RetrievalLaneAudit[];
   // Members of laneAudits (by object identity) from a corpus that contributed
   // anything secure (router.ts secureLaneAudits). Kept whole here for
@@ -327,8 +331,7 @@ export async function buildEvidencePackDetailed(input: BuildEvidencePackInput): 
 async function buildPreparedEvidencePackDetailed(
   input: BuildEvidencePackInput,
 ): Promise<EvidencePackBuildDetail> {
-  const reranker = input.reranker && !input.selectedItems?.length
-    && !hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? '')
+  const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input)
     ? input.reranker
     : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
@@ -343,9 +346,11 @@ async function buildPreparedEvidencePackDetailed(
   const visibleHits = input.visibilityGate && !input.selectedItems?.length
     ? input.visibilityGate(routed.hits)
     : routed.hits;
-  const routedHits = input.selectedItems?.length
-    ? routed.hits
-    : orderHitsForTemporalIntent(visibleHits, input);
+  // Routed order is the pack order. A recency word in the question does not
+  // re-sort it: newest-first over the whole pool undid store turn and the
+  // reserved leader seats, and buried a store's best match past what a local
+  // Analyst reads (2026-11-11). Every seat carries its date.
+  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
@@ -542,6 +547,7 @@ async function buildPreparedEvidencePackDetailed(
   return {
     pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    ...(routed.recencySeats ? { recencySeats: routed.recencySeats } : {}),
     laneAudits,
     secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
@@ -692,26 +698,8 @@ function contentFreePolicyLaneAudits(
   }));
 }
 
-function orderHitsForTemporalIntent(
-  hits: readonly SourceIndexRoutedSearchHit[],
-  input: BuildEvidencePackInput,
-): readonly SourceIndexRoutedSearchHit[] {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? '')) {
-    return hits;
-  }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime) return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore) return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
-
-function hitCandidateId(hit: SourceIndexRoutedSearchHit): string {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
+function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): boolean {
+  return hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? '');
 }
 
 export function hasTemporalIntent(value: string): boolean {
@@ -724,17 +712,6 @@ export function hasTemporalIntent(value: string): boolean {
     || /\bright\s+now\b/.test(normalized)
     || /\btoday\b/.test(normalized)
     || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
-}
-
-function hitCitationTime(hit: SourceIndexRoutedSearchHit): number {
-  const citation = hit.provenance?.citation;
-  return safeTime(citation?.authoredAt) || safeTime(citation?.updatedAt);
-}
-
-function safeTime(value: string | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 // --- Multi-query retrieval ---------------------------------------------------
@@ -751,7 +728,7 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
-> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings'>>;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats'>>;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -885,7 +862,13 @@ async function runRoutedSearches(
     // record it.
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
   });
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  // The fused budget cuts again, so the recency seats are taken again from
+  // the fused pool; the router's leader seats are not re-reserved here.
+  const recency = questionHasTemporalIntent(input)
+    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
+    : { ...budgeted, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
 
   return {
     hits: fused,
@@ -905,6 +888,7 @@ async function runRoutedSearches(
     ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),
     // Every run of this build, expansions included: what any of them met.
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
+    ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
   };
 }
 
@@ -939,6 +923,7 @@ function runRoutedSearch(
         maxResults,
         ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
         context: input.searchContext,
+        ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
       },
       ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),

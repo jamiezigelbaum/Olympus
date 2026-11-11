@@ -309,8 +309,8 @@ export class SecretLocationsIndex {
       hide?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity>;
     } = {},
   ): SecretLocationMatch[] {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0) return [];
+    const readings = secretLocationQueryReadings(query);
+    if (readings.length === 0) return [];
     const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
     const rows = this.db.query(`
       SELECT * FROM secret_locations
@@ -321,15 +321,14 @@ export class SecretLocationsIndex {
     for (const row of rows) {
       const location = locationFromRow(row);
       if (!secretLocationWithinScope(location, scope)) continue;
-      // A withheld name is not searchable either: matching on it would say it.
-      const haystack = [
-        location.namesReleasable ? location.locator ?? '' : '',
-        location.title ?? '',
-        location.findingKinds.join(' ').replaceAll('_', ' '),
-      ].join('\n').toLowerCase();
-      const words = new Set(haystack.split(/[^\p{L}\p{N}]+/u));
-      const score = terms.filter((term) => words.has(term)).length;
-      if (score >= Math.min(3, terms.length)) scored.push({ location, score });
+      const words = secretLocationWords(location);
+      // Either reading of the hyphens may match; the better one scores.
+      let best = 0;
+      for (const terms of readings) {
+        const score = terms.filter((term) => words.has(term)).length;
+        if (score >= Math.min(3, terms.length)) best = Math.max(best, score);
+      }
+      if (best > 0) scored.push({ location, score: best });
     }
     const identities = scored.map(({ location }): SecretLocationIdentity => ({
       provider: location.source,
@@ -420,11 +419,52 @@ const STOP_WORDS = new Set([
   'where', 'which', 'who', 'with',
 ]);
 
-export function secretLocationQueryTerms(query: string): string[] {
-  return [...new Set(
-    sourceIndexTopicTokens(query.replaceAll('_', ' '))
-      .filter((term) => term.length >= 2 && !STOP_WORDS.has(term)),
-  )];
+/**
+ * The query's topic words, read twice when it has a hyphen: with hyphenated
+ * words joined ("Wi-Fi" as "wifi", #1321) and split ("access-key" as "access"
+ * and "key"), since a name or finding kind may spell it either way.
+ */
+export function secretLocationQueryReadings(query: string): string[][] {
+  const text = query.replaceAll('_', ' ');
+  const joined = secretLocationQueryTerms(joinHyphenatedWords(text));
+  const split = secretLocationQueryTerms(text);
+  if (joined.length === 0 && split.length === 0) return [];
+  return joined.join(' ') === split.join(' ') ? [joined] : [joined, split].filter((terms) => terms.length > 0);
+}
+
+function secretLocationQueryTerms(text: string): string[] {
+  return [...new Set(sourceIndexTopicTokens(text).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+}
+
+/** "Wi-Fi" and "wifi" are one word: a hyphen between letters or digits joins them. */
+function joinHyphenatedWords(text: string): string {
+  return text.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, '');
+}
+
+/**
+ * The everyday words a person uses for what the detector found, so "my Wi-Fi
+ * password" finds a file whose names never say "password" (#1321). Only the
+ * kind of Secret, never its value.
+ */
+const FINDING_KIND_WORDS: Readonly<Record<string, readonly string[]>> = {
+  credential_assignment: ['password', 'passwords', 'passcode', 'passphrase', 'pin', 'login', 'credentials'],
+  private_key_material: ['ssh', 'keys'],
+  aws_access_key_id: ['keys'],
+  api_secret_token: ['key', 'keys', 'tokens'],
+  slack_token: ['tokens'],
+};
+
+/**
+ * The whole words a location can be found by: its names (when releasable),
+ * its title and its finding kinds with their everyday words. Each name is
+ * split at punctuation and also read with its hyphens joined, so "home-wifi"
+ * is found by "home", "wifi" and "home-wifi".
+ */
+function secretLocationWords(location: SecretLocation): Set<string> {
+  // A withheld name is not searchable either: matching on it would say it.
+  const names = [location.namesReleasable ? location.locator ?? '' : '', location.title ?? ''].join('\n').toLowerCase();
+  const kinds = location.findingKinds.flatMap((kind) => [kind.replaceAll('_', ' '), ...(FINDING_KIND_WORDS[kind] ?? [])]).join(' ');
+  return new Set([names, joinHyphenatedWords(names), kinds].join('\n').split(/[^\p{L}\p{N}]+/u).filter(Boolean));
 }
 
 interface SecretLocationRow {

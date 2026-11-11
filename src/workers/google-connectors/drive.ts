@@ -22,6 +22,7 @@ import {
   type CredentialBroker,
   type CredentialBrokerFetch,
 } from '../credential-broker/index.ts';
+import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
 import type { ConnectorStoreClassificationOptions } from '../connector-store/index.ts';
 import {
   accountFromGoogleHandle,
@@ -521,6 +522,9 @@ export class GoogleDriveSourceConnector implements SourceConnector {
         content: text?.trim() ? { kind: 'text', text } : { kind: 'metadata_only' },
         metadata: Object.freeze({
           ...metadata,
+          // The owner's folder choice keeps its text unread: it is judged on
+          // its names and never waits for text (#1295), as Gmail and local files do.
+          ...(!excluded && !contentAllowed ? namesOnlyContentScopeMetadata() : {}),
           ...(file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString(`${file.version ?? ''}:${text ?? title}`) }),
         }),
         fetchedAt: new Date().toISOString(),

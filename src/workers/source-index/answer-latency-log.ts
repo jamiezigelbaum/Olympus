@@ -89,6 +89,13 @@ export interface SourceAnswerLatencyTraceRecord {
   analyst_legs: SourceAnswerTraceAnalystLeg[];
   residual_analyst_orphan_count?: number;
   release_decision?: string;
+  // Store id per pack seat, recency seat count, and the seats each prompt fit
+  // kept (#1354). Ids and counts only.
+  evidence_seats?: {
+    pack_corpora: string[];
+    recency_seats: number;
+    fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[] }>;
+  };
   caller?: OperationCallerWire;
   phase_ms: {
     lane_setup_ms: number;
@@ -261,6 +268,18 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
       Math.floor(input.trace.residualAnalystOrphanCount),
     ),
     ...(input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {}),
+    ...(input.trace.evidenceSeats
+      ? {
+        evidence_seats: {
+          pack_corpora: input.trace.evidenceSeats.packCorpora.map(String),
+          recency_seats: Math.max(0, Math.floor(input.trace.evidenceSeats.recencySeats)),
+          fits: input.trace.evidenceSeats.fits.map((fit) => ({
+            lane: fit.lane,
+            kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat))),
+          })),
+        },
+      }
+      : {}),
     ...(input.caller ? { caller: copyCaller(input.caller) } : {}),
     phase_ms: {
       ...fittedPhases,

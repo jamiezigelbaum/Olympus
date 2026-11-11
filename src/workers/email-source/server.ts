@@ -474,6 +474,7 @@ import {
   FileSourceScopeAuthority,
   createScopeBoundGoogleDriveContentScope,
   createScopeBoundDropboxContentScope,
+  dropboxNamesOnlyByOwner,
   fileSourceScopeContentFilters,
   fileSourceScopeDropboxPolicy,
   fileSourceScopeMetadataEnabled,
@@ -3575,6 +3576,9 @@ export async function main(): Promise<void> {
           env: process.env,
           policy: dropboxIngestionPolicy,
           ...(dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {}),
+          // The owner's folder choice (names only) reaches the tier set, which the
+          // store's own ingestion rules never carry (#1295).
+          ...(fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {}),
           onStoreOpened: (store) => registerTierLegStore(
             store,
             DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,

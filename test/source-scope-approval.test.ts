@@ -1,3 +1,4 @@
+import { itemContentKeptNamesOnly } from '../src/core/classification-signals.ts';
 import { describe, expect, test } from 'bun:test';
 import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -289,6 +290,11 @@ test('Drive metadata-only scope reads no content and creates no vectors', async 
   expect(store.status().counts.embeddedChunks).toBe(0);
   expect(store.localContent('personal:file-1', 100)?.chunks).toEqual([]);
   store.close();
+  // Listed as names-only by the owner's choice, so it is judged on its names
+  // and never waits for text (#1295).
+  const listed: boolean[] = [];
+  for await (const page of connector.listItems()) listed.push(...page.items.map((item) => itemContentKeptNamesOnly(item)));
+  expect(listed).toEqual([true]);
 });
 
 test('cached rows from a prior approval revision stay quarantined after a same-account scope edit', async () => {

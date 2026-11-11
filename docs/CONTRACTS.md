@@ -1054,7 +1054,7 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   the 45 s source-answer hand-off) so the first question after idle keeps its
   vector lane. No frozen interface changed shape.
 - 2026-11-11 (no contract type version change; tier classifier stays
-  `2026-10-29.p8`; #1316, **draft until the owner decides**): **every source
+  `2026-10-29.p8`; #1316, owner decision 2026-11-11): **every source
   holds an item's text until it is judged.** Personal-first
   (`content:personal_first`, 2026-10-04) is retired. Read content whose
   model question is open is held pending in Private, as an own record or an

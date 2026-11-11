@@ -259,54 +259,6 @@ describe('buildEvidencePackDetailed multi-query expansion', () => {
     expect(chatScoredHigh).toEqual(chatScoredLow);
   });
 
-  test('recent/latest questions order evidence by citation date before rank', async () => {
-    const detail = await buildEvidencePackDetailed({
-      question: 'Analyze my recent lab results.',
-      searchQuery: 'lab results',
-      maxResults: 10,
-      searchContext: allowAll,
-      registry: registry(),
-      adapters: {
-        [CORPUS]: () => ({
-          hits: [
-            {
-              sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-lab', localItemId: 'old-lab' },
-              provenance: {
-                sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-lab', localItemId: 'old-lab' },
-                citation: { title: 'old-lab', authoredAt: '2014-10-23T00:00:00.000Z' },
-              },
-              score: 0.99,
-              rawExposed: false,
-            },
-            {
-              sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'new-lab', localItemId: 'new-lab' },
-              provenance: {
-                sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'new-lab', localItemId: 'new-lab' },
-                citation: { title: 'new-lab', authoredAt: '2026-04-17T00:00:00.000Z' },
-              },
-              score: 0.1,
-              rawExposed: false,
-            },
-          ],
-          latencyMs: 1,
-          laneAudits: [],
-          rawExposed: false,
-        }),
-      } as SourceIndexRouterAdapterMap,
-      contentProviders: {
-        [CORPUS]: provider({
-          'old-lab': internalBlock('2014 sodium panel'),
-          'new-lab': internalBlock('2026 ApoB lipid panel'),
-        }),
-      },
-    });
-
-    expect(detail.pack.candidates.map((c) => c.provenance.sourceItem.providerItemId)).toEqual([
-      'new-lab',
-      'old-lab',
-    ]);
-  });
-
   test('caps at 3 queries total and dedupes planned queries against the base query', async () => {
     const calls: string[] = [];
     await buildEvidencePackDetailed({

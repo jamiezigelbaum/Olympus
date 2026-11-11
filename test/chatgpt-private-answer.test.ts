@@ -58,6 +58,16 @@ import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
+import { waitFor } from './helpers/test-clock.ts';
+import { CLAUDE_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { parseRemotePublicBaseUrl, remoteMcpResource, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
+
+const CLAUDE_URLS: RemotePublicUrls = (() => {
+  const resolved = parseRemotePublicBaseUrl('https://mcp.olympusplugin.ai');
+  if (!resolved.enabled) throw new Error('test URL');
+  return resolved.urls;
+})();
+const isClaudeGrant = (connection: { clientId?: string | null }): boolean => connection.clientId === CLAUDE_CLIENT_ID;
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 
 /** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
@@ -885,11 +895,15 @@ describe('a handed-off answer starts its private panel job only for its own conn
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     const handler = createRemoteMcpHandler({
       connections: () => store,
+      publicUrls: CLAUDE_URLS,
+      // Relayed, with the Claude app on: a Claude grant gets the Claude surface, anything else ChatGPT's.
+      isRelayed: () => true,
+      claudeApp: { enabled: () => true },
       makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({
         config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal, sourceAnswerJobs: registry,
       }), releaseCheck: NO_SOURCE_INPUTS }),
       chatgpt: {
-        servesRequest: () => true,
+        servesRequest: (_request, connection) => !isClaudeGrant(connection),
         privateAnswers: jobs,
         async privateMatchProbe() { return probeTimesOut ? new Promise(() => {}) : { count: 2, evidence: EVIDENCE }; },
         privateMatchProbeTimeoutMs: 30,
@@ -907,8 +921,10 @@ describe('a handed-off answer starts its private panel job only for its own conn
     rmSync(dir, { recursive: true, force: true });
   });
 
-  async function connect(name: string): Promise<Client> {
-    const { token } = store.create(name);
+  async function connect(name: string, claude = false): Promise<Client> {
+    const token = claude
+      ? store.oauth.createGrant({ clientId: CLAUDE_CLIENT_ID, displayName: name, resource: remoteMcpResource(CLAUDE_URLS, 'default').resource }).tokens.accessToken
+      : store.create(name).token;
     const client = new Client({ name: 'private-handoff-test', version: '1.0.0' });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
       requestInit: { headers: { Authorization: `Bearer ${token}` } },
@@ -947,6 +963,39 @@ describe('a handed-off answer starts its private panel job only for its own conn
       expect(again._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
     } finally {
       await owner.close();
+      await other.close();
+    }
+  });
+
+  test('Claude, whose model never sees structuredContent, gets the job id in the text; only its own connection can use it, and the Private answer still reaches only the panel (#1327)', async () => {
+    const claude = await connect('Claude', true);
+    const other = await connect('Other');
+    try {
+      const handed = await claude.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
+      const jobId = (handed.structuredContent as { job_id: string }).job_id;
+      expect((handed.structuredContent as { status: string }).status).toBe('working');
+      const text = (handed.content as Array<{ text: string }>).map((part) => part.text).join('\n');
+      expect(text).toContain(`job_id: ${jobId}`);
+
+      // The id is not a key: another connection naming it gets an error and no panel job.
+      const stolen = await other.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect(stolen.isError).toBe(true);
+      expect(stolen._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
+
+      release();
+      const answered = await waitFor(async () => {
+        const result = await claude.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+        return (result.structuredContent as { status?: string }).status === 'answered' ? result : undefined;
+      }, { description: 'the handed-off answer finishes' });
+      expect((answered._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY]).toMatchObject({ v: 1, count: 2, state: 'ready' });
+      // Nothing private in what Claude receives, however it is collected.
+      expect(JSON.stringify([handed, stolen, answered]).match(SENTINEL_PATTERN)?.[0]).toBeUndefined();
+      // A ChatGPT connection's pending result keeps the id in structuredContent only.
+      const chatgpt = await other.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
+      const chatgptJob = (chatgpt.structuredContent as { job_id?: string }).job_id;
+      if (chatgptJob) expect(JSON.stringify(chatgpt.content)).not.toContain(chatgptJob);
+    } finally {
+      await claude.close();
       await other.close();
     }
   });

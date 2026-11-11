@@ -249,6 +249,11 @@ class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
+  /**
+   * When the run's time budget ends (epoch ms). Every in-machine call is cut to what is left of it, so a degraded candidate fails the
+   * run inside its budget with the call named, instead of each phase waiting out its own long bound (olympus-ops#156).
+   */
+  deadline = Number.POSITIVE_INFINITY;
   readonly stages = new Map<string, Stage>();
   /** What the update changed, for the report. */
   differences: Difference[] = [];
@@ -339,9 +344,34 @@ class Run {
   }
 
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<{ result: Record<string, any> | undefined; stdout: string; stderr: string; code: number; ms: number }> {
-    const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs });
+    const allowed = agentTimeoutMs(timeoutMs, this.deadline, Date.now());
+    const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
+    if (stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
     return { result: parseAgentLine(exec.stdout), stdout: exec.stdout, stderr: exec.stderr, code: exec.code, ms: exec.ms };
   }
+}
+
+/**
+ * An in-machine call's timeout: its own bound, cut to what is left of the run's budget. Past the budget a call still gets a short
+ * floor, so the evidence and teardown calls after it can run.
+ */
+export const AGENT_PAST_BUDGET_MS = 60_000;
+export function agentTimeoutMs(timeoutMs: number, deadline: number, now: number): number {
+  return Math.min(timeoutMs, Math.max(deadline - now, AGENT_PAST_BUDGET_MS));
+}
+
+/**
+ * The run's time budget when none is given. Fresh runs took about 20 to 30 minutes without the archive-import leg and about 65 with
+ * it, update runs about 75 to 80 with it (green legs, 8 to 10 Nov 2026); each budget is about twice that or more, so only a degraded
+ * candidate reaches it (olympus-ops#156).
+ */
+/** A call cut by the budget that then ran out of time: the harness's timer fired, or the driver stopped it (its timeout exit, 124). */
+export function stoppedByBudget(exec: { code: number; timedOut: boolean }, allowedMs: number, requestedMs: number): boolean {
+  return allowedMs < requestedMs && (exec.timedOut || exec.code === 124);
+}
+
+export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean): number {
+  return (upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135)) * 60_000;
 }
 
 /**
@@ -1278,11 +1308,6 @@ const tarballVersion = (dir: string): string | undefined => {
  * provisioned fresh with the candidate, the backup is put on it, `restore-clean-machine` is walked there and its state read; then
  * the two are compared. The second machine is destroyed at the end, whatever happened, unless the run keeps its machines.
  */
-/**
- * The Mac driver (tart) runs one machine at a time on its host: a run's second machine waits for the first to be gone, so
- * a second Mac is provisioned only after the first is destroyed (run 42918085215: restore-provision timed out waiting).
- */
-export const oneMachineAtATime = (os: Machine['os']): boolean => os === 'macos';
 
 /** What the restore leg keeps between its two halves: the state when the backup was made, and the backup file here. */
 interface RestorePrepared { before: StateSnapshot; local: string }
@@ -1356,7 +1381,8 @@ async function finishRestore(run: Run, bundlePath: string, outDir: string, workD
 }
 
 async function takeSnapshot(run: Run, what: string): Promise<StateSnapshot | undefined> {
-  const out = await run.agent('snapshot-state', '', 90_000);
+  // The agent waits up to a minute for tier moves to land before it reads the items.
+  const out = await run.agent('snapshot-state', '', 150_000);
   if (out.result?.ok !== true || !out.result.state) {
     run.errors.push(`the install's state could not be read ${what}: ${String(out.result?.detail ?? out.stderr.slice(-200))}`);
     return undefined;
@@ -1481,7 +1507,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
   const upgrading = options.upgradeFromDir !== undefined;
-  const deadline = Date.now() + (options.budgetMs ?? (upgrading ? 195 : 135) * 60_000);
+  const deadline = Date.now() + (options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true));
+  run.deadline = deadline;
   const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
   if (upgrading) {
     run.stages.clear();
@@ -1511,24 +1538,24 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+        // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
+        // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
+        // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
+        // on their host (tart: run 42918085215's restore-provision timed out waiting; LXD: run 42960983714's was refused, since
+        // two VMs do not fit in Sparta's memory).
+        let restore: RestorePrepared | undefined;
+        if (Date.now() < deadline) {
+          await run.inLeg('restore', async () => { restore = await prepareRestore(run, workDir, options.outDir); });
+        } else run.errors.push('the run exceeded its time budget before the restore leg');
         if (Date.now() < deadline) await runRelayConsentCheck(run);
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
-        // The restore leg's second machine: at once where the driver allows two, else after the first is done and gone.
-        const alone = oneMachineAtATime(run.machine!.os);
-        let restore: RestorePrepared | undefined;
-        if (Date.now() < deadline) {
-          await run.inLeg('restore', async () => {
-            restore = await prepareRestore(run, workDir, options.outDir);
-            if (restore && !alone) await finishRestore(run, bundlePath, options.outDir, workDir, restore);
-          });
-        } else run.errors.push('the run exceeded its time budget before the restore leg');
         if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
         await collectEvidence(run, options.outDir);
-        if (restore && alone) {
-          const prepared = restore;
+        if (restore) {
+          const prepared: RestorePrepared = restore;
           if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
-          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and this driver runs one at a time'); }
+          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and the driver runs one at a time'); }
           else {
             await run.inLeg('restore', async () => {
               // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.

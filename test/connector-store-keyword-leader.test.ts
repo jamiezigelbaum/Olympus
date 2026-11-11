@@ -14,7 +14,8 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import type { FusedRankedCandidate } from '../src/core/source-index/retrieval.ts';
-import { withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
+import { RESERVED_LEADER_MIN_CONCEPT_SHARE, withReservedLeaderSeats } from '../src/core/source-index/retrieval.ts';
+import { rankedCandidates, seatNameLeader, STORE_LEADER_LATEST_SEAT, withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreCorpusAdapter,
@@ -25,7 +26,7 @@ import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/worke
 const ACCOUNT = 'personal';
 const CORPUS_ID = 'internal.fake.leader';
 
-interface FixtureItem { id: string; name: string; text: string }
+interface FixtureItem { id: string; name: string; text?: string }
 
 // The answer: short, so bm25 ranks it first for the question's words.
 const TARGET: FixtureItem = {
@@ -108,7 +109,265 @@ describe('lane leader seats', () => {
   });
 });
 
-async function withStore(run: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => Promise<void>): Promise<void> {
+// gap-1 (Sparta probe 2026-11-11): the keyword lane seats the best name match
+// right after the best readable partial match (#1287), but hybrid output
+// buried it. Readable notes the vector lane vets count as complete there, and
+// a names-only file has no chunks, so no vector hit can vet it: every vetted
+// note went ahead of it and the store's top results never held the file named
+// for the question.
+const LANTERN: FixtureItem = { id: 'lantern', name: 'Harbor Lantern Restoration Quote.pdf' };
+const LANTERN_NOTES: FixtureItem[] = Array.from({ length: 6 }, (_, index) => ({
+  id: `lantern-note-${index}`,
+  name: `crew-log-${index}.txt`,
+  text: `Crew log ${index}. Harbor lantern restoration: the crew compared brass polish, glass panes, `
+    + `wick holders and paint for the old lantern and agreed to look again at item ${index} next week.`,
+}));
+
+describe('hybrid output keeps the keyword lane\'s name leader', () => {
+  const QUESTION = 'harbor lantern restoration estimate';
+
+  test('the keyword lane seats the names-only leader second (precondition)', async () => {
+    await withStore(async (store) => {
+      const keyword = hitIds(await search(store, QUESTION, { retrievalMode: 'keyword', maxResults: 2 }));
+      expect(keyword[0]).not.toBe('lantern');
+      expect(keyword[1]).toBe('lantern');
+    }, [LANTERN, ...LANTERN_NOTES]);
+  });
+
+  test('vetted vector notes do not push the names-only leader out of the top results', async () => {
+    await withStore(async (store, provider) => {
+      const hybrid = await search(store, QUESTION, {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      });
+      const ids = hitIds(hybrid);
+      // A readable note still takes the first seat; the file named for the question takes the next.
+      expect(ids[0]).toStartWith('lantern-note-');
+      expect(ids[1]).toBe('lantern');
+    }, [LANTERN, ...LANTERN_NOTES]);
+  });
+
+  test('with one seat, a readable note keeps it', async () => {
+    await withStore(async (store, provider) => {
+      const ids = hitIds(await search(store, QUESTION, {
+        retrievalMode: 'hybrid', maxResults: 1, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(ids).toHaveLength(1);
+      expect(ids[0]).toStartWith('lantern-note-');
+    }, [LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
+// A store's keyword leader keeps a place in that store's hybrid result, with
+// or without content (rerun 19, 2026-11-11): the lane's best hit matched only
+// part of the question, so every vetted vector hit (complete in the final
+// tiers) went ahead of it and the store's top results left it out.
+describe('a store\'s keyword leader keeps a place in its hybrid result', () => {
+  test('a readable partial-match leader the vector lane missed (value-2 shape)', async () => {
+    await withStore(async (store, provider) => {
+      // "premium" is in no note, so no row matches the whole question.
+      const question = 'harbor boat insurance renewal premium';
+      const keyword = hitIds(await search(store, question, { retrievalMode: 'keyword', maxResults: 5 }));
+      expect(keyword[0]).toBe('target');
+      const hybrid = hitIds(await search(store, question, {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(hybrid).toHaveLength(5);
+      expect(hybrid).toContain('target');
+    });
+  });
+
+  test('a names-only leader is not pushed out by a whole-question match ranked below the cut (gap-1 shape)', async () => {
+    // Names alone match the whole question, and the file has no text: the
+    // final tiers put it after every vetted note, and the name leader after it.
+    const ESTIMATE: FixtureItem = { id: 'estimate', name: 'Harbor Lantern Restoration Estimate.pdf' };
+    await withStore(async (store, provider) => {
+      const question = 'harbor lantern restoration estimate';
+      const hybrid = hitIds(await search(store, question, {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(hybrid).toHaveLength(5);
+      expect(hybrid[0]).toStartWith('lantern-note-');
+      expect(hybrid).toContain('estimate');
+    }, [ESTIMATE, LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
+// A store's order does not depend on how many results were asked for: for
+// any two cuts, the smaller result is the head of the larger. Before, the
+// leaders' place came from the cut, so at 24 results they sat behind every
+// vetted note (store rank 8 to 10) and a local Analyst's fitted pack never
+// read them (rerun 22, 24-seat pass, 2026-11-11).
+describe('a store\'s order is the same at every budget', () => {
+  type Row = { sourceItem: { localItemId: string } };
+  const candidate = (id: string, lanes: Record<string, number>): FusedRankedCandidate<Row> => ({
+    id: id as never, item: { sourceItem: { localItemId: id } }, score: 0, laneRanks: new Map(Object.entries(lanes)),
+  });
+  // Nine vetted vector notes, then a whole-question match fusion placed last,
+  // then the keyword leader (a readable partial match) and a names-only file.
+  const notes = Array.from({ length: 9 }, (_, index) => candidate(`v${index}`, { vector: index + 1, keyword: index + 3 }));
+  const whole = candidate('whole', { vector: 10, keyword: 2 });
+  const leader = candidate('leader', { keyword: 1 });
+  const named = candidate('named', { keyword: 12 });
+  const fused = [...notes, whole, leader, named];
+  const vetted = new Set(notes.map((c) => c.item.sourceItem.localItemId));
+  const order = (cut: number) => rankedCandidates(
+    fused as never,
+    cut,
+    (c) => vetted.has(c.item.sourceItem.localItemId) || c.item.sourceItem.localItemId === 'whole',
+    (c) => c.item.sourceItem.localItemId !== 'named',
+    { nameLeaderItemId: 'named', matchesWholeQuestion: (c) => c.item.sourceItem.localItemId === 'whole' },
+  ).map((c) => c.item.sourceItem.localItemId);
+
+  test('the smaller cut is the head of the larger', () => {
+    const full = order(24);
+    for (let cut = 3; cut <= 24; cut += 1) expect(order(cut)).toEqual(full.slice(0, cut));
+  });
+
+  test('the leaders hold seats 2 and 3 at the latest, after the store\'s own first', () => {
+    expect(STORE_LEADER_LATEST_SEAT).toBe(1);
+    expect(order(24).slice(0, 3)).toEqual(['v0', 'leader', 'named']);
+  });
+});
+
+describe('a store marks its keyword leaders for the pack', () => {
+  test('the keyword lane\'s first row carries its kind and concept share', async () => {
+    const ESTIMATE: FixtureItem = { id: 'estimate', name: 'Harbor Lantern Restoration Estimate.pdf' };
+    await withStore(async (store, provider) => {
+      const hybrid = await search(store, 'harbor lantern restoration estimate', {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      });
+      const marked = hybrid.hits.filter((hit) => hit.keywordLeader);
+      const estimate = marked.find((hit) => hit.sourceItem.providerItemId === 'estimate');
+      // The text-less file names every concept, so the keyword lane leads with it.
+      expect(estimate?.keywordLeader).toEqual({ kinds: ['keyword_first'], conceptShare: 1 });
+      // Only leaders are marked.
+      expect(marked.length).toBeLessThanOrEqual(2);
+    }, [ESTIMATE, LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
+// The pack keeps the strongest keyword leaders across stores (#1350): store
+// turn gives each store its first rank or two, so a store's leader sitting
+// lower never reached the Analyst (rerun 20, 2026-11-11).
+describe('reserved leader seats in the pack', () => {
+  type Hit = { id: string; corpusId: string; keywordLeader?: { kinds: Array<'keyword_first' | 'name'>; conceptShare: number } };
+  const hit = (id: string, corpusId: string, leader?: Hit['keywordLeader']): Hit => ({ id, corpusId, ...(leader ? { keywordLeader: leader } : {}) });
+  const seat = (pool: Hit[], budgetedIds: string[], budget: number) => {
+    const byId = new Map(pool.map((h) => [h.id, h]));
+    const result = withReservedLeaderSeats({ hits: budgetedIds.map((id) => byId.get(id)!), degradations: [] }, pool, budget);
+    return { ids: result.hits.map((h) => h.id), degradations: result.degradations };
+  };
+
+  test('seat 2 takes the keyword leader with the largest share, seat 3 the best names-only match', () => {
+    const pool = [
+      hit('a1', 'A', { kinds: ['keyword_first'], conceptShare: 0.6 }), hit('b1', 'B'), hit('c1', 'C'),
+      hit('a2', 'A'), hit('b2', 'B', { kinds: ['keyword_first'], conceptShare: 0.8 }), hit('c2', 'C'),
+      hit('a3', 'A'), hit('c3', 'C', { kinds: ['name'], conceptShare: 1 }),
+    ];
+    // Store turn seated a1 b1 c1 a2 b2; the names-only c3 was cut.
+    expect(seat(pool, ['a1', 'b1', 'c1', 'a2', 'b2'], 5).ids).toEqual(['a1', 'b2', 'c3', 'b1', 'c1']);
+  });
+
+  test('a tie on share goes to the earlier candidate in fused order', () => {
+    const pool = [
+      hit('x', 'A'), hit('first', 'B', { kinds: ['keyword_first'], conceptShare: 0.75 }),
+      hit('y', 'A'), hit('second', 'C', { kinds: ['keyword_first'], conceptShare: 0.75 }),
+    ];
+    expect(seat(pool, ['x', 'y', 'first'], 3).ids.slice(0, 2)).toEqual(['x', 'first']);
+  });
+
+  test('a leader under half the question\'s concepts gets no seat (negative-1 keeps its order)', () => {
+    expect(RESERVED_LEADER_MIN_CONCEPT_SHARE).toBe(0.5);
+    const pool = [
+      hit('a1', 'A'), hit('b1', 'B'), hit('c1', 'C'),
+      hit('weak', 'C', { kinds: ['keyword_first', 'name'], conceptShare: 0.25 }),
+    ];
+    const budgeted = ['a1', 'b1', 'c1'];
+    expect(seat(pool, budgeted, 3)).toEqual({ ids: budgeted, degradations: [] });
+  });
+
+  test('a leader already at or above its seat stays; one seated lower moves up', () => {
+    const pool = [
+      hit('lead', 'A', { kinds: ['keyword_first'], conceptShare: 1 }), hit('b1', 'B'), hit('c1', 'C'),
+      hit('name', 'B', { kinds: ['name'], conceptShare: 1 }),
+    ];
+    expect(seat(pool, ['lead', 'b1', 'c1', 'name'], 4).ids).toEqual(['lead', 'b1', 'name', 'c1']);
+  });
+
+  test('fewer than three seats: nothing is reserved', () => {
+    const pool = [hit('a1', 'A'), hit('b1', 'B'), hit('lead', 'B', { kinds: ['keyword_first'], conceptShare: 1 })];
+    expect(seat(pool, ['a1', 'b1'], 2).ids).toEqual(['a1', 'b1']);
+  });
+
+  test('a store that loses its only seat is reported as cut', () => {
+    const pool = [
+      hit('a1', 'A'), hit('b1', 'B'), hit('c1', 'C'),
+      hit('a2', 'A', { kinds: ['keyword_first'], conceptShare: 1 }),
+    ];
+    const result = seat(pool, ['a1', 'b1', 'c1'], 3);
+    expect(result.ids).toEqual(['a1', 'a2', 'b1']);
+    expect(result.degradations).toEqual([{ laneName: 'C', laneType: 'keyword', reason: 'lane_budget_cut', occurrences: 1 }]);
+  });
+
+  test('a store a leader brings back is no longer reported as cut', () => {
+    const pool = [
+      hit('a1', 'A'), hit('b1', 'B'), hit('c1', 'C'),
+      hit('d1', 'D', { kinds: ['keyword_first'], conceptShare: 1 }),
+    ];
+    const cut = (laneName: string) => ({ laneName, laneType: 'keyword' as const, reason: 'lane_budget_cut' as const, occurrences: 1 });
+    const result = withReservedLeaderSeats({ hits: [pool[0]!, pool[1]!, pool[2]!], degradations: [cut('D')] }, pool, 3);
+    expect(result.hits.map((h) => h.id)).toEqual(['a1', 'd1', 'b1']);
+    expect(result.degradations).toEqual([cut('C')]);
+  });
+});
+
+describe('name leader seat', () => {
+  // P = readable partial match, W = readable whole-question match, N = the names-only leader.
+  const seat = (order: string[]) => {
+    const entries = [...order];
+    seatNameLeader(entries, {
+      isLeader: (entry) => entry === 'N',
+      matchesWholeQuestion: (entry) => entry.startsWith('W'),
+      readable: (entry) => entry !== 'N',
+    });
+    return entries;
+  };
+
+  test('right after the best readable partial match', () => {
+    expect(seat(['W1', 'P1', 'P2', 'N'])).toEqual(['W1', 'P1', 'N', 'P2']);
+  });
+
+  test('never ahead of a whole-question match the final order placed after a partial one', () => {
+    expect(seat(['P1', 'W1', 'N'])).toEqual(['P1', 'W1', 'N']);
+    expect(seat(['P1', 'W1', 'P2', 'N'])).toEqual(['P1', 'W1', 'N', 'P2']);
+  });
+
+  test('never past the latest seat it is given, and never the first seat', () => {
+    const clamp = (order: string[], latestSeat: number) => {
+      const entries = [...order];
+      seatNameLeader(entries, {
+        isLeader: (entry) => entry === 'N',
+        matchesWholeQuestion: (entry) => entry.startsWith('W'),
+        readable: (entry) => entry !== 'N',
+        latestSeat,
+      });
+      return entries;
+    };
+    expect(clamp(['P1', 'W1', 'W2', 'W3', 'N'], 2)).toEqual(['P1', 'W1', 'N', 'W2', 'W3']);
+    expect(clamp(['P1', 'W1', 'W2', 'N'], 0)).toEqual(['P1', 'N', 'W1', 'W2']);
+    // Within the latest seat, the seat rule's own place stands.
+    expect(clamp(['W1', 'P1', 'P2', 'N'], 3)).toEqual(['W1', 'P1', 'N', 'P2']);
+  });
+
+  test('a leader already seated higher stays put', () => {
+    expect(seat(['P1', 'N', 'P2'])).toEqual(['P1', 'N', 'P2']);
+  });
+});
+
+async function withStore(
+  run: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => Promise<void>,
+  items: readonly FixtureItem[] = [TARGET, ...NEIGHBOURS],
+): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-keyword-leader-'));
   const store = new LocalConnectorStore({
     dbPath: join(dir, 'leader.sqlite'),
@@ -118,7 +377,7 @@ async function withStore(run: (store: LocalConnectorStore, provider: SourceEmbed
   });
   const provider = embeddingProvider();
   try {
-    await store.syncFromConnector(fixtureConnector([TARGET, ...NEIGHBOURS]), { fetchContent: true });
+    await store.syncFromConnector(fixtureConnector(items), { fetchContent: true });
     await store.embedChunks({ provider });
     await run(store, provider);
   } finally {
@@ -139,7 +398,7 @@ function fixtureConnector(items: readonly FixtureItem[]): SourceConnector {
       sourceVersion: `${item.id}:v1`,
     },
     mimeType: 'text/plain',
-    content: { kind: 'text', text: item.text },
+    content: item.text === undefined ? { kind: 'metadata_only' } : { kind: 'text', text: item.text },
     metadata: Object.freeze({
       name: item.name,
       locatorUri: `/notes/${item.name}`,

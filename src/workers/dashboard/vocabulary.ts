@@ -3917,6 +3917,8 @@ export const DASHBOARD_PRIVACY_ITEMS_COPY = {
   privateLine: 'Only your private model reads it.',
   judgeChose: 'The judge chose {tier}:',
   judgeMarked: 'The judge marked this {tier}.',
+  waitingToRead: 'Waiting to be read. It stays {tier} until the judge reads it.',
+  namesOnly: 'Names only, by your choice. The judge decided it on its name alone.',
   youChose: 'You chose {tier}',
   justNow: 'just now',
   judgeSaid: 'The judge said {tier}.',

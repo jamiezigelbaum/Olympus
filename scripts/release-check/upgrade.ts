@@ -67,6 +67,8 @@ export interface StateSnapshot {
   connections: string[];
   items: ItemRow[] | null;
   itemsError?: string;
+  /** Tier moves still in flight when the items were read (the snapshot waits a bounded time for them to land first). */
+  movesInFlight?: number;
   dashboard: DashboardCounts | null;
 }
 
@@ -122,6 +124,19 @@ export function differingPaths(a: unknown, b: unknown, base = '', out: string[] 
 
 const rowKey = (row: ItemRow): string => `${row.store}/${row.id}`;
 const rowFingerprint = (row: ItemRow): string => JSON.stringify([row.tier, Boolean(row.tombstoned), row.contentHash, row.metadataTier ?? null, row.contentTier ?? null]);
+
+/** What differs between two readings of one stored item, by field: `tombstoned false→true`. */
+export function itemChange(before: ItemRow, after: ItemRow): string {
+  const fields: Array<[string, unknown, unknown]> = [
+    ['tier', before.tier, after.tier],
+    ['tombstoned', Boolean(before.tombstoned), Boolean(after.tombstoned)],
+    ['content', before.contentHash, after.contentHash],
+    ['metadataTier', before.metadataTier ?? null, after.metadataTier ?? null],
+    ['contentTier', before.contentTier ?? null, after.contentTier ?? null],
+  ];
+  return fields.filter(([, was, now]) => was !== now)
+    .map(([name, was, now]) => (name === 'content' ? 'content digest' : `${name} ${String(was)}→${String(now)}`)).join(', ');
+}
 
 /** Which stored items differ: gone, new, or changed (tier, deletion mark, content digest, ledger verdicts). */
 export function compareItems(before: readonly ItemRow[], after: readonly ItemRow[]): { missing: string[]; added: string[]; changed: string[] } {

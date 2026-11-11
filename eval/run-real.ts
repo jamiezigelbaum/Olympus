@@ -26,6 +26,7 @@
 // Set OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true to include model-planned
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
+import { createHash } from 'node:crypto';
 import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -58,14 +59,18 @@ import {
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_APPROVED_SCOPE_FILTER_CODEC } from '../src/workers/dropbox-files/index.ts';
 import {
+  DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
   DEFAULT_MAX_CHARS_PER_CANDIDATE as PRODUCT_MAX_CHARS_PER_CANDIDATE,
+  DEFAULT_MAX_RESULTS as PRODUCT_MAX_RESULTS,
+  fitPackToPromptBytes,
   releaseAnalystAnswer,
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
 } from '../src/workers/source-index/analyst-answer.ts';
-import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
+import type { Analyst, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
+import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
@@ -83,11 +88,11 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import { acceptableForms, answerContainsExpectedValue, type EvalGrade } from './grade.ts';
+import { acceptableForms, answerContainsExpectedValue, expectedEvidenceMatches, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
-import type { EvalDataset, EvalQuestion } from './types.ts';
+import type { EvalDataset, EvalExpectedEvidence, EvalQuestion } from './types.ts';
 
 const DEFAULT_DATASET_PATH = 'eval/private/held-out.real.json';
 const DEFAULT_REPORT_PATH = 'eval/private/report.latest.json';
@@ -138,19 +143,41 @@ async function main(): Promise<void> {
     process.env[INTERNAL_QUESTION_INDEX_ENV],
     fullDataset.questions.length,
   );
+  // A local Analyst leg sees the pack Ask fits to its prompt budget (the
+  // same default and override Ask reads); a Venice leg is not fitted.
+  const analystPromptByteBudget = analystProvider === 'local'
+    ? parsePositiveIntegerEnv(
+      process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES,
+      DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
+      'OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES',
+    )
+    : undefined;
+  // Extra Analyst answers to each question's frozen pack, for the questions
+  // named (all when none are): tells a steady misreading from a coin flip.
+  const analystRepeats = parsePositiveIntegerEnv(process.env.OLYMPUS_EVAL_ANALYST_REPEATS, 1, 'OLYMPUS_EVAL_ANALYST_REPEATS');
+  const analystRepeatQuestions = (process.env.OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS ?? '')
+    .split(',').map((id) => id.trim()).filter((id) => id.length > 0);
+  // Run the Analyst once more on each question's expected seats alone, to
+  // tell distraction by other seats from a misread document.
+  const analystExpectedSeatOnly = process.env.OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY === '1';
   const reportConfig = {
     analystProvider,
+    ...(analystExpectedSeatOnly ? { analystExpectedSeatOnly } : {}),
+    ...(analystRepeats > 1 ? { analystRepeats, ...(analystRepeatQuestions.length > 0 ? { analystRepeatQuestions } : {}) } : {}),
     questionTimeoutMs,
     queryPlannerEnabled,
     maxResults,
     maxCharsPerCandidate,
+    ...(analystPromptByteBudget !== undefined ? { analystPromptByteBudget } : {}),
   };
   if (internalQuestionIndex === undefined) {
+    const informationalMaxResults = informationalEvalMaxResults(process.env.OLYMPUS_EVAL_INFORMATIONAL_MAX_RESULTS, maxResults);
     await runIsolatedEval({
       args,
       dataset: fullDataset,
       reportPath,
       config: reportConfig,
+      ...(informationalMaxResults !== undefined ? { informationalMaxResults } : {}),
     });
     return;
   }
@@ -178,11 +205,14 @@ async function main(): Promise<void> {
   console.error(
     `eval retrieval: ${retrieval.note}; stores ${retrieval.corpora.join(', ')}; tier ledger ${retrieval.tierLedger}`,
   );
+  // Each run evaluates one question, so every store search recorded is that question's.
+  const storeSearches: EvalStoreSearch[] = [];
   const lanes = createEvalDropboxLanes({
     stores: opened.stores,
     ...(opened.ledger ? { ledger: opened.ledger } : {}),
     scope,
     embeddingFor: embedding.embeddingFor,
+    onStoreSearch: (search) => storeSearches.push(search),
   });
   const model = createEvalAnalystModel({
     provider: analystProvider,
@@ -192,10 +222,13 @@ async function main(): Promise<void> {
   // Each run evaluates one question, so every prompt recorded here is that
   // question's: the answer-stage audit checks the values against it.
   const analystPrompts: string[] = [];
+  const analystModelIds: string[] = [];
   const analyst = createAnalyst({
-    complete(request) {
+    async complete(request) {
       analystPrompts.push(request.prompt);
-      return model.complete(request);
+      const completion = await model.complete(request);
+      analystModelIds.push(completion.modelId);
+      return completion;
     },
   }, { auditSuspiciousDrafts: true });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
@@ -208,6 +241,58 @@ async function main(): Promise<void> {
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
+  // The pack seats (1-based) the Analyst was actually sent, per pack.
+  const analystSeatsByPack = new WeakMap<object, number[]>();
+  const fittedAnalyst = promptFittedEvalAnalyst(
+    analyst,
+    analystPromptByteBudget,
+    (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
+    (pack, seats) => analystSeatsByPack.set(pack, seats),
+    (pack) => detailsByPack.get(pack)?.recencySeats,
+  );
+  const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
+  const repeatThisQuestion = analystRepeatQuestions.length === 0 || analystRepeatQuestions.includes(dataset.questions[0]!.id);
+  // How many prompts and model ids the graded (first) answer recorded.
+  let firstAnswer: { prompts: number; modelIds: number } | undefined;
+  // The audit's prompt and model fields describe the graded answer only.
+  const keepGradedAnswerRecords = () => {
+    analystPrompts.splice(firstAnswer?.prompts ?? 0);
+    analystModelIds.splice(firstAnswer?.modelIds ?? 0);
+  };
+  const gradedAnalyst: Analyst = {
+    async analyze(pack, analyzeOptions) {
+      const result = await fittedAnalyst.analyze(pack, analyzeOptions);
+      firstAnswer ??= { prompts: analystPrompts.length, modelIds: analystModelIds.length };
+      return result;
+    },
+  };
+  const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts: string[] }>();
+  // The seats the grader counts as expected evidence, by its own matcher.
+  const expectedSeatsOf = (pack: EvidencePack) => evalExpectedSeats(
+    dataset.questions[0]!.expectedEvidence ?? [],
+    pack,
+    detailsByPack.get(pack)?.candidateCorpusIds ?? [],
+  );
+  const seatOnlyAnalyst = analystExpectedSeatOnly && repeatThisQuestion
+    ? expectedSeatOnlyEvalAnalyst(
+      gradedAnalyst,
+      // Once per pack: a repeat of the same pack does not run it again.
+      (pack) => seatOnlyByPack.has(pack) ? [] : expectedSeatsOf(pack),
+      (pack, alone, result) => {
+        seatOnlyByPack.set(pack, { seats: expectedSeatsOf(pack), alone, result, prompts: analystPrompts.slice(firstAnswer?.prompts ?? 0) });
+        keepGradedAnswerRecords();
+      },
+      (pack) => detailsByPack.get(pack)?.candidateCorpusIds ?? [],
+    )
+    : gradedAnalyst;
+  const repeatingAnalyst = repeatedEvalAnalyst(
+    seatOnlyAnalyst,
+    repeatThisQuestion ? analystRepeats - 1 : 0,
+    (pack, results, failures) => {
+      repeatsByPack.set(pack, { results, failures });
+      keepGradedAnswerRecords();
+    },
+  );
   const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
   const evaluated = await runEval(dataset, {
     questionTimeoutMs,
@@ -227,7 +312,7 @@ async function main(): Promise<void> {
       detailsByPack.set(detail.pack, detail);
       return detail.pack;
     },
-    analyst,
+    analyst: repeatingAnalyst,
     releaseFor(pack, result) {
       rawResultsByPack.set(pack, result);
       const detail = detailsByPack.get(pack);
@@ -243,8 +328,17 @@ async function main(): Promise<void> {
         ...classifyPrecisionStage(question, pack, result, {
           ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
         }),
-        ...(detail ? { retrieval: evalRetrievalAudit(detail, question) } : {}),
-        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts),
+        ...(detail ? { retrieval: evalRetrievalAudit(detail, question, storeSearches) } : {}),
+        answerStage: {
+          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
+          ...(repeatsByPack.has(pack)
+            ? {
+              answerRepeats: repeatsByPack.get(pack)!.results.map((repeat) => evalAnswerRepeat(question, pack, repeat)),
+              ...(repeatsByPack.get(pack)!.failures > 0 ? { answerRepeatFailures: repeatsByPack.get(pack)!.failures } : {}),
+            }
+            : {}),
+          ...(seatOnlyByPack.has(pack) ? { expectedSeatOnly: expectedSeatOnlyAudit(question, seatOnlyByPack.get(pack)!) } : {}),
+        },
       });
     },
     onProgress(event) {
@@ -411,6 +505,8 @@ export function createEvalDropboxLanes(input: {
   scope: { accountScope?: string; locatorPathScope?: string };
   embeddingFor?: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined;
   localEmbedding?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider | undefined;
+  /** Told each store search's returned item ids, in order (the report's expectedStoreRanks). */
+  onStoreSearch?: (search: EvalStoreSearch) => void;
 }): (question: string) => AnalystAnswerLanes {
   const stores = () => input.stores;
   const scopes = () => (input.ledger
@@ -439,7 +535,23 @@ export function createEvalDropboxLanes(input: {
     visibilityGate: createTierVisibilityGate(scopes),
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
-  return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+  const onStoreSearch = input.onStoreSearch;
+  if (!onStoreSearch) return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+  return (question) => {
+    const built = lanes(localAnswerRequest(question), 'built_in_only');
+    return {
+      ...built,
+      adapters: Object.fromEntries(Object.entries(built.adapters).flatMap(([corpusId, adapter]) => adapter ? [[
+        corpusId,
+        // The adapter's own preparation hooks ride along unchanged.
+        Object.assign(async (...args: Parameters<SourceIndexCorpusSearchAdapter>) => {
+          const response = await adapter(...args);
+          onStoreSearch({ corpusId, providerItemIds: response.hits.map((hit) => hit.sourceItem.providerItemId) });
+          return response;
+        }, adapter) as SourceIndexCorpusSearchAdapter,
+      ]] : [])),
+    };
+  };
 }
 
 /**
@@ -494,13 +606,43 @@ export interface EvalRetrievalAudit {
   contentPrivateCandidates: number;
   corpusReadabilityGaps: number;
   secureExclusion: 'not_applied';
+  /**
+   * Where each store's own search ranked each expected item, before the pack
+   * merged the stores: 1-based rank in that store's returned hits, -1 when the
+   * store never returned it. `searches` counts the store's searches for the
+   * question (each formulation is one). Tells "the store never found it"
+   * apart from "it was found and lost in the merge". Absent when no store
+   * search was recorded.
+   */
+  expectedStoreRanks?: Array<{ expectedItem: number; corpusId: string; searches: number; bestRank: number; hitsReturned: number }>;
 }
+
+/** Each store search's returned item ids, in order, as the eval lanes record them. */
+export interface EvalStoreSearch { corpusId: string; providerItemIds: readonly string[] }
 
 export function evalRetrievalAudit(
   detail: EvidencePackBuildDetail,
   question?: Pick<EvalQuestion, 'expectedEvidence'>,
+  storeSearches?: readonly EvalStoreSearch[],
 ): EvalRetrievalAudit {
   const expected = question?.expectedEvidence ?? [];
+  const expectedStoreRanks = storeSearches && storeSearches.length > 0
+    ? expected.flatMap((want, index) => {
+      if (want.providerItemId === undefined) return [];
+      const byCorpus = new Map<string, EvalStoreSearch[]>();
+      for (const search of storeSearches) byCorpus.set(search.corpusId, [...(byCorpus.get(search.corpusId) ?? []), search]);
+      return [...byCorpus].map(([corpusId, searches]) => {
+        const ranks = searches.map((search) => search.providerItemIds.indexOf(want.providerItemId!) + 1).filter((rank) => rank > 0);
+        return {
+          expectedItem: index + 1,
+          corpusId,
+          searches: searches.length,
+          bestRank: ranks.length > 0 ? Math.min(...ranks) : -1,
+          hitsReturned: Math.max(...searches.map((search) => search.providerItemIds.length)),
+        };
+      });
+    })
+    : undefined;
   return {
     packCandidates: detail.pack.candidates.length,
     packCandidateSources: detail.pack.candidates.map((candidate, index) => {
@@ -545,6 +687,7 @@ export function evalRetrievalAudit(
     contentPrivateCandidates: detail.contentPrivateCandidateIndexes?.length ?? 0,
     corpusReadabilityGaps: detail.corpusReadabilityGaps?.length ?? 0,
     secureExclusion: 'not_applied',
+    ...(expectedStoreRanks ? { expectedStoreRanks } : {}),
   };
 }
 
@@ -577,7 +720,270 @@ export interface EvalAnswerStageAudit {
     packTokenShape?: string;
     /** The same for the Analyst's answer, when it holds the value only inside a longer token. */
     answerTokenShape?: string;
+    /**
+     * Each 1-based pack seat holding a form of the value as a substring: the
+     * value's character offset in the seat's excerpt (-1 when it is only in the
+     * seat's citation, facts or tables) and the excerpt's length.
+     */
+    packSeats: Array<{ seat: number; charOffset: number; seatChars: number }>;
+    /** The value's character offset in the prompt the Analyst model was sent, when it is there. */
+    promptCharOffset?: number;
+    /** Whether the Analyst's answer cites a seat holding the value. */
+    valueSeatCited: boolean;
   }>;
+  /**
+   * The 1-based pack seats the Analyst's answer cites, in seat order. A wrong
+   * value cited from the seat holding the right one is a misreading of that
+   * document; one cited from another seat is the wrong document.
+   */
+  answerCitedSeats: number[];
+  /** Citations naming no pack candidate. */
+  answerCitationsOutsidePack: number;
+  /** Whether the answer cites a seat holding an expected evidence item; absent when the question names none. */
+  expectedSeatCited?: boolean;
+  /**
+   * Cited seats that hold no expected evidence item; absent when the question
+   * names none. Informational: an answer citing every seat still cites the
+   * expected one, and this shows the rest.
+   */
+  citedSeatsWithoutExpectedItem?: number;
+  /**
+   * The answer's number-bearing tokens (dates, amounts, identifiers with a
+   * digit), and how many of them occur in a seat the answer cites. Fewer in
+   * the cited seats than in the answer means the answer states a value its
+   * citations do not hold.
+   */
+  answerValueTokens: number;
+  answerValueTokensInCitedSeats: number;
+  /**
+   * The shape of each answer value token not found in a cited seat (digits
+   * to 9, letters to a), so a run can tell a reformatted value from a wrong
+   * one without carrying the value itself.
+   */
+  answerValueTokensUnmatchedShapes: string[];
+  /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
+  analystSeats?: number[];
+  /**
+   * Further Analyst answers to the same frozen pack (OLYMPUS_EVAL_ANALYST_REPEATS),
+   * by shape and flags only. The graded answer is the first one.
+   */
+  answerRepeats?: EvalAnswerRepeat[];
+  /** Repeats whose Analyst call failed: diagnostics only, never the grade. */
+  answerRepeatFailures?: number;
+  /**
+   * The Analyst on a pack of the expected seats alone
+   * (OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY=1): the full pack's seats it held,
+   * and that answer by shape and flags (its cited seats count within that
+   * pack), or failed when the call failed. Diagnostics only, never the grade.
+   */
+  expectedSeatOnly?: { seats: number[]; prompts?: Array<{ chars: number; sha256: string }> } & (EvalAnswerRepeat | { failed: true });
+  /**
+   * The Analyst's own answer, by its structure: every expected value in it,
+   * some, or none (with no citation: it said it found nothing; with
+   * citations: it answered from other evidence). Absent with no expected values.
+   */
+  answerShape?: 'contains_all' | 'partial' | 'not_found' | 'other_answer';
+  answerCitations: number;
+  answerUnanswered: number;
+  /** Characters of every prompt the Analyst model was sent for the question. */
+  analystPromptChars?: number;
+  /** The model id each Analyst model call reported, in call order. */
+  analystModelIds?: readonly string[];
+}
+
+export interface EvalAnswerRepeat {
+  answerShape?: EvalAnswerStageAudit['answerShape'];
+  answerCitedSeats: number[];
+  /** Per expected value, in order: is it in this answer. */
+  valuesInAnswer: boolean[];
+  answerValueTokens: number;
+  answerValueTokensInCitedSeats: number;
+  answerValueTokensUnmatchedShapes: string[];
+}
+
+/** One repeat answer to a frozen pack, by the answer-stage audit's own measures. */
+export function evalAnswerRepeat(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
+  pack: EvidencePack,
+  result: AnalystResult,
+): EvalAnswerRepeat {
+  const audit = evalAnswerStageAudit(question, pack, result, result);
+  return {
+    ...(audit.answerShape ? { answerShape: audit.answerShape } : {}),
+    answerCitedSeats: audit.answerCitedSeats,
+    valuesInAnswer: audit.expected.map((value) => value.inAnalystAnswer),
+    answerValueTokens: audit.answerValueTokens,
+    answerValueTokensInCitedSeats: audit.answerValueTokensInCitedSeats,
+    answerValueTokensUnmatchedShapes: audit.answerValueTokensUnmatchedShapes,
+  };
+}
+
+/**
+ * The 1-based pack seats holding expected evidence, by the grader's own
+ * matcher (item id, locator, parent label and store, as the question gives).
+ */
+export function evalExpectedSeats(
+  expected: readonly EvalExpectedEvidence[],
+  pack: EvidencePack,
+  candidateCorpusIds: readonly string[],
+): number[] {
+  return pack.candidates.flatMap((candidate, index) =>
+    expected.some((want) => expectedEvidenceMatches(want, candidate.provenance, candidateCorpusIds[index]))
+      ? [index + 1]
+      : []);
+}
+
+/** The expected-seat-only answer, by the repeat audit's own measures. */
+export function expectedSeatOnlyAudit(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
+  run: { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts?: readonly string[] },
+): NonNullable<EvalAnswerStageAudit['expectedSeatOnly']> {
+  // Each model prompt by length and a short hash, so two runs can tell
+  // byte-identical prompts from different ones without carrying the text.
+  const prompts = run.prompts && run.prompts.length > 0
+    ? { prompts: run.prompts.map((prompt) => ({ chars: prompt.length, sha256: createHash('sha256').update(prompt).digest('hex').slice(0, 12) })) }
+    : {};
+  return run.result
+    ? { seats: [...run.seats], ...prompts, ...evalAnswerRepeat(question, run.alone, run.result) }
+    : { seats: [...run.seats], ...prompts, failed: true };
+}
+
+/**
+ * The Analyst, run extraRuns more times on the same pack after its first
+ * answer, so a run can tell a steady misreading from a coin flip on one
+ * frozen pack. The first answer is the one graded and released; a repeat
+ * that fails is counted, never allowed to fail the question.
+ */
+export function repeatedEvalAnalyst(
+  analyst: Analyst,
+  extraRuns: number,
+  onRepeats: (pack: EvidencePack, results: AnalystResult[], failures: number) => void,
+): Analyst {
+  if (extraRuns <= 0) return analyst;
+  return {
+    async analyze(pack, analyzeOptions) {
+      const first = await analyst.analyze(pack, analyzeOptions);
+      const extra: AnalystResult[] = [];
+      let failures = 0;
+      for (let run = 0; run < extraRuns; run += 1) {
+        try {
+          extra.push(await analyst.analyze(pack, analyzeOptions));
+        } catch {
+          failures += 1;
+        }
+      }
+      onRepeats(pack, extra, failures);
+      return first;
+    },
+  };
+}
+
+/**
+ * The Analyst, run once more after its graded answer on a pack holding only
+ * the seats with the question's expected items (1-based, in pack order). Right
+ * alone but wrong in the full pack means the other seats distract it; wrong
+ * alone means it misreads that document as extracted. Nothing to run when no
+ * expected item is seated; a failed call is reported as undefined, never the
+ * grade.
+ */
+export function expectedSeatOnlyEvalAnalyst(
+  analyst: Analyst,
+  expectedSeats: (pack: EvidencePack) => readonly number[],
+  onResult: (pack: EvidencePack, alone: EvidencePack, result: AnalystResult | undefined) => void,
+  candidateCorpusIds: (pack: EvidencePack) => readonly string[] = () => [],
+): Analyst {
+  return {
+    async analyze(pack, analyzeOptions) {
+      const graded = await analyst.analyze(pack, analyzeOptions);
+      const seats = new Set(expectedSeats(pack));
+      if (seats.size === 0) return graded;
+      const corpusIds = candidateCorpusIds(pack);
+      const kept = pack.candidates.flatMap((candidate, index) => seats.has(index + 1) ? [{ candidate, corpusId: corpusIds[index] }] : []);
+      if (kept.length === 0) return graded;
+      // The pack's coverage restated for the seats it keeps, as Ask's own fit
+      // does: a store's items in evidence are the seats it holds here.
+      const inEvidence = new Map<string, number>();
+      for (const { corpusId } of kept) if (corpusId !== undefined) inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
+      const alone: EvidencePack = {
+        ...pack,
+        candidates: kept.map(({ candidate }) => candidate),
+        coverage: {
+          ...pack.coverage,
+          ...(pack.coverage.matchCounts
+            ? { matchCounts: pack.coverage.matchCounts.map((count) => ({ ...count, inEvidence: inEvidence.get(count.corpusId) ?? 0 })) }
+            : {}),
+        },
+      };
+      let result: AnalystResult | undefined;
+      try {
+        result = await analyst.analyze(alone, analyzeOptions);
+      } catch {
+        result = undefined;
+      }
+      onResult(pack, alone, result);
+      return graded;
+    },
+  };
+}
+
+/**
+ * The text's distinct tokens, lowercased, with edge punctuation trimmed. Splits
+ * on whitespace and on JSON quotes and brackets too, so a value inside a
+ * serialized table or citation field is its own token.
+ */
+function textTokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[\s"[\]{}]+/u)
+    .map((token) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .filter((token) => token.length > 0));
+}
+
+/**
+ * The answer's distinct number-bearing tokens (textTokens), without the seat
+ * markers the Analyst writes inline ("[2]", "[1, 3]"): a marker names a seat
+ * of this pack, not a value, and no seat's text holds it.
+ */
+function answerValueTokens(answer: string, seats: number): string[] {
+  const withoutMarkers = answer.replace(/\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]/gu, (marker, list: string) =>
+    list.split(',').every((seat) => { const n = Number(seat); return n >= 1 && n <= seats; }) ? ' ' : marker);
+  return [...textTokens(withoutMarkers)].filter((token) => /\p{N}/u.test(token));
+}
+
+/**
+ * A seat's tokens as support for an answer value: its textTokens, plus the
+ * forms a citation line shows the Analyst that whole tokens miss. The
+ * full-format label prints the timestamp ("[2026-03-01T09:30:00.000Z]") and
+ * the compact one its date ("date: 2026-03-01"), so a timestamp also supports
+ * its date; a locator path also supports each of its segments (the file name),
+ * and a file name also supports itself without its extension.
+ */
+function seatSupportTokens(text: string): Set<string> {
+  const tokens = textTokens(text);
+  for (const token of [...tokens]) {
+    const parts = [token, ...(token.includes('/')
+      ? token.split('/').map((segment) => segment.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean)
+      : [])];
+    for (const part of parts) {
+      tokens.add(part);
+      const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(part);
+      if (date) tokens.add(date[1]!);
+      // A file name without its extension is still the name. The extension
+      // holds a letter, so a decimal ("4182.99") never supports its integer part.
+      const stem = /^(.+)\.(?=\p{N}*\p{L})[\p{L}\p{N}]{1,5}$/u.exec(part);
+      if (stem) tokens.add(stem[1]!);
+    }
+  }
+  return tokens;
+}
+
+function tokenShape(token: string): string {
+  return token.replace(/\p{N}/gu, '9').replace(/\p{L}/gu, 'a');
+}
+
+/** The first offset of any accepted form of the value in the text (case-insensitive), or -1. */
+function valueOffset(value: string, text: string): number {
+  const lower = text.toLowerCase();
+  const offsets = acceptableForms(value).map((form) => lower.indexOf(form)).filter((at) => at >= 0);
+  return offsets.length > 0 ? Math.min(...offsets) : -1;
 }
 
 /** The shape of the first token holding a form of the value as a substring (digits to 9, letters to a). */
@@ -597,22 +1003,67 @@ function valueTokenShape(value: string, text: string): string | undefined {
 }
 
 export function evalAnswerStageAudit(
-  question: Pick<EvalQuestion, 'expectedAnswerContains'>,
+  question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
   pack: EvidencePack,
   analystResult: AnalystResult | undefined,
   releasedResult: AnalystResult,
   analystPrompts?: readonly string[],
+  analystModelIds?: readonly string[],
+  analystSeats?: readonly number[],
 ): EvalAnswerStageAudit {
   // Every evidence field the Analyst can be shown: citation metadata
   // (title, locator, dates), chunk text, extracted facts and tables.
-  const packText = pack.candidates.map((candidate) => [
-    JSON.stringify(candidate.provenance.citation ?? {}),
-    ...candidate.chunks,
-    JSON.stringify(candidate.facts ?? []),
-    JSON.stringify(candidate.tables ?? []),
-  ].join('\n')).join('\n');
+  const seatTexts = pack.candidates.map((candidate) => ({
+    excerpt: candidate.chunks.join('\n'),
+    all: [
+      JSON.stringify(candidate.provenance.citation ?? {}),
+      ...candidate.chunks,
+      JSON.stringify(candidate.facts ?? []),
+      JSON.stringify(candidate.tables ?? []),
+    ].join('\n'),
+  }));
+  const packText = seatTexts.map((seat) => seat.all).join('\n');
   const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
+  const analystOwn = analystResult ?? releasedResult;
+  // A citation names its seat by the candidate's own provenance, else by the item.
+  const citationSeats = analystOwn.citations.map((citation) => {
+    const exact = pack.candidates.findIndex((candidate) => candidate.provenance === citation.provenance);
+    const index = exact >= 0 ? exact : pack.candidates.findIndex((candidate) =>
+      candidate.provenance.sourceItem.localItemId === citation.provenance.sourceItem.localItemId);
+    return index + 1;
+  });
+  const citedSeats = [...new Set(citationSeats.filter((seat) => seat > 0))].sort((left, right) => left - right);
+  const expectedIds = (question.expectedEvidence ?? []).flatMap((want) => want.providerItemId !== undefined ? [want.providerItemId] : []);
+  const expectedSeats = pack.candidates.flatMap((candidate, index) =>
+    expectedIds.includes(candidate.provenance.sourceItem.providerItemId) ? [index + 1] : []);
+  const valueTokens = answerValueTokens(analystOwn.answer, pack.candidates.length);
+  // Whole tokens, so '41' is not supported by a seat that says '4182'.
+  const citedTokens = seatSupportTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
+  const values = question.expectedAnswerContains ?? [];
+  const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
+  const answerShape = values.length === 0
+    ? undefined
+    : inAnswer === values.length ? 'contains_all' as const
+      : inAnswer > 0 ? 'partial' as const
+        : analystOwn.citations.length === 0 ? 'not_found' as const : 'other_answer' as const;
   return {
+    ...(answerShape ? { answerShape } : {}),
+    answerCitations: analystOwn.citations.length,
+    answerUnanswered: analystOwn.unanswered.length,
+    answerCitedSeats: citedSeats,
+    answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
+    ...(expectedIds.length > 0
+      ? {
+        expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)),
+        citedSeatsWithoutExpectedItem: citedSeats.filter((seat) => !expectedSeats.includes(seat)).length,
+      }
+      : {}),
+    answerValueTokens: valueTokens.length,
+    answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
+    answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),
+    ...(analystSeats ? { analystSeats: [...analystSeats] } : {}),
+    ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
+    ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
       inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),
@@ -623,11 +1074,18 @@ export function evalAnswerStageAudit(
       const value = question.expectedAnswerContains![index]!;
       const analystAnswer = (analystResult ?? releasedResult).answer;
       const packShape = !entry.inPack && entry.inPackAsSubstring ? valueTokenShape(value, packText) : undefined;
-      const answerShape = !entry.inAnalystAnswer ? valueTokenShape(value, analystAnswer) : undefined;
+      const answerToken = !entry.inAnalystAnswer ? valueTokenShape(value, analystAnswer) : undefined;
+      const packSeats = seatTexts.flatMap((seat, index) => valueOffset(value, seat.all) < 0
+        ? []
+        : [{ seat: index + 1, charOffset: valueOffset(value, seat.excerpt), seatChars: seat.excerpt.length }]);
+      const promptCharOffset = promptText !== undefined ? valueOffset(value, promptText) : -1;
       return {
         ...entry,
         ...(packShape !== undefined ? { packTokenShape: packShape } : {}),
-        ...(answerShape !== undefined ? { answerTokenShape: answerShape } : {}),
+        ...(answerToken !== undefined ? { answerTokenShape: answerToken } : {}),
+        packSeats,
+        ...(promptCharOffset >= 0 ? { promptCharOffset } : {}),
+        valueSeatCited: packSeats.some((seat) => citedSeats.includes(seat.seat)),
       };
     }),
   };
@@ -668,6 +1126,37 @@ export function failIncompleteRetrieval<R extends EvalReport>(
   });
   const passed = grades.filter((grade) => grade.passed).length;
   return { ...report, grades, passed, failed: report.total - passed };
+}
+
+/**
+ * The Analyst as Ask's local leg runs it: the pack fitted to the leg's prompt
+ * budget (fitPackToPromptBytes, Ask's own fit), or sent whole without a
+ * budget. Told the 1-based pack seats each Analyst call was sent.
+ */
+export function promptFittedEvalAnalyst(
+  analyst: Analyst,
+  promptByteBudget: number | undefined,
+  candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
+  onSeats: (pack: EvidencePack, seats: number[]) => void,
+  recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
+): Analyst {
+  return {
+    analyze(pack, analyzeOptions) {
+      const corpusIds = candidateCorpusIds(pack);
+      const sent = promptByteBudget === undefined || !corpusIds
+        ? pack
+        : fitPackToPromptBytes(
+          pack,
+          promptByteBudget,
+          new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index] ?? ''] as const)),
+          analyzeOptions,
+          recencySeats(pack),
+        );
+      onSeats(pack, sent.candidates.map((candidate) =>
+        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
+      return analyst.analyze(sent, analyzeOptions);
+    },
+  };
 }
 
 /** One question's evidence pack, over the eval's lanes, as live Ask builds it. */
@@ -832,7 +1321,9 @@ interface IsolatedEvalInput {
     queryPlannerEnabled: boolean;
     maxResults: number;
     maxCharsPerCandidate: number;
+    analystPromptByteBudget?: number;
   };
+  informationalMaxResults?: number;
 }
 
 interface RealEvalReportEnvelope {
@@ -847,21 +1338,42 @@ export interface EvalReportRetrieval extends EvalRetrievalMode {
   tierLedger: 'bound' | 'absent';
 }
 
-async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
-  const grades: EvalGrade[] = [];
-  const timings: EvalQuestionTiming[] = [];
-  const traces: PrecisionTrace[] = [];
-  let retrieval: EvalReportRetrieval | undefined;
-  const scriptPath = fileURLToPath(import.meta.url);
-  let timedOut = false;
+/**
+ * The pack size of the second, informational score: Ask's own default
+ * (rerun 20: the gate stays at the eval's seats; the second score shows the
+ * same questions at the product's). 0 turns it off; the gate's own size, or
+ * an unset gate, needs no second pass.
+ */
+export function informationalEvalMaxResults(value: string | undefined, gateMaxResults: number): number | undefined {
+  const parsed = value?.trim() ? Number(value.trim()) : PRODUCT_MAX_RESULTS;
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error('OLYMPUS_EVAL_INFORMATIONAL_MAX_RESULTS must be a whole number (0 turns the second score off).');
+  }
+  return parsed === 0 || parsed === gateMaxResults ? undefined : parsed;
+}
 
+interface IsolatedPass {
+  grades: EvalGrade[];
+  timings: EvalQuestionTiming[];
+  traces: PrecisionTrace[];
+  retrieval?: EvalReportRetrieval;
+}
+
+/** Every question in its own process, in order, stopping at the first timeout. */
+async function runIsolatedPass(
+  input: IsolatedEvalInput,
+  label: string,
+  env: Record<string, string>,
+  onQuestion?: (pass: IsolatedPass) => void,
+): Promise<IsolatedPass> {
+  const pass: IsolatedPass = { grades: [], timings: [], traces: [] };
+  const scriptPath = fileURLToPath(import.meta.url);
+  const total = input.dataset.questions.length;
   for (const [index, question] of input.dataset.questions.entries()) {
-    const childReportPath = `${input.reportPath}.question-${index + 1}-${process.pid}.json`;
+    const childReportPath = `${input.reportPath}.${label}-question-${index + 1}-${process.pid}.json`;
     rmSync(childReportPath, { force: true });
     const timeoutMs = effectiveIsolatedQuestionTimeoutMs(input.config.questionTimeoutMs, question);
-    console.error(
-      `eval isolated question ${index + 1}/${input.dataset.questions.length} started: ${question.id} (${question.shape})`,
-    );
+    console.error(`eval ${label} question ${index + 1}/${total} started: ${question.id} (${question.shape})`);
     const result = await runBoundedEvalProcess({
       command: [
         process.execPath,
@@ -872,6 +1384,7 @@ async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
       ],
       env: {
         ...process.env,
+        ...env,
         [INTERNAL_QUESTION_INDEX_ENV]: String(index),
         OLYMPUS_EVAL_REPORT_PATH: childReportPath,
       },
@@ -879,62 +1392,77 @@ async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
       stdout: 'ignore',
       stderr: 'inherit',
     });
+    let timedOut = false;
     if (result.timedOut) {
       timedOut = true;
-      grades.push(isolatedFailureGrade(question, 'timeout'));
-      timings.push(isolatedFailureTiming(question, result.durationMs, 'timeout'));
-      console.error(
-        `eval isolated question ${index + 1}/${input.dataset.questions.length} timeout: ${question.id} (${result.durationMs}ms)`,
-      );
+      pass.grades.push(isolatedFailureGrade(question, 'timeout'));
+      pass.timings.push(isolatedFailureTiming(question, result.durationMs, 'timeout'));
+      console.error(`eval ${label} question ${index + 1}/${total} timeout: ${question.id} (${result.durationMs}ms)`);
     } else if (existsSync(childReportPath)) {
       const envelope = JSON.parse(readFileSync(childReportPath, 'utf8')) as RealEvalReportEnvelope;
       const grade = envelope.report.grades[0];
       const timing = envelope.report.timings[0];
       if (grade && timing) {
-        grades.push(grade);
-        timings.push(timing);
-        traces.push(...(envelope.precision?.traces ?? []));
-        retrieval ??= envelope.retrieval;
+        pass.grades.push(grade);
+        pass.timings.push(timing);
+        pass.traces.push(...(envelope.precision?.traces ?? []));
+        if (envelope.retrieval) pass.retrieval ??= envelope.retrieval;
       } else {
-        grades.push(isolatedFailureGrade(question, 'child_report_incomplete'));
-        timings.push(isolatedFailureTiming(question, result.durationMs, 'error'));
+        pass.grades.push(isolatedFailureGrade(question, 'child_report_incomplete'));
+        pass.timings.push(isolatedFailureTiming(question, result.durationMs, 'error'));
       }
     } else {
-      grades.push(isolatedFailureGrade(question, `child_exit_${result.exitCode}`));
-      timings.push(isolatedFailureTiming(question, result.durationMs, 'error'));
+      pass.grades.push(isolatedFailureGrade(question, `child_exit_${result.exitCode}`));
+      pass.timings.push(isolatedFailureTiming(question, result.durationMs, 'error'));
     }
     rmSync(childReportPath, { force: true });
-    const partial = evalReportFromParts(input.dataset.questions.length, grades, timings);
-    writeEvalReport(
-      input.reportPath,
-      input.args.datasetPath,
-      partial,
-      traces,
-      { ...input.config, ...(retrieval ? { retrieval } : {}) },
-      { partial: true },
-    );
+    onQuestion?.(pass);
     if (timedOut) break;
   }
+  return pass;
+}
 
-  const report = evalReportFromParts(input.dataset.questions.length, grades, timings);
-  writeEvalReport(
+async function runIsolatedEval(input: IsolatedEvalInput): Promise<void> {
+  const total = input.dataset.questions.length;
+  const write = (gate: IsolatedPass, partial: boolean, informational?: { maxResults: number; pass: IsolatedPass }) => writeEvalReport(
     input.reportPath,
     input.args.datasetPath,
-    report,
-    traces,
-    { ...input.config, ...(retrieval ? { retrieval } : {}) },
-    { partial: report.remaining > 0 },
+    evalReportFromParts(total, gate.grades, gate.timings),
+    gate.traces,
+    { ...input.config, ...(gate.retrieval ? { retrieval: gate.retrieval } : {}) },
+    { partial },
+    informational ? {
+      maxResults: informational.maxResults,
+      report: evalReportFromParts(total, informational.pass.grades, informational.pass.timings),
+      traces: informational.pass.traces,
+    } : undefined,
   );
+  const gate = await runIsolatedPass(input, 'gate', {}, (pass) => write(pass, true));
+  const report = evalReportFromParts(total, gate.grades, gate.timings);
+  let informational: { maxResults: number; pass: IsolatedPass } | undefined;
+  if (input.informationalMaxResults !== undefined && report.remaining === 0) {
+    const maxResults = input.informationalMaxResults;
+    informational = {
+      maxResults,
+      pass: await runIsolatedPass(input, `informational-${maxResults}`, { OLYMPUS_EVAL_MAX_RESULTS: String(maxResults) },
+        (pass) => write(gate, true, { maxResults, pass })),
+    };
+  }
+  write(gate, report.remaining > 0 || (informational !== undefined && informational.pass.grades.length < total), informational);
   console.log(JSON.stringify(report, null, 2));
   console.error(`held-out eval: ${report.passed}/${report.total} passed`);
-  if (retrieval) console.error(`retrieval: ${retrieval.note}; stores ${retrieval.corpora.join(', ')}`);
+  if (informational) {
+    const second = evalReportFromParts(total, informational.pass.grades, informational.pass.timings);
+    console.error(`informational at ${informational.maxResults} seats: ${second.passed}/${second.total} passed (not the gate)`);
+  }
+  if (gate.retrieval) console.error(`retrieval: ${gate.retrieval.note}; stores ${gate.retrieval.corpora.join(', ')}`);
   console.error('\nprecision trace (where the needle was lost):');
-  for (const trace of traces) {
+  for (const trace of gate.traces) {
     console.error(
       `  ${trace.questionId.padEnd(20)} ${trace.stage.padEnd(16)} rank=${trace.bestRank} cands=${trace.candidateCount}  ${trace.note}`,
     );
   }
-  console.error(`\nlever attribution: ${summarizePrecisionTraces(traces).recommendation}`);
+  console.error(`\nlever attribution: ${summarizePrecisionTraces(gate.traces).recommendation}`);
   process.exit(report.failed === 0 ? 0 : 1);
 }
 
@@ -1192,10 +1720,13 @@ function writeEvalReport(
     queryPlannerEnabled: boolean;
     maxResults: number;
     maxCharsPerCandidate: number;
+    analystPromptByteBudget?: number;
     retrieval?: EvalReportRetrieval;
     reranker?: string;
   },
   options: { partial: boolean },
+  /** The second, informational score at another pack size: never the gate. */
+  informational?: { maxResults: number; report: Awaited<ReturnType<typeof runEval>>; traces: readonly PrecisionTrace[] },
 ): void {
   mkdirSync(dirname(reportPath), { recursive: true });
   writeFileSync(
@@ -1209,6 +1740,7 @@ function writeEvalReport(
       queryPlannerEnabled: config.queryPlannerEnabled,
       maxResults: config.maxResults,
       maxCharsPerCandidate: config.maxCharsPerCandidate,
+      ...(config.analystPromptByteBudget !== undefined ? { analystPromptByteBudget: config.analystPromptByteBudget } : {}),
       ...(config.retrieval ? { retrieval: config.retrieval } : {}),
       ...(config.reranker ? { reranker: config.reranker } : {}),
       report,
@@ -1216,6 +1748,14 @@ function writeEvalReport(
         traces,
         summary: summarizePrecisionTraces(traces),
       },
+      ...(informational ? {
+        informational: {
+          maxResults: informational.maxResults,
+          note: 'Not the gate: the same questions at another pack size.',
+          report: informational.report,
+          precision: { traces: informational.traces, summary: summarizePrecisionTraces(informational.traces) },
+        },
+      } : {}),
       writtenAt: new Date().toISOString(),
     }, null, 2)}\n`,
   );

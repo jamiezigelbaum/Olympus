@@ -70,7 +70,7 @@ import {
   type SourceIndexSkippedCorpus,
   type SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
-import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
+import { mergeRetrievalDegradations, RESERVED_HEAD_SEATS } from '../../core/source-index/retrieval.ts';
 import {
   assertEvidencePackModelEligible,
   assertModelTrustTierAllowed,
@@ -104,6 +104,8 @@ import type {
 import {
   observeSourceAnswerAnalystLeg,
   observeSourceAnswerRetrievalAttempt,
+  recordSourceAnswerAnalystFit,
+  recordSourceAnswerPackSeats,
   recordSourceAnswerPhaseTimings,
   recordSourceAnswerReleaseDecision,
   recordSourceAnswerResidualAnalystOrphan,
@@ -274,7 +276,7 @@ export interface SourceAnswerSelfHealResult {
 // (DEFAULT_LOCAL_ANALYST_PROMPT_BYTES). Venice Private contexts are far
 // larger. A caller's max_results still asks for fewer, up to
 // MAX_EVIDENCE_CANDIDATES.
-const DEFAULT_MAX_RESULTS = 24;
+export const DEFAULT_MAX_RESULTS = 24;
 const MAX_EVIDENCE_CANDIDATES = 48;
 const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // A local model served over an OpenAI-compatible endpoint (Ollama, llama.cpp,
@@ -286,7 +288,7 @@ const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // footprint that ran safely: 3 candidates x 3,000 chars measured 13,667 bytes.
 // A host that serves a larger context declares it with
 // OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES.
-const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
+export const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
 // The OpenClaw infer ceiling less a margin for the CLI's own framing.
 const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
@@ -416,7 +418,8 @@ export function createAnalystSourceIndexAnswerHandler(
       // Temporal questions ("did I just get...", "what arrived today") need a
       // deeper candidate cut than the relevance default: the newest matching
       // item can sit a few ranks down minutes later, and a 3-candidate pack
-      // silently drops it before temporal ordering runs (2026-07-05).
+      // silently drops it (2026-07-05). The pack keeps relevance order; each
+      // seat carries its date for the Analyst.
       // Explicit max_results from the caller is always respected.
       const configuredMaxResults = options.defaultMaxResults ?? DEFAULT_MAX_RESULTS;
       const maxResults = Math.min(
@@ -528,6 +531,11 @@ export function createAnalystSourceIndexAnswerHandler(
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
+        recordSourceAnswerPackSeats(
+          analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ''),
+          analysisDetail.recencySeats ?? 0,
+        );
+        const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1] as const));
         const guarded = (analyst: Analyst): Analyst => ({
           analyze: (dispatchPack, analyzeOptions) => {
             assertDispatchAllowed(analysisDetail);
@@ -535,8 +543,8 @@ export function createAnalystSourceIndexAnswerHandler(
           },
         });
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, 'local', seatOf),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, 'cloud', seatOf),
           trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             // Page asks use the same content-bearing candidates as the computer path.
             // Keep the full detail for the existing fail-closed release checks.
@@ -1000,12 +1008,19 @@ function promptBudgetedAnalyst(
   analyst: Analyst,
   promptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+  recencySeats: number | undefined,
+  lane: 'local' | 'cloud',
+  seatOf: ReadonlyMap<EvidenceCandidate['provenance'], number>,
 ): Analyst {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(
-      fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions),
-      analyzeOptions,
-    ),
+    analyze: (pack, analyzeOptions) => {
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats);
+      recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
+        const seat = seatOf.get(candidate.provenance);
+        return seat === undefined ? [] : [seat];
+      }));
+      return analyst.analyze(fitted, analyzeOptions);
+    },
   };
 }
 
@@ -1016,7 +1031,8 @@ const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's
  * labels and provenance, passages, coverage) is at most maxPromptBytes of
  * UTF-8. Keeps as many candidates as can each carry a usable passage share,
- * seated round-robin across corpora, then clips passages; the measurement is
+ * the pack's first three seats and any recency seats first, as seated, and
+ * the rest round-robin across corpora, then clips passages; the measurement is
  * the real prompt, so labels and escaping are counted, not estimated.
  */
 export function fitPackToPromptBytes(
@@ -1024,9 +1040,20 @@ export function fitPackToPromptBytes(
   maxPromptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
   analyzeOptions: AnalystOptions,
+  recencySeats = 0,
 ): EvidencePack {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
-  const order = roundRobinCandidates(pack.candidates, candidateCorpus);
+  // The first three seats go first: the router reserves seats 2 and 3 for
+  // the strongest keyword and names-only leaders across stores (#1350), and
+  // store turn alone would trim them whenever they share seat 1's store.
+  // Recency seats (seat 4 on, a recency question's newest chat messages) are
+  // read as seated, ahead of store turn: the question asked for what is new,
+  // so it outranks another store's first result.
+  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
+  const order = [
+    ...pack.candidates.slice(0, headSeats),
+    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus),
+  ];
   let fallback: EvidencePack | undefined;
   for (let keep = order.length; keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
