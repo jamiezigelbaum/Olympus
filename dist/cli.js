@@ -65066,6 +65066,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
+          ...!excluded && !contentAllowed ? namesOnlyContentScopeMetadata() : {},
           ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString5(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
