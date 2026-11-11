@@ -29,7 +29,13 @@
 // the vector-lane check have work to do.
 //
 //   bun scripts/engine-split-bench.ts seed  [--items 500000] [--child-every 5] [--dir PATH]
-//   bun scripts/engine-split-bench.ts run   --mode same|thread|process [--reads here|pool] [--every-ms 250] [--dir PATH] [--seconds 60]
+//   bun scripts/engine-split-bench.ts run   --mode same|thread|process [--reads here|pool] [--requests ask|status] [--every-ms 250] [--dir PATH] [--seconds 60]
+//
+// --requests status (#858) makes each request what a dashboard status poll
+// asks of every store whose counts have expired, instead of an Ask: the
+// status handler's prepareStatusCounts, then the counts with the snapshot
+// allowance (STORE_STATUS_REUSE_MS) read off the thread. Its times are in
+// keyword_ms; vector_lane_check_ms stays 0.
 //
 // Output is one JSON line per run. The seed is kept in --dir and copied per run.
 
@@ -144,6 +150,9 @@ function stats(values: number[]) {
   return { n: sorted.length, p50: at(0.5), p95: at(0.95), max: Math.round(sorted.at(-1) ?? 0) };
 }
 
+/** The dashboard's counts allowance (source-index/status.ts STORE_STATUS_REUSE_MS). */
+const STATUS_COUNTS_ALLOWANCE_MS = 5 * 60_000;
+
 /** Requests waiting at once, as the read pool's per-store queue (READ_POOL_QUEUE_PER_STORE). */
 const MAX_IN_FLIGHT = 8;
 
@@ -152,7 +161,7 @@ const MAX_IN_FLIGHT = 8;
  * Requests arrive every `everyMs` on a fixed schedule (an open loop), so a
  * slow layout queues requests instead of being offered fewer.
  */
-async function front(stores: LocalConnectorStore[], seconds: number, reads: 'here' | 'pool', modelId: string, everyMs: number) {
+async function front(stores: LocalConnectorStore[], seconds: number, reads: 'here' | 'pool', modelId: string, everyMs: number, requests: 'ask' | 'status' = 'ask') {
   const latencies: number[] = [];
   const visibility: number[] = [];
   const keyword: number[] = [];
@@ -170,6 +179,12 @@ async function front(stores: LocalConnectorStore[], seconds: number, reads: 'her
     try {
       for (const store of stores) {
         const t0 = performance.now();
+        if (requests === 'status') {
+          await store.prepareStatusCounts(undefined);
+          await store.statusOffThread(undefined, { countsMaxAgeMs: STATUS_COUNTS_ALLOWANCE_MS });
+          k += performance.now() - t0;
+          continue;
+        }
         store.vectorLaneServable(modelId);
         const t1 = performance.now();
         const text = `${word(q)} ${word(q * 5)}`;
@@ -232,6 +247,7 @@ function readStores(dir: string, readOnly: boolean): { stores: LocalConnectorSto
 async function run(): Promise<void> {
   const mode = args.get('mode') ?? 'same';
   const reads = args.get('reads') === 'pool' ? 'pool' : 'here';
+  const requests = args.get('requests') === 'status' ? 'status' : 'ask';
   const everyMs = Number(args.get('every-ms') ?? 250);
   const seconds = Number(args.get('seconds') ?? 60);
   const modelId = localProvider().modelId;
@@ -286,11 +302,11 @@ async function run(): Promise<void> {
       rssPeak = Math.max(rssPeak, rss() ?? 0);
       if (childPid) childRssPeak = Math.max(childRssPeak, rss(childPid) ?? 0);
     }, 1000);
-    const measured = await front(stores, seconds - 4, reads, modelId, everyMs);
+    const measured = await front(stores, seconds - 4, reads, modelId, everyMs, requests);
     clearInterval(sampler);
     const result = await writer;
     close();
-    console.log(JSON.stringify({ mode, reads, every_ms: everyMs, seconds, ...measured,
+    console.log(JSON.stringify({ mode, reads, requests, every_ms: everyMs, seconds, ...measured,
       writer: { ...result, ...(childPid ? { writer_rss_peak_mb: childRssPeak } : {}) }, process_rss_mb: rss(), process_rss_peak_mb: rssPeak }));
   } finally {
     rmSync(dir, { recursive: true, force: true });
