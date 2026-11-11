@@ -7,11 +7,12 @@
 // Synthetic data only: fixture stores in a temp folder, a scripted model.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { analystPromptBytes, createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModel, type AnalystModelRequest } from '../src/core/analyst.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
-import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes, type AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 import {
   buildEvalPack,
   createEvalDropboxLanes,
@@ -152,6 +153,7 @@ describe('the real eval report says where an expected value was lost (#1234)', (
       answerValueTokens: 1,
       answerValueTokensInCitedSeats: 0,
       answerValueTokensUnmatchedShapes: ['9999'],
+      answerValueTokensUnmatchedSeats: [[1]],
       expected: [
         { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat], valueSeatCited: false },
         { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [], valueSeatCited: false },
@@ -282,6 +284,19 @@ describe('the real eval report locates an expected item and value for a miss', (
       answerValueTokensUnmatchedShapes: ['9,999', '9999-99-99'],
     });
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat).answerValueTokensUnmatchedShapes).toEqual([]);
+    // Where an unmatched value came from: another seat's text, and whether the model was sent it.
+    const elsewhere = { ...citing(1), answer: 'The total is 5120 dollars, due 2031-01-01.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere, ['Evidence: total 5120'])).toMatchObject({
+      answerValueTokensUnmatchedShapes: ['9999', '9999-99-99'],
+      answerValueTokensUnmatchedInPrompt: [true, false],
+      answerValueTokensUnmatchedSeats: [[2], []],
+    });
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere).answerValueTokensUnmatchedInPrompt).toBeUndefined();
+    // The audit prompt quotes the model's own draft: a value only the draft holds was not sent as evidence.
+    const auditPrompt = ['Question: q', '', 'Draft JSON:', '{"answer":"due 2031-01-01"}', '', 'Audit evidence:', 'Evidence: total 5120'].join('\n');
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere, ['Evidence: total 5120', auditPrompt])).toMatchObject({
+      answerValueTokensUnmatchedInPrompt: [true, false],
+    });
     // A value the answer takes from the cited seat's citation line (its date,
     // its file name inside a path) is in that seat, as the Analyst saw it.
     const dated = {
@@ -448,6 +463,28 @@ describe('Analyst repeats on a frozen pack', () => {
 });
 
 describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () => {
+  test('the fitted local eval sends byte-identical main and audit prompts to the product local fit', async () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    pack.coverage = { ...pack.coverage, extractionGaps: [pack.coverage.extractionGaps[0]!,
+      ...pack.candidates.map((candidate) => `${candidate.provenance.citation!.title} content was truncated for length.`)] };
+    const gapIndexes = pack.candidates.map((_, index) => [index + 1]);
+    const calls: AnalystModelRequest[][] = [[], []];
+    const analysts = calls.map((requests) => createAnalyst({ complete: async (request) => {
+      requests.push(request);
+      return { modelId: 'fixture', text: JSON.stringify({ answer: 'Survey recorded [1].', citations: [{ evidence: 1, claim: 'Survey recorded.' }], unanswered: [], sufficient: true }) };
+    } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
+      new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!])), { localOnly: true }, 2, 'compact',
+      new Map(pack.candidates.map((candidate, index) => [candidate.provenance, gapIndexes[index]!])));
+    await analysts[0]!.analyze(withPromptBudget(fitted, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES), { localOnly: true });
+    const kept: number[][] = [];
+    await promptFittedEvalAnalyst(analysts[1]!, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, () => corpusIds,
+      (_pack, seats) => kept.push(seats), () => 2, () => gapIndexes).analyze(pack, { localOnly: true });
+    expect(calls[1]).toEqual(calls[0]);
+    expect(kept[0]).toEqual(fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
+    expect(calls[1]![0]!.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
+  });
+
   test('the pack is fitted to the local prompt budget, and the seats sent are recorded', async () => {
     const { stores, ledger } = await twoTierWorld();
     const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
@@ -671,7 +708,7 @@ describe('the dataset shape the runner reads', () => {
 });
 
 describe('evalPromptLayout', () => {
-  test("splits the sent prompt's bytes into fixed text, each seat's header and each seat's passages, and prices the compact format", () => {
+  test("splits the sent prompt's bytes into fixed text, each seat's header and each seat's passages, and prices the compact format", async () => {
     const options = { localOnly: true };
     const seat = (index: number, chunks: string[]) => ({
       provenance: {
@@ -685,10 +722,22 @@ describe('evalPromptLayout', () => {
     const sent: EvidencePack = {
       question: 'When does the lease end?',
       candidates: [seat(1, ['lease ends 31 May 2027', 'renewal "notice" due']), seat(2, []), seat(3, ['café receipt'])],
-      coverage: { searchedCorpora: ['a'], skippedCorpora: [], extractionGaps: [] },
+      coverage: { searchedCorpora: ['a'], skippedCorpora: [], extractionGaps: ['Un café could not be read.', 'An item was truncated.'] },
       builtAt: '2026-11-11T00:00:00Z',
     };
     const layout = evalPromptLayout(sent, options);
+    for (const evidenceFormat of ['full', 'compact'] as const) {
+      const calls: AnalystModelRequest[] = [];
+      // createAnalyst renders the actual sent Coverage line before completing.
+      const analyst = createAnalyst({ complete: async (request) => {
+        calls.push(request);
+        return { text: JSON.stringify({ answer: '', citations: [], unanswered: [], sufficient: false }), modelId: 'fixture' };
+      } }, { evidenceFormat });
+      await analyst.analyze(sent, options);
+      const measured = evalPromptLayout(sent, options, evidenceFormat);
+      expect(measured.coverageBytes).toBe(Buffer.byteLength(calls[0]!.prompt.split('\n').at(-1)!));
+      expect(measured.extractionGapCount).toBe(2);
+    }
     expect(layout.promptBytes).toBe(analystPromptBytes(sent, options));
     expect(layout.compactPromptBytes).toBe(analystPromptBytes(sent, options, 'compact'));
     expect(layout.seats).toHaveLength(3);

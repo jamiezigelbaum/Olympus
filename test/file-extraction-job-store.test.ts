@@ -176,6 +176,52 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
+  test('terminal outcomes use the identity index, latest job warnings, the newest version, and read/active precedence', () => {
+    const { store, dbPath } = newStore();
+    const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'outcome' };
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    const job = enqueueOne(store, 'outcome');
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    store.lease({ ...LANE, workerId: 'worker' });
+    store.record({ jobId: job, status: 'metadata_only', errorKind: 'extractor_empty_output',
+      derivations: [{ artifactKind: 'page', chars: 0, warnings: ['pdf_password_required'] }] });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'metadata_only', policyDecision: 'index_allowed',
+      lastErrorKind: 'extractor_empty_output', warnings: ['pdf_password_required'] });
+    expect(store.itemExtractionOutcome({ ...item, accountScope: 'other' })).toBeUndefined();
+    expect(store.itemExtractionOutcome({ ...item, provider: 'other' })).toBeUndefined();
+    const newer = enqueueOne(store, 'outcome', { version: 'v2' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'failed_terminal', last_error_kind: 'pdf_damaged', updated_at: '2099-01-01T00:00:00Z' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    // A read of the same content wins over a newer extractor's failure...
+    backdate(dbPath, job, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    // ...but an older version's read never hides the current version's outcome.
+    backdate(dbPath, newer, { source_version: 'outcome-v2' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    backdate(dbPath, newer, { status: 'queued' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    expect(store.itemExtractionState(item)).toBe('settled');
+  });
+
+  test('an item inside a conversation never takes another conversation\'s outcome for the same provider item id', () => {
+    const { store, dbPath } = newStore();
+    const inChat = (chat: string) => ref('42#child:media', { localItemId: `${LANE.accountScope}:${chat}:42#child:media`, contentHash: `hash-${chat}` });
+    const result = store.enqueue({ refs: [inChat('chat-a'), inChat('chat-b')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    const [a, b] = result.jobRefs.map(job => job.jobId);
+    backdate(dbPath, a!, { status: 'failed_terminal', last_error_kind: 'pdf_damaged' });
+    backdate(dbPath, b!, { status: 'indexed', updated_at: '2099-01-01T00:00:00Z' });
+    const item = (chat: string) => ({ provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: '42#child:media',
+      providerConversationId: chat, localItemId: `${LANE.accountScope}:${chat}:42#child:media` });
+    expect(store.itemExtractionOutcome(item('chat-a'))?.status).toBe('failed_terminal');
+    expect(store.itemExtractionOutcome(item('chat-b'))?.status).toBe('indexed');
+    const none = { status: 'skipped_unsupported', warnings: [], policyDecision: 'index_allowed' } as const;
+    expect(store.itemExtractionOutcome(item('chat-c'), { whenNoJob: none })).toBe(none);
+    expect(store.itemExtractionOutcome(item('chat-c'))).toBeUndefined();
+  });
+
   test('an item text is owed until a job reads it or settles without it', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };

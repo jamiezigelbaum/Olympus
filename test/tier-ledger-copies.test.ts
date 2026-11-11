@@ -38,6 +38,24 @@ function whole(target: { corpusId: string; trustDomain: 'public_safe' | 'interna
 }
 
 describe('tier ledger copies (P1b)', () => {
+  test('only a moved migration proposal protects its exact identity across plans and conversations', () => {
+    const store = ledger();
+    const identity = { ...ITEM, providerConversationId: 'conversation-a' };
+    store.replaceMigrationProposals('plan', [{ identity, family: 'file', fromCorpusId: SECURE.corpusId,
+      fromTrustDomain: SECURE.trustDomain, kind: 'queued_move', metadataTier: 'private', contentTier: 'private',
+      decision: decision(), chunks: 1, estimatedChunksToEmbed: 1, estimatedTokens: 1, itemFingerprint: 'test', batchKeys: [],
+    }]);
+    expect(store.hasMovedMigrationProposal(identity)).toBe(false);
+    store.markMigrationProposal('plan', identity, { status: 'moved', movedGeneration: 2 });
+    expect(store.hasMovedMigrationProposal(identity)).toBe(true);
+    expect(store.hasMovedMigrationProposal(ITEM)).toBe(false);
+    expect(store.hasMovedMigrationProposal({ ...identity, providerConversationId: 'conversation-b' })).toBe(false);
+    expect(store.hasMovedMigrationProposal({ ...identity, accountScope: 'other' })).toBe(false);
+    store.markMigrationProposal('plan', identity, { status: 'rolled_back' });
+    expect(store.hasMovedMigrationProposal(identity)).toBe(false);
+    store.close();
+  });
+
   test('a first placement records the decision and current copies in one write', () => {
     const store = ledger();
     const placed = store.recordRoutedPlacement(ITEM, decision(), {

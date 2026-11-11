@@ -24,7 +24,7 @@ import {
   type CredentialBroker,
   type CredentialOAuth2StateStore,
 } from '../src/workers/credential-broker/index.ts';
-import { EmailSourceWorkerError } from '../src/workers/engine/index.ts';
+import { EmailSourceWorkerError } from '../src/workers/engine/http/worker-responses.ts';
 import {
   accountCheckedXBookmarksRuntime,
   type XBookmarksConnectorStoreRuntime,

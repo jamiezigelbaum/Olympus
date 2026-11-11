@@ -43,7 +43,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 14;
+export const TIER_LEDGER_SCHEMA_VERSION = 15;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
@@ -403,7 +403,7 @@ export class TierLedgerRaiseAbandonRefusedError extends Error {
 }
 
 /** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
-/** Verified raises cannot restore a lower copy whose content was removed. */
+/** A purged move cannot restore a copy whose content was removed. */
 export class TierLedgerPurgedRollbackRefusedError extends Error {
   constructor() {
     super('already Private; its lower copy was removed');
@@ -3670,8 +3670,8 @@ export class TierLedger {
   }
 
   /**
-   * Forget ONE superseded copy row, after the caller tombstoned that store's
-   * copy (the owner-approved purge, design section 4.6 M6). A current or
+   * Forget ONE superseded copy row, after the caller tombstoned or stripped
+   * that store's copy (automatic pruning or design section 4.6 M6). A current or
    * staged copy is never removed here. Returns whether a row was removed.
    */
   removeSupersededCopy(identity: TierLedgerIdentity, corpusId: string): boolean {
@@ -3683,6 +3683,13 @@ export class TierLedger {
   }
 
   // ---- P3: migration proposals (design section 4.6) ---------------------------
+
+  /** Any still-moved migration protects this identity's rollback copies. */
+  hasMovedMigrationProposal(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
 
   /**
    * Record a plan's proposals, replacing any earlier rows for the same plan
@@ -5372,7 +5379,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 14,
       name: 'requeue_retired_embedding_clearances',
       up(db) {
         // Select CURRENT reasons only, never history. The schema receipt and
@@ -5409,6 +5416,16 @@ function tierLedgerMigrations(): SqliteMigration[] {
           DROP TABLE retired_embedding_clearances;
           DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
         `);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'moved_migration_identity',
+      up(db) {
+        // The bounded automatic-copy sweep probes by identity across plans.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
       },
     },
   ];

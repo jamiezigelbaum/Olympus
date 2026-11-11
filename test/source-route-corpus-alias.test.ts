@@ -27,7 +27,7 @@
 //     exercise below nor an explicit acknowledgement. Route number five, added
 //     next month, therefore cannot quietly reintroduce this: it lands red.
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -66,6 +66,8 @@ import type {
 } from '../src/workers/readwise/index.ts';
 
 const WORKER_SOURCE = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'index.ts');
+/** The worker's request parsers live beside it, one module per capability (#1068). */
+const WORKER_HTTP_DIR = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'http');
 const BASE = 'http://worker.test/v1';
 
 // The two ids under test are read from the registry, not written out here.
@@ -398,8 +400,12 @@ function inventoryCorpusAcceptingRoutes(): string[] {
   // Every request parser in the file, so a route that delegates its parsing is
   // still judged on what its parser reads.
   const parsers = new Map<string, string>();
-  for (const match of source.matchAll(/(?:async\s+)?function\s+(parse[A-Za-z0-9_]*)\s*\(/g)) {
-    parsers.set(match[1]!, functionBodyAt(source, match.index!));
+  const parserSources = [source, ...readdirSync(WORKER_HTTP_DIR).filter((name) => name.endsWith('.ts'))
+    .map((name) => readFileSync(join(WORKER_HTTP_DIR, name), 'utf8'))];
+  for (const text of parserSources) {
+    for (const match of text.matchAll(/(?:async\s+)?function\s+(parse[A-Za-z0-9_]*)\s*\(/g)) {
+      parsers.set(match[1]!, functionBodyAt(text, match.index!));
+    }
   }
 
   const routeMatches = [...source.matchAll(/url\.pathname === `\$\{basePath\}(\/[a-z0-9/_-]+)`/g)];

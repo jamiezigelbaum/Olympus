@@ -44,11 +44,18 @@ import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts'
 import {
   isUnreadableOpenToken,
   isUnreadablePageCursor,
+  NO_EXTRACTION_JOB_OUTCOME,
   createUnreadableFiles,
   createUnreadableVerdict,
   type UnreadableFiles,
   unreadableFileReason,
+  unreadHoldDisposition,
 } from '../src/workers/file-extraction/unreadable-files.ts';
+
+test('an unread hold no extractor was queued for cannot be read; one with no outcome yet is waiting', () => {
+  expect(unreadHoldDisposition(NO_EXTRACTION_JOB_OUTCOME)).toEqual({ kind: 'cannot_read', errorKind: 'no_extractor', reason: 'unsupported' });
+  expect(unreadHoldDisposition(undefined)).toEqual({ kind: 'waiting' });
+});
 
 const LANE = {
   corpusId: 'secure_local.dropbox.files',

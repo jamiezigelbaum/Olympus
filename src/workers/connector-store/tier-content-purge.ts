@@ -178,7 +178,7 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
 // cannot. Without an equal source fingerprint or a strict source-time order,
 // retain both bodies for a later repair rather than guessing which to destroy.
 type ContentState = NonNullable<ReturnType<LocalConnectorStore['copyContentState']>>;
-function compareContentVersions(a: ContentState, b: ContentState): number | undefined {
+export function compareContentVersions(a: ContentState, b: ContentState): number | undefined {
   if (a.sourceVersion === b.sourceVersion && a.contentHash !== null && a.contentHash === b.contentHash) return 0;
   const aTime = a.updatedAt ? Date.parse(a.updatedAt) : NaN;
   const bTime = b.updatedAt ? Date.parse(b.updatedAt) : NaN;
