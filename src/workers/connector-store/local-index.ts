@@ -14591,7 +14591,9 @@ export function createConnectorStoreCorpusAdapter(
       const hits = withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(
+        hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId === undefined
+          ? undefined
+          : { itemId: keywordLane.nameLeaderItemId, matchesWholeQuestion: complete }).map((candidate) => connectorStoreHitFromRow(
           store,
           candidate.item,
           candidate.score,
@@ -14999,15 +15001,17 @@ async function hybridConnectorStoreSearch(
     tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
   const seated = withLaneLeadersSeated(fused, vettedVectorItemIds);
-  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => {
-    const id = candidate.item.sourceItem.localItemId;
-    return (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(id))
-      || (candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(id));
-  };
+  const keywordComplete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+    candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
+  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+    (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId))
+    || keywordComplete(candidate);
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId === undefined
+      ? undefined
+      : { itemId: keywordLane.nameLeaderItemId, matchesWholeQuestion: keywordComplete }).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -15199,11 +15203,11 @@ async function connectorStoreKeywordLaneRows(
     ? leader.sourceItem.localItemId
     : undefined;
   if (leader && nameLeader !== undefined) {
-    const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
-    const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    // Right after the best readable partial match, when one leads it.
-    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]!) ? 1 : 0);
-    if (firstPartial >= 0 && at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
+    seatNameLeader(ordered, {
+      isLeader: (row) => row.sourceItem.localItemId === leader.sourceItem.localItemId,
+      matchesWholeQuestion: (row) => complete.has(row.sourceItem.localItemId),
+      readable: connectorStoreRowHasContent,
+    });
   }
   // The expansion-free baseline is the same search when expansion changes
   // nothing about it (no alternatives, no foreign stopwords): running it
@@ -15327,16 +15331,49 @@ function rankedCandidates(
   limit: number,
   complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
   hasContent: ContentPreference = lexicalContentPreference,
-  nameLeaderItemId?: string,
+  nameLeader?: { itemId: string; matchesWholeQuestion: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean },
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
   const tiers: FusedRankedCandidate<ConnectorStoreSearchRow>[][] = [[], [], [], []];
   for (const candidate of candidates) {
     // The best name match is never demoted for having no text: its lane
     // already put readable rows that match the question as fully ahead of it.
-    const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeaderItemId;
+    const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeader?.itemId;
     tiers[(complete(candidate) ? 0 : 2) + (readable ? 0 : 1)]!.push(candidate);
   }
-  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+  const ordered = tiers.flat();
+  if (nameLeader) {
+    seatNameLeader(ordered, {
+      isLeader: (candidate) => candidate.item.sourceItem.localItemId === nameLeader.itemId,
+      matchesWholeQuestion: nameLeader.matchesWholeQuestion,
+      readable: hasContent,
+    });
+  }
+  return ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+}
+
+// The seat for the best name match (#1287): right after the best readable
+// candidate that matches only part of the question, so the first seat stays
+// with a readable candidate and candidates matching the whole question still
+// lead. The keyword lane applies it to its rows, and the final order applies
+// it again, because a vetted vector hit counts as complete there and a
+// names-only item has no chunks for a vector hit to vet: without it every
+// vetted note buried the file named for the question (gap-1, Sparta probe
+// 2026-11-11).
+// The final order does not keep whole-question matches ahead of every
+// partial one (its first tier mixes vetted vector hits with them in fusion
+// order), so the seat also follows the last whole-question match above the
+// leader: the leader never moves ahead of one (#1343 review).
+export function seatNameLeader<T>(
+  ordered: T[],
+  rule: { isLeader: (entry: T) => boolean; matchesWholeQuestion: (entry: T) => boolean; readable: (entry: T) => boolean },
+): void {
+  const at = ordered.findIndex(rule.isLeader);
+  const firstPartial = ordered.findIndex((entry) => !rule.matchesWholeQuestion(entry));
+  if (at < 0 || firstPartial < 0) return;
+  let lastWholeAbove = -1;
+  for (let index = 0; index < at; index += 1) if (rule.matchesWholeQuestion(ordered[index]!)) lastWholeAbove = index;
+  const seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]!) ? 1 : 0), lastWholeAbove + 1);
+  if (at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
 }
 
 // Each lane's best hit keeps a seat near the top of fusion's order (#1230).
