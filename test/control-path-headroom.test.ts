@@ -127,7 +127,7 @@ describe('cpu samples taken during a freeze', () => {
     // fall either side (CI, 2026-11-05). Bound counts, not ratios: a slow runner
     // keeps 9 or fewer samples, where one edge sample alone is over 10% (#1372).
     const edge = Math.max(1, Math.floor(kept.length * 0.1));
-    expect(kept.filter((trace) => named(trace, 'heldTheThread')).length).toBeGreaterThanOrEqual(Math.ceil(kept.length * 0.8) - edge);
+    expect(kept.filter((trace) => named(trace, 'heldTheThread')).length).toBeGreaterThanOrEqual(Math.max(1, Math.ceil(kept.length * 0.8) - edge));
     expect(kept.filter((trace) => named(trace, 'afterwards')).length).toBeLessThanOrEqual(edge);
   });
 });
