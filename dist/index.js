@@ -19325,6 +19325,11 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/connector-store/main-thread-sql-trace.ts
+var init_main_thread_sql_trace = __esm(() => {
+  init_answer_latency_trace();
+});
+
 // src/workers/file-extraction/unreadable-files.ts
 var NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
@@ -19348,9 +19353,11 @@ var init_job_names = __esm(() => {
 });
 
 // src/core/source-index/keyword-languages.ts
-var profiles;
+var profiles, PROFILE_REUSE_MS, sampling;
 var init_keyword_languages = __esm(() => {
   profiles = new WeakMap;
+  PROFILE_REUSE_MS = 10 * 60000;
+  sampling = new WeakMap;
 });
 
 // src/core/source-index/keyword-equivalents.json
@@ -19765,9 +19772,11 @@ var init_control_path_headroom = __esm(() => {
 });
 
 // src/workers/connector-store/off-thread-reads.ts
-var queues, releases;
+var startedStores, storeOpens, queues, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
+  startedStores = new Set;
+  storeOpens = new Map;
   queues = new Map;
   releases = new Map;
 });
@@ -20075,8 +20084,9 @@ class MutablePkList {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_main_thread_sql_trace();
   init_store_write_guard();
   init_unreadable_files();
   init_job_names();
@@ -20156,6 +20166,9 @@ var init_local_index = __esm(() => {
   };
   STATUS_COUNTS_MAX_AGE_MS = 5 * 60000;
   NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
+  LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
+  WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+  ORDER BY started_at DESC, rowid DESC LIMIT 1`;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",
@@ -21003,6 +21016,12 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS;
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES;
 var init_evidence_versions = __esm(() => {
@@ -21017,6 +21036,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_partial_search();
   init_operation_error();
   init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage6;
@@ -21283,6 +21303,7 @@ var init_evidence_reranker = () => {};
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_partial_search();
   init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
@@ -21390,6 +21411,7 @@ var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
   init_analyst();
+  init_partial_search();
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();

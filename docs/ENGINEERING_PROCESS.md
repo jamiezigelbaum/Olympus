@@ -161,6 +161,25 @@ Current blocking gates recorded here:
   directory review or listing update is pending; the listing pin stays while
   the plugin is listed, because the directory rescans `/openai/mcp`.
 
+- **Busy-store gate** (2026-11-11, #1305). Prevents a build that holds the
+  engine's request thread with synchronous SQLite during an Ask from reaching
+  a large install: on Sparta's copy one Ask spent about 120 s there (language
+  profile, exact-vector pages, ledger states, run history, held counts) while
+  the synthetic gate it had passed showed a 303 ms worst freeze. Run:
+  `scripts/search-contention-bench.ts seed` (11 stores up to `--items`, every
+  chunk with a 768-float vector, 200,000 run-history rows a store, most of
+  them tier moves) then `run --writer on`. Bound: each Ask's
+  `main_thread_sql.total_ms` (from the Ask trace) is at most 2,000 ms and no
+  statement runs 250 ms or more; `run` exits non-zero otherwise. Applies
+  before a build that changes the Ask path or the engine's stores goes to a
+  large install. Expected runtime about 15 minutes at 2M items on Sparta;
+  false-positive budget: a run under heavy unrelated host load may be repeated
+  once, with the load recorded. Owner: the session changing the Ask path.
+  Retire when the Ask path reads no store or ledger on the request thread.
+  The seed also writes a tier ledger (every item routed with its copy, one in
+  ten held from embedding, one in fifty moved), and `run` routes through the
+  search's visibility gate over it, as the product does.
+
 ## Focused proof and CI triage
 
 Choose local proof from the changed surface instead of reflexively running the

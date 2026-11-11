@@ -3256,7 +3256,7 @@ export async function main(): Promise<void> {
           parentLabels: parentLabelResolver,
           secretLocations: tierSecretLocations,
           checkSecretLocations: checkTierSecretLocations,
-          heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
+          heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusHeldCopyCount(corpusId) ?? 0,
         }),
       });
     })()

@@ -185,6 +185,7 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
     expect(install.secure.searchItems('lender', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:bank']);
     // Both count as still checking.
     expect(install.lane.ledger.corpusCopyCounts(SECURE_CORPUS).held).toBe(2);
+    expect(install.lane.ledger.corpusHeldCopyCount(SECURE_CORPUS)).toBe(2);
     // The secret is Secret: stored nowhere, its location only.
     expect(install.lane.ledger.getCurrent(identity('id:secret'))).toMatchObject({ contentTier: 'secrets' });
     // Public is retired: no Public store was ever created.

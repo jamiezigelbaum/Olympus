@@ -22545,6 +22545,90 @@ function writeIntentFromRow(row) {
 function idParams(identity2) {
   return [identity2.provider, identity2.accountScope, tierLedgerConversationKey(identity2), identity2.providerItemId];
 }
+function uniqueIdentities(identities) {
+  const unique = new Map;
+  for (const identity2 of identities)
+    unique.set(tierLedgerIdentityKey(identity2), identity2);
+  return [...unique.values()];
+}
+function identityValues(batch) {
+  return { values: batch.map(() => "(?, ?, ?, ?)").join(", "), params: batch.flatMap((identity2) => [...idParams(identity2)]) };
+}
+function* copiesSteps(list) {
+  const result = new Map;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT * FROM tier_copies
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        ORDER BY corpus_id`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows) {
+      const key2 = tierLedgerIdentityKey(identityFromRow(row));
+      const existing = result.get(key2);
+      if (existing)
+        existing.push(copyFromRow(row));
+      else
+        result.set(key2, [copyFromRow(row)]);
+    }
+    const pending = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+        WHERE kind IN ('deletion', 'secret')
+          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+      params,
+      mode: "all"
+    };
+    for (const row of pending) {
+      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+      if (hidden) {
+        for (const copy of hidden)
+          if (copy.state !== "superseded")
+            copy.state = "superseded";
+      }
+    }
+  }
+  return result;
+}
+function* personalFirstWaitingSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          AND content_pending = 1
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`,
+      params: [...params, PERSONAL_FIRST_REASON],
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
+function* routedWithoutCopiesSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+        WHERE i.routed = 1
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${values})
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies c
+            WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+              AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          )`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
 function tierLedgerIdentityOfRecord(record) {
   return {
     provider: record.provider,
@@ -23887,45 +23971,32 @@ class TierLedger {
     `).all(...idParams(identity2)).map(copyFromRow);
   }
   copiesForMany(identities) {
-    const result = new Map;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity2 of identities)
-      unique.set(tierLedgerIdentityKey(identity2), identity2);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-          ORDER BY corpus_id
-        `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-        for (const row of rows) {
-          const key2 = tierLedgerIdentityKey(identityFromRow(row));
-          const existing = result.get(key2);
-          if (existing)
-            existing.push(copyFromRow(row));
-          else
-            result.set(key2, [copyFromRow(row)]);
-        }
-        const pending = this.db.query(`
-          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-          WHERE kind IN ('deletion', 'secret')
-            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-        `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-        for (const row of pending) {
-          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
-          if (hidden) {
-            for (const copy of hidden)
-              if (copy.state !== "superseded")
-                copy.state = "superseded";
-          }
-        }
+    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+  }
+  *visibilityReadSteps(identities, options = {}) {
+    const list = uniqueIdentities(identities);
+    const copies = yield* copiesSteps(list);
+    const copyless = list.filter((identity2) => (copies.get(tierLedgerIdentityKey(identity2))?.length ?? 0) === 0);
+    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    if (!options.personalFirst)
+      return { copies, routedWithoutCopies, personalFirstWaiting: new Set };
+    const unheld = list.filter((identity2) => !copies.get(tierLedgerIdentityKey(identity2))?.some((copy) => copy.state === "current" && copy.embedHold));
+    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
       }
+      return next.value;
     })();
-    return result;
   }
   recordRoutedPlacement(identity2, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -24095,31 +24166,7 @@ class TierLedger {
     }
   }
   routedWithoutCopies(identities) {
-    const result = new Set;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity2 of identities)
-      unique.set(tierLedgerIdentityKey(identity2), identity2);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
-          WHERE i.routed = 1
-            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies c
-              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-            )
-        `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-        for (const row of rows)
-          result.add(tierLedgerIdentityKey(identityOfRow(row)));
-      }
-    })();
-    return result;
+    return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
   itemStatesForMany(identities) {
     const result = new Map;
@@ -24931,6 +24978,12 @@ class TierLedger {
             AND c.corpus_id IN (SELECT value FROM json_each(?)))
     `).get(JSON.stringify(corpusIds)).n;
   }
+  corpusHeldCopyCount(corpusId) {
+    return this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
+    `).get(corpusId).n;
+  }
   corpusCopyCounts(corpusId) {
     const rows = this.db.query(`
       SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies
@@ -24994,21 +25047,6 @@ class TierLedger {
       mode: "get"
     };
     return { items: row.items, awaitingJudgment: row.awaiting };
-  }
-  onClose(listener) {
-    (this.closeListeners ??= []).push(listener);
-  }
-  closeListeners;
-  readSteps(steps) {
-    return this.db.transaction(() => {
-      let next = steps.next();
-      while (!next.done) {
-        const statement = this.db.query(next.value.sql);
-        const params = next.value.params;
-        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
-      }
-      return next.value;
-    })();
   }
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
@@ -25955,7 +25993,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 15, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 15, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -26055,6 +26093,481 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger();
   init_tier_ledger_path();
   tierLedgerIsWithin = pathResolvesWithin;
+});
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { randomUUID as randomUUID5 } from "node:crypto";
+function runInSourceAnswerLane(corpusId, run) {
+  return laneStorage.run(corpusId, run);
+}
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        sql_ms: 0,
+        sql_max_ms: 0,
+        snapshot_reads: 0,
+        snapshot_sql_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = unroundedMs(sqlMs);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function createSourceAnswerTrace(now = () => new Date) {
+  const received = now();
+  return {
+    correlationId: randomUUID5(),
+    receivedAt: received.toISOString(),
+    receivedAtMs: received.getTime(),
+    sqliteRetryCount: 0,
+    sqliteBackoffMs: 0,
+    queryPlannerMs: 0,
+    queryFormulationCount: 0,
+    queryPlannerAwaitedCount: 0,
+    queryPlannerIgnoredAfterStrongLiteralCount: 0,
+    queryPlannerFailedCount: 0,
+    retrievalAttempts: [],
+    routeResolutionMs: 0,
+    orderedRoute: [],
+    analystLegs: [],
+    residualAnalystOrphanCount: 0,
+    selfHealRebuildMs: 0,
+    recordBuildMs: 0,
+    appendMs: 0,
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [], by_site: [] }
+  };
+}
+function runWithSourceAnswerTrace(trace, run) {
+  return Promise.resolve(storage.run(trace, run));
+}
+function currentSourceAnswerTrace() {
+  return storage.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = unroundedMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS)
+    return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function recordSourceAnswerPhaseTimings(timings) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.phaseTimings = { ...timings };
+}
+function recordSourceAnswerSqliteRetry(backoffMs) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.sqliteRetryCount += 1;
+  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
+}
+function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
+  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
+}
+function recordSourceAnswerQueryPlannerDisposition(disposition) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  if (disposition === "awaited")
+    trace.queryPlannerAwaitedCount += 1;
+  else if (disposition === "ignored_after_strong_literal") {
+    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
+  } else
+    trace.queryPlannerFailedCount += 1;
+}
+async function observeSourceAnswerRetrievalAttempt(kind, run) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return run();
+  const previous = trace.activeAttempt;
+  const attempt = {
+    kind,
+    startedAtMs: Date.now(),
+    hydrationMs: 0,
+    queries: []
+  };
+  trace.activeAttempt = attempt;
+  try {
+    return await run();
+  } finally {
+    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
+    trace.retrievalAttempts.push({
+      kind,
+      elapsed_ms: elapsedMs,
+      hydration_ms: attempt.hydrationMs,
+      queries: attempt.queries
+    });
+    if (kind === "self_heal_rebuild")
+      trace.selfHealRebuildMs += elapsedMs;
+    if (previous)
+      trace.activeAttempt = previous;
+    else
+      delete trace.activeAttempt;
+  }
+}
+function recordSourceAnswerHydration(elapsedMs) {
+  const attempt = currentSourceAnswerTrace()?.activeAttempt;
+  if (attempt)
+    attempt.hydrationMs += nonNegativeMs(elapsedMs);
+}
+async function observeSourceAnswerRoutedQuery(ordinal, run) {
+  const trace = currentSourceAnswerTrace();
+  const attempt = trace?.activeAttempt;
+  if (!trace || !attempt)
+    return run();
+  const previous = trace.activeQuery;
+  const query = {
+    ordinal: Math.max(1, Math.floor(ordinal)),
+    startedAtMs: Date.now(),
+    corpusTimings: [],
+    poolByCorpus: new Map
+  };
+  trace.activeQuery = query;
+  try {
+    return await run();
+  } finally {
+    attempt.queries.push({
+      ordinal: query.ordinal,
+      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
+      corpus_timings: query.corpusTimings.map((timing) => ({
+        corpus_id: timing.corpus_id,
+        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+        outcome: timing.outcome,
+        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
+        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
+      })),
+      ...query.stages ? { stages: { ...query.stages } } : {}
+    });
+    if (previous)
+      trace.activeQuery = previous;
+    else
+      delete trace.activeQuery;
+  }
+}
+function recordSourceAnswerQueryStages(stages) {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query)
+    return;
+  query.stages = copyQueryStages(stages);
+}
+function copyQueryStages(stages) {
+  return {
+    prepare_ms: nonNegativeMs(stages.prepare_ms),
+    prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
+    lanes_ms: nonNegativeMs(stages.lanes_ms),
+    after_lanes_ms: nonNegativeMs(stages.after_lanes_ms)
+  };
+}
+function recordSourceAnswerCorpusTiming(timing) {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query)
+    return;
+  query.corpusTimings.push({
+    corpus_id: timing.corpus_id,
+    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+    outcome: timing.outcome,
+    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
+  });
+}
+function recordSourceAnswerRoute(elapsedMs, route) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
+  trace.orderedRoute = route.map((step) => ({
+    profile_id: step.profile_id,
+    backend: step.backend,
+    model_id: step.model_id
+  }));
+}
+async function observeSourceAnswerAnalystLeg(input, run) {
+  const startedAt = Date.now();
+  try {
+    const result = await run();
+    recordAnalystLeg(input, startedAt, "success");
+    return result;
+  } catch (error) {
+    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
+    throw error;
+  }
+}
+function recordSourceAnswerSkippedAnalystLeg(input) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: 0,
+    outcome: input.outcome ?? "policy_skipped",
+    error_class: sanitizeErrorClass(input.errorClass)
+  });
+}
+function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.evidenceSeats = {
+    packCorpora: [...corpusIds],
+    recencySeats: nonNegativeCount(recencySeats),
+    fits: []
+  };
+}
+function recordSourceAnswerAnalystFit(lane, keptSeats) {
+  const seats = currentSourceAnswerTrace()?.evidenceSeats;
+  if (!seats)
+    return;
+  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+}
+function recordSourceAnswerResidualAnalystOrphan() {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.residualAnalystOrphanCount += 1;
+}
+function recordSourceAnswerReleaseDecision(decision) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.releaseDecision = decision;
+}
+function recordSourceAnswerLedgerBuild(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.recordBuildMs += nonNegativeMs(elapsedMs);
+}
+function recordSourceAnswerLedgerAppend(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.appendMs += nonNegativeMs(elapsedMs);
+}
+function snapshotSourceAnswerTrace(trace) {
+  return {
+    correlationId: trace.correlationId,
+    receivedAt: trace.receivedAt,
+    receivedAtMs: trace.receivedAtMs,
+    sqliteRetryCount: trace.sqliteRetryCount,
+    sqliteBackoffMs: trace.sqliteBackoffMs,
+    queryPlannerMs: trace.queryPlannerMs,
+    queryFormulationCount: trace.queryFormulationCount,
+    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
+    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
+    queryPlannerFailedCount: trace.queryPlannerFailedCount,
+    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
+      ...attempt,
+      queries: attempt.queries.map((query) => ({
+        ...query,
+        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool } } : {} }))
+      }))
+    })),
+    routeResolutionMs: trace.routeResolutionMs,
+    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
+    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
+    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
+    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
+    selfHealRebuildMs: trace.selfHealRebuildMs,
+    recordBuildMs: trace.recordBuildMs,
+    appendMs: trace.appendMs,
+    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
+    mainThreadSql: {
+      statements: trace.mainThreadSql.statements,
+      total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
+      max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
+      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
+      by_site: [...trace.mainThreadSql.by_site].sort((left, right) => right.ms - left.ms).slice(0, SITE_TALLY_KEPT).map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) }))
+    },
+    ...trace.evidenceSeats ? {
+      evidenceSeats: {
+        packCorpora: [...trace.evidenceSeats.packCorpora],
+        recencySeats: trace.evidenceSeats.recencySeats,
+        fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] }))
+      }
+    } : {}
+  };
+}
+function sourceAnswerTraceErrorClass(error) {
+  return sanitizeErrorClass(errorClass(error));
+}
+function recordAnalystLeg(input, startedAt, outcome, error) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
+    outcome,
+    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
+  });
+}
+function errorClass(error) {
+  const candidate = error;
+  if (typeof candidate?.name === "string" && candidate.name.trim())
+    return candidate.name;
+  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
+    return candidate.constructor.name;
+  }
+  return "UnknownError";
+}
+function sanitizeErrorClass(value) {
+  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
+  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
+}
+function unroundedMs(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function nonNegativeCount(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  storage = new AsyncLocalStorage2;
+  laneStorage = new AsyncLocalStorage2;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/workers/connector-store/main-thread-sql-trace.ts
+import { Database as Database4 } from "bun:sqlite";
+import { isMainThread } from "node:worker_threads";
+function installMainThreadSqlTrace() {
+  if (installed || !isMainThread)
+    return;
+  installed = true;
+  for (const name of ["query", "prepare"]) {
+    const original = Database4.prototype[name];
+    Database4.prototype[name] = function(...args) {
+      return timeStatement(original.apply(this, args));
+    };
+  }
+}
+function timeStatement(statement) {
+  const held = statement;
+  if (!statement || held[TIMED])
+    return statement;
+  for (const method of STATEMENT_METHODS) {
+    const call = held[method];
+    if (typeof call !== "function")
+      continue;
+    held[method] = function(...args) {
+      if (!sourceAnswerTraceActive())
+        return call.apply(this, args);
+      const started = performance.now();
+      try {
+        return call.apply(this, args);
+      } finally {
+        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+      }
+    };
+  }
+  held[TIMED] = true;
+  return statement;
+}
+function callSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
+  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
+  const caller = recorder >= 0 ? recorder + 2 : 3;
+  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortFrame(frame) {
+  const open2 = frame.lastIndexOf("(");
+  const name = open2 > 0 ? frame.slice(0, open2).trim() : "<anonymous>";
+  const where = (open2 > 0 ? frame.slice(open2 + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
+  const [file, line] = where.split(":");
+  return `${name} ${file}${line ? `:${line}` : ""}`;
+}
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
+var init_main_thread_sql_trace = __esm(() => {
+  init_answer_latency_trace();
+  STATEMENT_METHODS = ["all", "get", "run", "values"];
 });
 
 // src/workers/file-extraction/unreadable-files.ts
@@ -26435,7 +26948,7 @@ function forgetSqliteRows(db, filters, dryRun) {
 
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync23 } from "node:fs";
-import { Database as Database4 } from "bun:sqlite";
+import { Database as Database5 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   return sharedDataPath("file-extraction-jobs", env);
 }
@@ -26480,7 +26993,7 @@ function itemNameRedacted(db, item) {
 function clearExtractionJobNames(dbPath, item, options = {}) {
   if (dbPath === ":memory:" || !existsSync23(dbPath))
     return { cleared: 0, durable: true };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
@@ -26528,7 +27041,7 @@ function clearExtractionJobNames(dbPath, item, options = {}) {
 function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
   if (dbPath === ":memory:" || !existsSync23(dbPath))
     return { retired: 0, stillSecret: false };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!redactionsTableExists(db))
@@ -26578,7 +27091,7 @@ function forgetExtractionJobs(dbPath, scope, options = {}) {
   const claimants = [...new Set(scope.tierLedgerIds ?? [])];
   if (!jobs && claimants.length === 0)
     return 0;
-  const db = new Database4(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
+  const db = new Database5(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!dryRun)
@@ -26611,7 +27124,7 @@ function forgetExtractionJobsOfAccountScopes(dbPath, corpusIds, accountScopes, o
   const marks = (values) => values.map(() => "?").join(", ");
   const ofScopes = `corpus_id IN (${marks(corpusIds)}) AND account_scope IN (${marks(accountScopes)})`;
   const params = [...corpusIds, ...accountScopes];
-  const db = new Database4(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
+  const db = new Database5(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!dryRun)
@@ -26639,7 +27152,7 @@ function settledByPlacement(job) {
 function oweExtractionRereadAfterTierMove(dbPath, item) {
   if (dbPath === ":memory:" || !existsSync23(dbPath))
     return 0;
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!rereadsTableExists(db) || !rereadsHaveReason(db))
@@ -26658,7 +27171,7 @@ function oweExtractionRereadAfterTierMove(dbPath, item) {
 function oweExtractionRereadAfterRevive(dbPath, item) {
   if (dbPath === ":memory:" || !existsSync23(dbPath))
     return 0;
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!rereadsTableExists(db) || !rereadsHaveReason(db))
@@ -26720,39 +27233,94 @@ var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/core/source-index/keyword-languages.ts
 function storeKeywordLanguages(db) {
+  const steps = profileSteps(db);
+  let next = steps.next();
+  while (!next.done) {
+    const read = next.value;
+    const statement = db.query(read.sql);
+    next = steps.next(read.mode === "get" ? statement.get(...read.params) : statement.all(...read.params));
+  }
+  return next.value;
+}
+function storeKeywordLanguagesWith(db, read) {
+  const steps = profileSteps(db);
+  const first = steps.next();
+  if (first.done)
+    return Promise.resolve(first.value);
+  const pending = sampling.get(db);
+  if (pending)
+    return pending;
+  const run = (async () => {
+    let next = first;
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  })().finally(() => sampling.delete(db));
+  sampling.set(db, run);
+  return run;
+}
+function lastKeywordLanguages(db) {
+  return profiles.get(db)?.languages ?? [];
+}
+function* profileSteps(db) {
   const revision = JSON.stringify([db.query("PRAGMA data_version").get(), db.query("SELECT total_changes() AS n").get()]);
   const cached2 = profiles.get(db);
   if (cached2?.revision === revision)
     return cached2.languages;
-  const total = db.query("SELECT count(*) AS n FROM chunks c JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0").get().n;
-  const threshold = Math.floor(Math.min(1, 1024 / Math.max(1, total)) * 4294967296);
-  const rows = db.query(`SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
-    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0
-      AND ((c.rowid * 2654435761) % 4294967296) < ? ORDER BY c.rowid LIMIT 2048`).all(threshold);
+  if (cached2 && cached2.large && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
+  const maxRowid = (yield { sql: "SELECT max(rowid) AS n FROM chunks", params: [], mode: "get" })?.n ?? 0;
+  const large = maxRowid > SAMPLE_LIMIT;
+  if (large && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
+  const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
+    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
+  let rows;
+  if (!large) {
+    rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
+  } else {
+    const step = maxRowid / SAMPLE_TARGET;
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
+    rows = [];
+    for (let at = 0;at < ids.length; at += READ_BATCH) {
+      const batch = ids.slice(at, at + READ_BATCH);
+      rows.push(...yield { sql: `${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`, params: batch, mode: "all" });
+    }
+  }
   const signature = JSON.stringify(rows);
   if (cached2?.signature === signature) {
-    cached2.revision = revision;
+    profiles.set(db, { ...cached2, revision, large, sampledAtMs: Date.now() });
     return cached2.languages;
   }
   const detected = new Map;
-  const counts = new Map;
-  const textFor = db.query("SELECT substr(bounded_text, 1, 1000) AS text FROM chunks WHERE rowid = ?");
   for (const row of rows) {
-    let language = detected.get(row.hash) ?? cached2?.detected.get(row.hash);
-    if (language === undefined)
-      language = franc(textFor.get(row.pk).text, { minLength: 40 });
-    detected.set(row.hash, language);
+    const known = cached2?.detected.get(row.hash);
+    if (known !== undefined)
+      detected.set(row.hash, known);
+  }
+  const unread = [...new Map(rows.filter((row) => !detected.has(row.hash)).map((row) => [row.hash, row.pk])).values()];
+  for (let at = 0;at < unread.length; at += READ_BATCH) {
+    const batch = unread.slice(at, at + READ_BATCH);
+    const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
+    for (const text2 of texts)
+      detected.set(text2.hash, franc(text2.text ?? "", { minLength: 40 }));
+  }
+  const counts = new Map;
+  for (const row of rows) {
+    const language = detected.get(row.hash) ?? "und";
     if (language !== "und")
       counts.set(language, (counts.get(language) ?? 0) + 1);
   }
   const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
-  profiles.set(db, { revision, signature, languages, detected });
+  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
-var profiles;
+var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, READ_BATCH = 500, PROFILE_REUSE_MS, sampling;
 var init_keyword_languages = __esm(() => {
   init_franc_min();
   profiles = new WeakMap;
+  PROFILE_REUSE_MS = 10 * 60000;
+  sampling = new WeakMap;
 });
 
 // src/core/source-index/keyword-equivalents.json
@@ -27082,7 +27650,7 @@ import { chmodSync as chmodSync8, existsSync as existsSync24, mkdirSync as mkdir
 import { dirname as dirname28, join as join31, resolve as resolve10 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 function isStandaloneEngineProcess(env) {
   const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
   return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
@@ -27537,7 +28105,7 @@ function migratePrivateMeaningSearch(path) {
       }
     };
     validateSovereigntyConfig(next);
-    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID5()}`;
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID6()}`;
     lease.commit(() => {
       writePrivateFileAtomicSync(backup, original);
       writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
@@ -29233,13 +29801,31 @@ var init_built_in_sniffer = __esm(() => {
 });
 
 // src/core/source-index/keyword-expansion.ts
-async function expandSourceIndexKeywords(query, profile, owner) {
+async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   if (keywordExpansionDisabled())
     return EMPTY2;
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned)
     return pinned;
-  const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
+  if (options.waitMs === undefined) {
+    const alternatives2 = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
+    pinKeywordAlternatives(owner, query, alternatives2);
+    return alternatives2;
+  }
+  let languages = typeof profile === "function" ? undefined : profile;
+  let read;
+  const once = typeof profile === "function" ? () => read ??= Promise.resolve(profile()).then((value) => languages = value) : profile;
+  const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
+  full.catch(() => {});
+  let timer;
+  const waited = await Promise.race([
+    full.then((value) => ({ value })),
+    new Promise((resolve11) => {
+      timer = setTimeout(() => resolve11(undefined), Math.max(0, options.waitMs ?? 0));
+    })
+  ]);
+  clearTimeout(timer);
+  const alternatives = waited ? waited.value : await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
@@ -29256,7 +29842,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly2) {
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0 ? Object.keys(concepts[0]).filter((language) => concepts.every((row, index) => row?.[language]?.some((word) => !word.includes(" ") && keyOf(word) === keyOf(sources[index])))) : [];
   const sourceLanguages = detectedLanguage === "und" ? knownLanguages : [detectedLanguage];
-  const targetProfile = typeof profile === "function" ? profile() : profile;
+  const targetProfile = typeof profile === "function" ? await profile() : profile;
   const languages = [...new Set(targetProfile.filter((code) => /^[a-z]{3}$/.test(code) && !sourceLanguages.includes(code)))].sort().slice(0, MAX_LANGUAGES);
   if (languages.length === 0)
     return EMPTY2;
@@ -29405,7 +29991,7 @@ async function withExpandedSourceIndexKeywords(query, languages, run, owner) {
   const alternatives = await expandSourceIndexKeywords(query, languages, owner);
   return await withKeywordAlternatives(query, alternatives, run);
 }
-var caches, EMPTY2, MAX_LANGUAGES = 6, MAX_TERMS_PER_LANGUAGE = 8, SYSTEM;
+var caches, EMPTY2, MAX_LANGUAGES = 6, MAX_TERMS_PER_LANGUAGE = 8, SYSTEM, KEYWORD_PREPARE_WAIT_MS = 4000;
 var init_keyword_expansion = __esm(() => {
   init_stemmer();
   init_keyword_equivalents();
@@ -29605,357 +30191,6 @@ function isSourceIndexLaneBusyError(error) {
 }
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { randomUUID as randomUUID6 } from "node:crypto";
-function runInSourceAnswerLane(corpusId, run) {
-  return laneStorage.run(corpusId, run);
-}
-function beginSourceAnswerPoolRead() {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return ({ queueWaitMs, runMs, outcome }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
-    }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-function createSourceAnswerTrace(now = () => new Date) {
-  const received = now();
-  return {
-    correlationId: randomUUID6(),
-    receivedAt: received.toISOString(),
-    receivedAtMs: received.getTime(),
-    sqliteRetryCount: 0,
-    sqliteBackoffMs: 0,
-    queryPlannerMs: 0,
-    queryFormulationCount: 0,
-    queryPlannerAwaitedCount: 0,
-    queryPlannerIgnoredAfterStrongLiteralCount: 0,
-    queryPlannerFailedCount: 0,
-    retrievalAttempts: [],
-    routeResolutionMs: 0,
-    orderedRoute: [],
-    analystLegs: [],
-    residualAnalystOrphanCount: 0,
-    selfHealRebuildMs: 0,
-    recordBuildMs: 0,
-    appendMs: 0
-  };
-}
-function runWithSourceAnswerTrace(trace, run) {
-  return Promise.resolve(storage.run(trace, run));
-}
-function currentSourceAnswerTrace() {
-  return storage.getStore();
-}
-function recordSourceAnswerPhaseTimings(timings) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.phaseTimings = { ...timings };
-}
-function recordSourceAnswerSqliteRetry(backoffMs) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.sqliteRetryCount += 1;
-  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
-}
-function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
-  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
-}
-function recordSourceAnswerQueryPlannerDisposition(disposition) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  if (disposition === "awaited")
-    trace.queryPlannerAwaitedCount += 1;
-  else if (disposition === "ignored_after_strong_literal") {
-    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
-  } else
-    trace.queryPlannerFailedCount += 1;
-}
-async function observeSourceAnswerRetrievalAttempt(kind, run) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return run();
-  const previous = trace.activeAttempt;
-  const attempt = {
-    kind,
-    startedAtMs: Date.now(),
-    hydrationMs: 0,
-    queries: []
-  };
-  trace.activeAttempt = attempt;
-  try {
-    return await run();
-  } finally {
-    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
-    trace.retrievalAttempts.push({
-      kind,
-      elapsed_ms: elapsedMs,
-      hydration_ms: attempt.hydrationMs,
-      queries: attempt.queries
-    });
-    if (kind === "self_heal_rebuild")
-      trace.selfHealRebuildMs += elapsedMs;
-    if (previous)
-      trace.activeAttempt = previous;
-    else
-      delete trace.activeAttempt;
-  }
-}
-function recordSourceAnswerHydration(elapsedMs) {
-  const attempt = currentSourceAnswerTrace()?.activeAttempt;
-  if (attempt)
-    attempt.hydrationMs += nonNegativeMs(elapsedMs);
-}
-async function observeSourceAnswerRoutedQuery(ordinal, run) {
-  const trace = currentSourceAnswerTrace();
-  const attempt = trace?.activeAttempt;
-  if (!trace || !attempt)
-    return run();
-  const previous = trace.activeQuery;
-  const query = {
-    ordinal: Math.max(1, Math.floor(ordinal)),
-    startedAtMs: Date.now(),
-    corpusTimings: [],
-    poolByCorpus: new Map
-  };
-  trace.activeQuery = query;
-  try {
-    return await run();
-  } finally {
-    attempt.queries.push({
-      ordinal: query.ordinal,
-      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
-      corpus_timings: query.corpusTimings.map((timing) => ({
-        corpus_id: timing.corpus_id,
-        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-        outcome: timing.outcome,
-        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
-        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
-      }))
-    });
-    if (previous)
-      trace.activeQuery = previous;
-    else
-      delete trace.activeQuery;
-  }
-}
-function recordSourceAnswerCorpusTiming(timing) {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  if (!query)
-    return;
-  query.corpusTimings.push({
-    corpus_id: timing.corpus_id,
-    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-    outcome: timing.outcome,
-    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
-  });
-}
-function recordSourceAnswerRoute(elapsedMs, route) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
-  trace.orderedRoute = route.map((step) => ({
-    profile_id: step.profile_id,
-    backend: step.backend,
-    model_id: step.model_id
-  }));
-}
-async function observeSourceAnswerAnalystLeg(input, run) {
-  const startedAt = Date.now();
-  try {
-    const result = await run();
-    recordAnalystLeg(input, startedAt, "success");
-    return result;
-  } catch (error) {
-    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
-    throw error;
-  }
-}
-function recordSourceAnswerSkippedAnalystLeg(input) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: 0,
-    outcome: input.outcome ?? "policy_skipped",
-    error_class: sanitizeErrorClass(input.errorClass)
-  });
-}
-function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.evidenceSeats = {
-    packCorpora: [...corpusIds],
-    recencySeats: nonNegativeCount(recencySeats),
-    fits: []
-  };
-}
-function recordSourceAnswerAnalystFit(lane, keptSeats) {
-  const seats = currentSourceAnswerTrace()?.evidenceSeats;
-  if (!seats)
-    return;
-  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
-}
-function recordSourceAnswerResidualAnalystOrphan() {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.residualAnalystOrphanCount += 1;
-}
-function recordSourceAnswerReleaseDecision(decision) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.releaseDecision = decision;
-}
-function recordSourceAnswerLedgerBuild(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.recordBuildMs += nonNegativeMs(elapsedMs);
-}
-function recordSourceAnswerLedgerAppend(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.appendMs += nonNegativeMs(elapsedMs);
-}
-function snapshotSourceAnswerTrace(trace) {
-  return {
-    correlationId: trace.correlationId,
-    receivedAt: trace.receivedAt,
-    receivedAtMs: trace.receivedAtMs,
-    sqliteRetryCount: trace.sqliteRetryCount,
-    sqliteBackoffMs: trace.sqliteBackoffMs,
-    queryPlannerMs: trace.queryPlannerMs,
-    queryFormulationCount: trace.queryFormulationCount,
-    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
-    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
-    queryPlannerFailedCount: trace.queryPlannerFailedCount,
-    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
-      ...attempt,
-      queries: attempt.queries.map((query) => ({
-        ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool } } : {} }))
-      }))
-    })),
-    routeResolutionMs: trace.routeResolutionMs,
-    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
-    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
-    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
-    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
-    selfHealRebuildMs: trace.selfHealRebuildMs,
-    recordBuildMs: trace.recordBuildMs,
-    appendMs: trace.appendMs,
-    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
-    ...trace.evidenceSeats ? {
-      evidenceSeats: {
-        packCorpora: [...trace.evidenceSeats.packCorpora],
-        recencySeats: trace.evidenceSeats.recencySeats,
-        fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] }))
-      }
-    } : {}
-  };
-}
-function sourceAnswerTraceErrorClass(error) {
-  return sanitizeErrorClass(errorClass(error));
-}
-function recordAnalystLeg(input, startedAt, outcome, error) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
-    outcome,
-    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
-  });
-}
-function errorClass(error) {
-  const candidate = error;
-  if (typeof candidate?.name === "string" && candidate.name.trim())
-    return candidate.name;
-  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
-    return candidate.constructor.name;
-  }
-  return "UnknownError";
-}
-function sanitizeErrorClass(value) {
-  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
-  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
-}
-function nonNegativeCount(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage2;
-  laneStorage = new AsyncLocalStorage2;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
 // src/workers/connector-store/off-thread-reads.ts
 function live() {
   return threads.filter((reader) => !reader.retired);
@@ -29966,22 +30201,39 @@ function busy(reader) {
 function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
-function startThread() {
-  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
+function startThread(store) {
+  if (threads.filter((reader) => reader.store === store).length >= READ_POOL_SIZE || !runtimeHasWorkers())
     return;
   try {
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
-    const started = { worker, pending: new Map, snapshots: 0 };
+    counters.starts += 1;
+    if (startedStores.has(store))
+      counters.restarts += 1;
+    startedStores.add(store);
+    const started = { store, worker, pending: new Map, snapshots: 0 };
     worker.onmessage = (event) => {
       const message2 = event.data;
+      const diagnostic = message2;
+      if (diagnostic.diagnostic === "open") {
+        counters.opens += 1;
+        counters.openMs += diagnostic.ms;
+        const held = storeOpens.get(diagnostic.path) ?? { opens: 0, openMs: 0 };
+        held.opens += 1;
+        held.openMs += diagnostic.ms;
+        storeOpens.set(diagnostic.path, held);
+        return;
+      }
+      started.executingStore = undefined;
       const waiting = started.pending.get(message2.id);
       if (!waiting)
         return;
       started.pending.delete(message2.id);
       if (waiting.timer !== undefined)
-        clearTimeout(waiting.timer);
+        clock2.clearTimeout(waiting.timer);
+      if (typeof message2.ms === "number")
+        waiting.sqlMs?.(message2.ms);
       if (message2.ok)
         waiting.resolve(message2.rows ?? null);
       else
@@ -30008,9 +30260,10 @@ function retire(stopped, error) {
   if (stopped.retired)
     return;
   stopped.retired = true;
+  counters.terminations += 1;
   for (const waiting of stopped.pending.values()) {
     if (waiting.timer !== undefined)
-      clearTimeout(waiting.timer);
+      clock2.clearTimeout(waiting.timer);
     waiting.reject(error);
   }
   stopped.pending.clear();
@@ -30021,21 +30274,21 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
+function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve11, reject) => {
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+    const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
       retire(reader, new Error("off-thread read timed out"));
     }, timeoutMs);
-    reader.pending.set(id, { resolve: resolve11, reject, ...timer !== undefined ? { timer } : {} });
+    reader.pending.set(id, { resolve: resolve11, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
     try {
       reader.worker.postMessage({ ...message2, id });
     } catch (error) {
       reader.pending.delete(id);
       if (timer !== undefined)
-        clearTimeout(timer);
+        clock2.clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
@@ -30054,7 +30307,25 @@ async function withOffThreadSnapshot(dbPath, work) {
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
-      return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+      return await work(async (query) => {
+        if (observeSnapshots)
+          observer?.(dbPath, query);
+        const report = beginSourceAnswerPoolRead();
+        const sentAtMs = clock2.now();
+        let sqlMs = 0;
+        try {
+          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+            sqlMs = ms;
+          });
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
+          return rows;
+        } catch (error) {
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
+          throw error;
+        } finally {
+          dispatch();
+        }
+      });
     } finally {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
@@ -30065,14 +30336,11 @@ async function withOffThreadSnapshot(dbPath, work) {
     dispatch();
   }
 }
-function snapshotThreadNow() {
-  const best = live().filter((reader) => !reader.job).reduce((least, reader) => !least || busy(reader) < busy(least) ? reader : least, undefined);
-  if (best && busy(best) === 0)
-    return best;
-  return startThread() ?? best;
+function snapshotThreadNow(store) {
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job) ?? startThread(store);
 }
 function snapshotThread(store) {
-  const reader = snapshotThreadNow();
+  const reader = snapshotThreadNow(store);
   if (reader) {
     reader.snapshots += 1;
     return Promise.resolve(reader);
@@ -30093,11 +30361,11 @@ function snapshotThread(store) {
   });
 }
 function serveSnapshotWaiters() {
-  while (snapshotWaiters.length > 0) {
-    const reader = snapshotThreadNow();
+  for (const waiter of [...snapshotWaiters]) {
+    const reader = snapshotThreadNow(waiter.store);
     if (!reader)
-      return;
-    const waiter = snapshotWaiters.shift();
+      continue;
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
     clearTimeout(waiter.timer);
     reader.snapshots += 1;
     waiter.resolve(reader);
@@ -30108,7 +30376,7 @@ function readOnPool(dbPath, read, options = {}) {
   const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
+    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve11, reject) => {
@@ -30138,11 +30406,12 @@ function releaseOffThreadReads(dbPath) {
     for (const job of waiting)
       settle(job, { error: new OffThreadReadBusyError });
   }
-  for (const reader of live()) {
-    try {
-      reader.worker.postMessage({ op: "release", path: dbPath });
-    } catch {}
+  for (const reader of live().filter((reader2) => reader2.store === dbPath)) {
+    reader.releaseWhenIdle = true;
+    if (reader.job)
+      settle(reader.job, { error: new OffThreadReadBusyError });
   }
+  dispatch();
 }
 function settle(job, outcome) {
   if (job.settled)
@@ -30164,6 +30433,7 @@ function settle(job, outcome) {
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      sqlMs: job.sqlMs ?? 0,
       outcome: ended
     });
   }
@@ -30177,7 +30447,6 @@ function missedDeadline(job) {
     return;
   settle(job, { error: new OffThreadReadBusyError });
   if (job.thread) {
-    retire(job.thread, new OffThreadReadBusyError);
     return;
   }
   const waiting = queues.get(job.store);
@@ -30185,55 +30454,59 @@ function missedDeadline(job) {
   if (waiting && at >= 0)
     waiting.splice(at, 1);
 }
-function freeThread() {
-  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
+function freeThread(store) {
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
 }
-function nextJob() {
-  while (turns.length > 0) {
+function dispatch() {
+  for (const reader of live()) {
+    if (reader.releaseWhenIdle && busy(reader) === 0)
+      retire(reader, new OffThreadReadBusyError);
+  }
+  serveSnapshotWaiters();
+  for (let remaining = turns.length;remaining > 0; remaining -= 1) {
     const store = turns.shift();
     const waiting = queues.get(store);
-    let job = waiting?.shift();
-    while (job && clock2.now() >= job.deadlineAtMs) {
-      settle(job, { error: new OffThreadReadBusyError });
-      job = waiting?.shift();
+    while (waiting.length && clock2.now() >= waiting[0].deadlineAtMs) {
+      settle(waiting.shift(), { error: new OffThreadReadBusyError });
     }
-    if (waiting && waiting.length > 0)
+    if (!waiting.length) {
+      queues.delete(store);
+      continue;
+    }
+    const reader = freeThread(store);
+    if (!reader) {
+      turns.push(store);
+      continue;
+    }
+    const job = waiting.shift();
+    if (waiting.length)
       turns.push(store);
     else
       queues.delete(store);
-    if (job)
-      return job;
-  }
-  return;
-}
-function dispatch() {
-  serveSnapshotWaiters();
-  while (turns.length > 0) {
-    const reader = freeThread();
-    if (!reader)
-      return;
-    const job = nextJob();
-    if (!job)
-      return;
     job.thread = reader;
     job.sentAtMs = clock2.now();
     reader.job = job;
+    reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+      job.sqlMs = ms;
+    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
     });
   }
 }
-var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
 const open = (path) => {
+  const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
 const connection = (path) => {
@@ -30270,15 +30543,16 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
       if (!db) throw new Error('unknown snapshot');
+      const started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows });
+      postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 };
-`, threads, nextId = 1, queues, turns, snapshotWaiters, releases;
+`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
@@ -30295,6 +30569,9 @@ var init_off_thread_reads = __esm(() => {
   };
   clock2 = REAL_CLOCK;
   threads = [];
+  counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+  startedStores = new Set;
+  storeOpens = new Map;
   queues = new Map;
   turns = [];
   snapshotWaiters = [];
@@ -31422,15 +31699,15 @@ var registered2, tierSetPlanners;
 
 // src/workers/connector-store/tier-placement.ts
 function resolveStoreTierClassification(explicit, ledgerPath) {
-  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
-  if (!installed)
+  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
+  if (!installed2)
     return explicit;
   if (!explicit)
-    return installed;
-  const rules = [...explicit.rules ?? [], ...installed.rules ?? []];
-  const sniffer = explicit.sniffer ?? installed.sniffer;
-  const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
-  const retirePublic = installed.retirePublic === true || explicit.retirePublic === true;
+    return installed2;
+  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
+  const sniffer = explicit.sniffer ?? installed2.sniffer;
+  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
+  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
   return {
     ...rules.length > 0 ? { rules } : {},
     ...sniffer ? { sniffer } : {},
@@ -32262,7 +32539,7 @@ __export(exports_waiting_private_questions, {
   WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION: () => WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION,
   CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
-import { Database as Database5 } from "bun:sqlite";
+import { Database as Database6 } from "bun:sqlite";
 import { createHash as createHash20, randomBytes as randomBytes10 } from "node:crypto";
 import { chmodSync as chmodSync10, existsSync as existsSync28, lstatSync as lstatSync16, mkdirSync as mkdirSync16 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
@@ -32350,7 +32627,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       listener();
   });
   hardenPrivatePath(dbPath);
-  const db = new Database5(dbPath, { create: true });
+  const db = new Database6(dbPath, { create: true });
   try {
     chmodSync10(dbPath, 384);
     const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
@@ -32611,7 +32888,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
       store.close();
     }
   }
-  const db = new Database5(dbPath, { readonly: true });
+  const db = new Database6(dbPath, { readonly: true });
   try {
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get())
@@ -32825,7 +33102,7 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_STORE_ID: () => REMOTE_CONNECTIONS_STORE_ID,
   REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
 });
-import { Database as Database6 } from "bun:sqlite";
+import { Database as Database7 } from "bun:sqlite";
 import { createHash as createHash21, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { chmodSync as chmodSync11, existsSync as existsSync29, lstatSync as lstatSync17, mkdirSync as mkdirSync17 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
@@ -32863,7 +33140,7 @@ function hashRemoteConnectionToken(token) {
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
   hardenPrivateDatabasePath(dbPath);
-  const db = new Database6(dbPath, { create: true });
+  const db = new Database7(dbPath, { create: true });
   try {
     chmodSync11(dbPath, 384);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
@@ -33105,7 +33382,7 @@ __export(exports_app_release_log, {
   APP_RELEASE_LOG_SCHEMA_VERSION: () => APP_RELEASE_LOG_SCHEMA_VERSION,
   APP_RELEASE_DEFAULT_RETENTION_DAYS: () => APP_RELEASE_DEFAULT_RETENTION_DAYS
 });
-import { Database as Database7 } from "bun:sqlite";
+import { Database as Database8 } from "bun:sqlite";
 import { randomBytes as randomBytes12 } from "node:crypto";
 import { chmodSync as chmodSync12, existsSync as existsSync30, lstatSync as lstatSync18, mkdirSync as mkdirSync18 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
@@ -33122,7 +33399,7 @@ function isAppReleaseRetentionDays(value) {
 function openAppReleaseLog(dbPath, options = {}) {
   const now = options.now ?? Date.now;
   hardenPrivatePath2(dbPath);
-  const db = new Database7(dbPath, { create: true });
+  const db = new Database8(dbPath, { create: true });
   try {
     chmodSync12(dbPath, 384);
     db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
@@ -35604,7 +35881,7 @@ var init_media_judge = __esm(() => {
 import { createHash as createHash23, randomUUID as randomUUID8 } from "node:crypto";
 import { existsSync as existsSync32, lstatSync as lstatSync19, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname36 } from "node:path";
-import { Database as Database8 } from "bun:sqlite";
+import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
 }
@@ -36161,15 +36438,67 @@ function embeddingFailureKind(error) {
   const name = error instanceof Error ? error.name : "error";
   return /^[A-Za-z0-9_]{1,64}$/.test(name) ? name.toLowerCase() : "error";
 }
-function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
-  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
-  const rows = db.query(sql).all(...params);
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding
-  }));
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize) {
+  const authority = embeddingAuthorityRead(provider);
+  const after = embeddingAuthorityFromRow(await read(authority), provider);
+  if (after.skippedReason)
+    return { skippedReason: after.skippedReason };
+  if (after.token !== beforeToken)
+    return { skippedReason: "embedding_authority_changed_during_query" };
+  const bestByItem = new Map;
+  let dimensionMismatches = 0;
+  let afterChunkPk = 0;
+  let pagesScanned = 0;
+  while (true) {
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
+      return { skippedReason: "vector_scan_deadline_exceeded" };
+    const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
+    const page2 = await read({ mode: "all", sql, params });
+    if (page2.length === 0)
+      break;
+    for (const [index, row] of page2.entries()) {
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+        return { skippedReason: "vector_scan_deadline_exceeded" };
+      }
+      const documentVector = decodeEmbedding(row.embedding);
+      if (documentVector.length !== queryVector.length) {
+        dimensionMismatches += 1;
+        continue;
+      }
+      const score = cosineSimilarity(queryVector, documentVector);
+      const existing = bestByItem.get(row.item_pk);
+      if (existing === undefined || score > existing.bestCosine) {
+        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+      }
+    }
+    afterChunkPk = page2.at(-1).chunk_pk;
+    if (page2.length < pageSize)
+      break;
+    if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      await yieldConnectorStoreVectorScan();
+  }
+  return { bestByItem, dimensionMismatches };
+}
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE)).catch((error) => {
+    if (error instanceof OffThreadReadBusyError)
+      return { skippedReason: "vector_scan_store_busy" };
+    throw error;
+  });
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
+    return scan;
+  let timer;
+  const deadline = new Promise((resolve13) => {
+    timer = setTimeout(() => resolve13({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()));
+  });
+  try {
+    return await Promise.race([scan, deadline]);
+  } finally {
+    clearTimeout(timer);
+    scan.catch(() => {
+      return;
+    });
+  }
 }
 function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
@@ -36201,13 +36530,43 @@ function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = 
     ]
   };
 }
+function embeddingAuthorityRead(provider) {
+  return {
+    mode: "get",
+    sql: `SELECT status, cursor, audit_receipt_sha256
+      FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?`,
+    params: [connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority"]
+  };
+}
+function embeddingAuthorityFromRow(row, provider) {
+  if (!row)
+    return { token: "no_embedding_write_authority" };
+  if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
+    return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
+  }
+  let record;
+  try {
+    record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+  } catch {
+    return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+  }
+  const token = row.audit_receipt_sha256 ?? "";
+  if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
+    return { token, skippedReason: "embedding_authority_provider_mismatch" };
+  }
+  if (record.currencyRebuildPending) {
+    return { token, skippedReason: "embedding_currency_rebuild_pending" };
+  }
+  return { token };
+}
 function connectorStoreReadableNow(dbPath) {
   let db;
   try {
     const stat2 = lstatSync19(dbPath);
     if (!stat2.isFile() || stat2.isSymbolicLink())
       return false;
-    db = new Database8(dbPath, { readonly: true, create: false, strict: true });
+    db = new Database9(dbPath, { readonly: true, create: false, strict: true });
     db.exec("PRAGMA busy_timeout = 10000;");
     return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
   } catch {
@@ -36307,7 +36666,7 @@ function createConnectorStoreCorpusAdapter(options) {
       return (async () => {
         const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
         const rows = keywordLane.rows;
-        const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
+        const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
         if (recencyRows.length === 0) {
           const hits2 = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
           return {
@@ -36456,7 +36815,7 @@ function createConnectorStoreCorpusAdapter(options) {
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
-    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store);
+    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS });
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
@@ -36465,10 +36824,10 @@ function createConnectorStoreCorpusAdapter(options) {
   }
   return expanded;
 }
-function chatRecencyLaneRows(store, accountScope, filters) {
+async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs) {
   if (store.family !== "chat")
     return [];
-  return store.recentItems(CHAT_RECENCY_LANE_LIMIT, accountScope, filters);
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs);
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -36538,7 +36897,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   })();
   const vectorWork = (async () => {
     const vectorStartedAt = Date.now();
-    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
+    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, vectorScanDeadline(request.deadlineAtMs, vectorStartedAt));
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
@@ -36571,7 +36930,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
-  const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs);
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
@@ -36652,6 +37011,12 @@ function roundCosine(value) {
 }
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
+}
+function vectorScanDeadline(laneDeadlineAtMs, nowMs) {
+  if (laneDeadlineAtMs === undefined || !Number.isFinite(laneDeadlineAtMs))
+    return laneDeadlineAtMs;
+  const left = laneDeadlineAtMs - nowMs;
+  return laneDeadlineAtMs - Math.max(VECTOR_SCAN_RESERVE_MIN_MS, left / 10);
 }
 function yieldConnectorStoreVectorScan() {
   return new Promise((resolve13) => setTimeout(resolve13, 0));
@@ -38944,14 +39309,15 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_main_thread_sql_trace();
   init_store_write_guard();
   init_unreadable_files();
   init_job_names();
@@ -39073,6 +39439,9 @@ var init_local_index = __esm(() => {
     moving: 32
   };
   NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
+  LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
+  WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+  ORDER BY started_at DESC, rowid DESC LIMIT 1`;
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -39109,6 +39478,7 @@ var init_local_index = __esm(() => {
     embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
+      installMainThreadSqlTrace();
       this.visibilityOwner = randomUUID8();
       this.visibilityNow = () => Date.now();
       this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
@@ -39151,7 +39521,7 @@ var init_local_index = __esm(() => {
         if (this.dbPath !== ":memory:")
           mkdirSync19(dirname36(this.dbPath), { recursive: true, mode: 448 });
       }
-      this.db = new Database8(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.db = new Database9(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -43322,6 +43692,13 @@ var init_local_index = __esm(() => {
         error TEXT,
         audit_receipt_sha256 TEXT
       );
+      -- lastSyncRun's order, over real syncs only: every tier move and
+      -- binding also writes a run, and sorting hundreds of thousands of them
+      -- held the request thread for seconds on each status or people check
+      -- (#1305). The WHERE must stay identical to lastSyncRun's for SQLite
+      -- to use it.
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
+        WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
     `);
       createConversationScopedItemsTable(this.db, "items", true);
       this.db.exec(`
@@ -45115,7 +45492,7 @@ var init_local_index = __esm(() => {
         this.refreshTierHiddenCountsInTurns();
         return this.anyCurrentEmbedding(modelId);
       }
-      const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+      const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: Number.POSITIVE_INFINITY });
       if (servable)
         (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
       else
@@ -45184,66 +45561,15 @@ var init_local_index = __esm(() => {
       }
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const scanDb = this.dbPath === ":memory:" ? this.db : new Database8(this.dbPath, { readonly: true, create: false, strict: true });
-      const ownsScanDb = scanDb !== this.db;
-      const bestByItem = new Map;
-      let dimensionMismatches = 0;
-      let afterChunkPk = 0;
-      let pagesScanned = 0;
-      try {
-        if (ownsScanDb) {
-          scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
-        }
-        scanDb.exec("BEGIN DEFERRED TRANSACTION;");
-        const after = this.embeddingReadAuthority(provider, scanDb);
-        if (after.skippedReason)
-          return { rows: [], skippedReason: after.skippedReason };
-        if (after.token !== input.beforeToken) {
-          return { rows: [], skippedReason: "embedding_authority_changed_during_query" };
-        }
-        while (true) {
-          if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-            return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-          }
-          const page2 = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
-            modelId: provider.modelId,
-            ...selectedAccount ? { accountScope: selectedAccount } : {},
-            ...filters ? { filters } : {}
-          }, afterChunkPk);
-          if (page2.length === 0)
-            break;
-          for (const [index, row] of page2.entries()) {
-            if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-              return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-            }
-            const documentVector = decodeEmbedding(row.embedding);
-            if (documentVector.length !== queryVector.length) {
-              dimensionMismatches += 1;
-              continue;
-            }
-            const score = cosineSimilarity(queryVector, documentVector);
-            const existing = bestByItem.get(row.itemPk);
-            if (existing === undefined || score > existing.bestCosine) {
-              bestByItem.set(row.itemPk, {
-                bestCosine: score,
-                bestChunkPk: row.chunkPk,
-                localItemId: row.localItemId
-              });
-            }
-          }
-          afterChunkPk = page2.at(-1).chunkPk;
-          if (page2.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
-            break;
-          if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
-            await yieldConnectorStoreVectorScan();
-        }
-      } finally {
-        try {
-          scanDb.exec("ROLLBACK;");
-        } catch {}
-        if (ownsScanDb)
-          closeSqliteStore(scanDb);
-      }
+      const pageOptions = {
+        modelId: provider.modelId,
+        ...selectedAccount ? { accountScope: selectedAccount } : {},
+        ...filters ? { filters } : {}
+      };
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+      if ("skippedReason" in scanned)
+        return { rows: [], skippedReason: scanned.skippedReason };
+      const { bestByItem, dimensionMismatches } = scanned;
       const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
       const rankedItems = [];
       let candidateOffset = 0;
@@ -45271,31 +45597,31 @@ var init_local_index = __esm(() => {
         ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
       };
     }
-    embeddingReadAuthority(provider, db = this.db) {
-      const row = db.query(`
-      SELECT status, cursor, audit_receipt_sha256
-      FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
-      if (!row)
-        return { token: "no_embedding_write_authority" };
-      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
-        return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
-      }
-      let record;
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+      const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
+      const ownsScanDb = scanDb !== this.db;
       try {
-        record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
-      } catch {
-        return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+        if (ownsScanDb) {
+          scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
+        }
+        scanDb.exec("BEGIN DEFERRED TRANSACTION;");
+        const read = async (query) => {
+          const statement = scanDb.query(query.sql);
+          const params = query.params;
+          return query.mode === "all" ? statement.all(...params) : statement.get(...params);
+        };
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+      } finally {
+        try {
+          scanDb.exec("ROLLBACK;");
+        } catch {}
+        if (ownsScanDb)
+          closeSqliteStore(scanDb);
       }
-      const token = row.audit_receipt_sha256 ?? "";
-      if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
-        return { token, skippedReason: "embedding_authority_provider_mismatch" };
-      }
-      if (record.currencyRebuildPending) {
-        return { token, skippedReason: "embedding_currency_rebuild_pending" };
-      }
-      return { token };
+    }
+    embeddingReadAuthority(provider, db = this.db) {
+      const read = embeddingAuthorityRead(provider);
+      return embeddingAuthorityFromRow(db.query(read.sql).get(...read.params), provider);
     }
     embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
@@ -45374,8 +45700,16 @@ var init_local_index = __esm(() => {
         return row ? [searchRowFromItemRow(row)] : [];
       });
     }
-    keywordLanguages() {
-      return storeKeywordLanguages(this.db);
+    async keywordLanguages() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return storeKeywordLanguages(this.db);
+      try {
+        return await storeKeywordLanguagesWith(this.db, (read) => readOnPool(this.dbPath, read));
+      } catch (error) {
+        if (error instanceof OffThreadReadBusyError || this.closedForPoolReads)
+          return lastKeywordLanguages(this.db);
+        throw error;
+      }
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
       return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
@@ -45544,14 +45878,15 @@ var init_local_index = __esm(() => {
       const kept = selected.slice(0, limit);
       const located = [];
       const locatedRows = [];
-      for (const row of kept) {
+      const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
+      for (const [index, row] of kept.entries()) {
         const base = searchRowFromItemRow(row);
         if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
           located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
           locatedRows.push(row);
           continue;
         }
-        const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+        const chunk = chunks.get(index);
         if (!chunk)
           continue;
         located.push({ ...base, chunk });
@@ -45665,27 +46000,65 @@ var init_local_index = __esm(() => {
       const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
       return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
     }
-    *keywordChunkMatchSteps(item, chunkPk, queryTerms) {
-      const rows = yield {
+    *keywordChunkMatchesSteps(rows, queryTerms) {
+      const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
+      const matches = new Map;
+      if (wanted.length === 0)
+        return matches;
+      const found = yield {
         mode: "all",
-        sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
-          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
-        ORDER BY c.chunk_index`,
-        params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk]
+        sql: `WITH want(ordinal, item_pk, local_item_id, source_version, chunk_pk) AS (VALUES ${wanted.map(() => "(?, ?, ?, ?, ?)").join(", ")})
+        SELECT w.ordinal, w.chunk_pk AS want_chunk_pk, c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM want w
+        JOIN items i ON i.item_pk = w.item_pk AND i.local_item_id = w.local_item_id AND i.source_version IS w.source_version AND i.tombstoned = 0
+        JOIN chunks c ON c.item_pk = w.item_pk
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = w.chunk_pk AND t.item_pk = w.item_pk)
+        ORDER BY w.ordinal, c.chunk_index`,
+        params: wanted.flatMap(([index, row]) => [index, row.item_pk, row.local_item_id, row.source_version ?? null, row.chunk_pk])
       };
-      const row = rows.at(-1);
-      if (!row || row.chunk_pk !== chunkPk)
-        return;
-      const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-      return chunkMatchFromRows(chunkPk, row, itemOffset, "keyword", queryTerms);
+      const byOrdinal = new Map;
+      for (const row of found) {
+        const held = byOrdinal.get(row.ordinal);
+        if (held)
+          held.push(row);
+        else
+          byOrdinal.set(row.ordinal, [row]);
+      }
+      for (const [ordinal, chunks] of byOrdinal) {
+        const row = chunks.at(-1);
+        if (row.chunk_pk !== row.want_chunk_pk)
+          continue;
+        const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+        matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, "keyword", queryTerms));
+      }
+      return matches;
     }
     recentItems(maxResults, accountScope, filters) {
+      const read = this.recentItemsRead(maxResults, accountScope, filters);
+      return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
+    }
+    async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs) {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.recentItems(maxResults, accountScope, filters);
+      let rows;
+      try {
+        rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
+      } catch (error) {
+        if (error instanceof OffThreadReadBusyError)
+          return [];
+        throw error;
+      }
+      if (this.closedForPoolReads)
+        return [];
+      return this.visibleRecentRows(rows);
+    }
+    recentItemsRead(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
-      const rows = this.db.query(`
+      return {
+        mode: "all",
+        sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -45700,7 +46073,15 @@ var init_local_index = __esm(() => {
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
-    `).all(...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit);
+    `,
+        params: [
+          ...selectedAccount ? [selectedAccount] : [],
+          ...selectedFilters.params,
+          limit
+        ]
+      };
+    }
+    visibleRecentRows(rows) {
       return this.tierVisibleRows(rows, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -46263,9 +46644,7 @@ var init_local_index = __esm(() => {
       };
     }
     lastSyncRun() {
-      const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+      const last = this.db.query(LAST_SYNC_RUN_SQL).get();
       return last ? syncRunFromRow(last) : undefined;
     }
     syncRun(syncRunId) {
@@ -46548,7 +46927,7 @@ var init_local_index = __esm(() => {
 });
 
 // src/core/source-storage.ts
-import { Database as Database9 } from "bun:sqlite";
+import { Database as Database10 } from "bun:sqlite";
 import { existsSync as existsSync33, lstatSync as lstatSync20, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync15 } from "node:fs";
 import { basename as basename8, join as join38, resolve as resolve13, sep as sep10 } from "node:path";
 function enableSourceRegistryAdoption() {
@@ -46903,7 +47282,7 @@ function openToLookAt(path, busyTimeoutMs) {
       break;
     let db;
     try {
-      db = new Database9(path, mode);
+      db = new Database10(path, mode);
       db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)}; PRAGMA query_only = ON;`);
       db.query("SELECT count(*) AS n FROM sqlite_master").get();
       return db;
@@ -46945,7 +47324,7 @@ function storeFileQuickCheck(path, busyTimeoutMs = 2000) {
 function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
   let db;
   try {
-    db = new Database9(path, { readwrite: true, create: false });
+    db = new Database10(path, { readwrite: true, create: false });
     db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)};`);
     const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     const [busy2, log, checkpointed] = row ? Object.values(row) : [];
@@ -47148,7 +47527,7 @@ var init_messaging_chat_kinds = __esm(() => {
 });
 
 // src/core/messaging-pairing.ts
-import { Database as Database10 } from "bun:sqlite";
+import { Database as Database11 } from "bun:sqlite";
 import { chmodSync as chmodSync13, existsSync as existsSync35, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync21, renameSync as renameSync5, rmSync as rmSync10, rmdirSync as rmdirSync4, statSync as statSync16 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { randomBytes as randomBytes13 } from "node:crypto";
@@ -47617,7 +47996,7 @@ function prepareLoginAside(base) {
 function copyLogin(from, to) {
   let db;
   try {
-    db = new Database10(from, { readonly: true });
+    db = new Database11(from, { readonly: true });
     db.run("PRAGMA busy_timeout = 5000");
     db.run("VACUUM INTO ?", [to]);
     chmodSync13(to, 384);
@@ -47658,7 +48037,7 @@ function loginChangedMeanwhile() {
   return new Error("Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.");
 }
 function writeLoginInto(from, to) {
-  const db = new Database10(to);
+  const db = new Database11(to);
   try {
     db.run("PRAGMA busy_timeout = 5000");
     let tables;
@@ -49645,7 +50024,7 @@ var init_dashboard_opening = __esm(() => {
 });
 
 // src/core/people-index.ts
-import { Database as Database11 } from "bun:sqlite";
+import { Database as Database12 } from "bun:sqlite";
 import { createHash as createHash26 } from "node:crypto";
 import { chmodSync as chmodSync14, existsSync as existsSync39, mkdirSync as mkdirSync26 } from "node:fs";
 import { dirname as dirname43 } from "node:path";
@@ -50128,7 +50507,7 @@ class LocalPeopleIndex {
     this.now = options.now ?? (() => new Date);
     this.readOnly = options.readOnly === true;
     if (this.readOnly) {
-      this.db = new Database11(options.dbPath, { readonly: true, create: false, strict: true });
+      this.db = new Database12(options.dbPath, { readonly: true, create: false, strict: true });
       try {
         this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;");
         this.loadPeople();
@@ -50141,7 +50520,7 @@ class LocalPeopleIndex {
     assertWritableStoreOpenAllowed("people index", options.dbPath);
     if (options.dbPath !== ":memory:")
       mkdirSync26(dirname43(options.dbPath), { recursive: true, mode: 448 });
-    this.db = new Database11(options.dbPath, { create: true, strict: true });
+    this.db = new Database12(options.dbPath, { create: true, strict: true });
     try {
       if (options.dbPath !== ":memory:")
         chmodSync14(options.dbPath, 384);
@@ -50473,7 +50852,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
   if (!existsSync39(dbPath) || scope.corpusIds.length === 0)
     return 0;
   const dryRun = options.dryRun === true;
-  const db = new Database11(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database12(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? "" : "PRAGMA secure_delete = ON;"}`);
     const corpora = JSON.stringify([...scope.corpusIds]);
@@ -51548,7 +51927,7 @@ var init_scope_safe_fs = __esm(() => {
 });
 
 // src/workers/archive-import/media-bindings.ts
-import { Database as Database12 } from "bun:sqlite";
+import { Database as Database13 } from "bun:sqlite";
 import { createHash as createHash27 } from "node:crypto";
 import { chmodSync as chmodSync15, existsSync as existsSync42, mkdirSync as mkdirSync28 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
@@ -51609,7 +51988,7 @@ class ArchiveMediaBindingStore {
       recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, options.path, options.env ?? process.env);
       mkdirSync28(dirname45(options.path), { recursive: true, mode: 448 });
     }
-    this.db = new Database12(options.path, { create: true });
+    this.db = new Database13(options.path, { create: true });
     if (options.path !== ":memory:")
       chmodSync15(options.path, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
@@ -52060,7 +52439,7 @@ var init_connector = __esm(() => {
 import { createHash as createHash29, randomUUID as randomUUID12 } from "node:crypto";
 import { chmodSync as chmodSync16, mkdirSync as mkdirSync29 } from "node:fs";
 import { dirname as dirname46 } from "node:path";
-import { Database as Database13 } from "bun:sqlite";
+import { Database as Database14 } from "bun:sqlite";
 
 class LocalXBookmarksReconcileStateStore {
   dbPath;
@@ -52071,7 +52450,7 @@ class LocalXBookmarksReconcileStateStore {
       recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
       mkdirSync29(dirname46(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database13(dbPath, { create: true });
+    this.db = new Database14(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync16(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -58301,7 +58680,7 @@ import {
 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
 import { dirname as dirname48, isAbsolute as isAbsolute21 } from "node:path";
-import { Database as Database14 } from "bun:sqlite";
+import { Database as Database15 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
     [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
@@ -58323,7 +58702,7 @@ function forgetSourceWatches(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const filters = filterFor("source_watches", [["corpus_id", scope.corpusIds]]);
-  const db = new Database14(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database15(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? "" : "PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;"}`);
     return forgetSqliteRows(db, filters, dryRun).reduce((sum, count) => sum + count, 0);
@@ -58369,13 +58748,13 @@ class LocalSourceWatchStore {
     this.dbPath = dbPath;
     this.clock = options.clock ?? SYSTEM_CLOCK;
     if (options.readOnly === true) {
-      this.db = new Database14(dbPath, { readonly: true, create: false });
+      this.db = new Database15(dbPath, { readonly: true, create: false });
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       return;
     }
     assertWritableStoreOpenAllowed("source watch store", dbPath);
     hardenPrivateDatabasePath2(dbPath);
-    this.db = new Database14(dbPath, { create: true });
+    this.db = new Database15(dbPath, { create: true });
     try {
       chmodSync17(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
@@ -64446,7 +64825,7 @@ import {
   renameSync as renameSync8
 } from "node:fs";
 import { dirname as dirname54 } from "node:path";
-import { Database as Database15 } from "bun:sqlite";
+import { Database as Database16 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
   utcDay = "";
@@ -64642,7 +65021,7 @@ function recoverPersistentFutureUtcDay(input) {
   });
 }
 function withLedger(ledgerPath, run, options = {}) {
-  const db = new Database15(ledgerPath, { create: true });
+  const db = new Database16(ledgerPath, { create: true });
   hardenLedgerFiles(ledgerPath);
   try {
     db.exec(options.journalModeWal ? "PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000;");
@@ -69539,7 +69918,7 @@ class BuiltInSourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
-    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.runtimeFactory = options.runtime ?? ((installed2) => onnxRuntimeFromDirectory(installed2.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
@@ -69684,9 +70063,9 @@ class BuiltInSourceEmbeddingProvider {
       ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
       ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
     };
-    let installed;
+    let installed2;
     try {
-      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+      installed2 = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
     } catch (error) {
       throw builtInEmbeddingOperationError(error);
     }
@@ -69694,12 +70073,12 @@ class BuiltInSourceEmbeddingProvider {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
       let model;
       if (this.spec.runtime === "litert") {
-        if (!installed.libraryPath)
+        if (!installed2.libraryPath)
           throw new Error("the LiteRT-LM runtime is not installed.");
         const settings = {
-          library: installed.libraryPath,
-          model: installed.modelPath,
-          cacheDir: join62(dirname58(installed.modelPath), "cache"),
+          library: installed2.libraryPath,
+          model: installed2.modelPath,
+          cacheDir: join62(dirname58(installed2.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -69719,13 +70098,13 @@ class BuiltInSourceEmbeddingProvider {
         if (this.spec.vision)
           reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
-        if (!installed.vocabularyPath)
+        if (!installed2.vocabularyPath)
           throw new Error("the model vocabulary is not installed.");
-        const tokenizer = loadTokenizer(installed.vocabularyPath);
-        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        const tokenizer = loadTokenizer(installed2.vocabularyPath);
+        const session = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
         model = { kind: "onnx", session, tokenizer };
         try {
-          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          const querySession = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
           this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
         } catch (error) {
           await session.release?.().catch(() => {
@@ -73982,6 +74361,37 @@ var init_opsec = __esm(() => {
   ];
 });
 
+// src/core/source-index/partial-search.ts
+function semanticSearchTimedOut(detail) {
+  return detail !== undefined && SEMANTIC_TIMEOUT_REASONS.has(detail);
+}
+function semanticTimeoutGap(corpusId) {
+  return `${PREFIX2}${corpusId}; only its keyword matches were searched, so related items may be missing. Ask again in a moment.`;
+}
+function semanticTimeoutGapCorpus(gap) {
+  if (!gap.startsWith(PREFIX2))
+    return;
+  const end = gap.indexOf(";", PREFIX2.length);
+  return end > PREFIX2.length ? gap.slice(PREFIX2.length, end) : undefined;
+}
+function laneTimeoutGap(corpusId) {
+  return `Ran out of time searching ${corpusId}; it is not part of this answer, so more may be there. Ask again in a moment.`;
+}
+function timedOutCorpora(coverage) {
+  const searched = new Set(coverage.searchedCorpora);
+  const stillSearching = [...new Set(coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
+  const partlySearched = [...new Set(coverage.extractionGaps.map(semanticTimeoutGapCorpus).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  return { stillSearching, partlySearched };
+}
+function timedOutCoverageNotes(coverage) {
+  const { stillSearching, partlySearched } = timedOutCorpora(coverage);
+  return [...stillSearching.map(laneTimeoutGap), ...partlySearched.map(semanticTimeoutGap)];
+}
+var SEMANTIC_TIMEOUT_REASONS, PREFIX2 = "Ran out of time searching by meaning: ";
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
 // src/core/evidence-versions.ts
 function evidenceVersions(items) {
   const shingles = items.map((item) => item.family === undefined || DOCUMENT_FAMILIES.has(item.family) ? shingleSet(item.text) : new Set);
@@ -74127,14 +74537,23 @@ function analystSchemaGapChars(maxOutputChars) {
 }
 function noEvidenceAnalystResult(pack) {
   const searched = new Set(pack.coverage.searchedCorpora);
-  const stillSearching = [...new Set(pack.coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
+  const { stillSearching, partlySearched } = timedOutCorpora(pack.coverage);
+  if (stillSearching.length === 0 && partlySearched.length > 0) {
+    const sources = partlySearched.length === 1 ? "1 source" : `${partlySearched.length} sources`;
+    return {
+      answer: `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources} by meaning and checked only their keyword matches, so the answer may still be there. Ask again in a moment.`,
+      citations: [],
+      unanswered: foldCoverageGaps(pack, [
+        `No matching evidence found in the searched corpora for: ${pack.question}`
+      ])
+    };
+  }
   if (stillSearching.length > 0) {
     const sources = stillSearching.length === 1 ? "1 source" : `${stillSearching.length} sources`;
     return {
       answer: searched.size === 0 ? `Olympus ran out of time searching your sources (${sources}), so it cannot say whether the answer is there. Ask again in a moment.` : `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources}, so the answer may still be there. Ask again in a moment.`,
       citations: [],
       unanswered: foldCoverageGaps(pack, [
-        `Ran out of time searching: ${stillSearching.join(", ")}`,
         ...searched.size > 0 ? [`No matching evidence found in the searched corpora for: ${pack.question}`] : []
       ])
     };
@@ -74775,8 +75194,9 @@ function countAnswerSentences(answer) {
 }
 function foldCoverageGaps(pack, modelUnanswered) {
   const gaps = [...modelUnanswered];
-  for (const skip of pack.coverage.skippedCorpora)
-    gaps.push(`Skipped ${skip.corpusId}: ${skip.reason}`);
+  for (const skip of pack.coverage.skippedCorpora) {
+    gaps.push(skip.reason === "lane_timeout" ? laneTimeoutGap(skip.corpusId) : `Skipped ${skip.corpusId}: ${skip.reason}`);
+  }
   for (const gap of pack.coverage.extractionGaps)
     gaps.push(gap);
   const seen = new Set;
@@ -74878,6 +75298,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_partial_search();
   init_operation_error();
   init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage6;
@@ -75610,6 +76031,9 @@ var init_parent_label = __esm(() => {
 });
 
 // src/core/source-index/router.ts
+function applySourceIndexVisibilityGate(gate, hits) {
+  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+}
 async function routeSourceIndexSearch(options) {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
 }
@@ -75661,17 +76085,27 @@ async function routePreparedSourceIndexSearch(options) {
     })
   ]));
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  let prepareKeywordsMaxMs = 0;
+  let prepareSemanticMaxMs = 0;
+  const timed2 = async (run) => {
+    const started = Date.now();
+    try {
+      await run();
+    } catch {}
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
-    try {
-      await adapter.prepareKeywords?.(request.query);
-    } catch {}
-    if (adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable) {
-      try {
-        await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs);
-      } catch {}
-    }
+    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed2(() => adapter.prepareKeywords?.(request.query)),
+      semantic ? timed2(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
+  const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
@@ -75752,8 +76186,9 @@ async function routePreparedSourceIndexSearch(options) {
       }))
     });
   }
+  const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
-    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
     for (const lane of lanes)
       lane.items = lane.items.filter((hit) => kept.has(hit));
   }
@@ -75785,6 +76220,13 @@ async function routePreparedSourceIndexSearch(options) {
     rawExposed: false
   };
   assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt
+  });
   return result;
 }
 function corpusContributedSecure(corpus, response) {
@@ -75989,6 +76431,13 @@ function resolveLaneTimeoutMs(explicit) {
     return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   return parsed;
 }
+function resolveAskSearchBudgetMs(explicit) {
+  if (explicit !== undefined)
+    return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
+}
 function cooperativeLaneDeadlineAtMs(timeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     return;
@@ -76050,7 +76499,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key2) {
   return key2.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
   init_keyword_context();
   init_types();
@@ -76102,7 +76551,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
-  const visibleHits = input.visibilityGate && !input.selectedItems?.length ? input.visibilityGate(routed.hits) : routed.hits;
+  const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
@@ -76405,7 +76854,8 @@ function selectedItemsToRoutedSlice(input) {
 async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
   const literalQuery = literalSearchQuery(input);
   const pendingPlan = input.queryPlanner ? startQueryPlanner(input.queryPlanner, input.question) : undefined;
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit);
+  const budget = searchBudget(input);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs());
   if (!pendingPlan)
     return literalRun;
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -76421,8 +76871,15 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     return literalRun;
   const runs = [literalRun];
   for (const query of expansions) {
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit));
+    const laneTimeoutMs = budget.laneTimeoutMs();
+    if (laneTimeoutMs === undefined) {
+      recordSourceAnswerQueryPlannerDisposition("search_budget_spent");
+      break;
+    }
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs));
   }
+  if (runs.length === 1)
+    return literalRun;
   const queries = [literalQuery, ...expansions];
   const ranked = fuseRankedCandidateLanes({
     lanes: runs.map((run, index) => ({ name: queries[index], items: run.hits })),
@@ -76458,7 +76915,23 @@ function mergeRoutedSkippedCorpora(runs) {
 function literalSearchQuery(input) {
   return input.searchQuery?.trim() || input.question;
 }
-function runRoutedSearch(input, query, ordinal, maxResults) {
+function searchBudget(input) {
+  const lane = resolveLaneTimeoutMs(input.laneTimeoutMs);
+  const total = resolveAskSearchBudgetMs(input.searchBudgetMs);
+  const startedAt = Date.now();
+  const cut = (left2) => Number.isFinite(lane) && lane > 0 ? Math.min(lane, left2) : left2;
+  const left = () => Math.max(1, total - (Date.now() - startedAt));
+  const unbounded = !Number.isFinite(total) || total <= 0;
+  return {
+    firstLaneTimeoutMs: () => unbounded ? lane : cut(left()),
+    laneTimeoutMs() {
+      if (unbounded)
+        return lane;
+      return left() < MIN_EXPANSION_BUDGET_MS ? undefined : cut(left());
+    }
+  };
+}
+function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -76469,7 +76942,7 @@ function runRoutedSearch(input, query, ordinal, maxResults) {
       context: input.searchContext,
       ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {}
     },
-    ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
+    laneTimeoutMs,
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
@@ -76507,6 +76980,8 @@ function hitProvenance(hit) {
   return hit.provenance ?? { sourceItem: hit.sourceItem };
 }
 function semanticLaneSkippedGap(corpusId, detail) {
+  if (semanticSearchTimedOut(detail))
+    return semanticTimeoutGap(corpusId);
   return `${corpusId}: the meaning-based search was skipped for this question` + `${detail ? ` (${detail})` : ""}; only keyword matches were searched, so related items may be missing.`;
 }
 function semanticLaneSkippedGaps(degradations, input) {
@@ -76574,9 +77049,10 @@ function trustDomainRank2(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_partial_search();
   init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
@@ -77993,6 +78469,7 @@ function releaseAnalystAnswer(input) {
     ...input.result.unanswered.length === 0 && releasedEvidenceCount === 0 ? zeroEvidenceCoverageNotes(input.detail.pack) : [],
     ...releasedEvidenceCount === 0 ? corpusReadabilityCoverageNotes(input.detail) : [],
     ...secureLocalExclusionCoverageNotes(input.detail),
+    ...timedOutCoverageNotes(input.detail.pack.coverage),
     ...classificationCoverageNotes(input.detail),
     ...secretLocationCoverageNotes(input.detail)
   ]);
@@ -78844,6 +79321,7 @@ var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
   init_analyst();
+  init_partial_search();
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
@@ -79297,7 +79775,7 @@ var init_grant_fence = __esm(() => {
 import { createHash as createHash46, randomUUID as randomUUID18 } from "node:crypto";
 import { chmodSync as chmodSync19, existsSync as existsSync54, lstatSync as lstatSync28, mkdirSync as mkdirSync36 } from "node:fs";
 import { dirname as dirname60 } from "node:path";
-import { Database as Database16 } from "bun:sqlite";
+import { Database as Database17 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
@@ -79385,7 +79863,7 @@ function forgetXBookmarksSyncState(usageDbPath, sourceIds, options) {
   if (!sourceIds.includes(X_BOOKMARKS_SOURCE_ID) || usageDbPath === ":memory:" || !existsSync54(usageDbPath))
     return 0;
   if (options.dryRun) {
-    const db = new Database16(usageDbPath, { readonly: true });
+    const db = new Database17(usageDbPath, { readonly: true });
     try {
       db.exec("PRAGMA busy_timeout = 10000;");
       const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'x_bookmarks_live_state'").get();
@@ -79409,7 +79887,7 @@ class LocalXBookmarksApiUsageStore {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
       mkdirSync36(dirname60(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database16(dbPath, { create: true });
+    this.db = new Database17(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync19(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -88127,18 +88605,18 @@ import { closeSync as closeSync19, constants as constants8, openSync as openSync
 function archiveInputMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
     throw new Error("An archive media locator needs a plain archive and binding id.");
-  return `${PREFIX2}${ref.archiveId}:b:${ref.bindingId}`;
+  return `${PREFIX3}${ref.archiveId}:b:${ref.bindingId}`;
 }
 function archiveInputZipMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !Number.isSafeInteger(ref.fileIndex) || ref.fileIndex < 0 || !Number.isSafeInteger(ref.memberIndex) || ref.memberIndex < 0) {
     throw new Error("An archive zip media locator needs a plain archive id and two places.");
   }
-  return `${PREFIX2}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
+  return `${PREFIX3}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
 }
 function parseArchiveInputMedia(locator) {
-  if (!locator.startsWith(PREFIX2))
+  if (!locator.startsWith(PREFIX3))
     return;
-  const parts = locator.slice(PREFIX2.length).split(":");
+  const parts = locator.slice(PREFIX3.length).split(":");
   const [archiveId, kind] = parts;
   if (archiveId === undefined || !ARCHIVE_ID.test(archiveId))
     return;
@@ -88305,7 +88783,7 @@ function serveZipMember(record, root, ref, maxBytes, sink) {
     reader?.close();
   }
 }
-var PREFIX2 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
+var PREFIX3 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
 var init_input_media = __esm(() => {
   init_file_extraction_source();
   init_scope_safe_fs();
@@ -89869,7 +90347,7 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-index.ts
-import { Database as Database17 } from "bun:sqlite";
+import { Database as Database18 } from "bun:sqlite";
 import { randomBytes as randomBytes15 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync58 } from "node:fs";
 import { join as join76 } from "node:path";
@@ -89890,7 +90368,7 @@ class WhatsAppSpoolIndex {
     const path = join76(spoolDir, WHATSAPP_SPOOL_INDEX_FILE);
     let db;
     try {
-      db = new Database17(path, { create: true });
+      db = new Database18(path, { create: true });
       chmodSync23(path, 384);
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
       const version = db.query("PRAGMA user_version").get().user_version;
@@ -90135,7 +90613,7 @@ var init_spool_index = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-resets.ts
-import { Database as Database18 } from "bun:sqlite";
+import { Database as Database19 } from "bun:sqlite";
 import { chmodSync as chmodSync24 } from "node:fs";
 import { join as join77 } from "node:path";
 
@@ -90148,7 +90626,7 @@ class WhatsAppSpoolResets {
     const path = join77(spoolDir, WHATSAPP_SPOOL_RESET_FILE);
     let db;
     try {
-      db = new Database18(path, { create: true });
+      db = new Database19(path, { create: true });
       chmodSync24(path, 384);
       db.exec(`
         PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
@@ -91683,7 +92161,7 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/media-fetch.ts
-import { Database as Database19 } from "bun:sqlite";
+import { Database as Database20 } from "bun:sqlite";
 import { createHash as createHash63 } from "node:crypto";
 import {
   chmodSync as chmodSync25,
@@ -91924,7 +92402,7 @@ class WhatsAppMediaFetchState {
   }
   static open(spoolDir) {
     const path = join80(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
-    const db = new Database19(path, { create: true });
+    const db = new Database20(path, { create: true });
     chmodSync25(path, 384);
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     db.run(`CREATE TABLE IF NOT EXISTS media (
@@ -92731,7 +93209,7 @@ var init_extraction_factory = __esm(() => {
 import { chmodSync as chmodSync26, mkdirSync as mkdirSync40 } from "node:fs";
 import { createHash as createHash64, randomUUID as randomUUID21 } from "node:crypto";
 import { dirname as dirname67 } from "node:path";
-import { Database as Database20 } from "bun:sqlite";
+import { Database as Database21 } from "bun:sqlite";
 function settleUnreadable(candidates, classify2) {
   const items = [];
   let blocked = 0;
@@ -92778,7 +93256,7 @@ class LocalFileExtractionJobStore {
     if (!inMemory && !this.readonly) {
       mkdirSync40(dirname67(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = this.readonly ? new Database20(dbPath, { readonly: true }) : new Database20(dbPath, { create: true });
+    this.db = this.readonly ? new Database21(dbPath, { readonly: true }) : new Database21(dbPath, { create: true });
     if (!inMemory && !this.readonly)
       chmodSync26(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
@@ -97945,7 +98423,7 @@ var shared, nextHandle = 1;
 var init_off_thread = () => {};
 
 // src/workers/source-index/built-in-reasoning/install.ts
-import { isMainThread } from "node:worker_threads";
+import { isMainThread as isMainThread2 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
 import { createHash as createHash65, randomUUID as randomUUID22 } from "node:crypto";
 import {
@@ -98014,16 +98492,16 @@ async function installBuiltInReasoning(options) {
   const { model, ...tuning } = options;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
-  const installed = await installPinnedModel({
+  const installed2 = await installPinnedModel({
     ...tuning,
     bundle: { modelId: model.modelId, displayName: model.displayName, files: [model.file] },
     layout: { ...builtInReasoningPaths(model, options.env, runtime, platform2), noun: REASONING_NOUN }
   });
-  return { modelPath: installed.filePaths[0], serverPath: installed.serverPath, gpu: installed.gpu };
+  return { modelPath: installed2.filePaths[0], serverPath: installed2.serverPath, gpu: installed2.gpu };
 }
 async function installPinnedModel(options) {
   const { onProgress, log: installLog, ...serializable } = options;
-  if (isMainThread && !Object.values(serializable).some((value) => typeof value === "function")) {
+  if (isMainThread2 && !Object.values(serializable).some((value) => typeof value === "function")) {
     try {
       return await modelThread().call({ kind: "install", options: serializable }, {
         progress: onProgress,
@@ -98076,7 +98554,7 @@ async function installPinnedModel(options) {
       throw new BuiltInReasoningInstallError("unsupported_platform", `The ${noun} does not run on ${platform2}.`);
     }
     ensureDirectory2(paths.root);
-    const installed = () => ({
+    const installed2 = () => ({
       filePaths: files.map(({ path }) => path),
       serverPath: findServerBinary(paths.runtimeDir),
       gpu: archive.gpu
@@ -98084,7 +98562,7 @@ async function installPinnedModel(options) {
     if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive)) {
       await stage("verify", verifyAll);
       finished();
-      return installed();
+      return installed2();
     }
     const now = (options.now ?? (() => new Date))();
     const previous = readPinnedModelStatus(paths.statusPath, bundle.modelId, noun);
@@ -98131,7 +98609,7 @@ async function installPinnedModel(options) {
       throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server did not install completely.");
     }
     finished();
-    return installed();
+    return installed2();
   } catch (error) {
     const failure = error instanceof BuiltInReasoningInstallError ? error : new BuiltInReasoningInstallError("disk_write_failed", error instanceof Error ? error.message : String(error));
     reporter.fail(failure.reason, failure.message, failure.shortfall);
@@ -98538,7 +99016,7 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/server.ts
-import { isMainThread as isMainThread2 } from "node:worker_threads";
+import { isMainThread as isMainThread3 } from "node:worker_threads";
 import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes16 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync25, writeFileSync as writeFileSync14 } from "node:fs";
@@ -98597,7 +99075,7 @@ function llamaServerArguments(launch, port, tokenFile) {
   ];
 }
 function createLlamaServerHandle(launch, options = {}) {
-  if (isMainThread2 && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
+  if (isMainThread3 && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
     const thread2 = modelThread();
     const handle = modelThreadHandleId();
     const translateError = (error) => {
@@ -99069,16 +99547,16 @@ async function installBuiltInTranscription(options = {}) {
   const { model = QWEN3_ASR_06B, ...tuning } = options;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
-  const installed = await installPinnedModel({
+  const installed2 = await installPinnedModel({
     ...tuning,
     bundle: { modelId: model.modelId, displayName: model.displayName, files: model.files },
     layout: builtInTranscriptionLayout(model, options.env, runtime, platform2)
   });
   return {
-    modelPath: installed.filePaths[0],
-    mmprojPath: installed.filePaths[1],
-    serverPath: installed.serverPath,
-    gpu: installed.gpu
+    modelPath: installed2.filePaths[0],
+    mmprojPath: installed2.filePaths[1],
+    serverPath: installed2.serverPath,
+    gpu: installed2.gpu
   };
 }
 function readBuiltInTranscriptionStatus(env = process.env, model = QWEN3_ASR_06B) {
@@ -99367,7 +99845,7 @@ function createBuiltInTranscriber(options = {}) {
   const fileDeadlineMs = options.fileDeadlineMs ?? DEFAULT_FILE_DEADLINE_MS;
   const maxChars = options.maxTranscriptChars ?? Number.POSITIVE_INFINITY;
   let unavailable2 = (options.totalMemoryBytes ?? totalmem()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
-  let installed;
+  let installed2;
   let installing2;
   let failedAt;
   let consecutiveFailures = 0;
@@ -99377,7 +99855,7 @@ function createBuiltInTranscriber(options = {}) {
   const prepare = () => {
     if (unavailable2)
       return "unavailable";
-    if (installed)
+    if (installed2)
       return "ready";
     if (installing2)
       return "pending";
@@ -99385,7 +99863,7 @@ function createBuiltInTranscriber(options = {}) {
     if (failedAt !== undefined && now() - failedAt < backoff)
       return "pending";
     installing2 = install({ ...options.installOptions, model, env, platform: platform2 }).then((result) => {
-      installed = result;
+      installed2 = result;
       failedAt = undefined;
       consecutiveFailures = 0;
       for (const listener of readyListeners) {
@@ -99438,12 +99916,12 @@ function createBuiltInTranscriber(options = {}) {
   return {
     prepare,
     downloadNow() {
-      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed && !unavailable2) {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed2 && !unavailable2) {
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
-      if (installed && readBuiltInTranscriptionStatus(env, model).failure?.reason === "runtime_load_failed") {
-        const paths = installed;
+      if (installed2 && readBuiltInTranscriptionStatus(env, model).failure?.reason === "runtime_load_failed") {
+        const paths = installed2;
         startServer(paths).then(({ handle }) => handle.touch(), () => {
           return;
         });
@@ -99472,10 +99950,10 @@ function createBuiltInTranscriber(options = {}) {
       }
       if (state === "unavailable")
         throw new TranscriberUnavailableError(unavailable2 ?? "Built-in transcription is unavailable.");
-      if (state === "pending" || !installed) {
+      if (state === "pending" || !installed2) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
-      const paths = installed;
+      const paths = installed2;
       const tempDir = await mkdtemp7(join92(tmpdir10(), TEMP_DIR_PREFIX5));
       try {
         const wavPath = join92(tempDir, "audio.wav");
@@ -104066,7 +104544,7 @@ __export(exports_source_ingestion_ledger, {
 });
 import { existsSync as existsSync66, mkdirSync as mkdirSync42 } from "node:fs";
 import { dirname as dirname73 } from "node:path";
-import { Database as Database21 } from "bun:sqlite";
+import { Database as Database22 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
   const assign = ledgerSourceAssignment(options.sourceCorpusRegistry);
@@ -104119,7 +104597,7 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   };
 }
 function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()) {
-  const db = new Database21(dbPath, { readonly: true, create: false });
+  const db = new Database22(dbPath, { readonly: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
     return db;
@@ -104135,7 +104613,7 @@ class SqliteSourceIngestionLedgerStore {
     assertWritableStoreOpenAllowed("ingestion ledger", dbPath);
     if (dbPath !== ":memory:")
       mkdirSync42(dirname73(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database21(dbPath);
+    this.db = new Database22(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
@@ -105684,7 +106162,7 @@ __export(exports_source_dashboard, {
 });
 import { existsSync as existsSync68, mkdirSync as mkdirSync43 } from "node:fs";
 import { dirname as dirname74 } from "node:path";
-import { Database as Database22 } from "bun:sqlite";
+import { Database as Database23 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
     return false;
@@ -105794,7 +106272,7 @@ function forgetSourceDashboardRows(dbPath, scope, options = {}) {
   ])];
   const corpusIds = [...new Set([...scope.corpusIds, ...cards.map((card) => card.primary_corpus_id)])];
   const dryRun = options.dryRun === true;
-  const db = new Database22(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database23(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     if (!dryRun)
@@ -105829,7 +106307,7 @@ class SqliteSourceDashboardHistory {
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
       mkdirSync43(dirname74(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database22(dbPath);
+    this.db = new Database23(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
@@ -105991,12 +106469,12 @@ class SqliteSourceDashboardHistory {
     return Object.keys(movement).length > 0 ? movement : undefined;
   }
   noteMovement(sample) {
-    const counters = [
+    const counters2 = [
       ["indexed_items", sample.indexed_items],
       ["content_ready_items", sample.content_ready_items],
       ["embedded_files", sample.embedded_files]
     ];
-    for (const [counter, value] of counters) {
+    for (const [counter, value] of counters2) {
       if (value === undefined || !Number.isFinite(value))
         continue;
       const parity = phaseAtParity(sample, counter, value);
@@ -108261,7 +108739,7 @@ var init_source_dashboard = __esm(() => {
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync27, existsSync as existsSync69, mkdirSync as mkdirSync44 } from "node:fs";
 import { dirname as dirname75 } from "node:path";
-import { Database as Database23 } from "bun:sqlite";
+import { Database as Database24 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
   return sharedDataPath("source-scheduler", env);
 }
@@ -108270,7 +108748,7 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const keys = [["source_id", scope.sourceIds], ["corpus_id", scope.corpusIds]];
-  const db = new Database23(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database24(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     return forgetSqliteRows(db, [
@@ -108290,7 +108768,7 @@ class LocalSourceSchedulerStateStore {
     if (dbPath !== ":memory:") {
       mkdirSync44(dirname75(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database23(dbPath, { create: true });
+    this.db = new Database24(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync27(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -109130,7 +109608,7 @@ var init_judge_check = __esm(() => {
 });
 
 // src/workers/classification/judge-second-round.ts
-import { Database as Database24 } from "bun:sqlite";
+import { Database as Database25 } from "bun:sqlite";
 import { createHash as createHash70 } from "node:crypto";
 import { chmodSync as chmodSync28, existsSync as existsSync71, readFileSync as readFileSync53, rmSync as rmSync27 } from "node:fs";
 import { dirname as dirname77, join as join99, sep as sep17 } from "node:path";
@@ -109147,7 +109625,7 @@ function judgeSecondRoundConfirmedPath(env) {
 class SecondRoundConfirmed {
   db;
   constructor(path) {
-    this.db = new Database24(path, { create: true });
+    this.db = new Database25(path, { create: true });
     this.db.exec("PRAGMA busy_timeout = 10000;");
     try {
       chmodSync28(path, 384);
@@ -110509,7 +110987,7 @@ import {
 import { homedir as homedir29 } from "node:os";
 import { basename as basename14, dirname as dirname81, join as join101, relative as relative15, resolve as resolve21, sep as sep18 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
-import { Database as Database25 } from "bun:sqlite";
+import { Database as Database26 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
   return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) => account.files.stores.map((path) => [path, account.sourceId])));
 }
@@ -110714,7 +111192,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped: skipped2, artifacts, media };
 }
 function readChunkMediaRefs(snapshotPath) {
-  const db = new Database25(snapshotPath, { readonly: true });
+  const db = new Database26(snapshotPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
@@ -111103,7 +111581,7 @@ function readTierLedgerIds(storePaths) {
       continue;
     let db;
     try {
-      db = new Database25(ledgerPath, { readonly: true });
+      db = new Database26(ledgerPath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
       const meta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_ledger_meta'").get();
       const row = meta ? db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() : null;
@@ -111329,7 +111807,7 @@ function readSourceMedia(sourceId, storePaths, env, options = {}) {
     let rows = [];
     let db;
     try {
-      db = new Database25(storePath, { readonly: true });
+      db = new Database26(storePath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
     } catch {
       if (options.skipUnreadable === true)
@@ -111550,7 +112028,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
   rmSync28(staging, { force: true });
   let db;
   try {
-    db = new Database25(sqlitePath, { readonly: true });
+    db = new Database26(sqlitePath, { readonly: true });
   } catch {
     return false;
   }
@@ -111571,7 +112049,7 @@ function assertSqliteSnapshotIntact(snapshotPath, sqlitePath) {
   inspectSqliteSnapshot(snapshotPath, sqlitePath, "unknown");
 }
 function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
-  const db = new Database25(snapshotPath, { readonly: true });
+  const db = new Database26(snapshotPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const rows = db.query("PRAGMA integrity_check").all();
@@ -111791,7 +112269,7 @@ function assertVerifiedExternalSqliteStore(path, storeId) {
   assertRegularFileTarget(path);
   let db;
   try {
-    db = new Database25(path, { readonly: true, create: false });
+    db = new Database26(path, { readonly: true, create: false });
     db.exec("PRAGMA busy_timeout = 10000;");
   } catch {
     throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the store paths a connector-store mount or a capture setting names before retrying data deletion.");
@@ -120434,14 +120912,14 @@ function expectedEngineBuild(options) {
   return engineBuildIdentity(root);
 }
 function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = process.getuid?.()) {
-  const installed = [
+  const installed2 = [
     [paths.appSupportDir, "Olympus application"],
     [paths.appDir, "Olympus application"],
     [`${paths.appDir}.next`, "Olympus application"],
     [paths.previousAppDir, "Olympus application"],
     [paths.runtimeDir, "Olympus runtime"]
   ];
-  for (const [dir, label] of installed) {
+  for (const [dir, label] of installed2) {
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
@@ -120563,9 +121041,9 @@ function openClawConfigHasOlympus(text3, stateDir) {
       return false;
     if (entry && typeof entry === "object" && entry.enabled === false)
       return false;
-    const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
+    const installed2 = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
     const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
-    return installed || loaded || existsSync78(join109(stateDir, "extensions", "olympus"));
+    return installed2 || loaded || existsSync78(join109(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text3);
   }
@@ -120696,20 +121174,20 @@ async function rollbackEngineUnderFence(options = {}) {
   assertDarwin(options.platform);
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths({ ...options, homeDir, platform: "darwin" });
-  const installed = installedProgram(paths.plistPath);
+  const installed2 = installedProgram(paths.plistPath);
   const appEntry = join109(paths.appDir, "dist", "cli.js");
-  if (!installed) {
+  if (!installed2) {
     throw new OperationError("config_error", "The engine is not installed, so there is nothing to roll back.", "Run the Olympus installer.");
   }
-  if (installed.entryPath !== appEntry) {
-    throw new OperationError("config_error", `This engine runs ${installed.entryPath}, not the installed app, so it has no previous version to return to.`, "Reinstall from the checkout or package you want with olympus engine install.");
+  if (installed2.entryPath !== appEntry) {
+    throw new OperationError("config_error", `This engine runs ${installed2.entryPath}, not the installed app, so it has no previous version to return to.`, "Reinstall from the checkout or package you want with olympus engine install.");
   }
   preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, "The previous app");
   assertFile(join109(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   if (paths.engineManager === "daemon")
     assertServerModeCanRunPrevious(paths.previousAppDir);
-  const bunBin = options.bunBin ?? installed.runtimePath;
+  const bunBin = options.bunBin ?? installed2.runtimePath;
   swapAppDirectories(paths);
   const reinstall = () => installEngineVerified({
     ...options[MAINTENANCE_FENCE] ? { [MAINTENANCE_FENCE]: options[MAINTENANCE_FENCE] } : {},
@@ -120894,11 +121372,11 @@ function installedProgram(plistPath) {
 function inspectEngine(options = {}) {
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths(options);
-  const installed = existsSync78(paths.plistPath);
+  const installed2 = existsSync78(paths.plistPath);
   const base = {
     ...paths.engineManager ? { manager: paths.engineManager } : {},
     label: paths.label,
-    installed,
+    installed: installed2,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
     config_present: existsSync78(paths.configPath),
@@ -120919,7 +121397,7 @@ function inspectEngine(options = {}) {
       state: "not_loaded",
       pid: null,
       last_exit_code: null,
-      detail: installed ? "The agent is installed but not loaded; run olympus engine install." : "The engine is not installed; run olympus engine install."
+      detail: installed2 ? "The agent is installed but not loaded; run olympus engine install." : "The engine is not installed; run olympus engine install."
     };
   }
   if (result.status !== 0) {
@@ -121839,7 +122317,7 @@ function durableProgram(layout, source, transaction, options) {
   }
   transaction.generationArtifact = treeMachineArtifact(generation);
   writeInstallTransaction(layout, transaction);
-  const installed = {
+  const installed2 = {
     runtimePath: join110(generation, "runtime/bun"),
     entryPath: join110(generation, "app/dist/cli.js"),
     workingDirectory: join110(generation, "app"),
@@ -121847,10 +122325,10 @@ function durableProgram(layout, source, transaction, options) {
     ...source.build ? { build: source.build } : {},
     runtimeDigest: hashFile(join110(generation, "runtime/bun"))
   };
-  if (engineBuildIdentity(installed.workingDirectory) !== source.build)
+  if (engineBuildIdentity(installed2.workingDirectory) !== source.build)
     throw new Error("The durable package generation does not match the verified source build.");
-  requireLinuxApprovalTransport(installed);
-  return installed;
+  requireLinuxApprovalTransport(installed2);
+  return installed2;
 }
 function unitLinkCandidates(layout) {
   return [join110(layout.home, ".config/systemd/user", SYSTEMD_ENGINE_UNIT)].filter((path) => path !== layout.unitPath);
@@ -130227,7 +130705,7 @@ function createBuiltInAnalystModel(options = {}) {
     ...options.platform ? { platform: options.platform } : {},
     ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
   };
-  let installed;
+  let installed2;
   let installing2;
   let server;
   let snifferEndpoint;
@@ -130240,10 +130718,10 @@ function createBuiltInAnalystModel(options = {}) {
     profile: { provider: "built-in", trust: "local", model: spec.modelId, purpose: "classification" }
   };
   const ensureInstalled = () => {
-    if (installed)
-      return Promise.resolve(installed);
+    if (installed2)
+      return Promise.resolve(installed2);
     installing2 ??= install(installerOptions).then((result) => {
-      installed = result;
+      installed2 = result;
       return result;
     }).finally(() => {
       installing2 = undefined;
@@ -130267,7 +130745,7 @@ function createBuiltInAnalystModel(options = {}) {
     spec,
     async prepare() {
       try {
-        const cached2 = installed !== undefined;
+        const cached2 = installed2 !== undefined;
         await ensureInstalled();
         const status = readBuiltInReasoningStatus(spec, env);
         if (cached2 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
@@ -130282,10 +130760,10 @@ function createBuiltInAnalystModel(options = {}) {
       await server?.stop();
     },
     installedRuntime() {
-      return installed;
+      return installed2;
     },
     async complete(request) {
-      let paths = installed;
+      let paths = installed2;
       if (!paths) {
         const pending = ensureInstalled();
         if (options.waitForInstall) {
@@ -132972,7 +133450,7 @@ __export(exports_tier_cli, {
   applyTierSet: () => applyTierSet,
   TIER_CLI_USAGE: () => TIER_CLI_USAGE
 });
-import { Database as Database26 } from "bun:sqlite";
+import { Database as Database27 } from "bun:sqlite";
 import { existsSync as existsSync89 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "recheck" || args[0] === "migrate";
@@ -133009,7 +133487,7 @@ function knownStorePaths(context2) {
   return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync89(path));
 }
 function matchStore2(dbPath, needle) {
-  const db = new Database26(dbPath, { readonly: true });
+  const db = new Database27(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const rows = "locator" in needle ? db.query(`
@@ -133114,7 +133592,7 @@ function locateMatched(needle, context2) {
 function withStore(dbPath, fallback, run) {
   let db;
   try {
-    db = new Database26(dbPath, { readonly: true });
+    db = new Database27(dbPath, { readonly: true });
     db.exec("PRAGMA busy_timeout = 10000;");
     const columns = new Set(db.query("PRAGMA table_info(items)").all().map((column) => column.name));
     if (!columns.has("provider_item_id"))
@@ -133134,7 +133612,7 @@ function knownTierLedgers(context2 = {}) {
     if (existsSync89(own3) && !ledgers.has(own3))
       ledgers.set(own3, undefined);
     let bound;
-    const db = new Database26(dbPath, { readonly: true });
+    const db = new Database27(dbPath, { readonly: true });
     try {
       db.exec("PRAGMA busy_timeout = 10000;");
       bound = storeBoundLedger(db, dbPath);
@@ -133379,7 +133857,7 @@ function knownLedgerPaths(context2) {
   return [...found].map(([path, id]) => ({ path, ...id ? { id } : {} }));
 }
 function boundLedgerOf(dbPath) {
-  const db = new Database26(dbPath, { readonly: true });
+  const db = new Database27(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const cursor = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID)?.cursor;
@@ -133590,7 +134068,7 @@ var init_tier_cli = __esm(() => {
 import { closeSync as closeSync31, copyFileSync as copyFileSync4, existsSync as existsSync90, fsyncSync as fsyncSync9, openSync as openSync30, readFileSync as readFileSync74, renameSync as renameSync19, rmSync as rmSync35, statSync as statSync37, chmodSync as chmodSync38 } from "node:fs";
 import { dirname as dirname93, join as join119, resolve as resolve23 } from "node:path";
 import { randomUUID as randomUUID29 } from "node:crypto";
-import { Database as Database27 } from "bun:sqlite";
+import { Database as Database28 } from "bun:sqlite";
 function restoreOlympusData(options) {
   const input = resolve23(options.input);
   verifyOlympusDataExport({ destination: input });
@@ -133883,7 +134361,7 @@ function sourceSettingsTarget(artifact, context2) {
   return target;
 }
 function storeIsTierBound(path) {
-  const db = new Database27(path, { readonly: true });
+  const db = new Database28(path, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
@@ -133896,7 +134374,7 @@ function storeIsTierBound(path) {
   }
 }
 function repointMediaPaths(storePath, pictureFor) {
-  const db = new Database27(storePath, { readwrite: true, create: false });
+  const db = new Database28(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
@@ -133926,7 +134404,7 @@ function recordRestoredScope(storePath, sourceId, providerAccountId, secretLocat
   if (!definition || definition.account !== "provider_account" || !providerAccountId)
     return;
   const secretGenerations = secretLocationsPath ? secretLocationGenerations(secretLocationsPath, definition.provider) : [];
-  const db = new Database27(storePath, { readwrite: true, create: false });
+  const db = new Database28(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const tables = new Set(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('items', 'sync_runs')").all().map((row) => row.name));
@@ -133953,7 +134431,7 @@ function recordRestoredScope(storePath, sourceId, providerAccountId, secretLocat
   }
 }
 function secretLocationGenerations(path, provider) {
-  const db = new Database27(path, { readonly: true });
+  const db = new Database28(path, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secret_locations'").get();
@@ -133967,7 +134445,7 @@ function secretLocationGenerations(path, provider) {
 function repointLedgerHint(storePath, ledgerFor) {
   if (!storeIsTierBound(storePath))
     return;
-  const db = new Database27(storePath, { readwrite: true, create: false });
+  const db = new Database28(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
@@ -140347,14 +140825,14 @@ var init_parse3 = __esm(() => {
 // node_modules/zod/v4/classic/schemas.js
 function _installLazyMethods(inst, group, methods) {
   const proto = Object.getPrototypeOf(inst);
-  let installed = _installedGroups.get(proto);
-  if (!installed) {
-    installed = new Set;
-    _installedGroups.set(proto, installed);
+  let installed2 = _installedGroups.get(proto);
+  if (!installed2) {
+    installed2 = new Set;
+    _installedGroups.set(proto, installed2);
   }
-  if (installed.has(group))
+  if (installed2.has(group))
     return;
-  installed.add(group);
+  installed2.add(group);
   for (const key2 in methods) {
     const fn = methods[key2];
     Object.defineProperty(proto, key2, {
@@ -157340,7 +157818,7 @@ function secretWhere(location) {
 function cutShortCorpora(audits) {
   const corpora = new Set;
   for (const audit of audits) {
-    if (audit.skippedReason !== "vector_scan_deadline_exceeded")
+    if (!semanticSearchTimedOut(audit.skippedReason))
       continue;
     const corpusId = audit.laneName.split(":")[0];
     if (corpusId)
@@ -157435,6 +157913,7 @@ async function readLocalEvidenceItem(input) {
 }
 var LOCAL_TRUST_DOMAINS, LOCAL_MAX_RESULTS = 16, LOCAL_MAX_CHARS_PER_CANDIDATE = 3000, LOCAL_EVIDENCE_BYTE_BUDGET = 24000, LOCAL_DEPTH_MAX_PASSAGES = 24, IN_SCOPE_SKIPS;
 var init_local_answer = __esm(() => {
+  init_partial_search();
   init_evidence_pack();
   init_remote_result();
   init_secret_location_note();
@@ -186022,6 +186501,19 @@ function buildSourceAnswerLatencyTraceRecord(input) {
       }
     } : {},
     ...input.caller ? { caller: copyCaller(input.caller) } : {},
+    ...input.trace.mainThreadSql ? {
+      main_thread_sql: {
+        statements: Math.max(0, Math.floor(input.trace.mainThreadSql.statements)),
+        total_ms: nonNegativeMs2(input.trace.mainThreadSql.total_ms),
+        max_ms: nonNegativeMs2(input.trace.mainThreadSql.max_ms),
+        slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs2(entry.ms), site: entry.site })),
+        by_site: (input.trace.mainThreadSql.by_site ?? []).map((entry) => ({
+          site: entry.site,
+          statements: Math.max(0, Math.floor(entry.statements)),
+          ms: nonNegativeMs2(entry.ms)
+        }))
+      }
+    } : {},
     phase_ms: {
       ...fittedPhases,
       unattributed_ms: unattributedMs
@@ -186134,7 +186626,8 @@ function copyRetrievalAttempt(attempt) {
         outcome: timing.outcome,
         ...timing.error_class ? { error_class: timing.error_class } : {},
         ...timing.pool ? { pool: copyPoolReads(timing.pool) } : {}
-      }))
+      })),
+      ...query.stages ? { stages: copyQueryStages(query.stages) } : {}
     }))
   };
 }
@@ -186146,6 +186639,10 @@ function copyPoolReads(pool) {
     queue_wait_max_ms: nonNegativeMs2(pool.queue_wait_max_ms),
     run_ms: nonNegativeMs2(pool.run_ms),
     run_max_ms: nonNegativeMs2(pool.run_max_ms),
+    sql_ms: nonNegativeMs2(pool.sql_ms ?? 0),
+    sql_max_ms: nonNegativeMs2(pool.sql_max_ms ?? 0),
+    snapshot_reads: count(pool.snapshot_reads ?? 0),
+    snapshot_sql_ms: nonNegativeMs2(pool.snapshot_sql_ms ?? 0),
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),
@@ -207950,73 +208447,117 @@ function childLane(scope) {
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
 function createTierVisibilityGate(scopes, onHeldMatches) {
-  return (hits) => {
+  const readOptions = { personalFirst: onHeldMatches !== undefined };
+  const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+  const gate = (hits) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
-    const hidden = new Set;
-    const held = new Set;
+    const reads = new Map;
     for (const scope of current2) {
-      const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+      const governed = governedBy(scope, hits);
       if (governed.length === 0)
         continue;
-      let copies;
-      let routedWithoutCopies;
       try {
-        copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
-        const copyless = governed.filter((hit) => (copies.get(tierLedgerIdentityKey(hit.sourceItem))?.length ?? 0) === 0);
-        routedWithoutCopies = scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem));
+        reads.set(scope, scope.ledger.readSteps(scope.ledger.visibilityReadSteps(governed.map((hit) => hit.sourceItem), readOptions)));
       } catch {
-        for (const hit of governed)
+        reads.set(scope, undefined);
+      }
+    }
+    return judgeVisibility(current2, hits, reads, onHeldMatches);
+  };
+  gate.offThread = async (hits) => {
+    const current2 = scopes();
+    if (current2.length === 0 || hits.length === 0)
+      return hits;
+    const reads = new Map;
+    await Promise.all(current2.map(async (scope) => {
+      const governed = governedBy(scope, hits);
+      if (governed.length === 0)
+        return;
+      try {
+        reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
+      } catch {
+        reads.set(scope, undefined);
+      }
+    }));
+    return judgeVisibility(current2, hits, reads, onHeldMatches);
+  };
+  return gate;
+}
+async function ledgerVisibilityReads(ledger, identities, options) {
+  if (identities.length > 0 && offThreadReadsSupported(ledger.dbPath)) {
+    if (!releasing.has(ledger)) {
+      releasing.add(ledger);
+      ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+    }
+    try {
+      return await withOffThreadSnapshot(ledger.dbPath, async (read) => {
+        const steps = ledger.visibilityReadSteps(identities, options);
+        let next = steps.next();
+        while (!next.done)
+          next = steps.next(await read(next.value));
+        return next.value;
+      });
+    } catch (error2) {
+      if (!(error2 instanceof OffThreadReadBusyError))
+        throw error2;
+    }
+  }
+  return ledger.readSteps(ledger.visibilityReadSteps(identities, options));
+}
+function judgeVisibility(current2, hits, reads, onHeldMatches) {
+  const hidden = new Set;
+  const held = new Set;
+  for (const scope of current2) {
+    if (!reads.has(scope))
+      continue;
+    const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+    const read = reads.get(scope);
+    if (!read) {
+      for (const hit of governed)
+        hidden.add(hit);
+      continue;
+    }
+    const { copies, routedWithoutCopies } = read;
+    for (const hit of governed) {
+      if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
+        hidden.add(hit);
+        continue;
+      }
+      const key2 = tierLedgerIdentityKey(hit.sourceItem);
+      const itemCopies = copies.get(key2);
+      if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
+        held.add(hit);
+      if (!itemCopies || itemCopies.length === 0) {
+        if (routedWithoutCopies.has(key2))
           hidden.add(hit);
         continue;
       }
-      for (const hit of governed) {
-        if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
-          hidden.add(hit);
-          continue;
-        }
-        const key2 = tierLedgerIdentityKey(hit.sourceItem);
-        const itemCopies = copies.get(key2);
-        if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
-          held.add(hit);
-        if (!itemCopies || itemCopies.length === 0) {
-          if (routedWithoutCopies.has(key2))
+      const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
+      if (!currentHere)
+        hidden.add(hit);
+    }
+    for (const hit of governed) {
+      if (!hidden.has(hit) && read.personalFirstWaiting.has(tierLedgerIdentityKey(hit.sourceItem)))
+        held.add(hit);
+    }
+    const lane = childLane(scope);
+    if (lane) {
+      const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
+      if (orphaned.size > 0) {
+        for (const hit of governed)
+          if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem)))
             hidden.add(hit);
-          continue;
-        }
-        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
-        if (!currentHere)
-          hidden.add(hit);
-      }
-      const waiting = onHeldMatches ? governed.filter((hit) => !hidden.has(hit) && !held.has(hit)) : [];
-      if (waiting.length > 0) {
-        try {
-          const states = scope.ledger.itemStatesForMany(waiting.map((hit) => hit.sourceItem));
-          for (const hit of waiting) {
-            const record8 = states.get(tierLedgerIdentityKey(hit.sourceItem))?.record;
-            if (record8?.contentPending && record8.reasons.includes(PERSONAL_FIRST_REASON))
-              held.add(hit);
-          }
-        } catch {}
-      }
-      const lane = childLane(scope);
-      if (lane) {
-        const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
-        if (orphaned.size > 0) {
-          for (const hit of governed)
-            if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem)))
-              hidden.add(hit);
-        }
       }
     }
-    if (onHeldMatches && held.size > 0) {
-      try {
-        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
-      } catch {}
-    }
-    return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
-  };
+  }
+  if (onHeldMatches && held.size > 0) {
+    try {
+      onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
+    } catch {}
+  }
+  return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
 }
 function interleaveByCorpus(hits) {
   const byCorpus = new Map;
@@ -208138,10 +208679,13 @@ function createPendingGovernance(lanes, newLane, log = () => {}) {
     waiting: () => [...waiting.keys()]
   };
 }
+var releasing;
 var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
+  init_off_thread_reads();
+  releasing = new WeakSet;
 });
 
 // src/workers/classification/judge-boost.ts
@@ -209965,12 +210509,12 @@ class InstalledTierClassification {
   }
 }
 function configureInstalledTierClassification(options = {}) {
-  installed?.close();
-  installed = new InstalledTierClassification(options);
-  registerInstalledTierClassification(installed);
-  return installed;
+  installed2?.close();
+  installed2 = new InstalledTierClassification(options);
+  registerInstalledTierClassification(installed2);
+  return installed2;
 }
-var NO_JUDGE_TIER_SNIFFER, installed;
+var NO_JUDGE_TIER_SNIFFER, installed2;
 var init_installed_tier_classification = __esm(() => {
   init_sniffer();
   init_sniffer_store();
@@ -210557,7 +211101,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database28 } from "bun:sqlite";
+import { Database as Database29 } from "bun:sqlite";
 import { existsSync as existsSync113, rmSync as rmSync44 } from "node:fs";
 function unrefTimer(timer) {
   timer?.unref?.();
@@ -210755,7 +211299,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database28(ledgerPath, { readonly: true, create: false });
+      db = new Database29(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {
@@ -237554,8 +238098,8 @@ function createDashboardConsultAdapter(options) {
           return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES3.acknowledgementsIncomplete };
       }
       if (turningOn || savingLanguages) {
-        const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
-        if (!chosen.every((language) => installed2.has(language)))
+        const installed3 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
+        if (!chosen.every((language) => installed3.has(language)))
           return invalid5(MESSAGES3.languageMissing, "language_pack_missing");
       }
       const result = writeConsultSettings({
@@ -240456,7 +241000,7 @@ ${key2}`;
         parentLabels: parentLabelResolver,
         secretLocations: tierSecretLocations,
         checkSecretLocations: checkTierSecretLocations,
-        heldItems: (corpusId) => tierLanes.find((candidate2) => candidate2.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
+        heldItems: (corpusId) => tierLanes.find((candidate2) => candidate2.corpusIds.has(corpusId))?.ledger.corpusHeldCopyCount(corpusId) ?? 0
       })
     });
   })() : undefined;
