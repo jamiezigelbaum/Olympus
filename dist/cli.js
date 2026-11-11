@@ -76281,10 +76281,11 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySea
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
-  const head = pack.candidates.slice(0, RESERVED_HEAD_SEATS);
-  const recency = pack.candidates.slice(RESERVED_HEAD_SEATS, RESERVED_HEAD_SEATS + recencySeats);
-  const rest = roundRobinCandidates(pack.candidates.slice(RESERVED_HEAD_SEATS + recencySeats), candidateCorpus);
-  const order = [...head, ...withRecencyAfterStoreFirsts(recency, rest, [...head, ...recency], candidateCorpus)];
+  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
+  const order = [
+    ...pack.candidates.slice(0, headSeats),
+    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
+  ];
   let fallback;
   for (let keep = order.length;keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
@@ -76305,19 +76306,6 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     }
   }
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
-}
-function withRecencyAfterStoreFirsts(recency, rest, ahead, candidateCorpus) {
-  if (recency.length === 0)
-    return [...rest];
-  const read = new Set(ahead.map((candidate) => candidateCorpus.get(candidate) ?? ""));
-  const firsts = rest.filter((candidate) => {
-    const corpusId = candidateCorpus.get(candidate) ?? "";
-    if (read.has(corpusId))
-      return false;
-    read.add(corpusId);
-    return true;
-  });
-  return [...firsts, ...recency, ...rest.filter((candidate) => !firsts.includes(candidate))];
 }
 function roundRobinCandidates(candidates, candidateCorpus) {
   const byCorpus = new Map;

@@ -283,8 +283,8 @@ export interface SourceIndexRoutedSearchResponse {
   // route leaves them out of what it returns. Internal.
   secureLaneAudits: readonly RetrievalLaneAudit[];
   // How many recency seats (seat 4 on) the pack's newest chat messages took
-  // (withReservedRecencySeats). A prompt fit keeps them right after every
-  // store's first result. Internal.
+  // (withReservedRecencySeats). A prompt fit reads them right after seats 1 to
+  // 3. Internal.
   recencySeats?: number;
   latencyMs: number;
   rawExposed: false;

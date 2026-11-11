@@ -55,12 +55,10 @@ const chatHits = (seats: number): FixtureHit[] => [
   { id: 'chat-second', at: '2026-11-11T08:00:00.000Z', newestInStore: 2 },
 ];
 
-async function seats(question: string, seatCount: number, storeCount: 1 | 3) {
+async function seats(question: string, seatCount: number, storeCount: number) {
   const stores: Array<{ id: string; family: SourceFamily; hits: FixtureHit[] }> = [
-    ...(storeCount === 3 ? [
-      { id: 'internal.mail.messages', family: 'email' as const, hits: older('mail', seatCount) },
-      { id: 'internal.files', family: 'file' as const, hits: older('file', seatCount) },
-    ] : []),
+    ...Array.from({ length: storeCount - 1 }, (_, index) => (
+      { id: `internal.store-${index}.items`, family: 'file' as const, hits: older(`store-${index}`, seatCount) })),
     { id: CHAT, family: 'chat', hits: chatHits(seatCount) },
   ];
   const detail = await buildEvidencePackDetailed({
@@ -89,6 +87,13 @@ describe('recency seats', () => {
       });
     }
   }
+
+  test('with many stores, the local fit still reads the recency seats (22 stores, 24 seats)', async () => {
+    const { pack, read } = await seats('Did I just get a message from the clinic?', 24, 22);
+    expect(pack.slice(3, 5)).toEqual(['chat-newest', 'chat-second']);
+    expect(read.length).toBeLessThan(pack.length);
+    expect(read.slice(3, 5)).toEqual(['chat-newest', 'chat-second']);
+  });
 
   test('any other question keeps relevance order and leaves the pinned messages where the store put them', async () => {
     const recency = await seats('Did I just get a message from the clinic?', 24, 1);
@@ -140,7 +145,7 @@ describe('withReservedRecencySeats', () => {
   });
 });
 
-describe('recency seats never cost a store its place', () => {
+describe('recency seats never cost a store its seat in the pack', () => {
   type Hit = { corpusId: string; id: string; newestInStore?: number; provenance?: { citation?: { authoredAt?: string } } };
   const hit = (corpusId: string, id: string, at?: string, newestInStore?: number): Hit => ({
     corpusId, id, ...(newestInStore ? { newestInStore } : {}), ...(at ? { provenance: { citation: { authoredAt: at } } } : {}),
@@ -161,7 +166,7 @@ describe('recency seats never cost a store its place', () => {
     expect(result.recencySeats).toBe(1);
   });
 
-  test('a local fit reads every store\'s first result before the recency seats', () => {
+  test('a local fit reads the recency seats right after the first three, then stores in turn', () => {
     const candidate = (id: string) => ({
       provenance: { sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: id } },
       trustTier: 'S2' as const,
@@ -183,8 +188,10 @@ describe('recency seats never cost a store its place', () => {
     const corpusOf = new Map(ordered);
     const read = fitPackToPromptBytes(pack as never, 9_000, corpusOf as never, { localOnly: true }, 2)
       .candidates.map((c) => c.provenance.sourceItem.providerItemId);
-    // Eight seats fit: the first three, then stores' first results; the
-    // recency seats wait for every store's first result.
-    expect(read).toEqual(['lead-0', 'lead-1', 'lead-2', ...[1, 2, 3, 4, 5].map((index) => `store-${index}-first`)]);
+    // Eight seats fit: the first three, the recency seats (asked for), then
+    // stores in turn.
+    expect(read.length).toBeLessThan(ordered.length);
+    expect(read.slice(0, 5)).toEqual(['lead-0', 'lead-1', 'lead-2', 'newest', 'second']);
+    expect(read.slice(5)).toEqual(read.slice(5).map((_, index) => `store-${index + 1}-first`));
   });
 });

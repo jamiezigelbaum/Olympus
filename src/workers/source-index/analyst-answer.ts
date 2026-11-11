@@ -1018,9 +1018,8 @@ const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's
  * labels and provenance, passages, coverage) is at most maxPromptBytes of
  * UTF-8. Keeps as many candidates as can each carry a usable passage share,
- * the pack's first three seats first, then each other store's first result,
- * then any recency seats, and the rest round-robin across corpora, then clips
- * passages; the measurement is
+ * the pack's first three seats and any recency seats first, as seated, and
+ * the rest round-robin across corpora, then clips passages; the measurement is
  * the real prompt, so labels and escaping are counted, not estimated.
  */
 export function fitPackToPromptBytes(
@@ -1034,13 +1033,14 @@ export function fitPackToPromptBytes(
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
-  // Recency seats (seat 4 on, a recency question's newest chat messages) come
-  // right after every store's first result, so they never cost a store its
-  // only read seat.
-  const head = pack.candidates.slice(0, RESERVED_HEAD_SEATS);
-  const recency = pack.candidates.slice(RESERVED_HEAD_SEATS, RESERVED_HEAD_SEATS + recencySeats);
-  const rest = roundRobinCandidates(pack.candidates.slice(RESERVED_HEAD_SEATS + recencySeats), candidateCorpus);
-  const order = [...head, ...withRecencyAfterStoreFirsts(recency, rest, [...head, ...recency], candidateCorpus)];
+  // Recency seats (seat 4 on, a recency question's newest chat messages) are
+  // read as seated, ahead of store turn: the question asked for what is new,
+  // so it outranks another store's first result.
+  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
+  const order = [
+    ...pack.candidates.slice(0, headSeats),
+    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus),
+  ];
   let fallback: EvidencePack | undefined;
   for (let keep = order.length; keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
@@ -1069,25 +1069,6 @@ export function fitPackToPromptBytes(
   // Nothing fits even one candidate's labels: send the smallest pack rather
   // than none, and let the transport's own ceiling report it.
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
-}
-
-// Without recency seats this is store turn unchanged. With them, every store
-// not yet read gets its first result in before the recency seats.
-function withRecencyAfterStoreFirsts(
-  recency: readonly EvidenceCandidate[],
-  rest: readonly EvidenceCandidate[],
-  ahead: readonly EvidenceCandidate[],
-  candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
-): EvidenceCandidate[] {
-  if (recency.length === 0) return [...rest];
-  const read = new Set(ahead.map((candidate) => candidateCorpus.get(candidate) ?? ''));
-  const firsts = rest.filter((candidate) => {
-    const corpusId = candidateCorpus.get(candidate) ?? '';
-    if (read.has(corpusId)) return false;
-    read.add(corpusId);
-    return true;
-  });
-  return [...firsts, ...recency, ...rest.filter((candidate) => !firsts.includes(candidate))];
 }
 
 function roundRobinCandidates(
