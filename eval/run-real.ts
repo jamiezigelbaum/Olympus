@@ -26,6 +26,7 @@
 // Set OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true to include model-planned
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
+import { createHash } from 'node:crypto';
 import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -265,7 +266,7 @@ async function main(): Promise<void> {
       return result;
     },
   };
-  const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined }>();
+  const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts: string[] }>();
   // The seats the grader counts as expected evidence, by its own matcher.
   const expectedSeatsOf = (pack: EvidencePack) => evalExpectedSeats(
     dataset.questions[0]!.expectedEvidence ?? [],
@@ -278,9 +279,10 @@ async function main(): Promise<void> {
       // Once per pack: a repeat of the same pack does not run it again.
       (pack) => seatOnlyByPack.has(pack) ? [] : expectedSeatsOf(pack),
       (pack, alone, result) => {
-        seatOnlyByPack.set(pack, { seats: expectedSeatsOf(pack), alone, result });
+        seatOnlyByPack.set(pack, { seats: expectedSeatsOf(pack), alone, result, prompts: analystPrompts.slice(firstAnswer?.prompts ?? 0) });
         keepGradedAnswerRecords();
       },
+      (pack) => detailsByPack.get(pack)?.candidateCorpusIds ?? [],
     )
     : gradedAnalyst;
   const repeatingAnalyst = repeatedEvalAnalyst(
@@ -740,6 +742,12 @@ export interface EvalAnswerStageAudit {
   /** Whether the answer cites a seat holding an expected evidence item; absent when the question names none. */
   expectedSeatCited?: boolean;
   /**
+   * Cited seats that hold no expected evidence item; absent when the question
+   * names none. Informational: an answer citing every seat still cites the
+   * expected one, and this shows the rest.
+   */
+  citedSeatsWithoutExpectedItem?: number;
+  /**
    * The answer's number-bearing tokens (dates, amounts, identifiers with a
    * digit), and how many of them occur in a seat the answer cites. Fewer in
    * the cited seats than in the answer means the answer states a value its
@@ -768,7 +776,7 @@ export interface EvalAnswerStageAudit {
    * and that answer by shape and flags (its cited seats count within that
    * pack), or failed when the call failed. Diagnostics only, never the grade.
    */
-  expectedSeatOnly?: { seats: number[] } & (EvalAnswerRepeat | { failed: true });
+  expectedSeatOnly?: { seats: number[]; prompts?: Array<{ chars: number; sha256: string }> } & (EvalAnswerRepeat | { failed: true });
   /**
    * The Analyst's own answer, by its structure: every expected value in it,
    * some, or none (with no citation: it said it found nothing; with
@@ -828,11 +836,16 @@ export function evalExpectedSeats(
 /** The expected-seat-only answer, by the repeat audit's own measures. */
 export function expectedSeatOnlyAudit(
   question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
-  run: { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined },
+  run: { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts?: readonly string[] },
 ): NonNullable<EvalAnswerStageAudit['expectedSeatOnly']> {
+  // Each model prompt by length and a short hash, so two runs can tell
+  // byte-identical prompts from different ones without carrying the text.
+  const prompts = run.prompts && run.prompts.length > 0
+    ? { prompts: run.prompts.map((prompt) => ({ chars: prompt.length, sha256: createHash('sha256').update(prompt).digest('hex').slice(0, 12) })) }
+    : {};
   return run.result
-    ? { seats: [...run.seats], ...evalAnswerRepeat(question, run.alone, run.result) }
-    : { seats: [...run.seats], failed: true };
+    ? { seats: [...run.seats], ...prompts, ...evalAnswerRepeat(question, run.alone, run.result) }
+    : { seats: [...run.seats], ...prompts, failed: true };
 }
 
 /**
@@ -877,14 +890,30 @@ export function expectedSeatOnlyEvalAnalyst(
   analyst: Analyst,
   expectedSeats: (pack: EvidencePack) => readonly number[],
   onResult: (pack: EvidencePack, alone: EvidencePack, result: AnalystResult | undefined) => void,
+  candidateCorpusIds: (pack: EvidencePack) => readonly string[] = () => [],
 ): Analyst {
   return {
     async analyze(pack, analyzeOptions) {
       const graded = await analyst.analyze(pack, analyzeOptions);
       const seats = new Set(expectedSeats(pack));
       if (seats.size === 0) return graded;
-      const alone: EvidencePack = { ...pack, candidates: pack.candidates.filter((_, index) => seats.has(index + 1)) };
-      if (alone.candidates.length === 0) return graded;
+      const corpusIds = candidateCorpusIds(pack);
+      const kept = pack.candidates.flatMap((candidate, index) => seats.has(index + 1) ? [{ candidate, corpusId: corpusIds[index] }] : []);
+      if (kept.length === 0) return graded;
+      // The pack's coverage restated for the seats it keeps, as Ask's own fit
+      // does: a store's items in evidence are the seats it holds here.
+      const inEvidence = new Map<string, number>();
+      for (const { corpusId } of kept) if (corpusId !== undefined) inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
+      const alone: EvidencePack = {
+        ...pack,
+        candidates: kept.map(({ candidate }) => candidate),
+        coverage: {
+          ...pack.coverage,
+          ...(pack.coverage.matchCounts
+            ? { matchCounts: pack.coverage.matchCounts.map((count) => ({ ...count, inEvidence: inEvidence.get(count.corpusId) ?? 0 })) }
+            : {}),
+        },
+      };
       let result: AnalystResult | undefined;
       try {
         result = await analyst.analyze(alone, analyzeOptions);
@@ -924,18 +953,23 @@ function answerValueTokens(answer: string, seats: number): string[] {
  * forms a citation line shows the Analyst that whole tokens miss. The
  * full-format label prints the timestamp ("[2026-03-01T09:30:00.000Z]") and
  * the compact one its date ("date: 2026-03-01"), so a timestamp also supports
- * its date; a locator path also supports each of its segments (the file name).
+ * its date; a locator path also supports each of its segments (the file name),
+ * and a file name also supports itself without its extension.
  */
 function seatSupportTokens(text: string): Set<string> {
   const tokens = textTokens(text);
   for (const token of [...tokens]) {
-    const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(token);
-    if (date) tokens.add(date[1]!);
-    if (token.includes('/')) {
-      for (const segment of token.split('/')) {
-        const trimmed = segment.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
-        if (trimmed) tokens.add(trimmed);
-      }
+    const parts = [token, ...(token.includes('/')
+      ? token.split('/').map((segment) => segment.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean)
+      : [])];
+    for (const part of parts) {
+      tokens.add(part);
+      const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(part);
+      if (date) tokens.add(date[1]!);
+      // A file name without its extension is still the name. The extension
+      // holds a letter, so a decimal ("4182.99") never supports its integer part.
+      const stem = /^(.+)\.(?=\p{N}*\p{L})[\p{L}\p{N}]{1,5}$/u.exec(part);
+      if (stem) tokens.add(stem[1]!);
     }
   }
   return tokens;
@@ -1018,7 +1052,12 @@ export function evalAnswerStageAudit(
     answerUnanswered: analystOwn.unanswered.length,
     answerCitedSeats: citedSeats,
     answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
-    ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
+    ...(expectedIds.length > 0
+      ? {
+        expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)),
+        citedSeatsWithoutExpectedItem: citedSeats.filter((seat) => !expectedSeats.includes(seat)).length,
+      }
+      : {}),
     answerValueTokens: valueTokens.length,
     answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
     answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),
