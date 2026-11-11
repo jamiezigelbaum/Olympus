@@ -74,3 +74,32 @@ test('parses its flags with safe defaults', () => {
   expect(parseStoreProbeArgs([])).toMatchObject({ scanCapMs: 60_000 });
   expect(parseStoreProbeArgs(['--scan-cap-seconds', '5', '--term', 'x'])).toMatchObject({ scanCapMs: 5_000, term: 'x' });
 });
+
+test('locates one expected item through the keyword search without printing its text (#707 gap-1)', async () => {
+  const { dir, cleanup } = tempDir('olympus-store-probe-expect-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'internal.sqlite');
+  const store = new LocalConnectorStore({ dbPath, corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, family: 'file', trustDomain: 'internal', tierLedger: null });
+  cleanups.push(() => store.close());
+  // Names only: the content is never fetched, as for gap-1's expected file.
+  await store.syncFromConnector(fixtureConnector(() => [
+    { id: 'k1', name: 'kestrel-boatyard-invoice.pdf', text: 'The Kestrel boatyard invoice total is 4182 dollars.' },
+    { id: 'k2', name: 'garden.txt', text: 'Tomatoes along the south fence.' },
+  ]), { fetchContent: false });
+
+  const trace = traceKeywordSearch(store, 'Kestrel boatyard invoice', undefined, undefined, 'k1');
+  const runs = trace.runs as Array<{ query: string; expected: Record<string, unknown>; leader: Record<string, unknown> | null }>;
+  const plain = runs.find((run) => run.query === 'plain')!;
+  expect(plain.expected).toMatchObject({ inFilterInput: true, keptByFilter: true, rank: 0, hasContent: false, conceptsMatched: 3, conceptsTotal: 3 });
+  expect(plain.leader).toMatchObject({ isExpected: true, hasContent: false });
+
+  const missing = traceKeywordSearch(store, 'Kestrel boatyard invoice', undefined, undefined, 'no-such-item').runs as Array<{ expected: Record<string, unknown> }>;
+  expect(missing[0]!.expected).toMatchObject({ inFilterInput: false, keptByFilter: false, rank: -1 });
+  const printed = JSON.stringify(trace);
+  for (const text of ['Kestrel', 'kestrel-boatyard', '4182', 'Tomatoes', 'invoice', 'boatyard']) expect(printed).not.toContain(text);
+});
+
+test('parses --expect', () => {
+  expect(parseStoreProbeArgs(['--expect', 'item-1'])).toMatchObject({ expect: 'item-1' });
+  expect(parseStoreProbeArgs([]).expect).toBeUndefined();
+});
