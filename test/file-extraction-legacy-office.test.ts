@@ -285,6 +285,29 @@ describe('legacy Office', () => {
     expect(output.text).toBe('XLS Data\nRows: 4\nColumns: 2\nSample:\nÉ\n-7 | 12.34\nTRUE | #DIV/0!\n1.5');
   });
 
+  test('formula cells keep their cached results', async () => {
+    const formula = (row: number, col: number, result: Buffer): Buffer => cell(0x0006, row, col,
+      Buffer.concat([result, Buffer.alloc(6), Buffer.from([3, 0, 0x1e, 42, 0])]));
+    const special = (kind: number, value = 0): Buffer => Buffer.from([kind, 0, value, 0, 0, 0, 0xff, 0xff]);
+    const number = Buffer.alloc(8);
+    number.writeDoubleLE(42);
+    const bytes = singleSheet([
+      formula(0, 0, number),
+      formula(0, 1, special(0)),
+      record(0x04bc, Buffer.alloc(8)),
+      record(0x0207, Buffer.concat([Buffer.from([5, 0, 0]), Buffer.from('Total')])),
+      formula(1, 0, special(1, 1)),
+      formula(1, 1, special(2, 42)),
+      formula(1, 2, special(3)),
+    ]);
+    const output = await extract(compoundFile({ Workbook: bytes }), XLS_MIME_TYPE);
+    expect(output.text).toBe('XLS Data\nRows: 2\nColumns: 2\nSample:\n42 | Total\nTRUE | #N/A');
+    const orphan = singleSheet([formula(0, 0, special(0))]);
+    expect(await extract(compoundFile({ Workbook: orphan }), XLS_MIME_TYPE)).toEqual({
+      status: 'failed_terminal', errorKind: 'office_document_damaged',
+    });
+  });
+
   test('padding after the last record is ignored; a sheet cut before its end is damaged', async () => {
     const label = cell(0x0204, 0, 0, Buffer.from([2, 0, 0, 0x4f, 0x4b]));
     const padded = Buffer.concat([singleSheet([label]), Buffer.from([0x01, 0x02, 0x03])]);
@@ -417,6 +440,12 @@ describe('OpenDocument and EPUB', () => {
   test('ODS tables share the sheet summary path', async () => {
     const output = await extract(storedZipBytes({ 'content.xml': ods }), ODS_MIME_TYPE);
     expect(output.text).toBe('ODS Stock\nRows: 2\nColumns: 2\nSample:\nItem | Count\nTools | 7');
+  });
+
+  test('a > inside a quoted attribute stays inside its tag', async () => {
+    const content = '<office:document-content><table:table table:name="Calc"><table:table-row><table:table-cell table:formula="of:=IF([.A1]>0;1;0)" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row></table:table></office:document-content>';
+    const output = await extract(storedZipBytes({ 'content.xml': content }), ODS_MIME_TYPE);
+    expect(output.text).toBe('ODS Calc\nRows: 1\nColumns: 1\nSample:\n1');
   });
 
   test('ODS repeats rows and cells without expanding empty repeated rows', async () => {

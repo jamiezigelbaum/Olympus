@@ -96297,7 +96297,7 @@ function decodeWorkbook(bytes) {
       }
       if (id === 2057)
         throw new RangeError;
-      if (![253, 516, 515, 638, 189, 517].includes(id))
+      if (![253, 516, 515, 638, 189, 517, 6].includes(id))
         continue;
       const row = data2.readUInt16LE(0);
       const column = data2.readUInt16LE(2);
@@ -96313,6 +96313,10 @@ function decodeWorkbook(bytes) {
         if (end > data2.length)
           throw new RangeError;
         put(row, column, biffText(data2.subarray(9, end), wide));
+      } else if (id === 6) {
+        const value = formulaResult(data2, records, i2);
+        if (value !== undefined)
+          put(row, column, value);
       } else if (id === 515)
         put(row, column, finiteNumber(data2.readDoubleLE(6)));
       else if (id === 638)
@@ -96343,6 +96347,31 @@ function finiteNumber(value) {
   if (!Number.isFinite(value))
     throw new RangeError;
   return String(value);
+}
+function formulaResult(data2, records, index) {
+  if (data2.length < 14)
+    throw new RangeError;
+  if (data2.readUInt16LE(12) !== 65535)
+    return finiteNumber(data2.readDoubleLE(6));
+  const kind = data2[6];
+  if (kind === 1)
+    return data2[8] ? "TRUE" : "FALSE";
+  if (kind === 2)
+    return biffError(data2[8]);
+  if (kind === 3)
+    return;
+  if (kind !== 0)
+    throw new RangeError;
+  let next = index + 1;
+  while (records[next]?.id === 1212 || records[next]?.id === 545)
+    next += 1;
+  const text3 = records[next];
+  if (text3?.id !== 519 || text3.data.length < 3)
+    throw new RangeError;
+  const chars = text3.data.readUInt16LE(0);
+  const wide = (text3.data[2] & 1) !== 0;
+  const available = Math.floor((text3.data.length - 3) / (wide ? 2 : 1));
+  return biffText(text3.data.subarray(3, 3 + Math.min(chars, available) * (wide ? 2 : 1)), wide);
 }
 function decodeRk(rk) {
   let value;
@@ -96449,7 +96478,7 @@ function unreadable(reason, message2) {
 function parseMarkup(xml) {
   const root = { name: "", attributes: {}, children: [] };
   const stack = [root];
-  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?[^>]+>|[^<]+/g);
+  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?(?:[^>"']|"[^"]*"|'[^']*')+>|[^<]+/g);
   let count = 0;
   let end = 0;
   for (const token of tokens) {

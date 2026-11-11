@@ -88,7 +88,7 @@ function decodeWorkbook(bytes: Uint8Array): DocumentSheet[] {
       const { id, data } = records[i]!;
       if (id === 0x000a) { ended = true; break; }
       if (id === 0x0809) throw new RangeError();
-      if (![0x00fd, 0x0204, 0x0203, 0x027e, 0x00bd, 0x0205].includes(id)) continue;
+      if (![0x00fd, 0x0204, 0x0203, 0x027e, 0x00bd, 0x0205, 0x0006].includes(id)) continue;
       const row = data.readUInt16LE(0);
       const column = data.readUInt16LE(2);
       if (id === 0x00fd) {
@@ -101,6 +101,9 @@ function decodeWorkbook(bytes: Uint8Array): DocumentSheet[] {
         const end = 9 + count * (wide ? 2 : 1);
         if (end > data.length) throw new RangeError();
         put(row, column, biffText(data.subarray(9, end), wide));
+      } else if (id === 0x0006) {
+        const value = formulaResult(data, records, i);
+        if (value !== undefined) put(row, column, value);
       } else if (id === 0x0203) put(row, column, finiteNumber(data.readDoubleLE(6)));
       else if (id === 0x027e) put(row, column, decodeRk(data.readUInt32LE(6)));
       else if (id === 0x00bd) {
@@ -127,6 +130,26 @@ function biffText(bytes: Buffer, wide: boolean): string {
 function finiteNumber(value: number): string {
   if (!Number.isFinite(value)) throw new RangeError();
   return String(value);
+}
+
+// A FORMULA record carries its last calculated result; a text result follows in a STRING record.
+function formulaResult(data: Buffer, records: RecordPart[], index: number): string | undefined {
+  if (data.length < 14) throw new RangeError();
+  if (data.readUInt16LE(12) !== 0xffff) return finiteNumber(data.readDoubleLE(6));
+  const kind = data[6]!;
+  if (kind === 1) return data[8] ? 'TRUE' : 'FALSE';
+  if (kind === 2) return biffError(data[8]!);
+  if (kind === 3) return undefined;
+  if (kind !== 0) throw new RangeError();
+  let next = index + 1;
+  // Shared and array formula records may sit between the formula and its text result.
+  while (records[next]?.id === 0x04bc || records[next]?.id === 0x0221) next += 1;
+  const text = records[next];
+  if (text?.id !== 0x0207 || text.data.length < 3) throw new RangeError();
+  const chars = text.data.readUInt16LE(0);
+  const wide = (text.data[2]! & 1) !== 0;
+  const available = Math.floor((text.data.length - 3) / (wide ? 2 : 1));
+  return biffText(text.data.subarray(3, 3 + Math.min(chars, available) * (wide ? 2 : 1)), wide);
 }
 
 function decodeRk(rk: number): string {

@@ -22,7 +22,7 @@ function unreadable(reason: 'damaged' | 'encrypted' | 'unsupported', message: st
 function parseMarkup(xml: string): XmlNode {
   const root: XmlNode = { name: '', attributes: {}, children: [] };
   const stack = [root];
-  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?[^>]+>|[^<]+/g);
+  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?(?:[^>"']|"[^"]*"|'[^']*')+>|[^<]+/g);
   let count = 0;
   let end = 0;
   for (const token of tokens) {
