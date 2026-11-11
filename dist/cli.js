@@ -243111,6 +243111,11 @@ var ENGINE_CLI_USAGE = {
   "engine logs": "olympus engine logs [--lines <n>] [--follow]"
 };
 var DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstallOpenHandler };
+function runningBuildExpected(service) {
+  if ((service.platform ?? process.platform) === "linux")
+    return linuxInstalledBuild(service);
+  return installedEngineBuild(engineServicePaths(service).plistPath);
+}
 async function runEngineCommand(args, deps = {}) {
   const [command2, ...rest] = args;
   if ((deps.platform ?? process.platform) === "linux" && !deps.lifecycleLocked && ["install", "uninstall", "rollback"].includes(command2 ?? "")) {
@@ -243202,9 +243207,7 @@ async function runEngineCommand(args, deps = {}) {
   if (command2 === "restart") {
     const since = Date.now();
     const result = restartEngine({ ...service, ...parseNowArg("restart", rest) });
-    if ((deps.platform ?? process.platform) !== "linux")
-      return result;
-    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), since }, { ...deps.health, exec: deps.exec });
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: runningBuildExpected(service), since }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
   if (command2 === "stop") {
@@ -243214,9 +243217,7 @@ async function runEngineCommand(args, deps = {}) {
     expectNoArgs("start", rest);
     const since = Date.now();
     const result = startEngine(service);
-    if ((deps.platform ?? process.platform) !== "linux")
-      return result;
-    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), ...result.action === "already_running" ? {} : { since } }, { ...deps.health, exec: deps.exec });
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: runningBuildExpected(service), ...result.action === "already_running" ? {} : { since } }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
   if (command2 === "rollback") {

@@ -3,7 +3,7 @@ import { spawn as spawnChild, spawnSync, type ChildProcess } from 'node:child_pr
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { engineStatusReport, parseInstallArgs, parseLogsArgs, parseVerifyArgs } from '../src/core/engine-cli.ts';
+import { engineStatusReport, runEngineCommand, parseInstallArgs, parseLogsArgs, parseVerifyArgs } from '../src/core/engine-cli.ts';
 import { engineHostServices, engineStatusPath, startEngineHost } from '../src/core/engine-host.ts';
 import {
   ENGINE_BUILD_ENV,
@@ -791,6 +791,21 @@ describe('engine upgrades restart the engine on the new build', () => {
     slept.length = 0;
     expect(restartEngine({ ...options, sleepMs })).toMatchObject({ ok: true });
     expect(slept).toEqual([]);
+  });
+
+  test('a Mac engine start or restart returns only once the worker answers, and says so when it does not (#1338)', async () => {
+    const { home, checkout, bun } = fixture();
+    let bad = false;
+    const launchctl = launchingLaunchctl(home, () => bad);
+    const deps = { platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, health: fastHealth() };
+    installEngine({ ...deps, fromCheckout: checkout, bunBin: bun });
+    stopEngine({ ...deps, now: true });
+    const started = await runEngineCommand(['start'], deps) as { ok: boolean; action: string; health: { ok: boolean; worker: string } };
+    expect(started).toMatchObject({ ok: true, action: 'started', health: { ok: true, worker: 'ok' } });
+    bad = true;
+    const restarted = await runEngineCommand(['restart', '--now'], deps) as { ok: boolean; health: { ok: boolean; reason?: string } };
+    expect(restarted.ok).toBe(false);
+    expect(restarted.health.reason).toContain('worker is not ready');
   });
 
   test('rollback swaps in the previous app and reloads the agent onto it; a second rollback swaps back', async () => {

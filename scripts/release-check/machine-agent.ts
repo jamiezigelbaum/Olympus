@@ -56,6 +56,7 @@ import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
+import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
 import './archive-live-seed-hooks.ts';
 
@@ -177,6 +178,11 @@ function olympus(args: string[], options: { input?: string; env?: Record<string,
     env: { ...process.env, ...options.env },
   });
   return { code: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+/** A one-time opening link for a place, minted the owner's way; throws with the CLI's reason when the mint fails. */
+function mintOpeningLink(place: string): string {
+  return openingLinkOrThrow(olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 }), `olympus dashboard --no-open --target ${place}`);
 }
 
 function workerBearer(): string {
@@ -1067,9 +1073,8 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     let origin = '';
     /** The owner's own way in: a one-time opening link for the place, then Unlock on the page. */
     const openTarget = async (target: string): Promise<{ state: any; unlockOffered: boolean; unlocked: boolean }> => {
-      const minted = olympus(['dashboard', '--no-open', '--target', target], { timeoutMs: 60_000 });
-      const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
-      if (!url) throw new Error(`olympus dashboard --no-open --target ${target.startsWith('private/') ? 'private/<id>' : target} printed no opening link`);
+      const url = openingLinkOrThrow(olympus(['dashboard', '--no-open', '--target', target], { timeoutMs: 60_000 }),
+        `olympus dashboard --no-open --target ${target.startsWith('private/') ? 'private/<id>' : target}`);
       origin = new URL(url).origin;
       if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(url).port || 80)); bridgeStarted = true; }
       await cdp.send('Page.navigate', { url });
@@ -1313,10 +1318,7 @@ async function journeysCommand(outDir: string, only: string[], skip: string[], s
       outDir,
       mintLink: async (place) => {
         if (place === 'update') return (standIn ??= startUpdateStandIn()).url;
-        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
-        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
-        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
-        return url;
+        return mintOpeningLink(place);
       },
       onOrigin: (origin) => {
         if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
@@ -1556,10 +1558,7 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
       debugPort: EXPLORE_DEBUG_PORT,
       outDir,
       mintLink: async (place) => {
-        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
-        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
-        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
-        return url;
+        return mintOpeningLink(place);
       },
       onOrigin: (origin) => {
         if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
@@ -1735,10 +1734,7 @@ async function withArchiveBrowser<T>(work: (session: ArchiveBrowserSession) => P
       debugPort: ARCHIVE_DEBUG_PORT,
       outDir: ARCHIVE_OUT,
       mintLink: async (place) => {
-        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
-        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
-        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
-        return url;
+        return mintOpeningLink(place);
       },
       onOrigin: (origin) => {
         if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
