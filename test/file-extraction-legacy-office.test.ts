@@ -460,6 +460,19 @@ describe('OpenDocument and EPUB', () => {
     expect(output.text).toStartWith('ODS Wide\nRows: 31\nColumns: 1\nSample:\nV');
   });
 
+  test('ODT tracked-change history is not read as document text', async () => {
+    const content = '<office:document-content><office:body><office:text><text:tracked-changes><text:changed-region><text:deletion><office:change-info><dc:creator>Editor</dc:creator></office:change-info><text:p>Old total: 999</text:p></text:deletion></text:changed-region></text:tracked-changes><text:p>Current total: 42</text:p></office:text></office:body></office:document-content>';
+    expect((await extract(storedZipBytes({ 'content.xml': content }), ODT_MIME_TYPE)).text).toBe('Current total: 42');
+  });
+
+  test('a long run of unmatched < fails fast instead of rescanning', async () => {
+    const started = performance.now();
+    expect(await extract(storedZipBytes({ 'content.xml': `<text:p>${'<'.repeat(200_000)}` }), ODT_MIME_TYPE)).toEqual({
+      status: 'failed_terminal', errorKind: 'office_document_damaged',
+    });
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   test('a > inside a quoted attribute stays inside its tag', async () => {
     const content = '<office:document-content><table:table table:name="Calc"><table:table-row><table:table-cell table:formula="of:=IF([.A1]>0;1;0)" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row></table:table></office:document-content>';
     const output = await extract(storedZipBytes({ 'content.xml': content }), ODS_MIME_TYPE);

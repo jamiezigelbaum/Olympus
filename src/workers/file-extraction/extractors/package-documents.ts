@@ -22,12 +22,12 @@ function unreadable(reason: 'damaged' | 'encrypted' | 'unsupported', message: st
 function parseMarkup(xml: string): XmlNode {
   const root: XmlNode = { name: '', attributes: {}, children: [] };
   const stack = [root];
-  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?(?:[^>"']|"[^"]*"|'[^']*')+>|[^<]+/g);
+  // Sticky: each token must start where the last ended, so malformed input fails at once instead of rescanning.
+  const pattern = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?(?:[^>"']|"[^"]*"|'[^']*')+>|[^<]+/y;
   let count = 0;
   let end = 0;
-  for (const token of tokens) {
-    if (token.index !== end) unreadable('damaged', 'Document markup is malformed.');
-    end += token[0].length;
+  for (let token = pattern.exec(xml); token; token = pattern.exec(xml)) {
+    end = pattern.lastIndex;
     const value = token[0];
     const parent = stack.at(-1)!;
     if (value.startsWith('<![CDATA[')) parent.children.push(token[1]!);
@@ -132,7 +132,8 @@ function nodes(root: XmlNode, name: string): XmlNode[] {
 
 function markupText(node: XmlNode): string {
   const name = localName(node.name).toLowerCase();
-  if (name === 'script' || name === 'style' || name === 'head' || name === 'binary-data') return '';
+  // Tracked-change history holds deleted text, not what the document shows.
+  if (name === 'script' || name === 'style' || name === 'head' || name === 'binary-data' || name === 'tracked-changes') return '';
   // OpenDocument's text:s is always empty; an HTML <s> (strikethrough) keeps its text.
   if (name === 's' && node.children.length === 0) return ' '.repeat(repeatCount(node.attributes.c, 1000));
   if (name === 'tab') return '\t';

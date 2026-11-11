@@ -96489,13 +96489,11 @@ function unreadable(reason, message2) {
 function parseMarkup(xml) {
   const root = { name: "", attributes: {}, children: [] };
   const stack = [root];
-  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?(?:[^>"']|"[^"]*"|'[^']*')+>|[^<]+/g);
+  const pattern = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?(?:[^>"']|"[^"]*"|'[^']*')+>|[^<]+/y;
   let count = 0;
   let end = 0;
-  for (const token of tokens) {
-    if (token.index !== end)
-      unreadable("damaged", "Document markup is malformed.");
-    end += token[0].length;
+  for (let token = pattern.exec(xml);token; token = pattern.exec(xml)) {
+    end = pattern.lastIndex;
     const value = token[0];
     const parent = stack.at(-1);
     if (value.startsWith("<![CDATA["))
@@ -96554,7 +96552,7 @@ function nodes(root, name) {
 }
 function markupText(node) {
   const name = localName(node.name).toLowerCase();
-  if (name === "script" || name === "style" || name === "head" || name === "binary-data")
+  if (name === "script" || name === "style" || name === "head" || name === "binary-data" || name === "tracked-changes")
     return "";
   if (name === "s" && node.children.length === 0)
     return " ".repeat(repeatCount(node.attributes.c, 1000));
