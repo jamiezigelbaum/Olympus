@@ -141,6 +141,8 @@ if (command === 'seed') {
     const asks = Number(args.get('asks') ?? 1);
     let writer: any;
     let imports = 0; let moves = 0; let stopped = false; let writerError: string | undefined;
+    // Longest single writer call of each kind, to place any request-thread freeze.
+    const writerMax = { import_ms: 0, move_ms: 0 };
     let writerTask: Promise<void> | undefined;
     let startWriter: (() => Promise<void>) | undefined;
     if (args.get('writer') === 'on') {
@@ -161,10 +163,14 @@ if (command === 'seed') {
           while (!stopped) {
             for (let j=0; j<5; j++) {
               const identity = fixtures.identityOf(`writer-${writerRun}-${imports}`);
+              const ti = performance.now();
               writer.stores.internal.importItemCopy({ ...copy, identity, columns: { ...copy.columns, provider_item_id: identity.providerItemId, local_item_id: identity.localItemId } }, { trustTier: 'S3', syncConnectorId: 'synthetic-writer' });
               imports++;
               writer.ledger.recordRoutedPlacement(identity, low, writer.set.placementFor(low));
+              writerMax.import_ms = Math.max(writerMax.import_ms, performance.now() - ti);
+              const tm = performance.now();
               await moveTieredItem({ set: writer.set, identity, target: high }); moves++;
+              writerMax.move_ms = Math.max(writerMax.move_ms, performance.now() - tm);
             }
             await new Promise<void>(r => setTimeout(r, 10));
           }
@@ -174,7 +180,10 @@ if (command === 'seed') {
     for (let ask=1; ask<=asks; ask++) {
       const before = rss(); const loadStart=loadavg()[0]; const beforePool=diagnostic();
       const importStart=imports; const moveStart=moves;
-      let peak=before; const sampler=setInterval(() => { peak=Math.max(peak,rss()); }, 20);
+      // The sampler doubles as a heartbeat: lag past its 20 ms period is time the request thread did not turn.
+      let peak=before; const lags: number[] = []; let beat=performance.now();
+      const sampler=setInterval(() => { const now=performance.now(); lags.push(Math.max(0, now-beat-20)); beat=now; peak=Math.max(peak,rss()); }, 20);
+      writerMax.import_ms = 0; writerMax.move_ms = 0;
       keywordReads.length = 0;
       const laneRecords: any[]=[];
       const t=performance.now();
@@ -210,7 +219,8 @@ if (command === 'seed') {
       const row = { label: args.get('label')??'current', source, writer: args.get('writer')??'off', ask, stores: stores.length, formulations: 3, items: selected.reduce((n,s)=>n+s.items,0),
         budget_ms: args.get('budget-ms')??'router-default', wall_ms: performance.now()-t, lanes_timed_out: results.reduce((n,r)=>n+r.timed_out,0), lanes_completed_with_results: results.reduce((n,r)=>n+r.completed_with_results,0),
         main_store_opens: stores.length, main_store_open_ms: mainOpenMs, pool_before: beforePool, pool_after: afterPool,
-        rss_before_mb: before, rss_after_mb: rss(), rss_peak_mb: Math.max(peak, rss()), rss_process_high_water_mb: process.resourceUsage().maxRSS/1024, load_1m_start: loadStart, load_1m_end: loadavg()[0], imports: imports-importStart, tier_moves: moves-moveStart, writer_error: writerError, results, per_lane: perLane, lane_records: laneRecords, on_thread_keyword_reads: keywordReads };
+        rss_before_mb: before, rss_after_mb: rss(), rss_peak_mb: Math.max(peak, rss()), rss_process_high_water_mb: process.resourceUsage().maxRSS/1024, load_1m_start: loadStart, load_1m_end: loadavg()[0], imports: imports-importStart, tier_moves: moves-moveStart,
+        freeze_ms: { max: Math.round(Math.max(0, ...lags)), over_1s: lags.filter(l => l > 1000).length, total_over_1s: Math.round(lags.filter(l => l > 1000).reduce((n,l)=>n+l,0)) }, writer_max_call_ms: { import: Math.round(writerMax.import_ms), move: Math.round(writerMax.move_ms) }, writer_error: writerError, results, per_lane: perLane, lane_records: laneRecords, on_thread_keyword_reads: keywordReads };
       console.log(JSON.stringify(row));
       appendFileSync(report, `\n## ${row.label}, writer ${row.writer}, Ask ${ask}\n\n${row.lanes_completed_with_results}/${stores.length * 3} lanes with results; ${row.lanes_timed_out} timed out; ${(row.wall_ms/1000).toFixed(2)} s. RSS ${before.toFixed(1)} → ${row.rss_after_mb.toFixed(1)} MiB; peak ${peak.toFixed(1)} MiB. Imports ${row.imports}; tier moves ${row.tier_moves}.\n\n<details><summary>Full numeric receipt</summary>\n\n\`\`\`json\n${JSON.stringify(row)}\n\`\`\`\n</details>\n`);
     }
