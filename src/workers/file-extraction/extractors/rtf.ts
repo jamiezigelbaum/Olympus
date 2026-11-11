@@ -106,11 +106,18 @@ export function rtfToText(source: string, maxChars: number): string {
         // space or hyphen, or a mark with no text.
         index += 2;
         groupStart = false;
-        if (state.skip) continue;
-        if (next === '\\' || next === '{' || next === '}') emit(next);
-        else if (next === '~') emit(' ');
-        else if (next === '_') emit('-');
-        else if (next === '\n' || next === '\r') emit('\n');
+        const symbol = next === '\\' || next === '{' || next === '}' ? next
+          : next === '~' ? ' '
+            : next === '_' ? '-'
+              : next === '\n' || next === '\r' ? '\n'
+                : undefined;
+        if (symbol === undefined) continue;
+        // A symbol can be the fallback a \uN escape said to drop.
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        if (!state.skip) emit(symbol);
         continue;
       }
       let end = index + 1;
@@ -176,10 +183,26 @@ function isDigit(char: string): boolean {
   return code >= 48 && code <= 57;
 }
 
+// RTF names code pages by number; the decoder wants a label.
+const CODE_PAGE_LABELS: ReadonlyMap<number, string> = new Map([
+  [866, 'ibm866'], [874, 'windows-874'],
+  [932, 'shift_jis'], [936, 'gbk'], [949, 'euc-kr'], [950, 'big5'],
+  [1250, 'windows-1250'], [1251, 'windows-1251'], [1252, 'windows-1252'], [1253, 'windows-1253'],
+  [1254, 'windows-1254'], [1255, 'windows-1255'], [1256, 'windows-1256'], [1257, 'windows-1257'],
+  [1258, 'windows-1258'], [10000, 'macintosh'], [10007, 'x-mac-cyrillic'], [20866, 'koi8-r'],
+  [28591, 'iso-8859-1'], [28592, 'iso-8859-2'], [28595, 'iso-8859-5'], [54936, 'gb18030'], [65001, 'utf-8'],
+]);
+
 function decodeCodePage(bytes: Uint8Array, codePage: number): string {
-  try {
-    return new TextDecoder(`windows-${codePage}`).decode(bytes);
-  } catch {
-    return new TextDecoder('windows-1252').decode(bytes);
+  const label = CODE_PAGE_LABELS.get(codePage);
+  if (label) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {
+      // Not in this runtime: fall through.
+    }
   }
+  // A code page this reader cannot decode: plain ASCII stays, every other
+  // byte becomes the replacement character, so no wrong letter is indexed.
+  return String.fromCharCode(...Array.from(bytes, (byte) => (byte < 0x80 ? byte : 0xfffd)));
 }

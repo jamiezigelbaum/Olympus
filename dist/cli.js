@@ -93594,18 +93594,17 @@ function rtfToText(source, maxChars) {
       if (!isLetter(next)) {
         index += 2;
         groupStart = false;
-        if (state.skip)
+        const symbol = next === "\\" || next === "{" || next === "}" ? next : next === "~" ? " " : next === "_" ? "-" : next === `
+` || next === "\r" ? `
+` : undefined;
+        if (symbol === undefined)
           continue;
-        if (next === "\\" || next === "{" || next === "}")
-          emit(next);
-        else if (next === "~")
-          emit(" ");
-        else if (next === "_")
-          emit("-");
-        else if (next === `
-` || next === "\r")
-          emit(`
-`);
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        if (!state.skip)
+          emit(symbol);
         continue;
       }
       let end = index + 1;
@@ -93677,13 +93676,15 @@ function isDigit(char) {
   return code >= 48 && code <= 57;
 }
 function decodeCodePage(bytes, codePage) {
-  try {
-    return new TextDecoder(`windows-${codePage}`).decode(bytes);
-  } catch {
-    return new TextDecoder("windows-1252").decode(bytes);
+  const label = CODE_PAGE_LABELS.get(codePage);
+  if (label) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {}
   }
+  return String.fromCharCode(...Array.from(bytes, (byte) => byte < 128 ? byte : 65533));
 }
-var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS;
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
 var init_rtf = __esm(() => {
   RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
   SKIPPED_DESTINATIONS = new Set([
@@ -93740,6 +93741,31 @@ var init_rtf = __esm(() => {
     enspace: " ",
     qmspace: " "
   };
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
 });
 
 // src/workers/file-extraction/extractors/document-formats.ts

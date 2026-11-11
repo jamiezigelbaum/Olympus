@@ -23736,7 +23736,7 @@ var init_bounded_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/rtf.ts
-var RTF_MIME_TYPES, SKIPPED_DESTINATIONS;
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, CODE_PAGE_LABELS;
 var init_rtf = __esm(() => {
   RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
   SKIPPED_DESTINATIONS = new Set([
@@ -23768,6 +23768,31 @@ var init_rtf = __esm(() => {
     "mmathPr",
     "pgdsctbl",
     "fldinst"
+  ]);
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
   ]);
 });
 

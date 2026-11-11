@@ -615,6 +615,23 @@ Agenda:\tab budget \{draft\}\line next steps 舒? done\par
     for (const left of ['Calibri', 'Riched20', 'Not body text', '89504e']) expect(text).not.toContain(left);
   });
 
+  test('decodes the code page the document names, and never guesses one it cannot decode', async () => {
+    const read = async (body: string) => {
+      const result = await createTextExtractor().extract(extractorInput({ bytes: textBytes(body), mimeType: 'application/rtf' }));
+      return result.status === 'indexed' ? result.text : '';
+    };
+    expect(await read(String.raw`{\rtf1\ansi\ansicpg932 \'82\'a0 kana}`)).toBe('\u3042 kana');
+    expect(await read(String.raw`{\rtf1\ansi\ansicpg437 caf\'82}`)).toBe('caf\ufffd');
+  });
+
+  test('a \\uN fallback that is a control symbol is dropped, not the next character', async () => {
+    const result = await createTextExtractor().extract(extractorInput({
+      bytes: textBytes(String.raw`{\rtf1\uc1\u12354\~X and \u12354\{Y}`),
+      mimeType: 'application/rtf',
+    }));
+    expect(result.status === 'indexed' ? result.text : '').toBe('\u3042X and \u3042Y');
+  });
+
   test('bytes that are not RTF are not read as RTF', async () => {
     const result = await createTextExtractor().extract(extractorInput({
       bytes: new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
