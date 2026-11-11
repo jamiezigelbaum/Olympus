@@ -167,6 +167,21 @@ describe('release-check canary', () => {
     expect(desktop.windows.map((w) => w.id)).toEqual(['0xc3', '0xd4']);
   });
 
+  test('Linux: a leftover dashboard app window that ignores Control-W is closed by its address, and both window checks pass', async () => {
+    const stray = { id: '0xe5', app: 'brave-__run_user_1000_olympus_owner-ticket-x.html-Default', title: 'Olympus' };
+    const desktop = fakeDesktop('linux', {
+      windows: [stray, { id: '0xd4', app: 'kitty', title: 'olympus logs' }],
+      stuck: ['0xe5'],
+      onLauncher: (w) => w.push({ id: '0xa1', app: 'chrome-127.0.0.1__-Default', title: 'Olympus' }),
+      onLink: (w) => w.push({ id: '0xb2', app: 'chrome-127.0.0.1__-Default', title: 'Olympus' }),
+    });
+    const result = await runCanary(desktop.machine, options('linux'));
+    expect(statusOf(result.checks)).toMatchObject({ 'canary.window.leftover': 'warn', 'canary.window.launcher': 'pass', 'canary.window.link': 'pass' });
+    expect(desktop.scripts.some((s) => s.includes("closewindow address:'0xe5'"))).toBe(true);
+    expect(result.checks.find((c) => c.id === 'canary.window.leftover')!.detail).not.toContain('still open');
+    expect(desktop.windows.map((w) => w.id)).toEqual(['0xd4']);
+  });
+
   test('Linux: windows and tabs close on a Hyprland with a classic config and on one with a Lua config', async () => {
     const desktop = fakeDesktop('linux', {
       windows: [{ id: '0xc3', app: 'brave-browser', title: '1Password - Brave' }],
