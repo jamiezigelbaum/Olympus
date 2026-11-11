@@ -27,6 +27,7 @@ import {
 } from '../src/core/file-extraction-source.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { connectorStoreExtractionCandidateReader } from '../src/workers/connector-store/extraction-candidate-reader.ts';
 
 // Compile-time proof that the locator port this leg declared is satisfied by
 // the shared store as it stands today, with nothing added to it. If the store
@@ -259,6 +260,28 @@ describe('Dropbox extraction source: candidate enumeration', () => {
     const page = await source.listCandidates({ limit: 10 });
     expect(page.candidates).toHaveLength(1);
     expect(page.skipped).toEqual({ excluded_by_owner: 3 });
+  });
+
+  test('the store adapter carries the owner-excluded count to the page', async () => {
+    const store = {
+      extractionCandidates: () => ({
+        candidates: [{
+          identity: {
+            localItemId: `${ACCOUNT}:id:keep`,
+            providerItemId: 'id:keep',
+            accountScope: ACCOUNT,
+            provider: 'dropbox',
+          },
+          locatorUri: '/2 Areas/Health/keep.pdf',
+        }],
+        done: true,
+        skippedByDisposition: 2,
+      }),
+    } as unknown as Pick<LocalConnectorStore, 'extractionCandidates'>;
+    const source = makeSource({ candidates: connectorStoreExtractionCandidateReader(store) });
+    const page = await source.listCandidates({ limit: 10 });
+    expect(page.candidates).toHaveLength(1);
+    expect(page.skipped).toEqual({ excluded_by_owner: 2 });
   });
 
   test('an item with no locator at all is not a candidate', async () => {
