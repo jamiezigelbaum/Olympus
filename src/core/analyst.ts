@@ -629,24 +629,39 @@ const AUDIT_UNSEEN_AMOUNTS = 'Amounts in the draft that appear nowhere in the ev
 const AMOUNT_PATTERN = /[€$£¥]\s?\d+(?:[.,']\d+)*|\d+(?:[.,']\d+)+/gu;
 
 // Separator style differs between a draft and its source ("1,240.50" against
-// "1.240,50"), so an amount is compared by its digits, without trailing zeros
-// ("12.50" and "12.5" are one amount).
-function amountDigits(amount: string): string {
-  return amount.replace(/\D/gu, '').replace(/^0+(?=\d)/u, '').replace(/0+$/u, '');
+// "1.240,50"), so an amount is compared by value: its whole digits, then its
+// fraction without padding zeros ("12.50" and "12.5" are one amount; "800"
+// and "8" are not). A last separator before exactly three digits may group
+// thousands or mark decimals ("1,240"), so such an amount has both readings.
+function amountReadings(amount: string): string[] {
+  const number = amount.replace(/[^\d.,' ]/gu, '').trim();
+  const parts = number.split(/[.,' ]/u).filter(Boolean);
+  if (parts.length === 0) return [];
+  const canonical = (whole: readonly string[], fraction = '') => {
+    const integer = whole.join('').replace(/^0+(?=\d)/u, '');
+    const decimals = fraction.replace(/0+$/u, '');
+    return decimals ? `${integer}.${decimals}` : integer;
+  };
+  const last = parts.at(-1)!;
+  const separator = number.charAt(number.length - last.length - 1);
+  const grouped = canonical(parts);
+  const decimal = canonical(parts.slice(0, -1), last);
+  if (parts.length === 1 || separator === ' ' || separator === "'") return [grouped];
+  return last.length === 3 ? [grouped, decimal] : [decimal];
 }
 
-/** The draft's amounts whose digits the evidence text never shows as an amount or a number. */
+/** The draft's amounts whose value the evidence text never shows as an amount or a number. */
 export function amountsMissingFrom(answer: string, evidence: string): string[] {
   const seen = new Set<string>();
   // Evidence numbers read both ways: a space can group thousands ("1 240,50").
   for (const pattern of [/\d+(?:[.,']\d+)*/gu, /\d+(?:[.,' ]\d+)*/gu]) {
-    for (const match of evidence.matchAll(pattern)) seen.add(amountDigits(match[0]));
+    for (const match of evidence.matchAll(pattern)) for (const reading of amountReadings(match[0])) seen.add(reading);
   }
   const missing: string[] = [];
   for (const match of answer.matchAll(AMOUNT_PATTERN)) {
     const amount = match[0].trim();
-    const digits = amountDigits(amount);
-    if (digits && !seen.has(digits) && !missing.includes(amount)) missing.push(amount);
+    const readings = amountReadings(amount);
+    if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount)) missing.push(amount);
   }
   return missing;
 }

@@ -73612,20 +73612,36 @@ ${prompt}`).length;
   }
   return prompt;
 }
-function amountDigits(amount) {
-  return amount.replace(/\D/gu, "").replace(/^0+(?=\d)/u, "").replace(/0+$/u, "");
+function amountReadings(amount) {
+  const number = amount.replace(/[^\d.,' ]/gu, "").trim();
+  const parts = number.split(/[.,' ]/u).filter(Boolean);
+  if (parts.length === 0)
+    return [];
+  const canonical = (whole, fraction = "") => {
+    const integer = whole.join("").replace(/^0+(?=\d)/u, "");
+    const decimals = fraction.replace(/0+$/u, "");
+    return decimals ? `${integer}.${decimals}` : integer;
+  };
+  const last = parts.at(-1);
+  const separator = number.charAt(number.length - last.length - 1);
+  const grouped = canonical(parts);
+  const decimal = canonical(parts.slice(0, -1), last);
+  if (parts.length === 1 || separator === " " || separator === "'")
+    return [grouped];
+  return last.length === 3 ? [grouped, decimal] : [decimal];
 }
 function amountsMissingFrom(answer, evidence) {
   const seen = new Set;
   for (const pattern of [/\d+(?:[.,']\d+)*/gu, /\d+(?:[.,' ]\d+)*/gu]) {
     for (const match of evidence.matchAll(pattern))
-      seen.add(amountDigits(match[0]));
+      for (const reading of amountReadings(match[0]))
+        seen.add(reading);
   }
   const missing = [];
   for (const match of answer.matchAll(AMOUNT_PATTERN)) {
     const amount = match[0].trim();
-    const digits = amountDigits(amount);
-    if (digits && !seen.has(digits) && !missing.includes(amount))
+    const readings = amountReadings(amount);
+    if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount))
       missing.push(amount);
   }
   return missing;

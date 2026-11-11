@@ -47,3 +47,13 @@ test('amounts are compared by their digits, whatever the separators', async () =
   expect(amountsMissingFrom('Paid €80 for 3 items [2]', 'Paid 80 EUR')).toEqual([]);
   expect(amountsMissingFrom('Paid €81.20', 'Paid 80 EUR, 1.20 fee')).toEqual(['€81.20']);
 });
+
+test('amounts that differ by orders of magnitude stay apart', async () => {
+  const { amountsMissingFrom } = await import('../src/core/analyst.ts');
+  expect(amountsMissingFrom('Paid €800', 'Paid 8 EUR')).toEqual(['€800']);
+  expect(amountsMissingFrom('Total €12.50', 'Total 125 EUR')).toEqual(['€12.50']);
+  expect(amountsMissingFrom('Total €1,240', 'Total 1240 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Total 1.240', 'Total 1240 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Total €1,24', 'Total 1.24 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Total €1,24', 'Total 124 EUR')).toEqual(['€1,24']);
+});
