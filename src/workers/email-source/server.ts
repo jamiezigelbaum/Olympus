@@ -157,7 +157,7 @@ import {
 } from '../../core/venice-models.ts';
 import { createOpenAICompatibleAnalystModel, type OpenAIReasoningEffort } from '../../core/analyst-openai.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
-import { defaultConfig, loadConfig, loadWorkerConfig, parseLane, readOpenClawPluginRemote, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
+import { claudeAppEnabled, defaultConfig, loadConfig, loadWorkerConfig, parseLane, readOpenClawPluginRemote, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
 import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
@@ -2642,6 +2642,13 @@ export async function main(): Promise<void> {
   // The local judge's own speed and held share on this install, for the setup estimates (#891).
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
+  // Set once the judge's model is built (below): a lane whose model cannot be
+  // built queues questions nothing answers, the same as no judge (#1316).
+  let snifferModelBuilt: boolean | undefined;
+  const judgeMissing = (): 'no_model' | 'turned_off' | undefined => (
+    !tierSnifferServiceEnv(process.env).enabled ? 'turned_off'
+      : snifferRuntime.source === 'off' || snifferModelBuilt === false ? 'no_model'
+        : undefined);
   if (snifferRuntime.source === 'off') {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
   }
@@ -6807,7 +6814,7 @@ export async function main(): Promise<void> {
     if (!connectionId) return false;
     try {
       const record = remoteConnections()?.list().find((connection) => connection.id === connectionId);
-      return record !== undefined && grantMcpSurface(record, olympusConfig.remote?.claudeAppEnabled === true) === 'remote';
+      return record !== undefined && grantMcpSurface(record, claudeAppEnabled(olympusConfig)) === 'remote';
     } catch {
       return false;
     }
@@ -7255,8 +7262,8 @@ export async function main(): Promise<void> {
   const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
   const { createChatGptSetupBackend, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
   const chatgptHandoffs = createChatGptHandoffs();
-  // Items held for the privacy check (pending, Private, not embedded), every
-  // tier ledger counted once per corpus. Counts only.
+  // Items held for the privacy check (pending, Private, not embedded), each
+  // item once per tier ledger (heldItemCount). Counts only.
   // Reused for a minute: each count reads every copy the tier ledgers hold,
   // and the dashboard's privacy panel asks on every poll (Sparta, 2026-11-05:
   // about a tenth of the sampled freezes).
@@ -7270,12 +7277,11 @@ export async function main(): Promise<void> {
   const countPendingClassification = (): number => {
     let total = 0;
     for (const lane of tierLanes) {
-      for (const corpusId of lane.corpusIds) {
-        try {
-          total += lane.ledger.corpusCopyCounts(corpusId).held;
-        } catch {
-          // An unreadable ledger contributes nothing to a count.
-        }
+      try {
+        // Each item once, also one recorded Personal-first before #1316.
+        total += lane.ledger.heldItemCount([...lane.corpusIds]);
+      } catch {
+        // An unreadable ledger contributes nothing to a count.
       }
     }
     return total;
@@ -7518,9 +7524,12 @@ export async function main(): Promise<void> {
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
       const backlog = tierSnifferBacklog?.();
+      const missing = judgeMissing();
       return {
         configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
+        // No judge: every new item waits, held, until one is set up (#1316).
+        ...(missing ? { judgeMissing: missing } : {}),
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
     },
@@ -7624,7 +7633,7 @@ export async function main(): Promise<void> {
     fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
-      claudeAppEnabled: () => olympusConfig.remote?.claudeAppEnabled === true,
+      claudeAppEnabled: () => claudeAppEnabled(olympusConfig),
       isRelayed: isRelayedRequest,
     }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs, { isRelayed: carriesRelayMarker }), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
@@ -7632,7 +7641,7 @@ export async function main(): Promise<void> {
       isRelayed: isRelayedRequest,
       extraOrigins: () => {
         const urls = currentRemotePublicUrls(remotePublicUrls);
-        return [DASHBOARD_UI_DOMAIN, ...(olympusConfig.remote?.claudeAppEnabled === true && urls
+        return [DASHBOARD_UI_DOMAIN, ...(claudeAppEnabled(olympusConfig) && urls
           ? [claudeAppOrigin(urls)] : [])];
       },
     }), withRemoteOAuthRoutes(
@@ -7654,7 +7663,7 @@ export async function main(): Promise<void> {
       withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
         withRemoteFailureBoundary(createRemoteMcpHandler({
           ...sharedRemoteMcpOptions,
-          claudeApp: { enabled: () => olympusConfig.remote?.claudeAppEnabled === true },
+          claudeApp: { enabled: () => claudeAppEnabled(olympusConfig) },
           // Only the public relay route can select the pinned ChatGPT surface.
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
@@ -7770,6 +7779,7 @@ export async function main(): Promise<void> {
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+  snifferModelBuilt = rawSnifferModel !== undefined;
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;

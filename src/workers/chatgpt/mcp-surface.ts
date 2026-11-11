@@ -1,3 +1,4 @@
+import { answerModelRequiredResult } from '../answer-model-required.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
@@ -9,7 +10,7 @@ import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWit
  * On this path Olympus retrieves and ChatGPT reasons: `olympus_search` returns
  * the release-gated evidence for Public and Personal items and ChatGPT's own
  * model answers from it under the generic Analyst instruction. `source_answer`
- * (an Analyst on the Mac) is listed only when an answer model is set up there.
+ * (an Analyst on the Mac) stays listed and explains setup when no answer model is set.
  *
  * Tool names stay those of the remote surface (source_answer,
  * source_answer_result, source_index_status) so the async answer pattern is
@@ -114,7 +115,7 @@ export interface ChatGptSurfaceOptions {
   evidenceSearch?: (input: { question: string; limit?: number }, signal?: AbortSignal) => Promise<unknown>;
   /**
    * Whether an answer model is set up on the Mac, so source_answer can work.
-   * Absent counts as yes; false hides source_answer and source_answer_result.
+   * Absent counts as yes; false returns setup guidance without running an answer.
    */
   answerModelAvailable?: () => boolean;
   /**
@@ -398,18 +399,16 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
 
 export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly' | 'appClient'> = {}): ChatGptToolDefinition[] {
   const tools: ChatGptToolDefinition[] = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
-  if (answerToolsListed(ctx, options)) tools.push(...ANSWER_TOOLS);
-  // A handed-off anonymous answer is collected with source_answer_result
-  // too, so the collector is listed with the ask even with no answer model.
+  if (answerToolsListed(ctx)) tools.push(...ANSWER_TOOLS);
+  // Anonymous answers also use the collector when the source index is off.
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
   return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
 }
 
-/** source_answer works only with an answer model on the Mac and the operation exposed remotely. */
-function answerToolsListed(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable'>): boolean {
-  if (options.answerModelAvailable && !options.answerModelAvailable()) return false;
+/** Answer tools stay listed wherever the operations are exposed remotely. */
+function answerToolsListed(ctx: OperationContext): boolean {
   return ANSWER_TOOLS.every((tool) => {
     const operation = findOperationByName(tool.name);
     return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' });
@@ -465,19 +464,29 @@ export async function callChatGptTool(
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record(withVisibleJobId(PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+  return record(forClaude(name, PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
 }
 
 /**
- * A handed-off answer names its job in the text too when the host's model
- * never sees `structuredContent` (Claude, #1327), so the model can call
- * source_answer_result. The id answers only the connection that asked
- * (source-answer-jobs.ts), and a Private answer still reaches only the panel.
+ * Lines only Claude's model gets, because Claude differs from ChatGPT in two ways:
+ * - its model never sees `structuredContent`, so a handed-off answer names its job
+ *   in the text (#1327). The id answers only the connection that asked
+ *   (source-answer-jobs.ts), and a Private answer still reaches only the panel;
+ * - its iPhone app runs the tools but shows no MCP App panel (#1303, 2026-11-11), and
+ *   the server can't tell the phone from web or desktop. So a result whose point is a
+ *   panel also says what to do when none appears, and never leaves a dead end.
  */
-function withVisibleJobId(result: ChatGptToolResult, client: McpAppClient | undefined): ChatGptToolResult {
+export const CLAUDE_NO_DASHBOARD_PANEL = 'If no dashboard panel appears (Claude\'s phone apps don\'t show panels yet), give the user this status in words; the full dashboard opens in Claude on the web or desktop, and in Olympus on their computer.';
+export const CLAUDE_NO_QUESTION_PANEL = 'If no panel appears (Claude\'s phone apps don\'t show panels yet), tell the user to open this chat in Claude on the web or desktop and type the question in the panel there.';
+
+function forClaude(name: string, result: ChatGptToolResult, client: McpAppClient | undefined): ChatGptToolResult {
+  if (client?.host !== 'claude' || result.isError) return result;
   const structured = result.structuredContent as { status?: unknown; job_id?: unknown } | undefined;
-  if (client?.host !== 'claude' || structured?.status !== 'working' || typeof structured.job_id !== 'string') return result;
-  return { ...result, content: [...result.content, { type: 'text', text: `job_id: ${structured.job_id}` }] };
+  const line = structured?.status === 'working' && typeof structured.job_id === 'string' ? `job_id: ${structured.job_id}`
+    : name === DASHBOARD_TOOL_NAME ? CLAUDE_NO_DASHBOARD_PANEL
+      : name === OPEN_PRIVATE_QUESTION_TOOL.name && structured?.status === 'opened' ? CLAUDE_NO_QUESTION_PANEL
+        : undefined;
+  return line ? { ...result, content: [...result.content, { type: 'text', text: line }] } : result;
 }
 
 /** Records a search or source answer as it leaves for ChatGPT; anything else (and an error) records nothing. */
@@ -495,6 +504,7 @@ function recordChatGptRequest(
   let question: string | undefined;
   if (name === SEARCH_TOOL_NAME) question = typeof args.question === 'string' ? args.question : undefined;
   else if (name === 'source_answer' || name === 'source_answer_result') {
+    if (!structured) return;
     question = sourceAnswerQuestion(name, args, structured?.status, structured?.job_id);
     if (structured?.status === 'working') return;
   } else return;
@@ -572,7 +582,9 @@ async function runChatGptTool(
         return result;
       }
       case SOURCE_ANSWER_TOOL.name: {
-        if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
+        if (!answerToolsListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
+        const setup = answerModelRequiredResult(name, args, options.answerModelAvailable, ctx.sourceAnswerJobs, options.appClient);
+        if (setup) return setup;
         const question = typeof args.question === 'string' ? args.question.trim() : '';
         if (!question) throw new ChatGptSurfaceError('invalid_params');
         const detail = detailArgument(args.detail);
@@ -610,7 +622,9 @@ async function runChatGptTool(
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {}) });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
-        if (!answerToolsListed(ctx, options) && !askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
+        if (!answerToolsListed(ctx) && !askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
+        const setup = answerModelRequiredResult(name, args, options.answerModelAvailable, ctx.sourceAnswerJobs, options.appClient);
+        if (setup) return setup;
         const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });

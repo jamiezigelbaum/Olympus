@@ -151,6 +151,8 @@ async function sourcePaths(i: ReturnType<typeof install>) {
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   const service = new TierSnifferService({ installed, lane: sniffer.lane, model: classifier.model,
     stores: () => fixture.set.openStores(), classificationLedgerPath: join(i.root, 'classification-ledger.jsonl'), autoApproveBuiltIn: true, rejudgePerPass: 0,
+    // Held until judged (#1316): a Personal verdict's move down runs, as the worker's mover does.
+    autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(i.root, 'embedding-ledger.jsonl'), maxPerPass: 5 },
   });
   cleanup.push(() => service.stop());
   expect(await service.runOnce()).toMatchObject({ state: 'ran' });

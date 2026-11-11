@@ -12,6 +12,7 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { TIER_CLASSIFIER_VERSION, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { CORPORA, FIXTURE_PLACEMENT, cloudProvider, fixtureConnector, identityOf, localProvider, openLegStore, storePaths, tempDir } from './helpers/tier-fixtures.ts';
 
@@ -43,9 +44,14 @@ async function lane(text = 'Please remember the bananas for the picnic on Saturd
   await set.sync(fixtureConnector(() => [{ id: 'note', name: 'Orchard note', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   const identity = identityOf('note');
   /** The verdict the resolver lands, with the names judged under another sniffer prompt kept beside it. */
-  const judge = (code = 'ordinary:0.95') => {
+  const judge = async (code = 'ordinary:0.95') => {
     const applied = ledger.applySnifferVerdict(identity, { pass: 'content', tier: 'private', reason: `content:sniffer:${SNIFFER}:${code}`, modelId: 'fixture' }, { placementFor: (decision) => set.placementFor(decision) });
     expect(applied?.outcome).toBeDefined();
+    // Held until judged (#1316), a Personal verdict moves the text down; the mover finishes it, as the worker's does.
+    const row = ledger.getCurrent(identity)!;
+    if (row.state === 'moving') {
+      await moveTieredItem({ set, identity, target: { metadataTier: row.targetMetadataTier!, contentTier: row.targetContentTier! }, expectedGeneration: row.generation });
+    }
   };
   /** Names an earlier sniffer prompt judged: by themselves they make the row a candidate. */
   const olderNames = () => {
@@ -58,7 +64,7 @@ async function lane(text = 'Please remember the bananas for the picnic on Saturd
 
 test('a row settled a moment ago is not re-asked for the same classifier and sniffer', async () => {
   const f = await lane();
-  f.judge();
+  await f.judge();
   f.olderNames();
   // Without the stamp the names reason alone makes it a candidate (the shape the live run showed).
   const page = f.ledger.rejudgeCandidatePage(KEY);
@@ -80,7 +86,7 @@ test('a row still owed a verdict is never stamped: held, fail-safe, older classi
   expect(heldPage.causes).toEqual(['held']);
 
   const failSafe = await lane();
-  failSafe.judge('unresolved:0.00');
+  await failSafe.judge('unresolved:0.00');
   const row = failSafe.ledger.getCurrent(failSafe.identity)!;
   poke(failSafe.ledger, 'UPDATE tier_items SET reasons_json = ? WHERE provider_item_id = ?',
     JSON.stringify([...row.reasons, `content:sniffer:${SNIFFER}:fail_safe:missing_question`]), 'note');
@@ -88,13 +94,13 @@ test('a row still owed a verdict is never stamped: held, fail-safe, older classi
   expect(failSafe.ledger.rejudgeCandidatePage(KEY).causes).toEqual(['missing_question']);
 
   const older = await lane();
-  older.judge();
+  await older.judge();
   poke(older.ledger, 'UPDATE tier_items SET engine_version = ? WHERE provider_item_id = ?', 'older-classifier', 'note');
   older.ledger.markJudged(older.identity, KEY);
   expect(older.ledger.rejudgeCandidatePage(KEY).causes).toEqual(['classifier']);
 
   const prior = await lane();
-  prior.judge();
+  await prior.judge();
   const priorRow = prior.ledger.getCurrent(prior.identity)!;
   poke(prior.ledger, 'UPDATE tier_items SET reasons_json = ? WHERE provider_item_id = ?',
     JSON.stringify([...priorRow.reasons, 'metadata:prior:source_chat']), 'note');
@@ -104,7 +110,7 @@ test('a row still owed a verdict is never stamped: held, fail-safe, older classi
 
 test('a stamp does not outlive a later decision that left the row owed a verdict', async () => {
   const f = await lane();
-  f.judge();
+  await f.judge();
   f.ledger.markJudged(f.identity, KEY);
   expect(f.ledger.rejudgeCandidatePage(KEY).records).toEqual([]);
   // Later: another decision, its question lost, settled fail-safe (settleMissingQuestions).

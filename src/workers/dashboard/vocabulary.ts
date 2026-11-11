@@ -3113,6 +3113,21 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
 } as const;
 
 /** needsYou while the privacy check waits for the owner to approve its model (approved on the computer only). */
+/**
+ * No privacy judge on this install (#1316): new items wait, held, until one is
+ * set up, so the owner is told plainly and given the way to set one up.
+ */
+export const DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY = {
+  sentence: 'No private model is set up to check what\'s private, so new items wait, unread by your AI apps, until one is.',
+  label: 'Set up the private model',
+} as const;
+
+/** The privacy check is switched off where Olympus runs (OLYMPUS_TIER_SNIFFER_ENABLED): new items wait the same way. */
+export const DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY = {
+  sentence: 'Checking what\'s private is turned off on the computer running Olympus, so new items wait, unread by your AI apps, until it\'s turned back on.',
+  label: 'See the private model',
+} as const;
+
 export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
   sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait.',
   machine: 'On the machine running Olympus',

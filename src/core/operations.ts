@@ -705,7 +705,7 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+      return jobs ? runUnderCaller({ ...jobs, anonymousAsk: true }, ctx.signal, ask) : ask(ctx.signal);
     },
   },
   {

@@ -701,7 +701,12 @@ async function untilApp(t: AskTimings, condition: () => Promise<boolean>): Promi
 type RecordAppCheck = (check: CheckResult) => Promise<void>;
 
 /** A throwaway sender rule exercises real saves; only this exact rule may ever be confirmed for removal. */
-export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record: RecordAppCheck): Promise<void> {
+/**
+ * Exercises the panel's privacy controls and returns the values it saw that only app-only tools
+ * returned: the run's own temporary sender rule, and the owner's longer rule names and description.
+ * None of them is ever in a model-visible result, so the hidden-values probe forbids them (#1266).
+ */
+export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record: RecordAppCheck): Promise<string[]> {
   const sender = `olympus-canary-${crypto.randomUUID()}@example.invalid`;
   const check = async (id: string, ok: boolean, detail: string): Promise<void> => record({ id: `web.claude.privacy.${id}`, title: `Claude.ai: privacy: ${id}`, status: ok ? 'pass' : 'fail', detail });
   const press = async (key: string): Promise<void> => {
@@ -727,6 +732,8 @@ export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record:
   let attempted = false;
   let baseline: string[] = [];
   let baselineDescription = '';
+  // Short owner values ("Tax", "Work") turn up in ordinary replies; the run's own sender never does.
+  const panelOnly = (): string[] => [...(attempted ? [sender] : []), ...[baselineDescription, ...baseline].filter((value) => value.trim().length >= 12)];
   const description = (): Promise<string> => frame.evaluate(`document.querySelector('[data-key="privacy:summary"]')?.textContent || ""`);
   try {
     await open();
@@ -749,7 +756,7 @@ export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record:
     if (added && !asked) await reopen();
     const applied = added && !asked && (await rows()).some((row) => row.name === sender);
     await check('raising', applied, applied ? 'the new sender rule persisted with no lowering confirmation' : 'the raising change did not persist without confirmation');
-    if (!applied) return;
+    if (!applied) return panelOnly();
     const rule = (await rows()).find((row) => row.name === sender)!;
     await press(rule.key);
     const confirmed = await untilApp(t, confirmation);
@@ -782,11 +789,19 @@ export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record:
       await check('undo', restored, restored ? 'the temporary rule was removed; the original rules and description are restored' : `cleanup could not verify the original rules; remove only ${sender} manually`);
     }
   }
+  return panelOnly();
 }
 
-export async function checkClaudeDashboard(tab: Tab, obs: TurnObservation | Inconclusive, t: AskTimings, record: RecordAppCheck): Promise<void> {
+/** After the dashboard ran, in the same chat: no value only the panel's app-only tools returned may reach the model. */
+export function evaluateClaudePanelHidden(obs: TurnObservation | Inconclusive, panelOnly: readonly string[]): CheckResult {
+  const leaked = 'turn' in obs && panelOnly.some((value) => saysWord(obs.turn, value));
+  return claudeCheck('dashboard.hidden-values', 'dashboard: app-only results stay hidden', obs, !leaked,
+    leaked ? 'a value only the panel\'s app-only tools returned appeared in the reply' : `none of ${panelOnly.length} panel-only value(s) appeared`, false, leaked);
+}
+
+export async function checkClaudeDashboard(tab: Tab, obs: TurnObservation | Inconclusive, t: AskTimings, record: RecordAppCheck): Promise<string[]> {
   const gate = claudeCheck('dashboard', 'dashboard opens', obs, true, '');
-  if (gate.status === 'skip') { await record(gate); return; }
+  if (gate.status === 'skip') { await record(gate); return []; }
   let frames: AppFrame[] = [];
   let texts: string[] = [];
   await untilApp(t, async () => {
@@ -798,9 +813,10 @@ export async function checkClaudeDashboard(tab: Tab, obs: TurnObservation | Inco
   await record(claudeCheck('dashboard', 'dashboard opens', obs, dashboardFrameFound(texts), dashboardFrameFound(texts) ? 'the dashboard App frame shows its title and Sources' : 'no App frame shows the dashboard\'s title and Sources section'));
   // The current App has privacy controls without the local dashboard's top bar. Still exercise those controls.
   for (const frame of frames) {
-    if (await hasControl(frame, 'privacy:edit').catch(() => false)) { await checkClaudePrivacy(frame, t, record); return; }
+    if (await hasControl(frame, 'privacy:edit').catch(() => false)) return checkClaudePrivacy(frame, t, record);
   }
   await record({ id: 'web.claude.privacy.controls', title: 'Claude.ai: privacy controls', status: 'fail', detail: 'no dashboard App frame exposes the source-defined privacy edit control' });
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,8 +1044,11 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
         }
         if (client === 'claude' && options.claudeApp && !stopped) {
           const obs = await probe('dashboard', CLAUDE_DASHBOARD_PROMPT);
-          try { await checkClaudeDashboard(tab, obs, t, record); }
+          let panelOnly: string[] = [];
+          try { panelOnly = await checkClaudeDashboard(tab, obs, t, record); }
           catch { await record(claudeCheck('dashboard', 'dashboard opens', { inconclusive: 'the Claude App frames could not be read; inspect the sign-in and connector' }, false, '')); }
+          // Same chat: what the panel's app-only calls returned must not be repeatable by the model.
+          if (panelOnly.length > 0) await record(evaluateClaudePanelHidden(await probe('dashboard-hidden-values', CLAUDE_HIDDEN_PROMPT, true), panelOnly));
         }
       } finally {
         await tab.close();

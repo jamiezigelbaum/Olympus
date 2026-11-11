@@ -370,9 +370,13 @@ export function stoppedByBudget(exec: { code: number; timedOut: boolean }, allow
   return allowedMs < requestedMs && (exec.timedOut || exec.code === 124);
 }
 
-export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean): number {
-  return (upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135)) * 60_000;
+export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, engineSplit = false): number {
+  const minutes = upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135);
+  // The engine-split switch-on leg stops at 75 minutes: past that it is stuck, and the report is wanted while the logs are fresh (L1, 2026-11-11).
+  return (engineSplit ? Math.min(minutes, ENGINE_SPLIT_BUDGET_MIN) : minutes) * 60_000;
 }
+
+export const ENGINE_SPLIT_BUDGET_MIN = 75;
 
 /**
  * How long one call to source_answer or source_answer_result may take on the machine. The engine holds a source_answer open for its
@@ -811,7 +815,6 @@ function listFiles(dir: string): string[] {
 }
 
 async function collectEvidence(run: Run, outDir: string): Promise<void> {
-  const machine = run.machine!;
   const dash = await run.agent('dashboard-json', '', 60_000);
   if (dash.result?.ok === true) {
     const body = String(dash.result.body ?? '');
@@ -823,22 +826,29 @@ async function collectEvidence(run: Run, outDir: string): Promise<void> {
     run.add({ id: 'scan.the dashboard payload', title: 'No Private or Secret content in the dashboard payload', status: 'fail', detail: `the dashboard payload could not be read: ${dash.result ? `the dashboard answered ${dash.result.status}` : `the read exited ${dash.code}: ${dash.stderr.trim().slice(-200) || 'with nothing on stderr'}`}` });
   }
 
-  const remoteLogs = '~/rc/logs';
-  const collected = await run.agent('collect-logs', `--out ${remoteLogs}`, 120_000);
-  if (collected.result?.ok === true) {
-    const local = join(outDir, 'logs', 'machine');
-    mkdirSync(local, { recursive: true });
-    for (const file of collected.result.files as string[]) {
-      try { await machine.get(`${remoteLogs}/${file}`, join(local, file)); } catch { run.log(`could not fetch ${file}`); }
-    }
-    const texts = listFiles(local).filter((path) => TEXT_EXT.test(path)).map((path) => ({ label: path.slice(local.length + 1), text: readFileSync(path, 'utf8') }));
-    run.add(evaluateArtifactScan('the engine logs and status output', texts, run.markers));
-    for (const path of listFiles(local)) {
-      if (TEXT_EXT.test(path)) writeFileSync(path, redactMarkers(readFileSync(path, 'utf8'), run.markers));
-      run.logs.push({ label: path.slice(local.length + 1), path: `logs/machine/${path.slice(local.length + 1)}` });
-    }
-  } else {
-    run.add({ id: 'scan.the engine logs and status output', title: 'No Private or Secret content in the engine logs and status output', status: 'fail', detail: 'the machine logs could not be collected' });
+  await fetchMachineLogs(run, outDir, '~/rc/logs', 'logs/machine', 'the engine logs and status output');
+}
+
+/**
+ * The machine's engine logs, status output and engine state files (collect-logs), fetched into `<outDir>/<into>`, scanned for
+ * planted Private content under `scanLabel`, redacted and listed in the report.
+ */
+async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, into: string, scanLabel: string): Promise<void> {
+  const collected = await run.agent('collect-logs', `--out ${remoteDir}`, 120_000);
+  if (collected.result?.ok !== true) {
+    run.add({ id: `scan.${scanLabel}`, title: `No Private or Secret content in ${scanLabel}`, status: 'fail', detail: 'the machine logs could not be collected' });
+    return;
+  }
+  const local = join(outDir, into);
+  mkdirSync(local, { recursive: true });
+  for (const file of collected.result.files as string[]) {
+    try { await run.machine!.get(`${remoteDir}/${file}`, join(local, file)); } catch { run.log(`could not fetch ${file}`); }
+  }
+  const texts = listFiles(local).filter((path) => TEXT_EXT.test(path)).map((path) => ({ label: path.slice(local.length + 1), text: readFileSync(path, 'utf8') }));
+  run.add(evaluateArtifactScan(scanLabel, texts, run.markers));
+  for (const path of listFiles(local)) {
+    if (TEXT_EXT.test(path)) writeFileSync(path, redactMarkers(readFileSync(path, 'utf8'), run.markers));
+    run.logs.push({ label: path.slice(local.length + 1), path: `${into}/${path.slice(local.length + 1)}` });
   }
 }
 
@@ -1142,8 +1152,18 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     run.errors.push(`the run exceeded its time budget before ${what}`);
     return true;
   };
+  // The machine's logs and engine state as they were at the first failing check, before the next step changes them (L1, 2026-11-11).
+  let firstFailure: string | undefined;
+  let keptAtFailure = false;
+  const keepStateAtFailure = async (): Promise<void> => {
+    if (firstFailure === undefined || keptAtFailure) return;
+    keptAtFailure = true;
+    run.log(`archive: keeping the machine's logs and engine state at the first failing check (${firstFailure})`);
+    await fetchMachineLogs(run, outDir, '~/rc/logs-archive-failure', 'logs/archive-first-failure', 'the engine logs at the first failing archive check');
+  };
   /** One in-machine verb; its result, or undefined (the checks then say there was none) with the machine's last words in the log. */
   const call = async <T extends object>(sub: string, args: string, timeoutS: number): Promise<T | undefined> => {
+    await keepStateAtFailure();
     const done = await run.phase(sub, () => run.agent(sub, args, timeoutS * 1_000));
     if (!done.result) run.log(`${sub}: no result from the machine (exit ${done.code}): ${done.stderr.slice(-300)}`);
     const result = done.result as T | undefined;
@@ -1151,7 +1171,12 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     if (Array.isArray(own)) traces.push(...own);
     return result;
   };
-  const addAll = (checks: CheckResult[]): void => { for (const check of checks) run.add(check); };
+  const addAll = (checks: CheckResult[]): void => {
+    for (const check of checks) {
+      run.add(check);
+      if (check.status === 'fail') firstFailure ??= check.id;
+    }
+  };
   const flags = (fx: { role: string; format: string }): string => `--role ${fx.role} --format ${fx.format} --seed ${sh(seed)}`;
 
   let modelTouched = false;
@@ -1251,6 +1276,8 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
       detail: cleaned?.ok === true ? `${cleaned.removed?.length ? `${cleaned.removed.length} left over archive(s) removed; ` : ''}fixtures folder deleted` : String(cleaned?.detail ?? 'no result from the machine'),
     });
   }
+
+  await keepStateAtFailure();
 
   // The pictures and traces of every step.
   (run.stage.traces ??= []).push(...traces);
@@ -1507,7 +1534,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
   const upgrading = options.upgradeFromDir !== undefined;
-  const deadline = Date.now() + (options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true));
+  const deadline = Date.now() + (options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true, options.engineSplit === true));
   run.deadline = deadline;
   const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
   if (upgrading) {

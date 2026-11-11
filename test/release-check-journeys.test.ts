@@ -16,6 +16,7 @@ import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_CHATGPT_PRIVACY_COPY as
 import { DEFAULT_TOLERANCE, SCREENS, compareImages, APPROVAL_FILE, approvalDigestOf, compareScreens, maskScript, normaliseDynamicText, screenName, visualChecks } from '../scripts/release-check/visual.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
 import { buildReport, renderHtml, visualSection, type MachineReport } from '../scripts/release-check/report.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
 /** Runs page-side source in a happy-dom window the way Runtime.evaluate does in a browser (happy-dom has no eval of its own). */
 function evalIn(window: Window, code: string): unknown {
@@ -118,6 +119,48 @@ describe('journey runner', () => {
     const check = journeyChecks([trace])[0]!;
     expect(check.status).toBe('fail');
     expect(check.detail).toContain('step 2');
+  });
+
+  test('transient text supports a remembered regex in the panel, and a later failed save cannot reuse its receipt', async () => {
+    const driver = new DomDriver({ '/dashboard': '<h2>Notes</h2><button>Save</button>' });
+    driver.show('/dashboard');
+    const clock = createTestClock();
+    let saves = 0;
+    driver.onPress.set('Save', (document) => {
+      if (++saves > 1) return;
+      document.body.insertAdjacentHTML('beforeend', '<p>Saved Notes</p>');
+      clock.setTimeout(() => document.querySelector('p')!.remove(), 6_000);
+    });
+    const click = driver.click.bind(driver);
+    driver.click = async (frame, target) => {
+      const result = await click(frame, target);
+      await flushMicrotasks();
+      await clock.advance(6_001);
+      return result;
+    };
+    const step: Journey['steps'][number] = {
+      name: 'Save', do: { click: { role: 'button', name: 'Save' }, frame: 'panel' },
+      remember: { heading: { textOf: { role: 'heading' }, frame: 'panel' } },
+      expect: [{ text: (vars) => new RegExp(`saved ${vars.heading}`, 'gi'), transient: true, frame: 'panel' }],
+    };
+    const trace = await runJourney(driver, { id: 'panel-toast', title: 'Panel save', source: 'test', steps: [step, step] }, { now: clock.now, sleep: (ms) => clock.advance(ms) });
+    expect(trace.steps.map((step) => step.ok)).toEqual([true, false]);
+    expect(trace.steps[0]!.actual).toContain('it appeared after the action');
+    expect(trace.steps[1]!.actual).toContain('it does not appear after the action');
+    expect(await driver.probe('panel', '__rc.sawText("1:0")')).toBe(false);
+  });
+
+  test('a success message already visible before an action cannot satisfy a transient expectation', async () => {
+    const driver = new DomDriver({ '/dashboard': '<h2>Notes</h2><button>Save</button><p>Saved</p>' });
+    driver.show('/dashboard');
+    driver.onPress.set('Save', (document) => { document.body.insertAdjacentHTML('beforeend', '<p>Save failed</p>'); });
+    const clock = createTestClock();
+    const trace = await runJourney(driver, {
+      id: 'stale-toast', title: 'Save', source: 'test',
+      steps: [{ name: 'Save', do: { click: { role: 'button', name: 'Save' }, frame: 'panel' }, expect: [{ text: 'Saved', transient: true }] }],
+    }, { now: clock.now, sleep: (ms) => clock.advance(ms) });
+    expect(trace.ok).toBe(false);
+    expect(trace.steps[0]!.actual).toContain('it does not appear after the action');
   });
 
   test('waits for a control the page disables while Olympus sets up, and FAILS when it stays disabled', async () => {

@@ -40,6 +40,8 @@ export interface SearchEvidence { source: string; title: string; excerpt: string
 /** Talks to the engine's MCP endpoint on the machine, as a connected agent does. */
 export interface EngineMcp {
   call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; text: string; structured: unknown; error?: string }>;
+  /** The names `tools/list` returns, as a connected client discovers them. */
+  listTools?(): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -100,6 +102,13 @@ printf '%s' "$out" | tr -d '\\n' | sed -n 's/.*"connection": *{[^}]*"id": *"\\([
       let structured: unknown = out.structuredContent ?? null;
       if (structured === null && !error) { try { structured = JSON.parse(text); } catch { structured = null; } }
       return { ok: !error, text, structured, ...(error ? { error: String(error) } : {}) };
+    },
+    listTools: async () => {
+      const result = await machine.exec(mcpCallScript(machine.os, TOKEN_PATH, { jsonrpc: '2.0', id: nextId++, method: 'tools/list', params: {} }), { timeoutMs: 60_000 });
+      if (result.code !== 0) throw new Error(`tools/list failed (exit ${result.code})`);
+      const tools = parseRpc(result.stdout).result?.tools;
+      if (!Array.isArray(tools)) throw new Error('tools/list returned no tools');
+      return tools.map((tool: { name?: unknown }) => String(tool.name));
     },
     close: async () => {
       const revoke = /^[A-Za-z0-9_-]+$/.test(connectionId) ? `"$HOME/.local/bin/olympus" connections revoke ${connectionId} >/dev/null 2>&1 || true; ` : '';

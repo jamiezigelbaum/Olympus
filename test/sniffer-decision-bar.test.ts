@@ -153,7 +153,9 @@ test('a bar change re-tiers already-judged items through the re-judge pass with 
   let installed = new InstalledTierClassification({ env: {}, lane: before });
   let service: TierSnifferService | undefined;
   const makeService = (lane: SnifferLaneIdentity) => new TierSnifferService({ installed, lane: lane as typeof builtIn4B, model,
-    stores: () => f.set.openStores(), classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
+    stores: () => f.set.openStores(), classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true,
+    // Held until judged (#1316): a verdict's move runs, as the worker's mover does.
+    autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(tmp.dir, 'embedding.jsonl'), maxPerPass: 5 } });
   try {
     registerInstalledTierClassification(installed);
     await f.set.sync(fixtureConnector(() => [
