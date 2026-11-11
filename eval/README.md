@@ -171,6 +171,18 @@ local Dropbox index and a reachable Argus lane:
    Analyst answers each named question's frozen pack that many times. The
    first answer is graded; the others are listed in `answerRepeats` by shape,
    cited seats and value flags only. Raise the question timeout to match.
+   To tell distraction from misreading, set
+   `OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY=1`: after the graded answer, the
+   Analyst answers once more on a pack holding only the seats with the
+   question's expected items, read whole. `expectedSeatOnly` reports those
+   seats and that answer by shape and flags (or `failed`). Right alone but
+   wrong in the full pack means the other seats distract it; wrong alone means
+   it misreads that document as extracted. It follows
+   `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   The value-token flag counts an answer token as held by a cited seat when
+   it is in that seat's text, facts, tables or citation fields, including the
+   date of a citation timestamp and each segment of its locator path, since
+   the Analyst sees those in the seat's citation line.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 

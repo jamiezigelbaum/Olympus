@@ -18,6 +18,7 @@ import type {
 } from './corpus.ts';
 import {
   applyPerCorpusResultBudget,
+  RESERVED_LEADER_MIN_CONCEPT_SHARE,
   withReservedLeaderSeats,
   withReservedRecencySeats,
   assessSourceIndexRetrievalState,
@@ -140,7 +141,21 @@ export interface SourceIndexCorpusSearchResponse {
    * lane audits.
    */
   incomplete?: boolean;
+  /**
+   * Internal: how well this store's best hit answers the question, in terms
+   * that compare across stores. The router orders stores within each turn by
+   * it (#1354). Search routes never return it.
+   */
+  storeRelevance?: SourceIndexStoreRelevance;
   rawExposed: false;
+}
+
+export interface SourceIndexStoreRelevance {
+  // The best hit's share of the question's concepts, 0 to 1.
+  conceptShare: number;
+  // The best vetted cosine minus this store's own relevance bar. Raw cosines
+  // do not compare across models, a margin over each store's bar does.
+  vectorMargin?: number;
 }
 
 /**
@@ -438,7 +453,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const laneAudits: RetrievalLaneAudit[] = [];
   const degradations: RetrievalDegradation[] = [];
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
-  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
+  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[]; relevance?: SourceIndexStoreRelevance }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
   const incompleteCorpora: string[] = [];
   let encounteredSecureLocal = false;
@@ -595,6 +610,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
+      ...(response.storeRelevance ? { relevance: response.storeRelevance } : {}),
       items: response.hits.map((hit) => ({
         ...hit,
         corpusId: corpus.corpusId,
@@ -610,11 +626,12 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
   }
 
-  // Lane declaration order — registry.list() preserves the order the corpora
-  // were registered in, which deliberately interleaves trust domains. It is the
-  // one ordering available here that is neither adapter-scale-derived nor
-  // spelling-derived, so it is what the tie-break falls back on.
-  const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index] as const));
+  // Store order within each turn: how well each store's best hit answers
+  // this question (storeOrderForQuestion), then lane declaration order.
+  // registry.list() preserves the order the corpora were registered in, which
+  // deliberately interleaves trust domains, and it is neither adapter-scale-
+  // derived nor spelling-derived, so it is the last tie-break.
+  const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
     lanes,
     getId: routedHitCandidateId,
@@ -690,6 +707,38 @@ function corpusContributedSecure(
     return true;
   }
   return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
+}
+
+// Below half the question's concepts a store's best keyword hit counts as no
+// keyword match, so one shared common word does not lead a turn (the same
+// floor as the reserved leader seats).
+const STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
+
+/**
+ * Store order within each turn of the pack (#1354). Every store's rank k ties
+ * in the fusion, so this order decides which stores' best hits the pack and a
+ * local Analyst's fitted prompt read first. It was config order for every
+ * question, so on an install with many stores a local answer read the same
+ * few stores whatever was asked. Now: a store whose best hit matches at least
+ * half the question's concepts first, by that share; then a store whose best
+ * hit is a vetted semantic match, by its margin over the store's own bar (a
+ * paraphrase with no word in common); then config order. Order only: which
+ * items may reach which Analyst is decided elsewhere and is unchanged.
+ */
+function storeOrderForQuestion(
+  lanes: ReadonlyArray<{ name: string; relevance?: SourceIndexStoreRelevance }>,
+): ReadonlyMap<string, number> {
+  const keyword = (lane: (typeof lanes)[number]) => {
+    const share = lane.relevance?.conceptShare ?? 0;
+    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
+  };
+  const vector = (lane: (typeof lanes)[number]) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
+  const ordered = lanes
+    .map((lane, index) => ({ lane, index }))
+    .sort((left, right) => (keyword(right.lane) - keyword(left.lane))
+      || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1)
+      || left.index - right.index);
+  return new Map(ordered.map(({ lane }, index) => [lane.name, index] as const));
 }
 
 /**
