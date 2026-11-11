@@ -9,7 +9,7 @@
  */
 import { isDeepStrictEqual } from 'node:util';
 import type { CheckResult } from './report.ts';
-import { compareItems, differingPaths, type StateSnapshot } from './upgrade.ts';
+import { compareItems, differingPaths, itemChange, type StateSnapshot } from './upgrade.ts';
 
 /** Where the leg puts the first machine's backup on the clean machine, for the restore journey. */
 export const RESTORE_BACKUP_PATH = '~/rc/restore/release-check.olympusbackup';
@@ -61,11 +61,17 @@ export function evaluateRestore(before: StateSnapshot, after: StateSnapshot): Ch
   if (before.items && after.items) {
     const moved = compareItems(before.items, after.items);
     const same = moved.missing.length === 0 && moved.added.length === 0 && moved.changed.length === 0;
+    // Each changed item names what changed, and moves still in flight on either side are said, so a move that had not landed
+    // is told apart from a judgment that came back different (#1338 follow-up: one item read differently with no field named).
+    const row = (items: NonNullable<StateSnapshot['items']>, key: string) => items.find((item) => `${item.store}/${item.id}` === key)!;
+    const changed = moved.changed.map((key) => `${key} (${itemChange(row(before.items!, key), row(after.items!, key))})`);
+    const inFlight = [before.movesInFlight ? `${before.movesInFlight} move(s) in flight when the backup was made` : '', after.movesInFlight ? `${after.movesInFlight} move(s) in flight after the restore` : ''].filter(Boolean);
     checks.push(check(
       'restore.stores',
       'The stores came back whole: the same items, in the same tiers, with the same content and judgments',
       same && before.items.length > 0,
-      same ? `${after.items.length} stored item(s) identical (tier, content digest, ledger verdicts)` : `missing ${moved.missing.join(', ') || 'none'}; new ${moved.added.join(', ') || 'none'}; changed ${moved.changed.join(', ') || 'none'}`,
+      (same ? `${after.items.length} stored item(s) identical (tier, content digest, ledger verdicts)` : `missing ${moved.missing.join(', ') || 'none'}; new ${moved.added.join(', ') || 'none'}; changed ${changed.join(', ') || 'none'}`)
+        + (inFlight.length ? `; ${inFlight.join('; ')}` : ''),
     ));
   } else {
     checks.push(check('restore.stores', 'The stores came back whole: the same items, in the same tiers, with the same content and judgments', false, `the stored items could not be read (${before.itemsError ?? after.itemsError ?? 'unknown'})`));
