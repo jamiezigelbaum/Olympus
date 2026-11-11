@@ -41,6 +41,7 @@
 // - Runs only with a sniffer configured (the sniffer service calls it): with
 //   no private lane, recorded decisions stand exactly as before.
 
+import { isSnifferUnionUpgrade } from '../classification/sniffer.ts';
 import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { parentNamesContext } from './parent-context.ts';
 import { storedSignals } from './stored-names.ts';
@@ -347,7 +348,9 @@ export function rejudgeStoredContent(
   const counting: TierSniffer | undefined = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
-      const verdict = options.sniffer!.judge(request);
+      const upgrade = !options.recheck && key && isSnifferUnionUpgrade(record.reasons, key.snifferId);
+      const verdict = options.sniffer!.judge(upgrade
+        ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
       if (verdict.verdict === 'undecided' && verdict.queued !== true) questionNotQueued = true;
       return verdict;
     },

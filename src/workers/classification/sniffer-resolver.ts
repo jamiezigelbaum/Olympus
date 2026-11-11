@@ -772,7 +772,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         const verdict = decisionVerdict ?? verdicts.get(index + 1);
         const key = keyOf(group[0]!.question);
         if (verdict) {
-          const stored = { ...verdict, failSafe: false };
+          const stored = { ...verdict, failSafe: decisionVerdict?.failSafe ?? false };
           group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
           for (const item of group) {
             if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
