@@ -413,7 +413,9 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
         // Amounts the draft states that the evidence it was written from
         // never shows: named to the audit, which keeps one only when the
         // answer computes it from cited values.
-        const unseen = amountsMissingFrom(parsed?.answer ?? '', request.prompt);
+        // The question is left out: repeating a value the question proposes
+        // does not make it evidence.
+        const unseen = amountsMissingFrom(parsed?.answer ?? '', request.prompt.replace(`Question: ${pack.question}`, ''));
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
           prompt: compact
@@ -623,16 +625,12 @@ function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null,
 const AUDIT_DRAFT_HEADING = 'Draft JSON:';
 const AUDIT_UNSEEN_AMOUNTS = 'Amounts in the draft that appear nowhere in the evidence:';
 
-// An amount: digits with a grouping or decimal separator between them, or
-// next to a currency sign ("1,240.50", "12,5", "$312", "€ 80"). Plain counts,
-// seat markers and years are not amounts.
-const AMOUNT_PATTERN = /[€$£¥]\s?\d+(?:[.,']\d+)*|\d+(?:[.,']\d+)+/gu;
-
 // Separator style differs between a draft and its source ("1,240.50" against
 // "1.240,50"), so an amount is compared by value: its whole digits, then its
 // fraction without padding zeros ("12.50" and "12.5" are one amount; "800"
 // and "8" are not). A last separator before exactly three digits may group
 // thousands or mark decimals ("1,240"), so such an amount has both readings.
+// Written number shapes only: no question semantics.
 function amountReadings(amount: string): string[] {
   const number = amount.replace(/[^\d.,' ]/gu, '').trim();
   const parts = number.split(/[.,' ]/u).filter(Boolean);
@@ -650,22 +648,34 @@ function amountReadings(amount: string): string[] {
   return last.length === 3 ? [grouped, decimal] : [decimal];
 }
 
-/** The draft's amounts whose value the evidence text never shows as an amount or a number. */
+/**
+ * The draft's amounts whose value the evidence text never shows as an amount
+ * or a number. An amount is digits with a grouping or decimal separator
+ * between them, or next to a currency sign ("1,240.50", "12,5", "1 240,50",
+ * "$312"); plain counts, seat markers and years are not amounts. On both sides
+ * a space groups thousands only before exactly three digits, and such a number
+ * is read whole ("1 240,50" is 1240.50, never 240.50). Its space-separated
+ * whole-number chunks also count as evidence numbers, so "2024 100" still
+ * shows 2024. Written number shapes only: no question semantics.
+ */
 export function amountsMissingFrom(answer: string, evidence: string): string[] {
   const seen = new Set<string>();
-  // A space groups thousands only before exactly three digits ("1 240,50");
-  // such a number is read whole, never as its fragments.
   for (const match of evidence.matchAll(/\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
     for (const reading of amountReadings(match[0])) seen.add(reading);
+    const chunks = match[0].split(' ');
+    if (chunks.length > 1) {
+      for (const chunk of chunks) if (/^\d+$/u.test(chunk)) seen.add(amountReadings(chunk)[0]!);
+    }
   }
   const missing: string[] = [];
-  for (const match of answer.matchAll(AMOUNT_PATTERN)) {
+  for (const match of answer.matchAll(/[€$£¥]\s?\d+(?:[.,']\d+| \d{3}(?!\d))*|\d+(?:[.,']\d+| \d{3}(?!\d))*[.,']\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
     const amount = match[0].trim();
     const readings = amountReadings(amount);
     if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount)) missing.push(amount);
   }
   return missing;
 }
+
 const AUDIT_EVIDENCE_HEADING = 'Audit evidence:';
 
 /**

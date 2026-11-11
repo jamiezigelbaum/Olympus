@@ -9,8 +9,9 @@ import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 
 const NOTE = 'Amounts in the draft that appear nowhere in the evidence:';
 
-async function auditPrompt(draftAnswer: string, evidenceFormat: 'full' | 'compact', seatText?: string): Promise<string> {
+async function auditPrompt(draftAnswer: string, evidenceFormat: 'full' | 'compact', seatText?: string, question?: string): Promise<string> {
   const { pack } = analystPromptFixture();
+  if (question) pack.question = question;
   pack.candidates = pack.candidates.slice(0, 2).map((candidate, index) =>
     index === 0 && seatText ? { ...candidate, chunks: [seatText] } : candidate);
   const calls: AnalystModelRequest[] = [];
@@ -33,6 +34,11 @@ for (const format of ['full', 'compact'] as const) {
   test(`${format}: an amount the evidence holds, in another separator style, is not named`, async () => {
     const prompt = await auditPrompt('The invoice total was 1,240.50 EUR [1].', format, 'Invoice total 1.240,50 EUR, paid in May.');
     expect(prompt).not.toContain(NOTE);
+  });
+
+  test(`${format}: an amount the question proposes is still named when no seat holds it`, async () => {
+    const prompt = await auditPrompt('The invoice total was €1,240.50 [1].', format, 'Invoice total 980.00 EUR, paid in May.', 'Was the invoice €1,240.50?');
+    expect(prompt.split('\n').find((line) => line.startsWith(NOTE))).toContain('€1,240.50');
   });
 
   test(`${format}: a draft without amounts, or with only seat markers and plain counts, adds no note`, async () => {
@@ -63,4 +69,12 @@ test('a space-grouped number in the evidence is one value, not its fragments', a
   expect(amountsMissingFrom('Paid €240.50', 'Paid 1 240,50 EUR')).toEqual(['€240.50']);
   expect(amountsMissingFrom('Paid €1,240.50', 'Paid 1 240,50 EUR')).toEqual([]);
   expect(amountsMissingFrom('Pages 12.5', 'pages 12 5')).toEqual(['12.5']);
+});
+
+test('a space-grouped amount in the draft is one value, and a space-grouped evidence number still shows its leading whole number', async () => {
+  const { amountsMissingFrom } = await import('../src/core/analyst.ts');
+  expect(amountsMissingFrom('Paid €1 240.50', 'Paid 1240.50 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Paid 1 240,50 EUR', 'Paid 1240.50 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Paid €1 240.50', 'Paid 240.50 EUR')).toEqual(['€1 240.50']);
+  expect(amountsMissingFrom('Spent €2024', 'In 2024 100 items')).toEqual([]);
 });

@@ -73457,7 +73457,7 @@ function createAnalyst(model, createOptions = {}) {
       const completion = await model.complete(request);
       let parsed = parseAnalystModelOutput(completion.text);
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
-        const unseen = amountsMissingFrom(parsed?.answer ?? "", request.prompt);
+        const unseen = amountsMissingFrom(parsed?.answer ?? "", request.prompt.replace(`Question: ${pack.question}`, ""));
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
           prompt: compact ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack), unseen) : buildAnalystAuditPrompt(pack, parsed, localOnly, undefined, unseen),
@@ -73635,9 +73635,15 @@ function amountsMissingFrom(answer, evidence) {
   for (const match of evidence.matchAll(/\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
     for (const reading of amountReadings(match[0]))
       seen.add(reading);
+    const chunks = match[0].split(" ");
+    if (chunks.length > 1) {
+      for (const chunk of chunks)
+        if (/^\d+$/u.test(chunk))
+          seen.add(amountReadings(chunk)[0]);
+    }
   }
   const missing = [];
-  for (const match of answer.matchAll(AMOUNT_PATTERN)) {
+  for (const match of answer.matchAll(/[€$£¥]\s?\d+(?:[.,']\d+| \d{3}(?!\d))*|\d+(?:[.,']\d+| \d{3}(?!\d))*[.,']\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
     const amount = match[0].trim();
     const readings = amountReadings(amount);
     if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount))
@@ -74180,7 +74186,7 @@ function coerceCitation(value) {
 function stripCodeFences2(text2) {
   return text2.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_UNSEEN_AMOUNTS = "Amounts in the draft that appear nowhere in the evidence:", AMOUNT_PATTERN, AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_UNSEEN_AMOUNTS = "Amounts in the draft that appear nowhere in the evidence:", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -74258,7 +74264,6 @@ var init_analyst = __esm(() => {
   analystEvidenceFormats = new WeakMap;
   packPromptBudgets = new WeakMap;
   promptEncoder = new TextEncoder;
-  AMOUNT_PATTERN = /[€$£¥]\s?\d+(?:[.,']\d+)*|\d+(?:[.,']\d+)+/gu;
   ANALYST_EVIDENCE_SCAFFOLDING_LABELS = [
     "trust: public_safe/",
     "trust: internal/",

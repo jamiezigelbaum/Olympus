@@ -360,6 +360,10 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
     'clampAnswer',
     'compactSourceText',
     'stripCodeFences',
+    // Reads written number shapes (digits, separators, a currency sign) to
+    // compare a draft's amounts by value with its evidence; no question semantics.
+    'amountReadings',
+    'amountsMissingFrom',
   ])],
   ['src/core/evidence-pack.ts', new Set([
     'hasTemporalIntent',
