@@ -41,7 +41,7 @@ import type { OAuthFetch } from '../src/core/connect.ts';
 import {
   createEmailSourceWorker,
   dashboardSourceSyncNotSupportedError,
-} from '../src/workers/email-source/index.ts';
+} from '../src/workers/engine/index.ts';
 import { DASHBOARD_READINESS_LEDGER_MAX_AGE_MS } from '../src/workers/source-index/status.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
@@ -2135,7 +2135,7 @@ describe('multi-source source dashboard', () => {
   // reached without booting main(), so the hook's refusal is pinned here.
   test('the product server dashboard sync hook declines unserved sources with the typed 501, not a bare Error', () => {
     const server = readFileSync(
-      join(import.meta.dir, '..', 'src/workers/email-source/server.ts'),
+      join(import.meta.dir, '..', 'src/workers/engine/server.ts'),
       'utf8',
     );
     const hookStart = server.indexOf('triggerSourceSync: async (request) => {');

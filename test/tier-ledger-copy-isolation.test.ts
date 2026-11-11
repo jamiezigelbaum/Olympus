@@ -9,7 +9,7 @@ import { TierLedger, TIER_LEDGER_SCHEMA_VERSION, TIER_LEDGER_SQLITE_STORE_ID } f
 import { findTierSetLedger } from '../src/workers/classification/tier-set-binding.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
-import { workerTierLedgerProblem } from '../src/workers/email-source/server.ts';
+import { workerTierLedgerProblem } from '../src/workers/engine/server.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, openTierFixture, storePaths, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -75,6 +75,19 @@ describe('tier ledger copy isolation (#1398)', () => {
     expect(() => new TierLedger({ dbPath: w.ledgerB, readOnly: true })).toThrow(/writer must migrate/);
     expect([hash(w.ledgerB), hash(w.copyPaths.secure_local)]).toEqual(before);
     expect(version(w.ledgerB)).toBe(TIER_LEDGER_SCHEMA_VERSION - 1);
+  });
+
+  test('a bound Personal store\'s former per-leg ledger never holds the front back', async () => {
+    const w = await world();
+    // An upgraded install keeps the Personal store's old ledger beside it; the set ledger governs the store.
+    const former = tieredStoreSetLedgerPath(w.copyPaths.internal);
+    new TierLedger({ dbPath: former }).close();
+    version(former, TIER_LEDGER_SCHEMA_VERSION - 1);
+    expect(findTierSetLedger(w.copyPaths.internal, JSON.parse((new Database(w.copyPaths.internal, { readonly: true }).query(`SELECT cursor FROM sync_runs WHERE connector_id = 'tiered_store_set_binding'`).get() as { cursor: string }).cursor))).toBe(w.ledgerB);
+    expect(workerTierLedgerProblem(Object.values(w.copyPaths), true)).toBeUndefined();
+    // The set ledger itself still decides.
+    version(w.ledgerB, TIER_LEDGER_SCHEMA_VERSION - 1);
+    expect(workerTierLedgerProblem(Object.values(w.copyPaths), true)).toMatch(/writer must migrate/);
   });
 
   test('a downgrade is nonfatal at the worker mount boundary and opens no writable tier data', async () => {

@@ -52,7 +52,7 @@ import { PrivateQuestionJobs, type PrivateQuestionAskInput } from '../src/worker
 import { ChatGptSurfaceError } from '../src/workers/chatgpt/response-builder.ts';
 import { NO_SECRET_LOCATIONS } from '../src/workers/chatgpt/scope-privacy.ts';
 import type { ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 

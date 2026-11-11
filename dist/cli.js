@@ -38599,6 +38599,14 @@ function createConnectorStoreSenderIndexes(db) {
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
   `);
+  createConnectorStorePeopleIndex(db);
+}
+function createConnectorStorePeopleIndex(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll("i.", "")};
+  `);
 }
 function createConnectorStoreEmbeddingModelsTable(db) {
   db.exec(`
@@ -38919,7 +38927,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_main_thread_sql_trace();
   init_store_write_guard();
@@ -39142,6 +39150,7 @@ var init_local_index = __esm(() => {
           createConnectorStoreMediaJudgments(this.db);
           createConnectorStoreItemTextVersions(this.db);
           createConnectorStoreVisibilityTables(this.db);
+          createConnectorStorePeopleIndex(this.db);
           validateConnectorStoreSchema(this.db);
         }
         if (options.readOnly !== true)
@@ -41278,18 +41287,42 @@ var init_local_index = __esm(() => {
     }
     peopleObservations() {
       const tierHidden = this.tierHiddenItemPks();
-      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-      const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
+      return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+    }
+    async peopleObservationsOffThread() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.peopleObservations();
+      for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+        const marker = this.peopleVisibilityMarker();
+        const tierHidden = await this.tierHiddenItemPksInTurns();
+        const steps = this.peopleObservationSteps(tierHidden);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await readOnPool(this.dbPath, step.value));
+        if (this.peopleVisibilityMarker() === marker)
+          return this.peopleObservationsFromRows(step.value);
+      }
+      return this.peopleObservations();
+    }
+    *peopleObservationSteps(tierHidden) {
+      return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);
+    }
+    peopleObservationRead(excludedItemPks) {
+      return {
+        mode: "all",
+        sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+        params: [JSON.stringify(excludedItemPks)]
+      };
+    }
+    peopleObservationsFromRows(rows) {
       const bySender = new Map;
       for (const row of rows) {
         const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;
@@ -42962,6 +42995,9 @@ var init_local_index = __esm(() => {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+      const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
       this.db.transaction(() => {
         for (const record of records) {
           const sender = normalizeSenderMetadata(record);
@@ -42994,8 +43030,12 @@ var init_local_index = __esm(() => {
             continue;
           }
           update.run(senderId, senderLabel, senderIsOwner, row.item_pk);
+          noteChange.run(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
           counts.itemsRepaired += 1;
           outputDigest.update(JSON.stringify({ identity: digestIdentity, status: "repaired" }));
+        }
+        if (counts.itemsRepaired > 0) {
+          this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
         }
       })();
       return {
@@ -50326,16 +50366,14 @@ class LocalPeopleIndex {
     }
   }
 }
-function refreshPeopleIndex(index, stores) {
-  const observations = [];
-  for (const store of stores) {
-    if (!PEOPLE_AUTHORED_FAMILIES.has(store.family))
-      continue;
-    try {
-      observations.push(...store.peopleObservations());
-    } catch {}
-  }
-  const people = index.rebuild(observations);
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
   const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
   for (const store of stores)
     store.setPeopleNames?.(resolver);
@@ -50348,29 +50386,70 @@ class PeopleIndexRefresher {
   lastFingerprint;
   lastRefreshAt;
   now;
+  observed = new Map;
+  inFlight;
   constructor(index, stores, options = {}) {
     this.index = index;
     this.stores = stores;
     this.now = options.now ?? (() => Date.now());
   }
   refresh() {
-    const stores = this.stores();
-    this.lastFingerprint = refreshFingerprint(stores);
-    this.lastRefreshAt = this.now();
-    return refreshPeopleIndex(this.index, stores);
+    return this.rebuildOnce(true);
   }
-  refreshIfChanged() {
-    const fingerprint = refreshFingerprint(this.stores());
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
     if (fingerprint === this.lastFingerprint)
       return false;
     if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
       return false;
-    this.refresh();
+    await this.rebuildOnce(false);
     return true;
   }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
+    }
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
+  }
 }
-function refreshFingerprint(stores) {
-  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+function fingerprintParts(stores) {
+  return stores.map((store) => {
     let sync = "";
     let visibility = "";
     try {
@@ -50382,10 +50461,10 @@ function refreshFingerprint(stores) {
     try {
       visibility = store.peopleVisibilityMarker?.() ?? "";
     } catch {
-      visibility = "unreadable";
+      return `${sync}${UNREADABLE_VISIBILITY}`;
     }
     return `${sync}#${visibility}`;
-  }).join("|");
+  });
 }
 function forgetPeopleIndexRows(dbPath, scope, options = {}) {
   if (!existsSync38(dbPath) || scope.corpusIds.length === 0)
@@ -50431,7 +50510,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
     closeSqliteStore(db);
   }
 }
-var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000;
+var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -78232,8 +78311,7 @@ async function searchPrivateEvidence(input) {
     };
     const translation = { missing: false };
     let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
-    if (matches.length === 0 && !secretMatch && translation.missing)
-      matches = await build(lanes.adapters);
+    const lowered = [];
     const selectedItems = [];
     for (const item of input.originalMatches ?? []) {
       const provenance = item.provenance;
@@ -78264,8 +78342,11 @@ async function searchPrivateEvidence(input) {
         evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET
       }));
       assertEvidencePackModelEligible(detail.pack);
-      matches.push(...detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => (candidate.trustDomain === "internal" || candidate.trustDomain === "public_safe") && candidate.corpusId !== "" && candidate.chunks.length > 0));
+      lowered.push(...detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => (candidate.trustDomain === "internal" || candidate.trustDomain === "public_safe") && candidate.corpusId !== "" && candidate.chunks.length > 0));
     }
+    if (matches.length === 0 && lowered.length === 0 && !secretMatch && translation.missing)
+      matches = await build(lanes.adapters);
+    matches.push(...lowered);
     if (matches.length === 0)
       return { matched: secretMatch ? 1 : 0, candidates: [], ...secretMatch ? { secretMatch: true } : {} };
     const neighbours = matches.some((candidate) => candidate.trustDomain === "secure_local") ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches)) : [];
@@ -81901,6 +81982,132 @@ function isBoundedSourceCheckpoint(value) {
 }
 var SOURCE_CHECKPOINT_MAX_LENGTH = 32768;
 
+// src/core/file-mime.ts
+function fileMimeTypeFromName(name) {
+  const dot2 = name.lastIndexOf(".");
+  if (dot2 <= 0 || dot2 === name.length - 1)
+    return "application/octet-stream";
+  const extension = name.slice(dot2 + 1).toLowerCase();
+  if (Object.hasOwn(MIME_BY_EXTENSION, extension))
+    return MIME_BY_EXTENSION[extension];
+  return SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream";
+}
+function fileMimeTypeFromBytes(bytes) {
+  const image = stillImageFormatFromBytes(bytes);
+  if (image)
+    return stillImageMimeTypes(image)[0];
+  if (asciiAt(bytes, 0, 5) === "%PDF-")
+    return "application/pdf";
+  if (asciiAt(bytes, 0, 3) === "ID3" || bytes.length >= 2 && bytes[0] === 255 && (bytes[1] & 224) === 224)
+    return "audio/mpeg";
+  if (asciiAt(bytes, 0, 4) === "RIFF" && asciiAt(bytes, 8, 4) === "WAVE")
+    return "audio/wav";
+  if (asciiAt(bytes, 0, 4) === "OggS")
+    return "audio/ogg";
+  if (asciiAt(bytes, 0, 4) === "fLaC")
+    return "audio/flac";
+  if (asciiAt(bytes, 4, 4) === "ftyp") {
+    const brand = asciiAt(bytes, 8, 4);
+    if (brand === "M4A " || brand === "M4B ")
+      return "audio/mp4";
+    if (brand === "qt  ")
+      return "video/quicktime";
+    return "video/mp4";
+  }
+  return;
+}
+var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS, asciiAt = (bytes, start, length) => bytes.length >= start + length ? String.fromCharCode(...bytes.subarray(start, start + length)) : "";
+var init_file_mime = __esm(() => {
+  init_still_image_formats();
+  MIME_BY_EXTENSION = Object.freeze({
+    pdf: "application/pdf",
+    txt: "text/plain",
+    text: "text/plain",
+    md: "text/plain",
+    markdown: "text/plain",
+    log: "text/plain",
+    rst: "text/plain",
+    org: "text/plain",
+    tex: "text/plain",
+    srt: "text/plain",
+    vtt: "text/plain",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    yaml: "text/plain",
+    yml: "text/plain",
+    toml: "text/plain",
+    xml: "application/xml",
+    html: "text/html",
+    htm: "text/html",
+    rtf: "application/rtf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    heif: "image/heif",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    avi: "video/x-msvideo",
+    mpg: "video/mpeg",
+    mpeg: "video/mpeg",
+    "3gp": "video/3gpp"
+  });
+  SOURCE_CODE_EXTENSIONS = new Set([
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "css",
+    "scss",
+    "lua",
+    "pl",
+    "r",
+    "scala",
+    "ini",
+    "cfg",
+    "conf",
+    "env"
+  ]);
+});
+
 // src/workers/dropbox-files/provider-client.ts
 function isDropboxCursorResetError(error) {
   return dropboxErrorKind(error) === "dropbox_cursor_reset";
@@ -82069,42 +82276,6 @@ class DropboxApiContentDownloadClient {
       size_bytes: declaredSize ?? bytes.byteLength
     };
   }
-}
-function dropboxMimeTypeFromName(name) {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".pdf"))
-    return "application/pdf";
-  if (lower.endsWith(".txt") || lower.endsWith(".md"))
-    return "text/plain";
-  if (lower.endsWith(".csv"))
-    return "text/csv";
-  if (lower.endsWith(".json"))
-    return "application/json";
-  if (lower.endsWith(".html") || lower.endsWith(".htm"))
-    return "text/html";
-  if (lower.endsWith(".docx"))
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (lower.endsWith(".xlsx"))
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (lower.endsWith(".pptx"))
-    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg"))
-    return "image/jpeg";
-  if (lower.endsWith(".png"))
-    return "image/png";
-  if (lower.endsWith(".gif"))
-    return "image/gif";
-  if (lower.endsWith(".webp"))
-    return "image/webp";
-  if (lower.endsWith(".heic"))
-    return "image/heic";
-  if (lower.endsWith(".heif"))
-    return "image/heif";
-  if (lower.endsWith(".tif") || lower.endsWith(".tiff"))
-    return "image/tiff";
-  if (lower.endsWith(".bmp"))
-    return "image/bmp";
-  return;
 }
 function metadataPageFromDropboxJson(payload2) {
   if (!Array.isArray(payload2.entries)) {
@@ -82614,7 +82785,7 @@ function rawItemFromDropboxEntry(entry, account, fetchedAt, deletedItemIdentityR
   return rawItemFromFileEntry(entry, account, fetchedAt);
 }
 function rawItemFromFileEntry(entry, account, fetchedAt) {
-  const mimeType = entry.mimeType ?? dropboxMimeTypeFromName(entry.name) ?? UNKNOWN_MIME_TYPE;
+  const mimeType = entry.mimeType ?? fileMimeTypeFromName(entry.name);
   return {
     identity: {
       family: "file",
@@ -82826,6 +82997,7 @@ function nowIso2() {
 var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50000, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
 var init_connector3 = __esm(() => {
   init_credential_broker();
+  init_file_mime();
   init_provider_client();
 });
 
@@ -93868,6 +94040,10 @@ function resolveExtractionMimeType(refMimeType, fetchedMimeType) {
     return enqueued;
   return normalizeMimeType2(fetchedMimeType) ?? enqueued;
 }
+function isGenericMimeType(mimeType) {
+  const normalized = normalizeMimeType2(mimeType);
+  return normalized === undefined || GENERIC_MIME_TYPES.has(normalized);
+}
 function hasPdfSignature(bytes) {
   return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 && bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
 }
@@ -93919,6 +94095,277 @@ var init_bounded_text = __esm(() => {
     "application/octet-stream",
     "binary/octet-stream",
     "application/binary"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/rtf.ts
+function hasRtfSignature(bytes) {
+  return bytes.length >= 5 && bytes[0] === 123 && bytes[1] === 92 && bytes[2] === 114 && bytes[3] === 116 && bytes[4] === 102;
+}
+function rtfSourceFromBytes(bytes) {
+  let source = "";
+  for (let start = 0;start < bytes.length; start += 8192) {
+    source += String.fromCharCode(...bytes.subarray(start, start + 8192));
+  }
+  return source;
+}
+function rtfToText(source, maxChars) {
+  const out = [];
+  let length = 0;
+  let truncated = false;
+  const emit = (text3) => {
+    const room = maxChars - length;
+    const piece = text3.length > room ? text3.slice(0, room) : text3;
+    if (piece.length < text3.length && text3.slice(piece.length).trim() !== "")
+      truncated = true;
+    if (piece.length === 0)
+      return;
+    out.push(piece);
+    length += piece.length;
+  };
+  let codePage = 1252;
+  const stack = [];
+  let state = { skip: false, unicodeSkip: 1 };
+  let pendingSkip = 0;
+  let groupStart = false;
+  const hexBytes = [];
+  const pushByte = (byte) => {
+    hexBytes.push(byte);
+    if (hexBytes.length >= (maxChars - length) * 4 + 4)
+      flushHex();
+  };
+  const flushHex = () => {
+    if (hexBytes.length === 0)
+      return;
+    if (!state.skip)
+      emit(decodeCodePage(Uint8Array.from(hexBytes), codePage));
+    hexBytes.length = 0;
+  };
+  let index = 0;
+  while (index < source.length && !truncated) {
+    const char = source[index];
+    if (char === "{") {
+      flushHex();
+      stack.push(state);
+      state = { ...state };
+      groupStart = true;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "}") {
+      flushHex();
+      state = stack.pop() ?? { skip: false, unicodeSkip: 1 };
+      groupStart = false;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "\\") {
+      const next = source[index + 1];
+      if (next === undefined)
+        break;
+      if (next === "'") {
+        const hex = source.slice(index + 2, index + 4);
+        index += 4;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        const value2 = Number.parseInt(hex, 16);
+        if (Number.isFinite(value2))
+          pushByte(value2);
+        groupStart = false;
+        continue;
+      }
+      flushHex();
+      if (next === "*") {
+        if (groupStart)
+          state.skip = true;
+        index += 2;
+        continue;
+      }
+      if (!isLetter(next)) {
+        index += 2;
+        groupStart = false;
+        const symbol = next === "\\" || next === "{" || next === "}" ? next : next === "~" ? " " : next === "_" ? "-" : next === `
+` || next === "\r" ? `
+` : undefined;
+        if (symbol === undefined)
+          continue;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        if (!state.skip)
+          emit(symbol);
+        continue;
+      }
+      let end = index + 1;
+      while (end < source.length && end - index <= 32 && isLetter(source[end]))
+        end += 1;
+      const word = source.slice(index + 1, end);
+      index = end;
+      let digitsEnd = source[index] === "-" ? index + 1 : index;
+      while (digitsEnd < source.length && digitsEnd - index < 11 && isDigit(source[digitsEnd]))
+        digitsEnd += 1;
+      const parameter = digitsEnd > index && isDigit(source[digitsEnd - 1]) ? source.slice(index, digitsEnd) : undefined;
+      if (parameter !== undefined)
+        index = digitsEnd;
+      if (source[index] === " ")
+        index += 1;
+      const value = parameter === undefined ? undefined : Number(parameter);
+      const atStart = groupStart;
+      groupStart = false;
+      if (atStart && SKIPPED_DESTINATIONS.has(word)) {
+        state.skip = true;
+        continue;
+      }
+      if (word === "ansicpg" && value !== undefined) {
+        codePage = value;
+        continue;
+      }
+      if (word === "uc" && value !== undefined) {
+        state.unicodeSkip = Math.max(0, value);
+        continue;
+      }
+      if (word === "u" && value !== undefined) {
+        if (!state.skip)
+          emit(String.fromCharCode(value < 0 ? value + 65536 : value));
+        pendingSkip = state.unicodeSkip;
+        continue;
+      }
+      if (word === "bin" && value !== undefined) {
+        index += Math.max(0, value);
+        continue;
+      }
+      if (!state.skip && BREAKS[word] !== undefined)
+        emit(BREAKS[word]);
+      continue;
+    }
+    if (char === "\r" || char === `
+`) {
+      index += 1;
+      continue;
+    }
+    groupStart = false;
+    index += 1;
+    if (pendingSkip > 0) {
+      pendingSkip -= 1;
+      continue;
+    }
+    if (char.charCodeAt(0) > 127) {
+      pushByte(char.charCodeAt(0));
+      continue;
+    }
+    flushHex();
+    if (!state.skip)
+      emit(char);
+  }
+  flushHex();
+  return { text: out.join(""), truncated };
+}
+function isLetter(char) {
+  const code = char.charCodeAt(0);
+  return code >= 65 && code <= 90 || code >= 97 && code <= 122;
+}
+function isDigit(char) {
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+function decodeCodePage(bytes, codePage) {
+  const label = CODE_PAGE_LABELS.get(codePage);
+  if (label) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {}
+  }
+  let text3 = "";
+  for (const byte of bytes)
+    text3 += byte < 128 ? String.fromCharCode(byte) : "�";
+  return text3;
+}
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  BREAKS = {
+    par: `
+`,
+    line: `
+`,
+    sect: `
+`,
+    page: `
+`,
+    row: `
+`,
+    tab: "\t",
+    cell: "\t",
+    emdash: "—",
+    endash: "–",
+    bullet: "•",
+    lquote: "‘",
+    rquote: "’",
+    ldblquote: "“",
+    rdblquote: "”",
+    emspace: " ",
+    enspace: " ",
+    qmspace: " "
+  };
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
   ]);
 });
 
@@ -94969,6 +95416,26 @@ function createTextExtractor(options = {}) {
           ]
         });
       }
+      if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
+        if (!hasRtfSignature(bytes))
+          return { status: "skipped_unsupported" };
+        const plain = rtfToText(rtfSourceFromBytes(bytes), maxBoundedTextChars);
+        const read = boundText(normalizeExtractedText(plain.text), maxBoundedTextChars);
+        const bounded2 = plain.truncated && !read.truncated ? {
+          ...read,
+          truncated: true,
+          truncationReason: BOUNDED_TEXT_TRUNCATION_REASON,
+          warnings: [BOUNDED_TEXT_TRUNCATED_WARNING]
+        } : read;
+        if (!bounded2.text)
+          return { status: "empty_output" };
+        return {
+          status: "indexed",
+          text: bounded2.text,
+          derivations: [buildDerivation({ artifact: "text", structural: { kind: "whole_file" }, bounded: bounded2 })],
+          ...bounded2.warnings.length > 0 ? { warnings: [...bounded2.warnings] } : {}
+        };
+      }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
         return { status: "skipped_unsupported" };
       }
@@ -95032,7 +95499,7 @@ function textLaneAccepts(mimeType) {
   const normalized = normalizeMimeType2(mimeType);
   if (!normalized)
     return false;
-  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized);
+  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized) || RTF_MIME_TYPES.has(normalized);
 }
 function missingBytesFailure() {
   return { status: "failed_terminal", errorKind: "extractor_input_missing_bytes" };
@@ -95448,6 +95915,7 @@ function extractDelimitedText(input) {
 }
 var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image", OCR_FAILED_IMAGE_WARNING = "ocr_failed_image";
 var init_text = __esm(() => {
+  init_rtf();
   init_bounded_text();
   init_command_runner();
   init_document_formats();
@@ -100009,8 +100477,9 @@ function createFileExtractionRunner(options) {
       const refuse2 = (reason, count) => {
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
-      for (const ref of page2.candidates) {
+      for (const candidate of page2.candidates) {
         await ingestionTurn();
+        const ref = withMediaTypeFromName(candidate);
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
@@ -100781,6 +101250,12 @@ function refusesImageContent(corpus, ref) {
     return false;
   }
 }
+function withMediaTypeFromName(ref) {
+  if (!ref.name || !isGenericMimeType(ref.mimeType))
+    return ref;
+  const named = fileMimeTypeFromName(ref.name);
+  return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
+}
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_control_path_headroom();
@@ -100792,6 +101267,7 @@ var init_runner = __esm(() => {
   init_command_runner();
   init_tier_classifier();
   init_bounded_text();
+  init_file_mime();
   init_job_store();
   init_secret_scan_off_thread();
   init_store_sink();
@@ -182962,130 +183438,6 @@ var init_session = __esm(() => {
   PERMISSION_TEXT = /permission denied|insufficient[_ ]scope|wasn't granted|was not granted|\bforbidden\b/i;
 });
 
-// src/core/file-mime.ts
-function fileMimeTypeFromName(name) {
-  const dot3 = name.lastIndexOf(".");
-  if (dot3 <= 0 || dot3 === name.length - 1)
-    return "application/octet-stream";
-  const extension = name.slice(dot3 + 1).toLowerCase();
-  return MIME_BY_EXTENSION[extension] ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream");
-}
-function fileMimeTypeFromBytes(bytes) {
-  const image = stillImageFormatFromBytes(bytes);
-  if (image)
-    return stillImageMimeTypes(image)[0];
-  if (asciiAt(bytes, 0, 5) === "%PDF-")
-    return "application/pdf";
-  if (asciiAt(bytes, 0, 3) === "ID3" || bytes.length >= 2 && bytes[0] === 255 && (bytes[1] & 224) === 224)
-    return "audio/mpeg";
-  if (asciiAt(bytes, 0, 4) === "RIFF" && asciiAt(bytes, 8, 4) === "WAVE")
-    return "audio/wav";
-  if (asciiAt(bytes, 0, 4) === "OggS")
-    return "audio/ogg";
-  if (asciiAt(bytes, 0, 4) === "fLaC")
-    return "audio/flac";
-  if (asciiAt(bytes, 4, 4) === "ftyp") {
-    const brand = asciiAt(bytes, 8, 4);
-    if (brand === "M4A " || brand === "M4B ")
-      return "audio/mp4";
-    if (brand === "qt  ")
-      return "video/quicktime";
-    return "video/mp4";
-  }
-  return;
-}
-var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS, asciiAt = (bytes, start, length) => bytes.length >= start + length ? String.fromCharCode(...bytes.subarray(start, start + length)) : "";
-var init_file_mime = __esm(() => {
-  init_still_image_formats();
-  MIME_BY_EXTENSION = Object.freeze({
-    pdf: "application/pdf",
-    txt: "text/plain",
-    text: "text/plain",
-    md: "text/plain",
-    markdown: "text/plain",
-    log: "text/plain",
-    rst: "text/plain",
-    org: "text/plain",
-    tex: "text/plain",
-    srt: "text/plain",
-    vtt: "text/plain",
-    csv: "text/csv",
-    tsv: "text/tab-separated-values",
-    json: "application/json",
-    yaml: "text/plain",
-    yml: "text/plain",
-    toml: "text/plain",
-    xml: "application/xml",
-    html: "text/html",
-    htm: "text/html",
-    rtf: "application/rtf",
-    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    png: "image/png",
-    gif: "image/gif",
-    webp: "image/webp",
-    heic: "image/heic",
-    heif: "image/heif",
-    tif: "image/tiff",
-    tiff: "image/tiff",
-    bmp: "image/bmp",
-    mp3: "audio/mpeg",
-    m4a: "audio/mp4",
-    wav: "audio/wav",
-    flac: "audio/flac",
-    ogg: "audio/ogg",
-    aac: "audio/aac",
-    mp4: "video/mp4",
-    m4v: "video/x-m4v",
-    mov: "video/quicktime",
-    mkv: "video/x-matroska",
-    webm: "video/webm",
-    avi: "video/x-msvideo",
-    mpg: "video/mpeg",
-    mpeg: "video/mpeg",
-    "3gp": "video/3gpp"
-  });
-  SOURCE_CODE_EXTENSIONS = new Set([
-    "ts",
-    "tsx",
-    "js",
-    "jsx",
-    "mjs",
-    "cjs",
-    "py",
-    "rb",
-    "go",
-    "rs",
-    "java",
-    "kt",
-    "swift",
-    "c",
-    "h",
-    "cc",
-    "cpp",
-    "hpp",
-    "cs",
-    "php",
-    "sh",
-    "bash",
-    "zsh",
-    "sql",
-    "css",
-    "scss",
-    "lua",
-    "pl",
-    "r",
-    "scala",
-    "ini",
-    "cfg",
-    "conf",
-    "env"
-  ]);
-});
-
 // src/workers/archive-import/notes/note.ts
 import { createHash as createHash97 } from "node:crypto";
 function isRecord11(value2) {
@@ -184320,7 +184672,7 @@ var init_live_sync3 = __esm(() => {
   AUTH_KINDS = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
 });
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 import { createHash as createHash99, randomBytes as randomBytes32, timingSafeEqual as timingSafeEqual9 } from "node:crypto";
 import { readFileSync as readFileSync95, statSync as statSync44 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
@@ -189343,7 +189695,7 @@ function mostPrivateTrustDomain(domains) {
   return "public_safe";
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = "/dashboard/settings/proposal/apply", DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = "/dashboard/settings/proposal/discard", DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
-var init_email_source = __esm(() => {
+var init_engine2 = __esm(() => {
   init_judge_spending();
   init_people();
   init_source_failure();
@@ -204570,6 +204922,16 @@ function createArchiveImportDashboard(options) {
           resumeOne(request.request_id);
         } catch {}
       }
+    },
+    frontChanged() {
+      api2.resume();
+      refresh();
+      let removing2 = false;
+      try {
+        removing2 = state.list().some((record8) => record8.status === "removing");
+      } catch {}
+      if (removing2)
+        wakeScheduler();
     },
     idle: () => checks4,
     close() {
@@ -235073,7 +235435,7 @@ var init_private_agent_listeners = __esm(() => {
   init_first_run_privacy_gate();
 });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
   workerTierLedgerProblem: () => workerTierLedgerProblem,
@@ -236299,10 +236661,8 @@ function replaceEmptyAccountsAtBoot(env) {
 }
 function workerTierLedgerProblem(storePaths, readOnly = false) {
   try {
-    for (const path of storePaths) {
+    for (const path of storePaths)
       assertStoreTierLedgerCanOpen(path, readOnly);
-      TierLedger.assertSchemaCanOpen(tieredStoreSetLedgerPath(path), readOnly);
-    }
     return;
   } catch (error2) {
     if (error2 instanceof TierLedgerSchemaError)
@@ -237466,11 +237826,23 @@ ${key2}`;
     }
     if (!peopleRefresher)
       return;
+    const failed = (error2) => {
+      console.warn(`[olympus] people index refresh failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    };
     try {
-      if (force)
-        peopleRefresher.refresh();
-      else
-        peopleRefresher.refreshIfChanged();
+      (force ? peopleRefresher.refresh() : peopleRefresher.refreshIfChanged()).catch(failed);
+    } catch (error2) {
+      failed(error2);
+    }
+  };
+  const relinkPeople = () => {
+    if (!peopleRefresher) {
+      refreshPeople(true);
+      return;
+    }
+    try {
+      if (peopleRefresher.relink() === undefined)
+        refreshPeople(true);
     } catch (error2) {
       console.warn(`[olympus] people index refresh failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
     }
@@ -237479,8 +237851,6 @@ ${key2}`;
   peopleFirstRefresh.unref?.();
   const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
   peopleCheck.unref?.();
-  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
-  peopleRefresh.unref?.();
   const configuredFileExtractionCorpora = parseFileExtractionCorporaEnv(process.env.OLYMPUS_FILE_EXTRACTION_CORPORA_JSON);
   const dropboxExtractionScopes = dropboxPolicyFullExtractionScopeKeys(dropboxIngestionPolicy);
   const selectedGoogleDriveExtractionHandle = () => selectedSourceCredentialHandle({
@@ -237907,12 +238277,20 @@ ${key2}`;
     },
     onStoreOpened: (store) => registerTierLegStore(store, store.corpusId, store.trustDomain === "secure_local" ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null)
   });
+  const mountArchiveLanes = () => {
+    try {
+      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
+        archiveImports.existingLanes();
+      tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID2);
+    } catch (error2) {
+      if (error2 instanceof TierLedgerSchemaError)
+        tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID2, error2.message);
+      throw error2;
+    }
+  };
   try {
-    if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-      archiveImports.existingLanes();
+    mountArchiveLanes();
   } catch (error2) {
-    if (error2 instanceof TierLedgerSchemaError)
-      tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID2, error2.message);
     console.warn(`[archive-import] imported archives are not served this run: ${error2 instanceof Error ? error2.message : "error"}`);
   }
   const evernote = createEvernoteRuntime({
@@ -237946,7 +238324,7 @@ ${key2}`;
     if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID))
       evernote.existingLane();
   } catch (error2) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error2 instanceof Error ? error2.name : "error"}`);
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error2 instanceof Error ? error2.message : "error"}`);
   }
   const archiveExtraction = createArchiveExtractionRuntime({
     runtime: archiveImports,
@@ -238847,10 +239225,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const refreshFrontMounts = () => {
     const reads = [
       () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      () => {
-        if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-          archiveImports.existingLanes();
-      },
+      mountArchiveLanes,
       openTierStoresThatExist
     ];
     for (const read of reads) {
@@ -239380,7 +239755,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return dashboardPanelTools.call(name, args, context3);
           }
         },
-        ...peopleIndex ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) } : {},
+        ...peopleIndex ? { people: createDashboardPeople({ index: peopleIndex, refresh: relinkPeople }) } : {},
         ...sourceAnswerLanes ? {
           privateAnswers: {
             destinations: () => localPrivateAnswers?.destinations() ?? { computer: "not_set_up", venice: "not_set_up" },
@@ -240517,8 +240892,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           return { reloaded: target, ...target === "scope" ? { invalidated_jobs: invalidated } : {} };
         },
         archive_changed: () => {
-          archiveImportDashboard.resume();
-          refreshSchedulerSources();
+          archiveImportDashboard.frontChanged();
           return { resumed: true };
         },
         dashboard_samples: ({ samples }) => {
@@ -241350,7 +241724,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, PEOPLE_INDEX_FIRST_REFRESH_MS = 60000, PEOPLE_INDEX_REFRESH_MS, PEOPLE_INDEX_CHECK_MS = 60000, workerLaunch, dataOwnerLock;
+var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, PEOPLE_INDEX_FIRST_REFRESH_MS = 60000, PEOPLE_INDEX_CHECK_MS = 60000, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_dashboard_people();
   init_people_index();
@@ -241402,7 +241776,7 @@ var init_server5 = __esm(async () => {
   init_venice_client();
   init_openai_compatible_client();
   init_apple_vision_ocr();
-  init_email_source();
+  init_engine2();
   init_analyst_answer();
   init_answer_latency_log();
   init_status();
@@ -241608,7 +241982,6 @@ var init_server5 = __esm(async () => {
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
   ]);
-  PEOPLE_INDEX_REFRESH_MS = 15 * 60000;
   workerLaunch = {};
   if (false) {}
 });

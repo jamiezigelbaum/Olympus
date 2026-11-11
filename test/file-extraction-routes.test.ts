@@ -9,7 +9,7 @@
 // any given deployment.
 
 import { describe, expect, test } from 'bun:test';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { ExtractionLaneKey } from '../src/workers/file-extraction/job-store.ts';
 import type {
   ExtractionPlanRequest,

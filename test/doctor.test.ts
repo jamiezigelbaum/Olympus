@@ -2097,7 +2097,7 @@ describe('runDoctor', () => {
           'dropbox.files',
         ],
         // Only Readwise has a live credential handle, so only its source was
-        // constructed (email-source/server.ts builds each lane's source solely
+        // constructed (engine/server.ts builds each lane's source solely
         // for an active non-reauth handle).
         missing_selected_source_ids: ['google_drive.docs', 'gmail.email', 'dropbox.files'],
         sources: [{ source_id: 'readwise.library', corpus_id: 'internal.readwise.library', tasks: [] }],

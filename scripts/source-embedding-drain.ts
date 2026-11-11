@@ -9,7 +9,7 @@ import { loadConfig, normalizeSourceWorkerBaseUrl } from '../src/core/config.ts'
 import { DataOwnerBusyError, withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { withWorkerAuthHeader, workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
-import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
+import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/engine/server.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import {
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,

@@ -199,6 +199,14 @@ export interface ArchiveImportDashboard {
    */
   resume(): void;
   /**
+   * The engine split's background, told that the front changed a request or
+   * state file: resume its checks, hand the scheduler the tasks, and wake it
+   * when a removal waits. The front's own Remove woke the front's runtime,
+   * which has no scheduler, so without this a removal waited for the import's
+   * next pass (30 minutes by default).
+   */
+  frontChanged(): void;
+  /**
    * Settles when every check started so far has finished (tests, shutdown).
    */
   idle(): Promise<void>;
@@ -1272,6 +1280,18 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           // Left as it is: the next start tries again.
         }
       }
+    },
+
+    frontChanged() {
+      api.resume();
+      refresh();
+      let removing = false;
+      try {
+        removing = state.list().some((record) => record.status === 'removing');
+      } catch {
+        // An unreadable list is reported where it is shown; nothing to wake for.
+      }
+      if (removing) wakeScheduler();
     },
 
     idle: () => checks,

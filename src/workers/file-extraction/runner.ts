@@ -59,7 +59,8 @@ import {
   ExtractionCommandTimeoutError,
 } from './extractors/command-runner.ts';
 import { isImageMediaType } from '../classification/tier-classifier.ts';
-import { resolveExtractionMimeType } from './extractors/bounded-text.ts';
+import { isGenericMimeType, resolveExtractionMimeType } from './extractors/bounded-text.ts';
+import { fileMimeTypeFromName } from '../../core/file-mime.ts';
 import type {
   ExtractionLaneKey,
   ExtractionStatusCount,
@@ -703,8 +704,9 @@ export function createFileExtractionRunner(
       const refuse = (reason: string, count: number): void => {
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
-      for (const ref of page.candidates) {
+      for (const candidate of page.candidates) {
         await ingestionTurn();
+        const ref = withMediaTypeFromName(candidate);
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
@@ -1814,4 +1816,16 @@ function refusesImageContent(corpus: ExtractionRunnerCorpus, ref: ExtractionItem
   } catch {
     return false;
   }
+}
+
+/**
+ * A candidate whose stored type says only "bytes" takes the type its name
+ * gives. Listings that typed files from a short list stored every other name
+ * as bytes (until 2026-11), and an unchanged file is never listed
+ * again, so routing would count those rows unreadable on every pass.
+ */
+function withMediaTypeFromName(ref: ExtractionItemRef): ExtractionItemRef {
+  if (!ref.name || !isGenericMimeType(ref.mimeType)) return ref;
+  const named = fileMimeTypeFromName(ref.name);
+  return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
 }

@@ -33,7 +33,7 @@ import {
   gmailConnectorScopeFromApproval,
   scopeBoundSchedulerSource,
 } from '../src/workers/source-scope-runtime.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';

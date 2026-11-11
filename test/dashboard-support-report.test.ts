@@ -35,7 +35,7 @@ test('the Help route is reachable, and only locally opened controls get a system
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const { createSovereigntyEngine, loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
-  const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
+  const { createEmailSourceWorker } = await import('../src/workers/engine/index.ts');
   const { withWorkerBearerAuth } = await import('../src/workers/http.ts');
   const { recordRequestPeer } = await import('../src/core/request-peer.ts');
   const dir = mkdtempSync(join(tmpdir(), 'support-report-'));

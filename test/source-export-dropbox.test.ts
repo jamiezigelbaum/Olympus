@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DROPBOX_FILES_CORPUS_ID,
   DropboxSourceExportDestinationError,

@@ -2991,9 +2991,10 @@ export async function searchPrivateEvidence(input: {
   // unless nothing matched and the translation could still find something.
   const translation: CachedKeywordExpansion = { missing: false };
   let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
-  if (matches.length === 0 && !secretMatch && translation.missing) matches = await build(lanes.adapters);
   // Rehydrate only original matches in their current lower-tier stores. This
-  // is identity lookup, never a Personal/Public search or cloud query.
+  // is identity lookup, never a Personal/Public search or cloud query. It runs
+  // before the translation retry, so a lowered match never waits behind one.
+  const lowered: PrivateEvidenceCandidate[] = [];
   const selectedItems: SelectedEvidenceItem[] = [];
   for (const item of input.originalMatches ?? []) {
     const provenance = item.provenance as SourceIndexProvenance | undefined;
@@ -3016,11 +3017,13 @@ export async function searchPrivateEvidence(input: {
       evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
     }));
     assertEvidencePackModelEligible(detail.pack);
-    matches.push(...detail.pack.candidates
+    lowered.push(...detail.pack.candidates
       .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
       .filter(candidate => (candidate.trustDomain === 'internal' || candidate.trustDomain === 'public_safe')
         && candidate.corpusId !== '' && candidate.chunks.length > 0));
   }
+  if (matches.length === 0 && lowered.length === 0 && !secretMatch && translation.missing) matches = await build(lanes.adapters);
+  matches.push(...lowered);
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
   if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}) };

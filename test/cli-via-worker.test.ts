@@ -32,7 +32,7 @@ import {
   formatSourceIngestionLedger,
   type SourceIngestionLedgerSnapshot,
 } from '../src/workers/source-ingestion-ledger.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 
 const TOKEN = 'cli-worker-test-token';
 const roots: string[] = [];

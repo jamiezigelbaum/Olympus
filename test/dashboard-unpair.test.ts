@@ -27,7 +27,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   readConnectedHandleRegistry,
   writeConnectedHandleRegistry,

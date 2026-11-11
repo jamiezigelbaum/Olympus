@@ -25,7 +25,7 @@ This document is the contract. The relay page is
 worker side lives in [`src/core/oauth-relay.ts`](../../src/core/oauth-relay.ts)
 (state minting and verification), the publisher client identifiers in
 [`src/core/publisher-oauth-client.ts`](../../src/core/publisher-oauth-client.ts),
-and the routes in `src/workers/email-source/index.ts`. It satisfies
+and the routes in `src/workers/engine/index.ts`. It satisfies
 ["What the worker must verify"](#what-the-worker-must-verify).
 
 ### Which flow a source takes
@@ -116,7 +116,7 @@ rotation is a manual edit of the stored JSON.
 Owner decision 2026-10-13. Code: `googleDesktopClient()` and
 `googleDesktopClientSecret()` in `src/core/publisher-oauth-client.ts`; the
 start route and `dashboardGoogleLoopbackOrigin` in
-`src/workers/email-source/index.ts`; the ChatGPT hand-off in
+`src/workers/engine/index.ts`; the ChatGPT hand-off in
 `src/workers/chatgpt/handoff.ts`; the relay page in
 `connect-relay/server/signin-bridge.ts`; `olympus connect finish` in
 `src/core/oauth-callback-paste.ts`.

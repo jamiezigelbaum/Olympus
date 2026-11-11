@@ -239,6 +239,32 @@ describe('Dropbox SourceConnector (Contract 1)', () => {
     expect(markdown.identity.sourceVersion).toBe('rev-3');
   });
 
+  test('a listed file is typed by the shared name map, and a name it does not know stays bytes', async () => {
+    const file = (id: string, name: string) => ({
+      tag: 'file' as const, id, name, pathDisplay: `/Approved/${name}`, pathLower: `/approved/${name.toLowerCase()}`, rev: `rev-${id}`,
+    });
+    const metadataClient: DropboxMetadataClient = {
+      supportsNativeRecursive: true,
+      async listFolder() {
+        return {
+          entries: [file('a', 'minutes.xml'), file('b', 'settings.yaml'), file('c', 'letter.rtf'), file('d', 'deck.key')],
+          cursor: 'only',
+          hasMore: false,
+        };
+      },
+      async listFolderContinue() {
+        throw new Error('not reached');
+      },
+    };
+    const pages = await drain(connectorWithFakes({ metadataClient }).listItems({ limit: 25 }));
+    expect(pages.flatMap((page) => page.items.map((item) => [item.metadata.name, item.mimeType]))).toEqual([
+      ['minutes.xml', 'application/xml'],
+      ['settings.yaml', 'text/plain'],
+      ['letter.rtf', 'application/rtf'],
+      ['deck.key', 'application/octet-stream'],
+    ]);
+  });
+
   test('listItems resumes from a provided cursor', async () => {
     const calls: string[] = [];
     const connector = connectorWithFakes({ metadataClient: fakeMetadataClient(calls) });

@@ -62,7 +62,7 @@ function storedChunksText(path: string): string {
   }
 }
 
-const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'e2e-worker-token-0123456789abcdef0123456789abcdef';
 

@@ -17252,7 +17252,107 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
+  const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
+  for (const store of stores)
+    store.setPeopleNames?.(resolver);
+  return people;
+}
+
+class PeopleIndexRefresher {
+  index;
+  stores;
+  lastFingerprint;
+  lastRefreshAt;
+  now;
+  observed = new Map;
+  inFlight;
+  constructor(index, stores, options = {}) {
+    this.index = index;
+    this.stores = stores;
+    this.now = options.now ?? (() => Date.now());
+  }
+  refresh() {
+    return this.rebuildOnce(true);
+  }
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
+    if (fingerprint === this.lastFingerprint)
+      return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
+      return false;
+    await this.rebuildOnce(false);
+    return true;
+  }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
+    }
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
+  }
+}
+function fingerprintParts(stores) {
+  return stores.map((store) => {
+    let sync = "";
+    let visibility = "";
+    try {
+      const run = store.lastSyncRun?.();
+      sync = run && run.status === "completed" ? `${run.syncRunId}@${run.completedAt ?? ""}` : "";
+    } catch {
+      sync = "";
+    }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? "";
+    } catch {
+      return `${sync}${UNREADABLE_VISIBILITY}`;
+    }
+    return `${sync}#${visibility}`;
+  });
+}
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -21465,6 +21565,99 @@ var init_x_bookmarks = __esm(() => {
   init_live_control2();
   init_reconcile_state();
 });
+// src/core/file-mime.ts
+var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS;
+var init_file_mime = __esm(() => {
+  init_still_image_formats();
+  MIME_BY_EXTENSION = Object.freeze({
+    pdf: "application/pdf",
+    txt: "text/plain",
+    text: "text/plain",
+    md: "text/plain",
+    markdown: "text/plain",
+    log: "text/plain",
+    rst: "text/plain",
+    org: "text/plain",
+    tex: "text/plain",
+    srt: "text/plain",
+    vtt: "text/plain",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    yaml: "text/plain",
+    yml: "text/plain",
+    toml: "text/plain",
+    xml: "application/xml",
+    html: "text/html",
+    htm: "text/html",
+    rtf: "application/rtf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    heif: "image/heif",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    avi: "video/x-msvideo",
+    mpg: "video/mpeg",
+    mpeg: "video/mpeg",
+    "3gp": "video/3gpp"
+  });
+  SOURCE_CODE_EXTENSIONS = new Set([
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "css",
+    "scss",
+    "lua",
+    "pl",
+    "r",
+    "scala",
+    "ini",
+    "cfg",
+    "conf",
+    "env"
+  ]);
+});
+
 // src/workers/dropbox-files/provider-client.ts
 var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
 var init_provider_client = __esm(() => {
@@ -21475,6 +21668,7 @@ var init_provider_client = __esm(() => {
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {
   init_credential_broker();
+  init_file_mime();
   init_provider_client();
 });
 
@@ -23663,6 +23857,67 @@ var init_bounded_text = __esm(() => {
   ]);
 });
 
+// src/workers/file-extraction/extractors/rtf.ts
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
+});
+
 // src/workers/file-extraction/extractors/document-formats.ts
 var init_document_formats = __esm(() => {
   init_bounded_text();
@@ -23687,6 +23942,7 @@ var init_image_prepare = __esm(() => {
 
 // src/workers/file-extraction/extractors/text.ts
 var init_text = __esm(() => {
+  init_rtf();
   init_bounded_text();
   init_command_runner();
   init_document_formats();
@@ -24262,6 +24518,7 @@ var init_runner = __esm(() => {
   init_command_runner();
   init_tier_classifier();
   init_bounded_text();
+  init_file_mime();
   init_job_store();
   init_secret_scan_off_thread();
   init_store_sink();

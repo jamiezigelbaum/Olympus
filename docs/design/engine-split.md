@@ -271,7 +271,7 @@ either kept front-owned or becomes one command.
 ## Writes the front still needs
 
 From an inventory of the request handlers on main `b649295` (handler
-bodies are in `src/workers/email-source/index.ts`; route sets in
+bodies are in `src/workers/engine/index.ts`; route sets in
 `src/workers/http.ts:600-720`). No request handler calls the sniffer or
 the tier-move code directly, and no answer path writes a verdict or a
 ledger. What the front does write falls into four kinds.
