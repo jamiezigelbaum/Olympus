@@ -96219,12 +96219,13 @@ function decodeWorkbook(bytes) {
   if (!stream)
     throw new OfficeDocumentUnreadableError("damaged", "Workbook stream is missing.");
   const records = [];
+  let dataEnd = stream.length;
+  while (dataEnd > 0 && stream[dataEnd - 1] === 0)
+    dataEnd -= 1;
   let at = 0;
-  while (at + 4 <= stream.length) {
+  while (at + 4 <= stream.length && at < dataEnd) {
     const id = stream.readUInt16LE(at);
     const length = stream.readUInt16LE(at + 2);
-    if (id === 0 && length === 0 && stream.subarray(at).every((byte) => byte === 0))
-      break;
     if (at + 4 + length > stream.length)
       break;
     if (records.length >= 1e6)

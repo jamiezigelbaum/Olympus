@@ -296,6 +296,15 @@ describe('legacy Office', () => {
     });
   });
 
+  test('a long zero run before a stray byte does not rescan the stream', async () => {
+    const started = performance.now();
+    const bytes = Buffer.concat([Buffer.alloc(256 * 1024), Buffer.from([1])]);
+    expect(await extract(compoundFile({ Workbook: bytes }), XLS_MIME_TYPE)).toEqual({
+      status: 'failed_terminal', errorKind: 'office_document_damaged',
+    });
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   test('formula cells keep their cached results', async () => {
     const formula = (row: number, col: number, result: Buffer): Buffer => cell(0x0006, row, col,
       Buffer.concat([result, Buffer.alloc(6), Buffer.from([3, 0, 0x1e, 42, 0])]));

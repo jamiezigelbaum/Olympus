@@ -26,11 +26,13 @@ function decodeWorkbook(bytes: Uint8Array): DocumentSheet[] {
   const stream = file.readStream('Workbook') ?? file.readStream('Book');
   if (!stream) throw new OfficeDocumentUnreadableError('damaged', 'Workbook stream is missing.');
   const records: RecordPart[] = [];
+  // Everything past the last nonzero byte is zero padding; find it once instead of rescanning the tail.
+  let dataEnd = stream.length;
+  while (dataEnd > 0 && stream[dataEnd - 1] === 0) dataEnd -= 1;
   let at = 0;
-  while (at + 4 <= stream.length) {
+  while (at + 4 <= stream.length && at < dataEnd) {
     const id = stream.readUInt16LE(at);
     const length = stream.readUInt16LE(at + 2);
-    if (id === 0 && length === 0 && stream.subarray(at).every((byte) => byte === 0)) break;
     // Bytes past the last whole record are padding; a cut-off sheet still fails its EOF check.
     if (at + 4 + length > stream.length) break;
     if (records.length >= 1_000_000) throw new RangeError();
