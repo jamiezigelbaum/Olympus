@@ -45026,12 +45026,16 @@ var init_local_index = __esm(() => {
       let exhausted = false;
       let tryBound = true;
       while (true) {
-        const rankedPage = (bound2) => ({ mode: "all", sql: `
-        ${bound2 === undefined ? "" : `WITH top AS MATERIALIZED (
+        const rankedPage = (from) => {
+          const bound2 = from === undefined ? undefined : ("bound" in from) ? from.bound : undefined;
+          const atOrAbove = from === undefined ? undefined : ("atOrAbove" in from) ? from.atOrAbove : undefined;
+          const top = from === undefined ? undefined : bound2 !== undefined ? "top" : "tied";
+          return { mode: "all", sql: `
+        ${top === undefined ? "" : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound2 !== undefined ? "ORDER BY rank LIMIT ?" : "AND (rank + 0.0) <= ?"}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -45044,12 +45048,12 @@ var init_local_index = __esm(() => {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound2 === undefined ? "MIN(connector_store_fts.rank) AS rank" : `MIN(top.rank) AS rank,
+          ${top === undefined ? "MIN(connector_store_fts.rank) AS rank" : top === "tied" ? "MIN(tied.rank) AS rank" : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound2 === undefined ? "connector_store_fts" : "top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid"}
+        FROM ${top === undefined ? "connector_store_fts" : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound2 === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : "1"}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -45061,22 +45065,27 @@ var init_local_index = __esm(() => {
         ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
         LIMIT ? OFFSET ?
       `, params: [
-          terms,
-          ...bound2 === undefined ? [] : [bound2],
-          ...selectedAccount ? [selectedAccount] : [],
-          ...selectedFilters.params,
-          ...selectedFtsScope.params,
-          pageSize,
-          scanned
-        ] });
+            terms,
+            ...bound2 === undefined ? [] : [bound2],
+            ...atOrAbove === undefined ? [] : [atOrAbove],
+            ...selectedAccount ? [selectedAccount] : [],
+            ...selectedFilters.params,
+            ...selectedFtsScope.params,
+            pageSize,
+            scanned
+          ] };
+        };
         const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-        const boundedPage = tryBound ? yield rankedPage(bound) : [];
+        const boundedPage = tryBound ? yield rankedPage({ bound }) : [];
         const head = boundedPage[0];
         const last = boundedPage.at(-1);
-        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || boundedPage.length === pageSize && last.rank < head.bound_rank);
-        if (!proved)
+        const full = boundedPage.length === pageSize;
+        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || full && last.rank < head.bound_rank);
+        const tied = !proved && full && head !== undefined ? yield rankedPage({ atOrAbove: head.bound_rank }) : undefined;
+        const tiedProved = tied !== undefined && tied.length === pageSize;
+        if (!proved && !tiedProved)
           tryBound = false;
-        const page2 = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : yield rankedPage(undefined);
+        const page2 = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : tiedProved ? tied : yield rankedPage(undefined);
         scanned += page2.length;
         exhausted = page2.length < pageSize;
         const rows = page2.filter((row) => !seen.has(row.item_pk));
