@@ -41598,6 +41598,99 @@ var init_x_bookmarks = __esm(() => {
   init_live_control2();
   init_reconcile_state();
 });
+// src/core/file-mime.ts
+var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS;
+var init_file_mime = __esm(() => {
+  init_still_image_formats();
+  MIME_BY_EXTENSION = Object.freeze({
+    pdf: "application/pdf",
+    txt: "text/plain",
+    text: "text/plain",
+    md: "text/plain",
+    markdown: "text/plain",
+    log: "text/plain",
+    rst: "text/plain",
+    org: "text/plain",
+    tex: "text/plain",
+    srt: "text/plain",
+    vtt: "text/plain",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    yaml: "text/plain",
+    yml: "text/plain",
+    toml: "text/plain",
+    xml: "application/xml",
+    html: "text/html",
+    htm: "text/html",
+    rtf: "application/rtf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    heif: "image/heif",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    avi: "video/x-msvideo",
+    mpg: "video/mpeg",
+    mpeg: "video/mpeg",
+    "3gp": "video/3gpp"
+  });
+  SOURCE_CODE_EXTENSIONS = new Set([
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "css",
+    "scss",
+    "lua",
+    "pl",
+    "r",
+    "scala",
+    "ini",
+    "cfg",
+    "conf",
+    "env"
+  ]);
+});
+
 // src/workers/dropbox-files/provider-client.ts
 class DropboxApiMetadataClient {
   supportsNativeRecursive = true;
@@ -41868,6 +41961,7 @@ var init_provider_client = __esm(() => {
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {
   init_credential_broker();
+  init_file_mime();
   init_provider_client();
 });
 
@@ -43645,6 +43739,7 @@ var init_runner = __esm(() => {
   init_command_runner();
   init_tier_classifier();
   init_bounded_text();
+  init_file_mime();
   init_job_store();
   init_secret_scan_off_thread();
   init_store_sink();
@@ -55941,99 +56036,6 @@ var init_delphi = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_secret_store();
-});
-
-// src/core/file-mime.ts
-var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS;
-var init_file_mime = __esm(() => {
-  init_still_image_formats();
-  MIME_BY_EXTENSION = Object.freeze({
-    pdf: "application/pdf",
-    txt: "text/plain",
-    text: "text/plain",
-    md: "text/plain",
-    markdown: "text/plain",
-    log: "text/plain",
-    rst: "text/plain",
-    org: "text/plain",
-    tex: "text/plain",
-    srt: "text/plain",
-    vtt: "text/plain",
-    csv: "text/csv",
-    tsv: "text/tab-separated-values",
-    json: "application/json",
-    yaml: "text/plain",
-    yml: "text/plain",
-    toml: "text/plain",
-    xml: "application/xml",
-    html: "text/html",
-    htm: "text/html",
-    rtf: "application/rtf",
-    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    png: "image/png",
-    gif: "image/gif",
-    webp: "image/webp",
-    heic: "image/heic",
-    heif: "image/heif",
-    tif: "image/tiff",
-    tiff: "image/tiff",
-    bmp: "image/bmp",
-    mp3: "audio/mpeg",
-    m4a: "audio/mp4",
-    wav: "audio/wav",
-    flac: "audio/flac",
-    ogg: "audio/ogg",
-    aac: "audio/aac",
-    mp4: "video/mp4",
-    m4v: "video/x-m4v",
-    mov: "video/quicktime",
-    mkv: "video/x-matroska",
-    webm: "video/webm",
-    avi: "video/x-msvideo",
-    mpg: "video/mpeg",
-    mpeg: "video/mpeg",
-    "3gp": "video/3gpp"
-  });
-  SOURCE_CODE_EXTENSIONS = new Set([
-    "ts",
-    "tsx",
-    "js",
-    "jsx",
-    "mjs",
-    "cjs",
-    "py",
-    "rb",
-    "go",
-    "rs",
-    "java",
-    "kt",
-    "swift",
-    "c",
-    "h",
-    "cc",
-    "cpp",
-    "hpp",
-    "cs",
-    "php",
-    "sh",
-    "bash",
-    "zsh",
-    "sql",
-    "css",
-    "scss",
-    "lua",
-    "pl",
-    "r",
-    "scala",
-    "ini",
-    "cfg",
-    "conf",
-    "env"
-  ]);
 });
 
 // src/workers/archive-import/notes/note.ts

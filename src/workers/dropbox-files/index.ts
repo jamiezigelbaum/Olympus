@@ -12,7 +12,6 @@ export {
   DropboxContentTooLargeError,
   DropboxCursorResetError,
   DropboxRateLimitError,
-  dropboxMimeTypeFromName,
   isDropboxCursorResetError,
   isDropboxRateLimitError,
   type DropboxApiContentDownloadClientOptions,
