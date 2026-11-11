@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { forwardPath, forwardRequestHeaders, forwardResponseHeaders, RELAY_HEADER } from '../client/forward.ts';
 import { credentialInstallId, mintCredential } from '../shared/tokens.ts';
 import { decodeBodyFrame, encodeBodyFrame, MAX_BODY_CHUNK_BYTES } from '../shared/protocol.ts';
-import { isDashboardCall } from '../server/relay-mcp.ts';
+import { mcpRequestPriority } from '../server/relay-mcp.ts';
 import { installTag } from '../server/log.ts';
 import { runAdmin } from '../server/admin.ts';
 import { FileInstallRegistry } from '../server/registry.ts';
@@ -135,9 +135,19 @@ describe('framing and policy helpers', () => {
   });
 
   test('only a tools/call of the dashboard tool takes the reserved slot', () => {
-    expect(isDashboardCall(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'olympus_dashboard' } }))).toBe(true);
-    expect(isDashboardCall(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'source_answer', q: 'olympus_dashboard' } }))).toBe(false);
-    expect(isDashboardCall('olympus_dashboard')).toBe(false);
+    expect(mcpRequestPriority(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'olympus_dashboard' } }), 'default')).toBe('dashboard');
+    expect(mcpRequestPriority(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'source_answer', q: 'olympus_dashboard' } }), 'default')).toBe('normal');
+    expect(mcpRequestPriority('olympus_dashboard', 'default')).toBe('normal');
+  });
+
+  test('listing requests take the listing headroom on /mcp only', () => {
+    for (const method of ['initialize', 'notifications/initialized', 'ping', 'tools/list', 'resources/list', 'resources/templates/list']) {
+      expect(mcpRequestPriority(JSON.stringify({ jsonrpc: '2.0', id: 1, method }), 'default')).toBe('listing');
+      expect(mcpRequestPriority(JSON.stringify({ jsonrpc: '2.0', id: 1, method }), 'directory')).toBe('normal');
+    }
+    expect(mcpRequestPriority(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri: 'ui://olympus/dashboard' } }), 'default')).toBe('normal');
+    expect(mcpRequestPriority(JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]), 'default')).toBe('normal');
+    expect(mcpRequestPriority(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', pad: 'x'.repeat(5000) }), 'default')).toBe('normal');
   });
 
   test('logs name an install only by a short hash', () => {

@@ -106,6 +106,7 @@ import {
   UploadBudget,
   createInstallAdmission,
   type AdmissionLane,
+  type AdmissionPriority,
   type RelayLimits,
 } from './limits.ts';
 import { installTag, type RelayLog } from './log.ts';
@@ -119,7 +120,7 @@ import {
   surfaceResource,
   unauthorized,
 } from './oauth-metadata.ts';
-import { isDashboardCall, relayMcpResponse } from './relay-mcp.ts';
+import { mcpRequestPriority, relayMcpResponse } from './relay-mcp.ts';
 import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './registry.ts';
 import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
@@ -519,7 +520,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     path: string;
     body: Uint8Array;
     lane: AdmissionLane;
-    dashboard: boolean;
+    /** Which owner-lane slots it may take (limits.ts); default `normal`. */
+    priority?: AdmissionPriority;
     /** What the install may answer on this route (response-policy.ts). */
     route: RouteKind;
     /** The caller's address: the key the unverified and control pools share fairly by. */
@@ -559,7 +561,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
       return input.unknown();
     }
-    const admitted = await admission.admit(installId, input.lane, input.dashboard, input.ip, input.request.signal);
+    const admitted = await admission.admit(installId, input.lane, input.priority ?? 'normal', input.ip, input.request.signal);
     if (!admitted.ok) {
       log('request_refused', { install: installTag(installId), reason: admitted.reason });
       return admitted.reason === 'busy'
@@ -674,9 +676,10 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       lane,
       route: 'api',
       ip,
-      // Only an owner-lane call may take the reserved dashboard slot. The
-      // decoded text is not kept: only the charged body is held.
-      dashboard: lane === 'owner' && isDashboardCall(new TextDecoder().decode(body)),
+      // Only an owner-lane call may take the reserved dashboard slot or the
+      // listing headroom. The decoded text is not kept: only the charged body
+      // is held.
+      priority: lane === 'owner' ? mcpRequestPriority(new TextDecoder().decode(body), surface) : 'normal',
       credentialKey: key,
       releaseBody: read.release,
       offline: () => relayMcpResponse({
@@ -762,7 +765,6 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       lane: 'control',
       route: 'api',
       ip,
-      dashboard: false,
       offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your Mac is offline. Try again when your Mac is awake.' }, { 'Retry-After': '30' }),
       unknown,
     });
@@ -802,7 +804,6 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       lane: 'control',
       route: 'browser',
       ip,
-      dashboard: false,
       offline: macOffline,
       unknown: expiredLink,
     });
@@ -827,7 +828,6 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       lane: 'control',
       route: 'browser',
       ip,
-      dashboard: false,
       offline: macOffline,
       unknown: expiredLink,
     });
@@ -850,7 +850,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' },
     });
-    const response = await toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, dashboard: false, offline: unavailable, unknown: unavailable });
+    const response = await toInstall({ installId: demoInstallId, request, path, body, releaseBody: read.release, lane: 'control', route: 'demo', ip, offline: unavailable, unknown: unavailable });
     // Which app, and which of its published return addresses, a reviewer's
     // sign-in took, once the demo has answered: `status` 200 is a page shown,
     // anything else a refusal or an unavailable demo. Never a code or state.
@@ -901,7 +901,6 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       lane: 'unverified',
       route: 'api',
       ip,
-      dashboard: false,
       offline: () => reply(503, { status: 'mac_offline' }, { 'Retry-After': '30' }),
       unknown: () => reply(410, { status: 'gone' }),
     });
