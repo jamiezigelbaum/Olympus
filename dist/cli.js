@@ -16892,7 +16892,7 @@ function applyOpenClawPluginRemote(config, env) {
   config.remote = parseRemoteConfig(section.remote);
 }
 function claudeAppEnabled(config) {
-  return config.remote?.claudeAppEnabled !== false;
+  return config.remote?.claudeAppEnabled === true;
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
