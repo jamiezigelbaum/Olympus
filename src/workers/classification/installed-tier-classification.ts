@@ -31,9 +31,20 @@ import type { OwnerTierRule, TierSniffer } from './tier-classifier.ts';
 import { loadOwnerTierRules, tierRulesFileStamp } from './tier-rules.ts';
 
 
+/**
+ * The sniffer of an install with no privacy judge: every question stays
+ * undecided, so read content is held pending (never Personal) until a judge
+ * is set up. Its id keys the decisions it leaves, so the re-judge asks them
+ * again once a real judge's id differs.
+ */
+export const NO_JUDGE_TIER_SNIFFER: TierSniffer = {
+  id: 'no_judge',
+  judge: () => ({ verdict: 'undecided' }),
+};
+
 export interface InstalledTierClassificationOptions {
   env?: Record<string, string | undefined>;
-  /** The resolved privacy-safe lane. Absent: no sniffer; flagged items stay pending. */
+  /** The resolved privacy-safe lane. Absent: no judge; every read item stays pending, held (NO_JUDGE_TIER_SNIFFER). */
   lane?: SnifferLaneIdentity;
   /**
    * This install has no Public tier (its sovereignty policy defines none:
@@ -87,6 +98,10 @@ export class InstalledTierClassification implements InstalledTierClassificationP
       } catch {
         // No sniffer store: flagged items stay pending (held Private).
       }
+    } else if (!this.lane && ledgerPath !== ':memory:') {
+      // No privacy judge on this install (#1316): every read item is still
+      // asked, so its content is held until a judge is set up and answers.
+      sniffer = NO_JUDGE_TIER_SNIFFER;
     }
     return {
       ...(rules.length > 0 ? { rules } : {}),

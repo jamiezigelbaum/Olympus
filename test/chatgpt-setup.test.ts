@@ -1427,6 +1427,23 @@ describe('dashboard privacy field', () => {
     expect(approved.needsYou.some((entry) => entry.id === 'privacy:classifier_approval')).toBe(false);
   });
 
+  test('no privacy judge set up: needsYou says plainly that new items wait, with the way to set one up (#1316)', () => {
+    const view = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
+      privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: true },
+    }));
+    const item = view.needsYou.find((entry) => entry.id === 'privacy:no_judge');
+    expect(item?.sentence).toBe('No private model is set up to check what\'s private, so new items wait, unread by your AI apps, until one is.');
+    expect(item?.fix.label).toBe('Set up the private model');
+    expect(item?.fix.href).toContain('/open/fix/models/');
+    // A judge waiting for approval is the more specific ask: only that one shows.
+    const waiting = buildChatGptDashboardViewModel(emptyView(), {
+      privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: true, classifierAwaitingApproval: true },
+    });
+    expect(waiting.needsYou.some((entry) => entry.id === 'privacy:no_judge')).toBe(false);
+    const judged = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 0 } });
+    expect(judged.needsYou.some((entry) => entry.id === 'privacy:no_judge')).toBe(false);
+  });
+
   test('a local model gets one Approve button on the computer\'s own dashboard, and a pointer to the computer anywhere else', () => {
     const waiting = { configured: true, pendingCount: 4, ruleCount: 0, classifierAwaitingApproval: true, classifierWaiting: { lane: 'local' as const, modelId: 'qwen-35b' } };
     const item = (privacy: typeof waiting & { approveHere?: boolean }, remote?: { port: number; agent: boolean }) =>

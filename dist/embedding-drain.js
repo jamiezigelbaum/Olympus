@@ -78620,6 +78620,10 @@ init_sniffer();
 init_sniffer_store();
 init_tier_ledger_path();
 init_tier_rules();
+var NO_JUDGE_TIER_SNIFFER = {
+  id: "no_judge",
+  judge: () => ({ verdict: "undecided" })
+};
 
 class InstalledTierClassification {
   lane;
@@ -78646,6 +78650,8 @@ class InstalledTierClassification {
       try {
         sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane, snifferPromptVersions(this.ownerContext?.()).cache);
       } catch {}
+    } else if (!this.lane && ledgerPath !== ":memory:") {
+      sniffer = NO_JUDGE_TIER_SNIFFER;
     }
     return {
       ...rules.length > 0 ? { rules } : {},

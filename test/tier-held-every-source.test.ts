@@ -1,3 +1,4 @@
+import { InstalledTierClassification, NO_JUDGE_TIER_SNIFFER } from '../src/workers/classification/installed-tier-classification.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
@@ -297,3 +298,23 @@ for (const provider of ['dropbox', 'google_drive', 'gmail', 'telegram', 'whatsap
     expect(contentHeldForJudgment(decision)).toBe(true);
     expect(decision.reasons).not.toContain(PERSONAL_FIRST_REASON);
   });
+
+test('no privacy judge set up: ordinary text is still held and counted, and asked again once a judge exists (#1316)', async () => {
+  const f = lane(NO_JUDGE_TIER_SNIFFER);
+  await f.set.sync(fixtureConnector(() => [{ id: 'nojudge', name: 'Weekend', text: 'Nojudgemarker picnic plans for Saturday.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  expect(f.ledger.getCurrent(identityOf('nojudge'))).toMatchObject({ state: 'pending', contentPending: true });
+  expect(f.stores.internal!.searchItems('Nojudgemarker', 10)).toEqual([]);
+  expect(f.ledger.corpusCopyCounts(CORPORA.secure_local).held).toBe(1);
+  // A judge set up later: the item is a re-judge candidate for it.
+  const later = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: 'local:p-000000000000.m0000000000000000', limit: 10 };
+  expect(f.ledger.rejudgeCandidatePage(later).records.map((row) => row.providerItemId)).toContain('nojudge');
+});
+
+test('an install with no judge gets the no-judge sniffer for every ledger it classifies (#1316)', () => {
+  const tmp = tempDir();
+  cleanups.push(() => tmp.cleanup());
+  const installed = new InstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: `${tmp.dir}/none.json` } });
+  cleanups.push(() => installed.close());
+  expect(installed.forLedger(`${tmp.dir}/tier-ledger.sqlite`).sniffer).toBe(NO_JUDGE_TIER_SNIFFER);
+  expect(installed.forLedger(':memory:').sniffer).toBeUndefined();
+});

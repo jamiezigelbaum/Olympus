@@ -119,19 +119,21 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
       { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 starts treatment Monday.' },
       { id: 'm3', conversation: 'chat-b', title: 'Family', text: 'See you at the allotment on Sunday.' },
     ]);
-    expect(ids(internal(), 'allotment')).toEqual(['m1']);
+    // No judge here, so chat-a's ordinary message waits, held in Private, until one answers (#1316);
+    // chat-b's is Private by the owner's rule, with no question at all.
+    expect(ids(internal(), 'allotment')).toEqual([]);
     expect(ids(internal(), 'diagnosis')).toEqual([]);
     expect(ids(store, 'diagnosis')).toEqual(['m2']);
-    expect(ids(store, 'allotment')).toEqual(['m3']);
+    expect([...ids(store, 'allotment')].sort()).toEqual(['m1', 'm3']);
   });
 
-  test('with no rules file an ordinary message is Personal', async () => {
+  test('with no rules file and no judge, an ordinary message waits, held, until a judge answers (#1316)', async () => {
     const root = workspace();
     configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(root, 'none.json') } });
     const { store, sync, internal } = openLane(root);
     await sync([{ id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' }]);
-    expect(ids(internal(), 'allotment')).toEqual(['m1']);
-    expect(ids(store, 'allotment')).toEqual([]);
+    expect(ids(internal(), 'allotment')).toEqual([]);
+    expect(ids(store, 'allotment')).toEqual(['m1']);
   });
 });
 

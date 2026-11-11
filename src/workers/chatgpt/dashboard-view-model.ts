@@ -76,6 +76,7 @@ import {
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
   DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
+  DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardUnreadableMoreLabel,
@@ -206,6 +207,8 @@ export interface ChatGptDashboardOptions {
     classifierWaiting?: { lane: 'local' | 'venice'; modelId: string };
     /** The computer's own unlocked dashboard, which may approve a local model in place (dashboard-panel-tools.ts). */
     approveHere?: boolean;
+    /** No privacy judge is set up on this install: new items wait, held, until one is (#1316). */
+    judgeMissing?: boolean;
   };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
@@ -354,6 +357,14 @@ export function buildChatGptDashboardViewModel(
   // Approving the model that checks what is private is the owner's step on
   // the computer; until then flagged items wait unseen, so it is never silent.
   if (options.privacy?.classifierAwaitingApproval) needsYou.push(classifierApprovalItem(options.privacy, options.remote !== undefined));
+  // With no judge at all, new items wait held until one is set up (#1316): never silent either.
+  else if (options.privacy?.judgeMissing) {
+    needsYou.push({
+      id: 'privacy:no_judge',
+      sentence: DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY.sentence,
+      fix: { label: DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
+    });
+  }
 
   const transcription = transcriptionModel(options.transcription);
 

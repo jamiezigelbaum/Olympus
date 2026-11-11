@@ -7517,6 +7517,8 @@ export async function main(): Promise<void> {
       return {
         configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
+        // No judge: every new item waits, held, until one is set up (#1316).
+        judgeMissing: snifferRuntime.source === 'off' || !tierSnifferServiceEnv(process.env).enabled,
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
     },

@@ -147,7 +147,9 @@ describe('1. an unusable rules file fails closed', () => {
 
     specs.push({ id: 'garden-1', name: 'garden notes', text: 'Tomatoes and beans this year.' });
     await sync();
-    expect(copies('garden-1')).toEqual([[CORPORA.internal, 'current', false]]);
+    // No judge here, so its text waits held in Private (#1316); its names are Personal.
+    const namesPersonalTextHeld = [[CORPORA.internal, 'current', true], [CORPORA.secure_local, 'current', true]];
+    expect(copies('garden-1')).toEqual(namesPersonalTextHeld);
 
     // The owner saves the rules with a trailing comma.
     writeFileSync(rulesPath, withTrailingComma(rulesJson('/Files/zebracorn budget')));
@@ -169,11 +171,11 @@ describe('1. an unusable rules file fails closed', () => {
     await sync();
     expect(copies('garden-3')).toEqual([[CORPORA.secure_local, 'current', true]]);
 
-    // Fixed: new items route by their tiers again.
+    // Fixed: new items route by their tiers again (names Personal, text waiting for the judge).
     writeFileSync(rulesPath, full);
     specs.push({ id: 'garden-4', name: 'garden hose', text: 'Twenty metres.' });
     await sync();
-    expect(copies('garden-4')).toEqual([[CORPORA.internal, 'current', false]]);
+    expect(copies('garden-4')).toEqual(namesPersonalTextHeld);
   });
 });
 
