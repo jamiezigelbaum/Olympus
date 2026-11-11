@@ -7630,9 +7630,10 @@ var init_keyword_context = __esm(() => {
 });
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var storage2, CONTENT_FREE_ERROR_CLASSES;
+var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   storage2 = new AsyncLocalStorage3;
+  laneStorage = new AsyncLocalStorage3;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -19639,6 +19640,7 @@ var init_control_path_headroom = __esm(() => {
 // src/workers/connector-store/off-thread-reads.ts
 var queues, releases;
 var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
   queues = new Map;
   releases = new Map;
 });

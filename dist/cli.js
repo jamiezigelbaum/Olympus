@@ -29016,6 +29016,331 @@ function isSourceIndexLaneBusyError(error) {
 }
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { randomUUID as randomUUID7 } from "node:crypto";
+function runInSourceAnswerLane(corpusId, run) {
+  return laneStorage.run(corpusId, run);
+}
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, outcome }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = nonNegativeMs(queueWaitMs);
+    const ran = nonNegativeMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function createSourceAnswerTrace(now = () => new Date) {
+  const received = now();
+  return {
+    correlationId: randomUUID7(),
+    receivedAt: received.toISOString(),
+    receivedAtMs: received.getTime(),
+    sqliteRetryCount: 0,
+    sqliteBackoffMs: 0,
+    queryPlannerMs: 0,
+    queryFormulationCount: 0,
+    queryPlannerAwaitedCount: 0,
+    queryPlannerIgnoredAfterStrongLiteralCount: 0,
+    queryPlannerFailedCount: 0,
+    retrievalAttempts: [],
+    routeResolutionMs: 0,
+    orderedRoute: [],
+    analystLegs: [],
+    residualAnalystOrphanCount: 0,
+    selfHealRebuildMs: 0,
+    recordBuildMs: 0,
+    appendMs: 0
+  };
+}
+function runWithSourceAnswerTrace(trace, run) {
+  return Promise.resolve(storage.run(trace, run));
+}
+function currentSourceAnswerTrace() {
+  return storage.getStore();
+}
+function recordSourceAnswerPhaseTimings(timings) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.phaseTimings = { ...timings };
+}
+function recordSourceAnswerSqliteRetry(backoffMs) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.sqliteRetryCount += 1;
+  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
+}
+function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
+  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
+}
+function recordSourceAnswerQueryPlannerDisposition(disposition) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  if (disposition === "awaited")
+    trace.queryPlannerAwaitedCount += 1;
+  else if (disposition === "ignored_after_strong_literal") {
+    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
+  } else
+    trace.queryPlannerFailedCount += 1;
+}
+async function observeSourceAnswerRetrievalAttempt(kind, run) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return run();
+  const previous = trace.activeAttempt;
+  const attempt = {
+    kind,
+    startedAtMs: Date.now(),
+    hydrationMs: 0,
+    queries: []
+  };
+  trace.activeAttempt = attempt;
+  try {
+    return await run();
+  } finally {
+    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
+    trace.retrievalAttempts.push({
+      kind,
+      elapsed_ms: elapsedMs,
+      hydration_ms: attempt.hydrationMs,
+      queries: attempt.queries
+    });
+    if (kind === "self_heal_rebuild")
+      trace.selfHealRebuildMs += elapsedMs;
+    if (previous)
+      trace.activeAttempt = previous;
+    else
+      delete trace.activeAttempt;
+  }
+}
+function recordSourceAnswerHydration(elapsedMs) {
+  const attempt = currentSourceAnswerTrace()?.activeAttempt;
+  if (attempt)
+    attempt.hydrationMs += nonNegativeMs(elapsedMs);
+}
+async function observeSourceAnswerRoutedQuery(ordinal, run) {
+  const trace = currentSourceAnswerTrace();
+  const attempt = trace?.activeAttempt;
+  if (!trace || !attempt)
+    return run();
+  const previous = trace.activeQuery;
+  const query = {
+    ordinal: Math.max(1, Math.floor(ordinal)),
+    startedAtMs: Date.now(),
+    corpusTimings: [],
+    poolByCorpus: new Map
+  };
+  trace.activeQuery = query;
+  try {
+    return await run();
+  } finally {
+    attempt.queries.push({
+      ordinal: query.ordinal,
+      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
+      corpus_timings: query.corpusTimings.map((timing) => ({
+        corpus_id: timing.corpus_id,
+        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+        outcome: timing.outcome,
+        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
+        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
+      }))
+    });
+    if (previous)
+      trace.activeQuery = previous;
+    else
+      delete trace.activeQuery;
+  }
+}
+function recordSourceAnswerCorpusTiming(timing) {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query)
+    return;
+  query.corpusTimings.push({
+    corpus_id: timing.corpus_id,
+    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+    outcome: timing.outcome,
+    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
+  });
+}
+function recordSourceAnswerRoute(elapsedMs, route) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
+  trace.orderedRoute = route.map((step) => ({
+    profile_id: step.profile_id,
+    backend: step.backend,
+    model_id: step.model_id
+  }));
+}
+async function observeSourceAnswerAnalystLeg(input, run) {
+  const startedAt = Date.now();
+  try {
+    const result = await run();
+    recordAnalystLeg(input, startedAt, "success");
+    return result;
+  } catch (error) {
+    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
+    throw error;
+  }
+}
+function recordSourceAnswerSkippedAnalystLeg(input) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: 0,
+    outcome: input.outcome ?? "policy_skipped",
+    error_class: sanitizeErrorClass(input.errorClass)
+  });
+}
+function recordSourceAnswerResidualAnalystOrphan() {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.residualAnalystOrphanCount += 1;
+}
+function recordSourceAnswerReleaseDecision(decision) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.releaseDecision = decision;
+}
+function recordSourceAnswerLedgerBuild(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.recordBuildMs += nonNegativeMs(elapsedMs);
+}
+function recordSourceAnswerLedgerAppend(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.appendMs += nonNegativeMs(elapsedMs);
+}
+function snapshotSourceAnswerTrace(trace) {
+  return {
+    correlationId: trace.correlationId,
+    receivedAt: trace.receivedAt,
+    receivedAtMs: trace.receivedAtMs,
+    sqliteRetryCount: trace.sqliteRetryCount,
+    sqliteBackoffMs: trace.sqliteBackoffMs,
+    queryPlannerMs: trace.queryPlannerMs,
+    queryFormulationCount: trace.queryFormulationCount,
+    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
+    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
+    queryPlannerFailedCount: trace.queryPlannerFailedCount,
+    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
+      ...attempt,
+      queries: attempt.queries.map((query) => ({
+        ...query,
+        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool } } : {} }))
+      }))
+    })),
+    routeResolutionMs: trace.routeResolutionMs,
+    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
+    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
+    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
+    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
+    selfHealRebuildMs: trace.selfHealRebuildMs,
+    recordBuildMs: trace.recordBuildMs,
+    appendMs: trace.appendMs,
+    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}
+  };
+}
+function sourceAnswerTraceErrorClass(error) {
+  return sanitizeErrorClass(errorClass(error));
+}
+function recordAnalystLeg(input, startedAt, outcome, error) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
+    outcome,
+    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
+  });
+}
+function errorClass(error) {
+  const candidate = error;
+  if (typeof candidate?.name === "string" && candidate.name.trim())
+    return candidate.name;
+  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
+    return candidate.constructor.name;
+  }
+  return "UnknownError";
+}
+function sanitizeErrorClass(value) {
+  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
+  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  storage = new AsyncLocalStorage2;
+  laneStorage = new AsyncLocalStorage2;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
 // src/workers/connector-store/off-thread-reads.ts
 function live() {
   return threads.filter((reader) => !reader.retired);
@@ -29166,11 +29491,13 @@ function serveSnapshotWaiters() {
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
+  const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve10, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve10, reject, timer: undefined };
+    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve10, reject, timer: undefined, enqueuedAtMs: clock2.now(), report };
     job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -29207,6 +29534,24 @@ function settle(job, outcome) {
     return;
   job.settled = true;
   clock2.clearTimeout(job.timer);
+  if (job.report) {
+    const now = clock2.now();
+    const sentAtMs = job.sentAtMs;
+    let ended;
+    if ("rows" in outcome)
+      ended = "rows";
+    else if (sentAtMs === undefined)
+      ended = "dropped_queued";
+    else if (outcome.error instanceof OffThreadReadBusyError)
+      ended = "past_deadline_running";
+    else
+      ended = "error";
+    job.report({
+      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
+      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      outcome: ended
+    });
+  }
   if ("rows" in outcome)
     job.resolve(outcome.rows);
   else
@@ -29256,6 +29601,7 @@ function dispatch() {
     if (!job)
       return;
     job.thread = reader;
+    job.sentAtMs = clock2.now();
     reader.job = job;
     observer?.(job.store, job.read);
     send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
@@ -29319,6 +29665,7 @@ self.onmessage = (event) => {
 };
 `, threads, nextId = 1, queues, turns, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
     constructor() {
@@ -30159,7 +30506,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash16, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash16, randomUUID as randomUUID8 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
   closeSync as closeSync13,
@@ -30222,10 +30569,10 @@ function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash16("sha256").update(bytes).digest("hex");
   const path = join34(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID7()}`;
+  const stagingHolder = `staging:${randomUUID8()}`;
   addMarker(path, stagingHolder);
   if (!existsSync25(path)) {
-    const temporary = join34(dir, `.${sha256}.${randomUUID7()}.tmp`);
+    const temporary = join34(dir, `.${sha256}.${randomUUID8()}.tmp`);
     writeFileSync6(temporary, bytes, { mode: 384 });
     chmodSync9(temporary, 384);
     renameSync4(temporary, path);
@@ -31137,7 +31484,7 @@ var init_remote_oauth_store = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -31152,10 +31499,10 @@ function createReleaseCapture() {
   return { heldBack: 0 };
 }
 function runWithReleaseCapture(capture, fn) {
-  return storage.run(capture, fn);
+  return storage2.run(capture, fn);
 }
 function noteReleasedItems(items, heldBack = 0, withheld = false) {
-  const capture = storage.getStore();
+  const capture = storage2.getStore();
   if (!capture)
     return;
   capture.items = items.map((item) => ({ ...item }));
@@ -31221,7 +31568,7 @@ function notePrivateAnswerCompleted(ref) {
   } catch {}
 }
 function notePrivateQuestion(ref) {
-  const capture = storage.getStore();
+  const capture = storage2.getStore();
   if (capture && ref && privateQuestionKey(ref))
     capture.privateQuestion = { id: ref.id, generation: ref.generation };
 }
@@ -31298,9 +31645,9 @@ function recordRemoteOperation(input) {
     privateQuestion: input.privateQuestion
   });
 }
-var storage, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
+var storage2, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage = new AsyncLocalStorage2;
+  storage2 = new AsyncLocalStorage3;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -33557,7 +33904,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 import { createHash as createHash21 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -34407,7 +34754,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage3;
+  priorityQueryEmbedding = new AsyncLocalStorage4;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -34573,7 +34920,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash22, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync31, lstatSync as lstatSync19, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname36 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
@@ -37981,7 +38328,7 @@ var init_local_index = __esm(() => {
     embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
-      this.visibilityOwner = randomUUID8();
+      this.visibilityOwner = randomUUID9();
       this.visibilityNow = () => Date.now();
       this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
       this.visibilityTimers = {
@@ -37993,7 +38340,7 @@ var init_local_index = __esm(() => {
       this.readOnly = options.readOnly === true;
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID8()}` : options.mediaHolder ?? this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID9()}` : options.mediaHolder ?? this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -39291,7 +39638,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity2, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID8()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID9()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -39324,7 +39671,7 @@ var init_local_index = __esm(() => {
           return "held";
         if (!row && options.record !== true)
           return "none";
-        const syncRunId = `connector-secret-retired-${randomUUID8()}`;
+        const syncRunId = `connector-secret-retired-${randomUUID9()}`;
         const now = nowIso();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -39411,7 +39758,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID8()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID9()}`;
           const startedAt = nowIso();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -39519,7 +39866,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID8()}`;
+      const syncRunId = `connector-tier-move-${randomUUID9()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -39946,7 +40293,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID8()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID9()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -41116,7 +41463,7 @@ var init_local_index = __esm(() => {
       }
       const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID8()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID9()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -41460,7 +41807,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID8()}`;
+        const syncRunId = `connector-relinquish-${randomUUID9()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -41599,7 +41946,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID8()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID9()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -42259,7 +42606,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID8()}`;
+      const syncRunId = `connector-sync-${randomUUID9()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -47877,7 +48224,7 @@ var init_linux_owner_bridge_host = __esm(() => {
 
 // src/core/native-worker-service.ts
 import { homedir as homedir23 } from "node:os";
-import { randomUUID as randomUUID9 } from "node:crypto";
+import { randomUUID as randomUUID10 } from "node:crypto";
 import { statSync as statSync17 } from "node:fs";
 import { basename as basename9, delimiter as delimiter3, isAbsolute as isAbsolute19, join as join45 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
@@ -48066,7 +48413,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID9();
+  const instanceId = randomUUID10();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath(service.runtimePath, env),
@@ -49479,7 +49826,7 @@ var init_mac_engine_daemon = __esm(() => {
 // src/workers/archive-import/state.ts
 import { existsSync as existsSync39, mkdirSync as mkdirSync27, readFileSync as readFileSync34 } from "node:fs";
 import { dirname as dirname44 } from "node:path";
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID12 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
 }
@@ -49546,7 +49893,7 @@ class ArchiveImportStateStore {
     const at = this.now().toISOString();
     const { skipped, ...rest } = input;
     const record = {
-      archive_id: randomUUID11(),
+      archive_id: randomUUID12(),
       ...rest,
       status: "importing",
       created_at: at,
@@ -50857,7 +51204,7 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash28, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID13 } from "node:crypto";
 import { chmodSync as chmodSync16, mkdirSync as mkdirSync29 } from "node:fs";
 import { dirname as dirname46 } from "node:path";
 import { Database as Database13 } from "bun:sqlite";
@@ -50917,7 +51264,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID12();
+    const runToken = randomUUID13();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -51142,7 +51489,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID12(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID13(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -56864,7 +57211,7 @@ var init_manifest3 = __esm(() => {
 // src/workers/archive-import/requests.ts
 import { existsSync as existsSync42, mkdirSync as mkdirSync30, readFileSync as readFileSync35 } from "node:fs";
 import { dirname as dirname47, join as join51 } from "node:path";
-import { randomUUID as randomUUID13 } from "node:crypto";
+import { randomUUID as randomUUID14 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
@@ -57017,7 +57364,7 @@ class ArchiveImportRequestStore {
   entry(kind, origin, path, status, removal) {
     const at = this.now().toISOString();
     return {
-      request_id: randomUUID13(),
+      request_id: randomUUID14(),
       kind,
       origin,
       path,
@@ -57092,7 +57439,7 @@ var init_source_delete_holds = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash31, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash31, randomUUID as randomUUID15 } from "node:crypto";
 import {
   chmodSync as chmodSync17,
   existsSync as existsSync43,
@@ -57195,7 +57542,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID14() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID15() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -57490,7 +57837,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID14();
+        const leaseToken = randomUUID15();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -58516,7 +58863,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash32, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash32, randomUUID as randomUUID16 } from "node:crypto";
 import { existsSync as existsSync45, readFileSync as readFileSync37 } from "node:fs";
 import { dirname as dirname50, join as join53 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -58636,7 +58983,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID15();
+    const revision = randomUUID16();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -58800,7 +59147,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash33, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash33, randomUUID as randomUUID17 } from "node:crypto";
 import { existsSync as existsSync46, readFileSync as readFileSync38 } from "node:fs";
 import { dirname as dirname51, join as join54 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -58895,7 +59242,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID16();
+    const revision = randomUUID17();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -59404,7 +59751,7 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { existsSync as existsSync48, readFileSync as readFileSync39 } from "node:fs";
-import { createHash as createHash34, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash34, randomUUID as randomUUID18 } from "node:crypto";
 import { dirname as dirname52, join as join56 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity2 = hostIdentity();
@@ -59484,7 +59831,7 @@ function connectThisComputerSource(handleRegistryPath, sourceId, now = new Date,
   const path = defaultThisComputerStatePath(handleRegistryPath);
   withFileLeaseSync(path, (lease) => {
     const current2 = readStateForHost(path, hostIdentity) ?? (() => {
-      const machineId = randomUUID17();
+      const machineId = randomUUID18();
       const binding = hostBinding(machineId, hostIdentity);
       return {
         version: 1,
@@ -72073,17 +72420,17 @@ function namesOnlyCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage4;
+  localInferenceGuards ??= new AsyncLocalStorage5;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage4;
+  localInferencePriority ??= new AsyncLocalStorage5;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage4;
+  localInferencePriority ??= new AsyncLocalStorage5;
   return localInferencePriority.run("maintenance", work);
 }
 function createAnswerActivity(onBusy, options = {}) {
@@ -72566,7 +72913,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3) {
   if (!request.localOnly)
     return;
@@ -73321,7 +73668,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -74047,287 +74394,6 @@ var init_parent_label = __esm(() => {
   ];
 });
 
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-import { randomUUID as randomUUID18 } from "node:crypto";
-function createSourceAnswerTrace(now = () => new Date) {
-  const received = now();
-  return {
-    correlationId: randomUUID18(),
-    receivedAt: received.toISOString(),
-    receivedAtMs: received.getTime(),
-    sqliteRetryCount: 0,
-    sqliteBackoffMs: 0,
-    queryPlannerMs: 0,
-    queryFormulationCount: 0,
-    queryPlannerAwaitedCount: 0,
-    queryPlannerIgnoredAfterStrongLiteralCount: 0,
-    queryPlannerFailedCount: 0,
-    retrievalAttempts: [],
-    routeResolutionMs: 0,
-    orderedRoute: [],
-    analystLegs: [],
-    residualAnalystOrphanCount: 0,
-    selfHealRebuildMs: 0,
-    recordBuildMs: 0,
-    appendMs: 0
-  };
-}
-function runWithSourceAnswerTrace(trace, run) {
-  return Promise.resolve(storage2.run(trace, run));
-}
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function recordSourceAnswerPhaseTimings(timings) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.phaseTimings = { ...timings };
-}
-function recordSourceAnswerSqliteRetry(backoffMs) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.sqliteRetryCount += 1;
-  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
-}
-function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
-  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
-}
-function recordSourceAnswerQueryPlannerDisposition(disposition) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  if (disposition === "awaited")
-    trace.queryPlannerAwaitedCount += 1;
-  else if (disposition === "ignored_after_strong_literal") {
-    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
-  } else
-    trace.queryPlannerFailedCount += 1;
-}
-async function observeSourceAnswerRetrievalAttempt(kind, run) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return run();
-  const previous = trace.activeAttempt;
-  const attempt = {
-    kind,
-    startedAtMs: Date.now(),
-    hydrationMs: 0,
-    queries: []
-  };
-  trace.activeAttempt = attempt;
-  try {
-    return await run();
-  } finally {
-    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
-    trace.retrievalAttempts.push({
-      kind,
-      elapsed_ms: elapsedMs,
-      hydration_ms: attempt.hydrationMs,
-      queries: attempt.queries
-    });
-    if (kind === "self_heal_rebuild")
-      trace.selfHealRebuildMs += elapsedMs;
-    if (previous)
-      trace.activeAttempt = previous;
-    else
-      delete trace.activeAttempt;
-  }
-}
-function recordSourceAnswerHydration(elapsedMs) {
-  const attempt = currentSourceAnswerTrace()?.activeAttempt;
-  if (attempt)
-    attempt.hydrationMs += nonNegativeMs(elapsedMs);
-}
-async function observeSourceAnswerRoutedQuery(ordinal, run) {
-  const trace = currentSourceAnswerTrace();
-  const attempt = trace?.activeAttempt;
-  if (!trace || !attempt)
-    return run();
-  const previous = trace.activeQuery;
-  const query = {
-    ordinal: Math.max(1, Math.floor(ordinal)),
-    startedAtMs: Date.now(),
-    corpusTimings: []
-  };
-  trace.activeQuery = query;
-  try {
-    return await run();
-  } finally {
-    attempt.queries.push({
-      ordinal: query.ordinal,
-      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
-      corpus_timings: query.corpusTimings.map((timing) => ({
-        corpus_id: timing.corpus_id,
-        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-        outcome: timing.outcome,
-        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
-      }))
-    });
-    if (previous)
-      trace.activeQuery = previous;
-    else
-      delete trace.activeQuery;
-  }
-}
-function recordSourceAnswerCorpusTiming(timing) {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  if (!query)
-    return;
-  query.corpusTimings.push({
-    corpus_id: timing.corpus_id,
-    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-    outcome: timing.outcome,
-    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
-  });
-}
-function recordSourceAnswerRoute(elapsedMs, route) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
-  trace.orderedRoute = route.map((step) => ({
-    profile_id: step.profile_id,
-    backend: step.backend,
-    model_id: step.model_id
-  }));
-}
-async function observeSourceAnswerAnalystLeg(input, run) {
-  const startedAt = Date.now();
-  try {
-    const result = await run();
-    recordAnalystLeg(input, startedAt, "success");
-    return result;
-  } catch (error) {
-    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
-    throw error;
-  }
-}
-function recordSourceAnswerSkippedAnalystLeg(input) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: 0,
-    outcome: input.outcome ?? "policy_skipped",
-    error_class: sanitizeErrorClass(input.errorClass)
-  });
-}
-function recordSourceAnswerResidualAnalystOrphan() {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.residualAnalystOrphanCount += 1;
-}
-function recordSourceAnswerReleaseDecision(decision) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.releaseDecision = decision;
-}
-function recordSourceAnswerLedgerBuild(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.recordBuildMs += nonNegativeMs(elapsedMs);
-}
-function recordSourceAnswerLedgerAppend(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.appendMs += nonNegativeMs(elapsedMs);
-}
-function snapshotSourceAnswerTrace(trace) {
-  return {
-    correlationId: trace.correlationId,
-    receivedAt: trace.receivedAt,
-    receivedAtMs: trace.receivedAtMs,
-    sqliteRetryCount: trace.sqliteRetryCount,
-    sqliteBackoffMs: trace.sqliteBackoffMs,
-    queryPlannerMs: trace.queryPlannerMs,
-    queryFormulationCount: trace.queryFormulationCount,
-    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
-    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
-    queryPlannerFailedCount: trace.queryPlannerFailedCount,
-    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
-      ...attempt,
-      queries: attempt.queries.map((query) => ({
-        ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing }))
-      }))
-    })),
-    routeResolutionMs: trace.routeResolutionMs,
-    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
-    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
-    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
-    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
-    selfHealRebuildMs: trace.selfHealRebuildMs,
-    recordBuildMs: trace.recordBuildMs,
-    appendMs: trace.appendMs,
-    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}
-  };
-}
-function sourceAnswerTraceErrorClass(error) {
-  return sanitizeErrorClass(errorClass(error));
-}
-function recordAnalystLeg(input, startedAt, outcome, error) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
-    outcome,
-    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
-  });
-}
-function errorClass(error) {
-  const candidate = error;
-  if (typeof candidate?.name === "string" && candidate.name.trim())
-    return candidate.name;
-  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
-    return candidate.constructor.name;
-  }
-  return "UnknownError";
-}
-function sanitizeErrorClass(value) {
-  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
-  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var storage2, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  storage2 = new AsyncLocalStorage6;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
 // src/core/source-index/router.ts
 async function routeSourceIndexSearch(options) {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
@@ -74404,7 +74470,7 @@ async function routePreparedSourceIndexSearch(options) {
     };
     const retrievalState = retrievalStates.get(corpus.corpusId).state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
-    const outcome = await runCorpusLaneWithDeadline(() => metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    const outcome = await runCorpusLaneWithDeadline(() => runInSourceAnswerLane(corpus.corpusId, () => metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
     return { corpus, outcome, retrievalState };
   }));
   for (const { corpus, outcome, retrievalState } of laneOutcomes) {
@@ -173009,9 +173075,24 @@ function copyRetrievalAttempt(attempt) {
         elapsed_ms: nonNegativeMs2(timing.elapsed_ms),
         ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs2(timing.adapter_reported_ms) } : {},
         outcome: timing.outcome,
-        ...timing.error_class ? { error_class: timing.error_class } : {}
+        ...timing.error_class ? { error_class: timing.error_class } : {},
+        ...timing.pool ? { pool: copyPoolReads(timing.pool) } : {}
       }))
     }))
+  };
+}
+function copyPoolReads(pool) {
+  const count = (value2) => Math.max(0, Math.floor(value2));
+  return {
+    reads: count(pool.reads),
+    queue_wait_ms: nonNegativeMs2(pool.queue_wait_ms),
+    queue_wait_max_ms: nonNegativeMs2(pool.queue_wait_max_ms),
+    run_ms: nonNegativeMs2(pool.run_ms),
+    run_max_ms: nonNegativeMs2(pool.run_max_ms),
+    refused: count(pool.refused),
+    dropped_queued: count(pool.dropped_queued),
+    past_deadline_running: count(pool.past_deadline_running),
+    errors: count(pool.errors)
   };
 }
 function sumAttemptMs(attempts) {
@@ -240700,7 +240781,7 @@ init_native_process_service();
 init_native_worker_service();
 init_worker_auth();
 init_worker_shutdown();
-import { randomUUID as randomUUID10 } from "node:crypto";
+import { randomUUID as randomUUID11 } from "node:crypto";
 var STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5000;
 var STARTUP_TIMEOUT_MS = 180000;
 var STABLE_UPTIME_MS = 30000;
@@ -240743,7 +240824,7 @@ async function superviseWorkerServiceSplit(input) {
     label: "background engine",
     descendantGroupsPath: descendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
     prepareStart: async () => {
-      const instanceId = randomUUID10();
+      const instanceId = randomUUID11();
       const env = launchEnv();
       return engineBackgroundLaunch({
         env: { ...env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
